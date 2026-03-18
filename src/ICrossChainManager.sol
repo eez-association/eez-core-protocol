@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @notice Action types used to identify execution entry entrypoints
-enum ActionType {
-    CALL, // A cross-chain call to execute on the destination rollup
-    L2TX // A pre-computed L2 transaction (RLP-encoded, permissionless)
-}
-
 /// @notice Represents an action used to build the entrypoint hash
 struct Action {
-    ActionType actionType;
     uint256 rollupId;
     address destination;
     uint256 value;
@@ -27,7 +20,7 @@ struct StateDelta {
 
 /// @notice Represents a cross-chain call within an execution entry
 /// @dev revertSpan > 0 opens an isolated revert context spanning the next revertSpan calls (including this one)
-struct SubCall {
+struct CrossChainCall {
     address destination;
     uint256 value;
     bytes data;
@@ -36,14 +29,38 @@ struct SubCall {
     uint256 revertSpan;
 }
 
+/// @notice Pre-computed result for a successful reentrant cross-chain call triggered during execution
+/// @dev Consumed sequentially from the entry's nestedActions array. If a nested action itself
+///      triggers a reentrant call, it consumes the next element in the same flat array.
+/// @dev All nested actions must succeed. Failed calls should use StaticCall instead.
+struct NestedAction {
+    bytes32 actionHash;
+    CrossChainCall[] calls;
+    bytes returnData;
+}
+
+/// @notice Pre-computed result for a static call or a call that reverts
+/// @dev Used for read-only calls and for calls whose revert needs to be replayed.
+///      Loaded via postBatch (L1) or loadExecutionTable (L2).
+struct StaticCall {
+    bytes32 actionHash;
+    bytes returnData;
+    bool failed;
+    bytes32 stateRoot;
+    uint64 crossChainCall;
+    uint64 nestedAction;
+    CrossChainCall[] calls;
+}
+
 /// @notice Represents an execution entry with pre-computed calls and return hash verification
 struct ExecutionEntry {
     StateDelta[] stateDeltas;
     bytes32 actionHash;
-    SubCall[] calls;
+    CrossChainCall[] calls;
+    NestedAction[] nestedActions;
     bytes returnData;
     bool failed;
-    bytes32 returnHash;
+    bytes32 rollingHash;
 }
 
 /// @notice Stores the identity of an authorized CrossChainProxy

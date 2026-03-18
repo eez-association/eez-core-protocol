@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IZKVerifier} from "./IZKVerifier.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
-import {ICrossChainManager, ActionType, StateDelta, SubCall, ExecutionEntry, ProxyInfo} from "./ICrossChainManager.sol";
+import {ICrossChainManager, StateDelta, CrossChainCall, NestedAction, StaticCall, ExecutionEntry, ProxyInfo} from "./ICrossChainManager.sol";
 
 /// @notice Rollup configuration
 struct RollupConfig {
@@ -34,6 +34,9 @@ contract Rollups is ICrossChainManager {
     /// @notice Array of pre-computed executions
     ExecutionEntry[] public executions;
 
+    /// @notice Array of pre-computed static call results
+    StaticCall[] public staticCalls;
+
     /// @notice Index of the next execution entry to consume
     uint256 public executionIndex;
 
@@ -42,6 +45,15 @@ contract Rollups is ICrossChainManager {
 
     /// @notice Last block number when state was modified
     uint256 public lastStateUpdateBlock;
+
+    /// @notice Index of the next nested action to consume within the current entry
+    uint256 transient _nestedActionIndex;
+
+    /// @notice The current execution entry being processed (for nested action consumption)
+    uint256 transient _currentEntryIndex;
+
+    /// @notice Whether we're currently inside a cross-chain call execution
+    bool transient _insideExecution;
 
     /// @notice Emitted when a new rollup is created
     event RollupCreated(uint256 indexed rollupId, address indexed owner, bytes32 verificationKey, bytes32 initialState);
@@ -68,7 +80,7 @@ contract Rollups is ICrossChainManager {
     event CrossChainCallExecuted(bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value);
 
     /// @notice Emitted when a precomputed L2 transaction is executed
-    event L2TXExecuted(bytes32 indexed actionHash, uint256 indexed rollupId, bytes rlpEncodedTx);
+    event L2TXExecuted(uint256 indexed entryIndex);
 
     /// @notice Emitted when a batch is posted via postBatch
     event BatchPosted(ExecutionEntry[] entries, bytes32 publicInputsHash);
@@ -97,18 +109,23 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when the ether delta from state deltas doesn't match actual ETH flow
     error EtherDeltaMismatch();
 
-
     /// @notice Error when execution is attempted in a different block than the last state update
     error ExecutionNotInCurrentBlock();
 
-    /// @notice Error when the computed return hash doesn't match the entry's returnHash
-    error ReturnHashMismatch();
+    /// @notice Error when the computed rolling hash doesn't match the entry's rollingHash
+    error RollingHashMismatch();
 
     /// @notice Carries execution results out of a reverted context
     error ContextResult(bytes32 computedHash);
 
     /// @notice Error when executeInContext reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
+
+    /// @notice Error when not all nested actions were consumed after execution
+    error UnconsumedNestedActions();
+
+    /// @notice Error when executeCrossChainCall is called during execution with no matching nested action
+    error NoNestedActionAvailable();
 
     /// @param _zkVerifier The ZK verifier contract address
     /// @param startingRollupId The starting ID for rollup numbering
@@ -156,14 +173,16 @@ contract Rollups is ICrossChainManager {
     // ──────────────────────────────────────────────
 
     /// @notice Posts a batch of execution entries with a single ZK proof
-    /// @dev Only the first entry may have actionHash == bytes32(0) (immediate state commitment + optional subcalls).
+    /// @dev Only the first entry may have actionHash == bytes32(0) (immediate state commitment + optional calls).
     ///      All remaining entries must have actionHash != bytes32(0) and are stored for deferred consumption.
     /// @param entries The execution entries to process
+    /// @param _staticCalls The static call results to store
     /// @param blobCount Number of blobs containing shared data
     /// @param callData Shared data passed via calldata
     /// @param proof The ZK proof covering all entries
     function postBatch(
         ExecutionEntry[] calldata entries,
+        StaticCall[] calldata _staticCalls,
         uint256 blobCount,
         bytes calldata callData,
         bytes calldata proof
@@ -173,27 +192,7 @@ contract Rollups is ICrossChainManager {
         }
 
         // --- Build public inputs ---
-        bytes32[] memory entryHashes = new bytes32[](entries.length);
-        for (uint256 i = 0; i < entries.length; i++) {
-            // Gather verification keys and current state roots for each delta's rollup
-            bytes32[] memory vks = new bytes32[](entries[i].stateDeltas.length);
-            bytes32[] memory prevStates = new bytes32[](entries[i].stateDeltas.length);
-            for (uint256 j = 0; j < entries[i].stateDeltas.length; j++) {
-                RollupConfig storage cfg = rollups[entries[i].stateDeltas[j].rollupId];
-                vks[j] = cfg.verificationKey;
-                prevStates[j] = cfg.stateRoot;
-            }
-
-            entryHashes[i] = keccak256(
-                abi.encodePacked(
-                    abi.encode(entries[i].stateDeltas),
-                    abi.encode(vks),
-                    abi.encode(prevStates),
-                    entries[i].actionHash,
-                    entries[i].returnHash
-                )
-            );
-        }
+        bytes32[] memory entryHashes = _computeEntryHashes(entries);
 
         bytes32[] memory blobHashes = new bytes32[](blobCount);
         for (uint256 i = 0; i < blobCount; i++) {
@@ -214,22 +213,50 @@ contract Rollups is ICrossChainManager {
 
         // Delete previous execution table and reset index
         delete executions;
+        delete staticCalls;
         executionIndex = 0;
 
         // --- Process entries ---
-        // First entry may have actionHash == 0 (immediate state commitment with optional subcalls).
+        // First entry may have actionHash == 0 (immediate state commitment with optional calls).
         // All remaining entries must have actionHash != 0 (deferred, consumed via proxy calls).
         uint256 startIdx = 0;
         if (entries.length > 0 && entries[0].actionHash == bytes32(0)) {
-            _applyAndExecute(entries[0].stateDeltas, entries[0].calls, entries[0].returnHash, 0);
+            _applyAndExecute(entries[0].stateDeltas, entries[0].calls, entries[0].rollingHash, 0);
             startIdx = 1;
         }
         for (uint256 i = startIdx; i < entries.length; i++) {
             executions.push(entries[i]);
         }
+        for (uint256 i = 0; i < _staticCalls.length; i++) {
+            staticCalls.push(_staticCalls[i]);
+        }
 
         emit BatchPosted(entries, publicInputsHash);
         lastStateUpdateBlock = block.number;
+    }
+
+    /// @notice Computes entry hashes for the public inputs, including verification keys and previous state roots
+    function _computeEntryHashes(ExecutionEntry[] calldata entries) internal view returns (bytes32[] memory entryHashes) {
+        entryHashes = new bytes32[](entries.length);
+        for (uint256 i = 0; i < entries.length; i++) {
+            // Gather verification keys and current state roots for each delta's rollup
+            bytes32[] memory vks = new bytes32[](entries[i].stateDeltas.length);
+            bytes32[] memory prevStates = new bytes32[](entries[i].stateDeltas.length);
+            for (uint256 j = 0; j < entries[i].stateDeltas.length; j++) {
+                RollupConfig storage cfg = rollups[entries[i].stateDeltas[j].rollupId];
+                vks[j] = cfg.verificationKey;
+                prevStates[j] = cfg.stateRoot;
+            }
+            entryHashes[i] = keccak256(
+                abi.encodePacked(
+                    abi.encode(entries[i].stateDeltas),
+                    abi.encode(vks),
+                    abi.encode(prevStates),
+                    entries[i].actionHash,
+                    entries[i].rollingHash
+                )
+            );
+        }
     }
 
     /// @notice Verifies a ZK proof against the computed public inputs hash
@@ -243,7 +270,7 @@ contract Rollups is ICrossChainManager {
     //  L2 execution (proxy entry point)
     // ──────────────────────────────────────────────
 
-    /// @notice Executes an L2 execution initiated by an authorized proxy
+    /// @notice Executes a cross-chain call initiated by an authorized proxy
     /// @dev Builds the CALL action from the proxy's identity and msg context, then executes
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
@@ -261,7 +288,6 @@ contract Rollups is ICrossChainManager {
 
         // Build the action input hash for matching
         bytes32 actionHash = _computeActionInputHash(
-            ActionType.CALL,
             proxyInfo.originalRollupId,
             proxyInfo.originalAddress,
             msg.value,
@@ -272,6 +298,11 @@ contract Rollups is ICrossChainManager {
 
         emit CrossChainCallExecuted(actionHash, msg.sender, sourceAddress, callData, msg.value);
 
+        if (_insideExecution) {
+            // Inside a cross-chain call: consume the next nested action
+            return _consumeNestedAction(actionHash);
+        }
+
         return _consumeAndExecute(actionHash, int256(msg.value));
     }
 
@@ -279,37 +310,37 @@ contract Rollups is ICrossChainManager {
     //  Execute precomputed L2 transaction
     // ──────────────────────────────────────────────
 
-    /// @notice Executes a precomputed L2 transaction
-    /// @param rollupId The rollup ID for the transaction
-    /// @param rlpEncodedTx The RLP-encoded transaction data
-    /// @return result The result data from the execution
-    function executeL2TX(uint256 rollupId, bytes calldata rlpEncodedTx) external returns (bytes memory result) {
-        // Executions can only be consumed in the same block they were posted
+    /// @notice Executes the next L2 transaction from the execution table (permissionless)
+    /// @dev The next entry must have actionHash == bytes32(0) and we must not be inside a nested call.
+    function executeL2TX() external returns (bytes memory result) {
         if (lastStateUpdateBlock != block.number) {
             revert ExecutionNotInCurrentBlock();
         }
+        if (_insideExecution) revert ExecutionNotFound();
 
-        // Build the action input hash for matching
-        bytes32 actionHash = _computeActionInputHash(
-            ActionType.L2TX,
-            rollupId,
-            address(0),
-            0,
-            rlpEncodedTx,
-            address(0),
-            MAINNET_ROLLUP_ID
-        );
-
-        emit L2TXExecuted(actionHash, rollupId, rlpEncodedTx);
-
-        return _consumeAndExecute(actionHash, 0);
+        return _consumeAndExecute(bytes32(0), 0);
     }
 
     // ──────────────────────────────────────────────
     //  Internal execution
     // ──────────────────────────────────────────────
 
-    /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies return hash
+    /// @notice Consumes the next nested action from the current entry
+    function _consumeNestedAction(bytes32 actionHash) internal returns (bytes memory) {
+        ExecutionEntry storage entry = executions[_currentEntryIndex];
+        uint256 idx = _nestedActionIndex++;
+        if (idx >= entry.nestedActions.length) revert NoNestedActionAvailable();
+
+        NestedAction storage nested = entry.nestedActions[idx];
+        if (nested.actionHash != actionHash) revert ExecutionNotFound();
+
+        // Execute the nested action's cross-chain calls
+        _processCrossChainCalls(bytes32(0), nested.calls);
+
+        return nested.returnData;
+    }
+
+    /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies rolling hash
     /// @param actionHash The expected action input hash for the next entry
     /// @param etherIn The ETH value received (msg.value) for ether accounting
     /// @return result The pre-computed return data from the action
@@ -322,7 +353,16 @@ contract Rollups is ICrossChainManager {
 
         emit ExecutionConsumed(actionHash, idx);
 
-        _applyAndExecute(entry.stateDeltas, entry.calls, entry.returnHash, etherIn);
+        // Set execution context for nested action consumption
+        _currentEntryIndex = idx;
+        _nestedActionIndex = 0;
+        _insideExecution = true;
+
+        _applyAndExecute(entry.stateDeltas, entry.calls, entry.rollingHash, etherIn);
+
+        // Verify all nested actions were consumed
+        if (_nestedActionIndex != entry.nestedActions.length) revert UnconsumedNestedActions();
+        _insideExecution = false;
 
         bytes memory returnData = entry.returnData;
 
@@ -336,65 +376,79 @@ contract Rollups is ICrossChainManager {
         return returnData;
     }
 
-    /// @notice Applies state deltas, processes subcalls, verifies return hash, and checks ether balance
+    /// @notice Applies state deltas, processes cross-chain calls, verifies rolling hash, and checks ether balance
     function _applyAndExecute(
         StateDelta[] memory deltas,
-        SubCall[] memory calls,
-        bytes32 returnHash,
+        CrossChainCall[] memory calls,
+        bytes32 rollingHash,
         int256 etherIn
     ) internal {
+        (bytes32 computedHash, int256 etherOut) = _processCrossChainCalls(bytes32(0), calls);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
-        (bytes32 computedHash, int256 etherOut) = _processSubCalls(bytes32(0), calls);
-        if (computedHash != returnHash) revert ReturnHashMismatch();
+        if (computedHash != rollingHash) revert RollingHashMismatch();
         if (totalEtherDelta != etherIn - etherOut) revert EtherDeltaMismatch();
     }
 
-    /// @notice Processes sub-calls, opening new contexts for revertSpan subcalls
+    /// @notice Processes cross-chain calls, opening new contexts for revertSpan calls
     /// @param runningHash The accumulated hash from prior calls
-    /// @param calls The sub-calls to process
+    /// @param calls The cross-chain calls to process
     /// @return computedHash The chained hash of all results
     /// @return etherOut Total ETH sent in successful (non-reverted) calls
-    function _processSubCalls(bytes32 runningHash, SubCall[] memory calls) internal returns (
+    function _processCrossChainCalls(bytes32 runningHash, CrossChainCall[] memory calls) internal returns (
         bytes32 computedHash,
         int256 etherOut
     ) {
         computedHash = runningHash;
         uint256 i = 0;
+        // Flat sequential iteration — no recursion. Each call is processed in order.
+        // Reentrant calls triggered during execution are handled via NestedAction[] on the entry,
+        // not by recursive invocations of this function.
         while (i < calls.length) {
-            SubCall memory subCall = calls[i];
+            CrossChainCall memory cc = calls[i];
 
-            if (subCall.revertSpan > 0) {
-                // Build the slice of calls to execute in an isolated revert context
-                SubCall[] memory contextCalls = new SubCall[](subCall.revertSpan);
-                for (uint256 j = 0; j < subCall.revertSpan; j++) {
+            if (cc.revertSpan > 0) {
+                // revertSpan opens an isolated revert context spanning the next N calls (including this one).
+                // All state changes within the context are rolled back regardless of success/failure,
+                // but the rolling hash is preserved via ContextResult.
+                CrossChainCall[] memory contextCalls = new CrossChainCall[](cc.revertSpan);
+                for (uint256 j = 0; j < cc.revertSpan; j++) {
                     contextCalls[j] = calls[i + j];
                 }
-                // Clear revertSpan on the first call so it executes normally inside the context
+                // Clear revertSpan on the first call so it executes as a normal CALL inside the context,
+                // otherwise it would recursively open another revert context.
                 contextCalls[0].revertSpan = 0;
 
-                // Execute in isolated context (always reverts via ContextResult)
+                // Self-call that always reverts: isolates state changes while preserving the
+                // accumulated rolling hash via the ContextResult error. The hash is assigned
+                // directly (not re-hashed) to maintain continuity across revert boundaries.
                 try this.executeInContext(computedHash, contextCalls) {
-                    // unreachable — executeInContext always reverts
+                    // unreachable — executeInContext always reverts with ContextResult
                 } catch (bytes memory revertData) {
                     computedHash = _decodeContextResult(revertData);
                 }
 
-                i += subCall.revertSpan;
+                // Skip past all calls covered by this revert context
+                i += cc.revertSpan;
             } else {
-                // Normal execution
-                address sourceProxy = computeCrossChainProxyAddress(subCall.sourceAddress, subCall.sourceRollup);
+                // Normal call path: route through the source proxy so msg.sender on the
+                // destination is the deterministic proxy address (not the manager).
+                address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollup);
                 if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
-                    _createCrossChainProxyInternal(subCall.sourceAddress, subCall.sourceRollup);
+                    _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollup);
                 }
 
-                (bool success, bytes memory retData) = sourceProxy.call{value: subCall.value}(
-                    abi.encodeCall(CrossChainProxy.executeOnBehalf, (subCall.destination, subCall.data))
+                (bool success, bytes memory retData) = sourceProxy.call{value: cc.value}(
+                    abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.destination, cc.data))
                 );
 
-                if (subCall.value > 0 && success) {
-                    etherOut += int256(subCall.value);
+                // Track ETH leaving the manager — only on successful calls (reverted calls
+                // return the ETH). Verified against state delta ether accounting in _applyAndExecute.
+                if (cc.value > 0 && success) {
+                    etherOut += int256(cc.value);
                 }
 
+                // Chain (success, retData) into the rolling hash for end-to-end verification
+                // against entry.rollingHash after all calls are processed.
                 computedHash = keccak256(abi.encodePacked(computedHash, success, retData));
 
                 i++;
@@ -402,12 +456,10 @@ contract Rollups is ICrossChainManager {
         }
     }
 
-    /// @notice Executes sub-calls in an isolated context that always reverts (for failed subcalls)
-    /// @dev Can only be called by this contract. Results are encoded in the ContextResult revert.
-    /// @param calls The sub-calls to execute in the isolated context
-    function executeInContext(bytes32 runningHash, SubCall[] calldata calls) external {
+    /// @notice Executes cross-chain calls in an isolated context that always reverts
+    function executeInContext(bytes32 runningHash, CrossChainCall[] calldata calls) external {
         if (msg.sender != address(this)) revert NotSelf();
-        (bytes32 computedHash,) = _processSubCalls(runningHash, calls);
+        (bytes32 computedHash,) = _processCrossChainCalls(runningHash, calls);
         revert ContextResult(computedHash);
     }
 
@@ -460,11 +512,8 @@ contract Rollups is ICrossChainManager {
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
     function _createCrossChainProxyInternal(address originalAddress, uint256 originalRollupId) internal returns (address proxy) {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-
         proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-
         authorizedProxies[proxy] = ProxyInfo(originalAddress, uint64(originalRollupId));
-
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
@@ -497,7 +546,6 @@ contract Rollups is ICrossChainManager {
 
     /// @notice Computes the action input hash from individual fields
     function _computeActionInputHash(
-        ActionType actionType,
         uint256 rollupId,
         address destination,
         uint256 value,
@@ -505,7 +553,7 @@ contract Rollups is ICrossChainManager {
         address sourceAddress,
         uint256 sourceRollup
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(actionType, rollupId, destination, value, data, sourceAddress, sourceRollup));
+        return keccak256(abi.encode(rollupId, destination, value, data, sourceAddress, sourceRollup));
     }
 
     // ──────────────────────────────────────────────
