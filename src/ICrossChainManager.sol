@@ -42,6 +42,9 @@ struct NestedAction {
 }
 
 /// @notice Represents an execution entry with pre-computed calls and return hash verification
+/// @dev `failed` must always be false for deferred entries.
+///      A failed entry reverts in _consumeAndExecute, rolling back executionIndex++ and
+///      permanently blocking the execution table. TODO remove failed
 struct ExecutionEntry {
     StateDelta[] stateDeltas;
     bytes32 actionHash;
@@ -56,6 +59,7 @@ struct ExecutionEntry {
 /// @notice Pre-computed result for a static call or a call that reverts
 /// @dev Used for read-only calls and for calls whose revert needs to be replayed.
 ///      Loaded via postBatch (L1) or loadExecutionTable (L2).
+///      All proxies referenced by `calls` must be deployed before staticCallLookup is called.
 struct StaticCall {
     bytes32 actionHash;
     bytes returnData;
@@ -63,6 +67,8 @@ struct StaticCall {
     bytes32 stateRoot;
     uint64 callNumber;                  // 1-indexed global call number
     uint64 lastNestedActionConsumed;    // disambiguates phases within same call
+    CrossChainCall[] calls;             // calls to execute in static context (no revertSpan)
+    bytes32 rollingHash;                // expected hash of all call results
 }
 
 /// @notice Stores the identity of an authorized CrossChainProxy

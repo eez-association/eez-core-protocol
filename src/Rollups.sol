@@ -596,6 +596,10 @@ contract Rollups is ICrossChainManager {
         for (uint256 i = 0; i < staticCalls.length; i++) {
             StaticCall storage sc = staticCalls[i];
             if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
+                if (sc.calls.length > 0) {
+                    bytes32 computedHash = _processNStaticCalls(sc.calls);
+                    if (computedHash != sc.rollingHash) revert RollingHashMismatch();
+                }
                 if (sc.failed) {
                     bytes memory returnData = sc.returnData;
                     assembly {
@@ -607,6 +611,21 @@ contract Rollups is ICrossChainManager {
         }
 
         revert ExecutionNotFound();
+    }
+
+    /// @notice Executes calls in static context and computes a rolling hash of results
+    /// @dev All proxies referenced by the calls must already be deployed — cannot CREATE2 in static context.
+    ///      No revertSpan handling — all calls execute as-is (revertSpan correctness is verified by the proof).
+    ///      Does not use storage or transient variables — only a local rolling hash.
+    function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
+        for (uint256 i = 0; i < calls.length; i++) {
+            CrossChainCall memory cc = calls[i];
+            address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollup);
+            (bool success, bytes memory retData) = sourceProxy.staticcall(
+                abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.destination, cc.data))
+            );
+            computedHash = keccak256(abi.encodePacked(computedHash, success, retData));
+        }
     }
 
     // ──────────────────────────────────────────────

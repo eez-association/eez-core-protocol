@@ -1,6 +1,105 @@
 # Smart Contract TODOs
 
-## 1. Failed nested actions block execution
+## 1a. Failed entry (`entry.failed == true`) blocks the execution table
+
+### Problem
+
+When `_consumeAndExecute` processes an entry with `failed == true`, it executes all calls (to verify the rolling hash), then reverts with `entry.returnData` via assembly. But the `executionIndex++` that happened at the start of `_consumeAndExecute` is **rolled back** by the revert — because the revert propagates through `executeCrossChainCall`, which was called via `.call` from the proxy. The entire call context is undone.
+
+Result: the failed entry is never consumed, `executionIndex` stays the same, and **every subsequent call hits the same failed entry forever**. The execution table is stuck.
+
+### Scenario
+
+```
+User calls proxy → proxy calls executeCrossChainCall via .call
+  → _consumeAndExecute:
+    → executionIndex++ (0 → 1)
+    → processes calls, verifies rolling hash — all good
+    → entry.failed == true
+    → assembly { revert(returnData) }
+  → revert propagates: executionIndex rolled back to 0
+proxy catches revert, returns failure to user
+
+Next call: executionIndex is still 0, same failed entry, same revert → stuck forever
+```
+
+### Possible solutions
+
+**A. Self-call isolation: execute inside `executeInContext`, advance index outside**
+
+Split `_consumeAndExecute` for failed entries: advance `executionIndex` and set `_currentEntryIndex` in the outer context, then process the entry's calls in a self-call that reverts. The outer context survives and the index is advanced. Then the outer function reverts with the entry's returnData.
+
+Problem: the outer `executeCrossChainCall` still reverts (to propagate the failure to the proxy caller), which rolls back `executionIndex++` anyway. The revert boundary is the proxy's `.call`, which wraps the entire `executeCrossChainCall`.
+
+**B. Don't revert for failed entries — return normally with failure encoding**
+
+Change `_consumeAndExecute` to return `(bytes memory returnData, bool failed)` instead of reverting. `executeCrossChainCall` returns normally. The proxy decodes the result and decides whether to revert:
+
+```solidity
+// In _consumeAndExecute:
+return (entry.returnData, entry.failed);  // no revert
+
+// In executeCrossChainCall:
+(bytes memory result, bool failed) = _consumeAndExecute(actionHash, int256(msg.value));
+if (failed) {
+    // encode failure into return so proxy can distinguish
+    return abi.encode(result, true);  // or use a custom encoding
+}
+return result;
+```
+
+The proxy would need to understand this encoding and revert on the caller's behalf. This preserves `executionIndex` advancement (no revert in the manager) while still giving the proxy's caller a revert.
+
+Downside: requires proxy changes and a new encoding convention.
+
+**C. Two-step: separate `consumeEntry()` from execution**
+
+Add a permissionless `consumeEntry()` that just advances `executionIndex` without executing. For failed entries, the flow would be:
+1. Someone calls `consumeEntry()` — advances index, emits event
+2. The proxy call to `executeCrossChainCall` sees the entry was already consumed
+
+Problem: breaks the atomic consumption model. Race conditions. Complexity.
+
+**D. Use an intermediate storage flag to mark entries as consumed**
+
+Before processing, write `entry.consumed = true` (or a separate mapping). On revert, the storage write inside the `.call` is rolled back. This has the same problem as `executionIndex++`.
+
+Unless the proxy is changed to make TWO calls: first a call to mark consumption (succeeds, state persists), then a call to execute (may revert). But this requires proxy changes.
+
+**E. Move the revert boundary: proxy-level revert instead of manager-level**
+
+The manager never reverts for failed entries. Instead, it returns `(returnData, failed)` as ABI-encoded bytes. The proxy detects `failed == true` and performs the revert. Since the manager's `.call` succeeded, `executionIndex++` persists.
+
+```solidity
+// Manager returns normally:
+function executeCrossChainCall(...) external payable returns (bytes memory result) {
+    ...
+    (result, bool failed) = _consumeAndExecute(actionHash, int256(msg.value));
+    if (failed) {
+        // Return a sentinel that the proxy interprets as "revert with this data"
+        // Could use a custom ABI encoding or error-like wrapper
+    }
+    return result;
+}
+
+// Proxy checks and reverts on behalf:
+if (success) {
+    // decode and check if manager signaled failure
+    // if so, revert with the original returnData
+}
+```
+
+This is the cleanest approach but requires a protocol between manager and proxy for signaling failures.
+
+**F. Accept the constraint: failed entries must not exist in the deferred table**
+
+The off-chain precomputation ensures that entries with `failed == true` are only used as the immediate entry in `postBatch` (index 0, `actionHash == bytes32(0)`). Since `postBatch` calls `_applyAndExecute` directly (not through `_consumeAndExecute`), the failed revert path is never hit for deferred entries. For proxy-triggered entries that fail, use `revertSpan` around the calls instead.
+
+This is the simplest solution but restricts what can be expressed in the execution table.
+
+---
+
+## 1b. Failed nested action (reentrant call reverts) blocks entry verification
 
 ### Problem
 
@@ -14,72 +113,58 @@ The current workaround is documented: "All nested actions must succeed. Failed c
 _processNCalls: executes call c0 via proxy
   → destination calls back into proxy (reentrant)
   → executeCrossChainCall → _consumeNestedAction
-    → _lastNestedActionConsumed++ (now 1)
+    → _lastNestedActionConsumed++ (0 → 1)
     → _processNCalls(nested.callCount) — processes nested calls
-    → one of the nested calls reverts, propagating up
+    → one of the nested calls reverts, propagating up through _consumeNestedAction
   → revert rolls back _lastNestedActionConsumed to 0
 proxy call returns (success=false, revertData)
 CALL_END hashes the failure — but nested action was NOT consumed
 → verification fails: _lastNestedActionConsumed (0) != nestedActions.length (1)
 ```
 
+The fundamental issue: `_lastNestedActionConsumed++` happens INSIDE the sub-call context (the proxy call → destination → reentrant call chain). A revert anywhere in that chain rolls back the transient storage increment. There's no way to "commit" the increment before the potential revert because it's triggered by the destination's callback, not by the manager.
+
 ### Possible solutions
 
 **A. Wrap failing calls in revertSpan (current design, off-chain)**
 
-If the off-chain precomputation knows a call will trigger a failed reentrant call, it can wrap that call in a `revertSpan`. The `ContextResult` carries `_lastNestedActionConsumed` out of the revert context, preserving consumption state. Downside: requires off-chain prediction of which calls will fail.
+If the off-chain precomputation knows a call will trigger a failed reentrant call, it wraps that call in a `revertSpan`. The entire call (including the reentrant callback) executes inside `executeInContext`. The `ContextResult` carries `_lastNestedActionConsumed` out of the revert context, preserving consumption state even though the inner call failed.
 
-**B. Add `failed` flag to NestedAction**
+Downside: requires off-chain prediction of which calls will fail. Also, the call with the reentrant callback must be the one with `revertSpan` — not just any call in the span.
 
-```solidity
-struct NestedAction {
-    bytes32 actionHash;
-    uint256 callCount;
-    bytes returnData;
-    bool failed;        // if true, skip call processing
-}
-```
+**B. Pre-consume nested actions before the proxy call**
 
-When `failed == true`, `_consumeNestedAction` would skip `_processNCalls` and hash a failure marker into the rolling hash instead. The nested action is consumed (index advances) without executing calls. The outer proxy call would still fail (the reentrant call reverts), but the consumption would have already happened before the revert propagates.
-
-Problem: the consumption happens INSIDE the sub-context that reverts, so `_lastNestedActionConsumed++` is still rolled back. This doesn't actually solve the fundamental issue.
-
-**C. Pre-consume before the proxy call**
-
-Move nested action consumption to happen BEFORE the proxy call, not during it. The manager would know (from the execution entry metadata) that call N triggers nested action M, and pre-consume it:
+Move nested action consumption from the reentrant callback into the outer `_processNCalls` loop. The manager would know (from execution entry metadata) that call N triggers nested action M, and pre-consume it before making the proxy call:
 
 ```
 for each call:
   if this call triggers a nested action:
-    pre-consume nested action (advance index, hash NESTED_BEGIN/END)
+    advance _lastNestedActionConsumed (in outer context — survives inner revert)
+    hash NESTED_BEGIN
+    _processNCalls(nested.callCount)  // process nested calls
+    hash NESTED_END
   execute the call via proxy
   hash CALL_END
 ```
 
-This requires a new field on `CrossChainCall` (e.g., `bool triggersNestedAction`) or a mapping from call index to nested action index. The nested action's calls would still need processing, but the consumption index advances in the outer context (not rolled back by inner revert).
+This requires a new field on `CrossChainCall` (e.g., `uint256 nestedActionCount` — how many nested actions this call triggers, typically 0 or 1). The reentrant `executeCrossChainCall` would just return `nested.returnData` without consuming (already consumed).
 
-Downside: changes the execution model significantly. The reentrant `executeCrossChainCall` would no longer consume nested actions — the outer loop would handle it. This breaks the current model where the destination contract's callback triggers consumption.
+Upside: completely solves the problem — consumption index advances in the outer context, immune to inner reverts.
 
-**D. Treat reentrant-call-that-reverts as a special revertSpan automatically**
+Downside: changes the execution model. The destination contract's callback no longer drives consumption. The manager must know in advance which calls are reentrant.
 
-When `_consumeNestedAction` is about to process a nested action marked as `failed`, it wraps the execution in a self-call (like `executeInContext`), carrying `_lastNestedActionConsumed` through `ContextResult`. This way the consumption survives the revert.
+**C. Treat reentrant-call-that-reverts as a special revertSpan automatically**
 
-```solidity
-if (nested.failed) {
-    // self-call to isolate the revert
-    try this.executeFailedNestedAction(actionHash) {}
-    catch (bytes memory revertData) {
-        // restore _lastNestedActionConsumed from ContextResult
-    }
-    return nested.returnData;
-}
-```
+When a proxy call fails AND the next nested action hasn't been consumed (indicating a failed reentrant call), the manager could retry the call inside a revert context to capture the consumption:
 
-Downside: adds another self-call pattern and complexity.
+Problem: the manager can't know at CALL_END time whether the failed call was supposed to trigger a nested action. The failure could be a normal call failure (no nesting) or a nested action failure.
 
-**E. Accept current design — document the constraint**
+**D. Accept current design — document the constraint**
 
-The current design works correctly: the off-chain precomputation routes all potentially-failing reentrant calls through `StaticCall` lookup or wraps them in `revertSpan`. This keeps the on-chain logic simple. The constraint "nested actions must succeed" is a valid design choice that trades off-chain flexibility for on-chain simplicity.
+The current design works correctly under its stated constraints: the off-chain precomputation routes all potentially-failing reentrant calls through `StaticCall` lookup or wraps them in `revertSpan`. The constraint "nested actions must succeed" is a valid design choice that trades off-chain flexibility for on-chain simplicity.
+
+This is well-documented in `ICrossChainManager.sol`:
+> All nested actions must succeed. Failed calls should use StaticCall instead.
 
 ---
 
