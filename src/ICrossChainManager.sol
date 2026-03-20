@@ -51,7 +51,7 @@ struct ExecutionEntry {
     StateDelta[] stateDeltas;
     bytes32 actionHash;
     CrossChainCall[] calls;         // ALL calls flat, in execution order
-    NestedAction[] nestedActions;   // metadata only, no calls[]
+    NestedAction[] nestedActions;   // 
     uint256 callCount;              // entry-level iterations
     bytes returnData;
     bool failed;

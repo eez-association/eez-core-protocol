@@ -144,383 +144,304 @@
 <div class="tabs" id="tabs"></div>
 <div class="main" id="app"></div>
 <script>
-// ═══ Entry definitions (all 14 entries with full details) ════════
+// ═══ Entry definitions (new flat model: ExecutionEntry with calls[], nestedActions[], rollingHash) ════════
 
 const E = {
-  // ── Scenario 0 (simplest) ──
-  s0e1: {
-    id:'s0e1', hash:'CALL{L2, A, inc(), src=Alice}', next:'RESULT{L2, data=1}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'counterL2 — A (Counter on L2)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'alice',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
-    },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-state-after-increment")', etherDelta:'0' }
-  },
-  s0e2: {
-    id:'s0e2', hash:'RESULT{L2, data=1}', next:'RESULT{L2, data=1}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: null
-  },
-
-  // ── Scenario 1 ──
+  // ── Scenario 1: L1 -> L2 simple call ──
+  // Single L1 entry: actionHash matches the proxy call, calls[] has the cross-chain call to B,
+  // returnData carries the result back to A.
   s1e1: {
-    id:'s1e1', hash:'CALL{L2, B, inc(), src=A}', next:'RESULT{L2, data=1}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'counterL2 — B (Counter on L2)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxy — A (CounterAndProxy on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s1e1', summary:'hash(L2,B,inc,src=A) | 1 call | ret=abi.encode(1)', delta:'L2: S0 -> S1',
+    entry: {
+      actionHash:'keccak256(L2_ROLLUP_ID, B, 0, inc.selector, A, MAINNET_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-state-after-increment")', etherDelta:'0' }
+    calls: [
+      { destination:'B (Counter on L2)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'A (CounterAndProxy on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-after-increment")', etherDelta:'0' }
   },
+  // Single L2 entry: actionHash matches the proxy call from A', calls[] has the call to B.
   s1e2: {
-    id:'s1e2', hash:'RESULT{L2, data=1}', next:'RESULT{L2, data=1}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s1e2', summary:'hash(L2,B,inc,src=A) | 1 call | ret=abi.encode(1)', delta:null,
+    entry: {
+      actionHash:'keccak256(L2_ROLLUP_ID, B, 0, inc.selector, A, MAINNET_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
+    calls: [
+      { destination:'B (Counter on L2)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'A (CounterAndProxy on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [],
     sd: null
   },
 
-  // ── Scenario 2 ──
+  // ── Scenario 2: L2 -> L1 simple call ──
+  // L1 entry 1: executeL2TX triggers this. calls[] has the cross-chain call to C via D'.
   s2e1: {
-    id:'s2e1', hash:'L2TX{L2, rlp=0x01}', next:'CALL{MAIN, C, inc(), src=D}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'L2TX', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'hex"01" (rlpEncodedTx)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s2e1', summary:'hash(L2TX, rlp=0x01) | 1 call(C) | ret=abi.encode(1)', delta:'L2: S0 -> S1',
+    entry: {
+      actionHash:'keccak256(executeL2TX hash for rlp=0x01)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterL1 — C (Counter on L1)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxyL2 — D (CounterAndProxy on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-state-after-scenario2")', etherDelta:'0' }
+    calls: [
+      { destination:'C (Counter on L1)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'D (CounterAndProxy on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-after-scenario2")', etherDelta:'0' }
   },
+  // L2 entry: actionHash matches D's call to C'. calls[] has the call to C.
   s2e2: {
-    id:'s2e2', hash:'RESULT{MAIN, data=1}', next:'RESULT{MAIN, data=1}', delta:'L2: S1 → S2',
-    action: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s2e2', summary:'hash(MAIN,C,inc,src=D) | 1 call | ret=abi.encode(1)', delta:null,
+    entry: {
+      actionHash:'keccak256(MAINNET_ROLLUP_ID, C, 0, inc.selector, D, L2_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-state-before-call")', newState:'keccak256("l2-state-after-scenario2")', etherDelta:'0' }
-  },
-  s2e3: {
-    id:'s2e3', hash:'CALL{MAIN, C, inc(), src=D}', next:'RESULT{MAIN, data=1}', delta:null,
-    action: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterL1 — C (Counter on L1)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxyL2 — D (CounterAndProxy on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
-    },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
+    calls: [
+      { destination:'C (Counter on L1)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'D (CounterAndProxy on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [],
     sd: null
   },
 
-  // ── Scenario 3 ──
+  // ── Scenario 3: L2 -> L1 -> L2 (nested cross-manager) ──
+  // L1 entry 1: executeL2TX. calls[] = [call A.incProxy via Alice'], nestedActions = [B.inc].
   s3e1: {
-    id:'s3e1', hash:'L2TX{L2, rlp=0x02}', next:'CALL{MAIN, A, incProxy(), src=Alice}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'L2TX', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'hex"02" (rlpEncodedTx)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s3e1', summary:'hash(L2TX, rlp=0x02) | 1 call(A) + 1 nested(B) | ret=void', delta:'L2: S0 -> S1',
+    entry: {
+      actionHash:'keccak256(executeL2TX hash for rlp=0x02)',
+      callCount:'1',
+      returnData:'"" (void -- A.incrementProxy has no return)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterAndProxy — A (CounterAndProxy on L1)', value:'0',
-      data:'CounterAndProxy.incrementProxy.selector', failed:'false',
-      sourceAddress:'alice', sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-state-s3-step1")', etherDelta:'0' }
+    calls: [
+      { destination:'A (CounterAndProxy on L1)', value:'0', data:'CounterAndProxy.incrementProxy.selector',
+        sourceAddress:'alice', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(L2,B,0,inc.selector,A,MAINNET)', callCount:'1', returnData:'abi.encode(uint256(1))' }
+    ],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s3-step1")', etherDelta:'0' }
   },
+  // L2 entry 1: actionHash matches Alice's call to A' (proxy). calls[] = [call B], nestedActions = none.
+  // _consumeNestedAction on L1 validates via rolling hash.
   s3e2: {
-    id:'s3e2', hash:'CALL{L2, B, inc(), src=A}', next:'RESULT{L2, data=1}', delta:'L2: S1 → S2',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'counterL2 — B (Counter on L2)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxy — A (CounterAndProxy on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s3e2', summary:'hash(MAIN,A,incProxy,src=Alice) | 1 call(B) + 1 nested(B.inc) | ret=void', delta:null,
+    entry: {
+      actionHash:'keccak256(MAINNET_ROLLUP_ID, A, 0, incProxy.sel, alice, L2_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-state-s3-step1")', newState:'keccak256("l2-state-s3-step2")', etherDelta:'0' }
+    calls: [
+      { destination:'A (CounterAndProxy on L1)', value:'0', data:'CounterAndProxy.incrementProxy.selector',
+        sourceAddress:'alice', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(L2,B,0,inc.selector,A,MAINNET)', callCount:'1', returnData:'abi.encode(uint256(1))' }
+    ],
+    sd: null
   },
+  // L2 entry 2: the nested call to B. Consumed by _consumeNestedAction when A calls B' on L1.
   s3e3: {
-    id:'s3e3', hash:'RESULT{MAIN, data=""}', next:'RESULT{MAIN, data=""}', delta:'L2: S2 → S3',
-    action: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'"" (void return — A.incrementProxy has no return)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s3e3', summary:'hash(L2,B,inc,src=A) | 1 call(B) | ret=abi.encode(1)', delta:'L2: S1 -> S2',
+    entry: {
+      actionHash:'keccak256(L2_ROLLUP_ID, B, 0, inc.selector, A, MAINNET_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'"" (void return)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-state-s3-step2")', newState:'keccak256("l2-state-s3-step3")', etherDelta:'0' }
-  },
-  s3e4: {
-    id:'s3e4', hash:'CALL{MAIN, A, incProxy(), src=Alice}', next:'CALL{L2, B, inc(), scope=[0]}', delta:null,
-    action: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterAndProxy — A (CounterAndProxy on L1)', value:'0',
-      data:'CounterAndProxy.incrementProxy.selector', failed:'false',
-      sourceAddress:'alice', sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
-    },
-    nextAct: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'counterL2 — B (Counter on L2)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxy — A (CounterAndProxy on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[0]'
-    },
-    sd: null
-  },
-  s3e5: {
-    id:'s3e5', hash:'RESULT{L2, data=1}', next:'RESULT{L2, data=1}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: null
+    calls: [
+      { destination:'B (Counter on L2)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'A (CounterAndProxy on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s3-step2")', etherDelta:'0' }
   },
 
-  // ── Scenario 4 ──
+  // ── Scenario 4: L1 -> L2 -> L1 (nested cross-manager) ──
+  // L1 entry 1: Alice calls D' (proxy for D on L2). calls[] = [call D.incProxy via Alice'],
+  //   nestedActions = [C.inc triggered by D calling C'].
   s4e1: {
-    id:'s4e1', hash:'CALL{L2, D, incProxy(), src=Alice}', next:'CALL{MAIN, C, inc(), scope=[0]}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'counterAndProxyL2 — D (CounterAndProxy on L2)', value:'0',
-      data:'CounterAndProxy.incrementProxy.selector', failed:'false',
-      sourceAddress:'alice', sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s4e1', summary:'hash(L2,D,incProxy,src=Alice) | 1 call(D) + 1 nested(C) | ret=void', delta:'L2: S0 -> S1',
+    entry: {
+      actionHash:'keccak256(L2_ROLLUP_ID, D, 0, incProxy.sel, alice, MAINNET_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'"" (void -- D.incrementProxy has no return)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterL1 — C (Counter on L1)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxyL2 — D (CounterAndProxy on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[0]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-state-s4-step1")', etherDelta:'0' }
+    calls: [
+      { destination:'D (CounterAndProxy on L2)', value:'0', data:'CounterAndProxy.incrementProxy.selector',
+        sourceAddress:'alice', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(MAIN,C,0,inc.selector,D,L2)', callCount:'1', returnData:'abi.encode(uint256(1))' }
+    ],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s4-step1")', etherDelta:'0' }
   },
+  // L2 entry 1: actionHash matches Alice's call to D (via proxy). calls[] = [call D.incProxy],
+  //   nestedActions = [C.inc].
   s4e2: {
-    id:'s4e2', hash:'RESULT{MAIN, data=1}', next:'RESULT{MAIN, data=1}', delta:'L2: S1 → S2',
-    action: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s4e2', summary:'hash(L2,D,incProxy,src=Alice) | 1 call(D) + 1 nested(C.inc) | ret=void', delta:null,
+    entry: {
+      actionHash:'keccak256(L2_ROLLUP_ID, D, 0, incProxy.sel, alice, MAINNET_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-state-s4-step1")', newState:'keccak256("l2-state-s4-step2")', etherDelta:'0' }
+    calls: [
+      { destination:'D (CounterAndProxy on L2)', value:'0', data:'CounterAndProxy.incrementProxy.selector',
+        sourceAddress:'alice', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(MAIN,C,0,inc.selector,D,L2)', callCount:'1', returnData:'abi.encode(uint256(1))' }
+    ],
+    sd: null
   },
+  // L1 entry 2: the nested call to C. Consumed by _consumeNestedAction when D calls C' on L2.
   s4e3: {
-    id:'s4e3', hash:'CALL{MAIN, C, inc(), src=D}', next:'RESULT{MAIN, data=1}', delta:null,
-    action: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'counterL1 — C (Counter on L1)', value:'0',
-      data:'Counter.increment.selector', failed:'false',
-      sourceAddress:'counterAndProxyL2 — D (CounterAndProxy on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
+    id:'s4e3', summary:'hash(MAIN,C,inc,src=D) | 1 call(C) | ret=abi.encode(1)', delta:'L2: S1 -> S2',
+    entry: {
+      actionHash:'keccak256(MAINNET_ROLLUP_ID, C, 0, inc.selector, D, L2_ROLLUP_ID)',
+      callCount:'1',
+      returnData:'abi.encode(uint256(1))',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'abi.encode(uint256(1))', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: null
-  },
-  s4e4: {
-    id:'s4e4', hash:'RESULT{L2, data=""}', next:'RESULT{L2, data=""}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void return — D.incrementProxy has no return)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void return)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: null
+    calls: [
+      { destination:'C (Counter on L1)', value:'0', data:'Counter.increment.selector',
+        sourceAddress:'D (CounterAndProxy on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s4-step2")', etherDelta:'0' }
   },
 
-  // ── Scenario 5 (Flash Loan) ──
+  // ── Scenario 5: Cross-Chain Flash Loan ──
+  // L1 entry 1: bridge forward. calls[] = [Bridge_L2.receiveTokens via BridgeL1'].
   s5e1: {
-    id:'s5e1', hash:'CALL{L2, Bridge_L2, recvTokens, src=Bridge_L1}', next:'RESULT{L2, void}', delta:'L2: S0 → S1',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'Bridge_L2 (Bridge on L2)', value:'0',
-      data:'Bridge.receiveTokens(token, MAINNET, executorL2, 10k, ...)', failed:'false',
-      sourceAddress:'Bridge_L1 (Bridge on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s5e1', summary:'hash(L2,Bridge_L2,recvTokens,src=BridgeL1) | 1 call | ret=void', delta:'L2: S0 -> S1',
+    entry: {
+      actionHash:'keccak256(L2, Bridge_L2, 0, recvTokens.sel, Bridge_L1, MAINNET)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-initial-state")', newState:'keccak256("l2-tokens-bridged-to-executor")', etherDelta:'0' }
+    calls: [
+      { destination:'Bridge_L2 (Bridge on L2)', value:'0', data:'Bridge.receiveTokens(token, MAINNET, executorL2, 10k, ...)',
+        sourceAddress:'Bridge_L1 (Bridge on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-tokens-bridged-to-executor")', etherDelta:'0' }
   },
+  // L1 entry 2: claimBack. calls[] = [ExecL2.claimAndBridgeBack], nestedActions = [bridge return].
   s5e2: {
-    id:'s5e2', hash:'CALL{L2, ExecL2, claimBack, src=Executor}', next:'CALL{MAIN, Bridge_L1, recvTokens, scope=[0]}', delta:'L2: S1 → S2',
-    action: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'ExecutorL2 (FlashLoanBridgeExecutor on L2)', value:'0',
-      data:'FlashLoanBridgeExecutor.claimAndBridgeBack(...)', failed:'false',
-      sourceAddress:'Executor (FlashLoanBridgeExecutor on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
+    id:'s5e2', summary:'hash(L2,ExecL2,claimBack,src=Executor) | 1 call + 1 nested(bridge ret) | ret=void', delta:'L2: S1 -> S2',
+    entry: {
+      actionHash:'keccak256(L2, ExecL2, 0, claimBack.sel, Executor, MAINNET)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'Bridge_L1 (Bridge on L1)', value:'0',
-      data:'Bridge.receiveTokens(token, MAINNET, executor, 10k, ...)', failed:'false',
-      sourceAddress:'Bridge_L2 (Bridge on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[0]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-tokens-bridged-to-executor")', newState:'keccak256("l2-nft-claimed-tokens-bridged-back")', etherDelta:'0' }
+    calls: [
+      { destination:'ExecutorL2 (FlashLoanBridgeExecutor on L2)', value:'0', data:'FlashLoanBridgeExecutor.claimAndBridgeBack(...)',
+        sourceAddress:'Executor (FlashLoanBridgeExecutor on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(MAIN,Bridge_L1,0,recvTokens.sel,Bridge_L2,L2)', callCount:'1', returnData:'"" (void)' }
+    ],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-nft-claimed-tokens-bridged-back")', etherDelta:'0' }
   },
+  // L1 entry 3: nested bridge return. Consumed by _consumeNestedAction.
   s5e3: {
-    id:'s5e3', hash:'RESULT{MAIN, void}', next:'RESULT{L2, void}', delta:'L2: S2 → S3',
-    action: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s5e3', summary:'hash(MAIN,Bridge_L1,recvTokens,src=Bridge_L2) | 1 call | ret=void', delta:'L2: S2 -> S3',
+    entry: {
+      actionHash:'keccak256(MAINNET, Bridge_L1, 0, recvTokens.sel, Bridge_L2, L2)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
-    sd: { rollupId:'L2_ROLLUP_ID (1)', currentState:'keccak256("l2-nft-claimed-tokens-bridged-back")', newState:'keccak256("l2-bridge-return-executed")', etherDelta:'0' }
+    calls: [
+      { destination:'Bridge_L1 (Bridge on L1)', value:'0', data:'Bridge.receiveTokens(token, MAINNET, executor, 10k, ...)',
+        sourceAddress:'Bridge_L2 (Bridge on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [],
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-bridge-return-executed")', etherDelta:'0' }
   },
+  // L2 entry 1: bridge forward receives. calls[] = [Bridge_L2.receiveTokens].
   s5e4: {
-    id:'s5e4', hash:'RESULT{L2, void}', next:'CALL{L2, ExecL2, claimBack, src=Executor}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s5e4', summary:'hash(L2,Bridge_L2,recvTokens,src=BridgeL1) | 1 call | ret=void', delta:null,
+    entry: {
+      actionHash:'keccak256(L2, Bridge_L2, 0, recvTokens.sel, Bridge_L1, MAINNET)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'CALL', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'ExecutorL2 (FlashLoanBridgeExecutor on L2)', value:'0',
-      data:'FlashLoanBridgeExecutor.claimAndBridgeBack(...)', failed:'false',
-      sourceAddress:'Executor (FlashLoanBridgeExecutor on L1)',
-      sourceRollup:'MAINNET_ROLLUP_ID (0)', scope:'[]'
-    },
+    calls: [
+      { destination:'Bridge_L2 (Bridge on L2)', value:'0', data:'Bridge.receiveTokens(token, MAINNET, executorL2, 10k, ...)',
+        sourceAddress:'Bridge_L1 (Bridge on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [],
     sd: null
   },
+  // L2 entry 2: claimBack. calls[] = [ExecL2.claimAndBridgeBack], nestedActions = [bridge return].
   s5e5: {
-    id:'s5e5', hash:'CALL{MAIN, Bridge_L1, recvTokens, src=Bridge_L2}', next:'RESULT{MAIN, void}', delta:null,
-    action: {
-      actionType:'CALL', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'Bridge_L1 (Bridge on L1)', value:'0',
-      data:'Bridge.receiveTokens(token, MAINNET, executor, 10k, ...)', failed:'false',
-      sourceAddress:'Bridge_L2 (Bridge on L2)',
-      sourceRollup:'L2_ROLLUP_ID (1)', scope:'[]'
+    id:'s5e5', summary:'hash(L2,ExecL2,claimBack,src=Executor) | 1 call + 1 nested(ret) | ret=void', delta:null,
+    entry: {
+      actionHash:'keccak256(L2, ExecL2, 0, claimBack.sel, Executor, MAINNET)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'MAINNET_ROLLUP_ID (0)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
+    calls: [
+      { destination:'ExecutorL2 (FlashLoanBridgeExecutor on L2)', value:'0', data:'FlashLoanBridgeExecutor.claimAndBridgeBack(...)',
+        sourceAddress:'Executor (FlashLoanBridgeExecutor on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
+    ],
+    nestedActions: [
+      { actionHash:'keccak256(MAIN,Bridge_L1,0,recvTokens.sel,Bridge_L2,L2)', callCount:'1', returnData:'"" (void)' }
+    ],
     sd: null
   },
+  // L2 entry 3: nested bridge return on L2 side. Consumed by _consumeNestedAction.
   s5e6: {
-    id:'s5e6', hash:'RESULT{L2, void}', next:'RESULT{L2, void}', delta:null,
-    action: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
+    id:'s5e6', summary:'hash(MAIN,Bridge_L1,recvTokens,src=Bridge_L2) | 1 call | ret=void', delta:null,
+    entry: {
+      actionHash:'keccak256(MAINNET, Bridge_L1, 0, recvTokens.sel, Bridge_L2, L2)',
+      callCount:'1',
+      returnData:'"" (void)',
+      failed:'false',
+      rollingHash:'hash(CALL_BEGIN(1) + CALL_END(1))',
     },
-    nextAct: {
-      actionType:'RESULT', rollupId:'L2_ROLLUP_ID (1)',
-      destination:'address(0)', value:'0',
-      data:'"" (void)', failed:'false',
-      sourceAddress:'address(0)', sourceRollup:'0', scope:'[]'
-    },
+    calls: [
+      { destination:'Bridge_L1 (Bridge on L1)', value:'0', data:'Bridge.receiveTokens(token, MAINNET, executor, 10k, ...)',
+        sourceAddress:'Bridge_L2 (Bridge on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
+    ],
+    nestedActions: [],
     sd: null
   }
 };
@@ -581,7 +502,7 @@ s1: {
     { from:'ManagerL2',to:'Aprime',label:'execOnBehalf' },
     { from:'Aprime',to:'B',      label:'inc()' },
     { from:'B',to:'Aprime',      label:'return(1)', back:true },
-    { from:'Aprime',to:'ManagerL2',label:'RESULT{1}', back:true },
+    { from:'Aprime',to:'ManagerL2',label:'ret(1)', back:true },
     { from:'Rollups',to:'Bprime', label:'return(1)', back:true },
     { from:'Bprime',to:'A',      label:'return(1)', back:true },
     { from:'Prover',to:'Rollups', label:'postBatch' },
@@ -611,7 +532,7 @@ s2: {
     { from:'Rollups',to:'Dprime', label:'execOnBehalf' },
     { from:'Dprime',to:'C',      label:'inc()' },
     { from:'C',to:'Dprime',      label:'return(1)', back:true },
-    { from:'Dprime',to:'Rollups', label:'RESULT{1}', back:true },
+    { from:'Dprime',to:'Rollups', label:'ret(1)', back:true },
     { from:'ManagerL2',to:'Cprime',label:'return(1)', back:true },
     { from:'Cprime',to:'D',      label:'return(1)', back:true },
     { from:'Prover',to:'Rollups', label:'postBatch' },
@@ -645,11 +566,11 @@ s3: {
     { from:'ManagerL2',to:'Aprime', label:'execOnBehalf' },
     { from:'Aprime',to:'B',         label:'inc()' },
     { from:'B',to:'Aprime',         label:'return(1)', back:true },
-    { from:'Aprime',to:'ManagerL2', label:'RESULT{1}', back:true, id:'Aprime-RESULT' },
+    { from:'Aprime',to:'ManagerL2', label:'ret(1)', back:true, id:'Aprime-RESULT' },
     { from:'Rollups',to:'Bprime',   label:'return(1)', back:true },
     { from:'Bprime',to:'A',         label:'return(1)', back:true },
     { from:'A',to:'Bprime',         label:'return(void)', back:true, id:'A-return-Bprime' },
-    { from:'Bprime',to:'Rollups',   label:'RESULT{""}', back:true, id:'Bprime-return-Rollups' },
+    { from:'Bprime',to:'Rollups',   label:'ret(void)', back:true, id:'Bprime-return-Rollups' },
     { from:'ManagerL2',to:'Aprime', label:'return', back:true, id:'ManagerL2-return-Aprime' },
     { from:'Aprime',to:'Alice',     label:'return', back:true },
     { from:'Prover',to:'Rollups',    label:'postBatch' },
@@ -685,9 +606,9 @@ s4: {
     { from:'Rollups',to:'Dprime',  label:'execOnBehalf' },
     { from:'Dprime',to:'C',        label:'inc()' },
     { from:'C',to:'Dprime',        label:'return(1)', back:true },
-    { from:'Dprime',to:'Rollups',  label:'RESULT{1}', back:true, id:'Dprime-RESULT' },
+    { from:'Dprime',to:'Rollups',  label:'ret(1)', back:true, id:'Dprime-RESULT' },
     { from:'D',to:'Cprime',        label:'return(void)', back:true, id:'D-return-Cprime' },
-    { from:'Cprime',to:'ManagerL2',label:'RESULT{""}', back:true, id:'Cprime-return-ManagerL2' },
+    { from:'Cprime',to:'ManagerL2',label:'ret(void)', back:true, id:'Cprime-return-ManagerL2' },
     { from:'Rollups',to:'Dprime',  label:'return', back:true, id:'Rollups-return-Dprime' },
     { from:'Dprime',to:'Alice',    label:'return', back:true },
     { from:'Prover',to:'Rollups',   label:'postBatch' },
@@ -783,251 +704,251 @@ s0: {
 },
 
 s1: {
-  title:'Scenario 1: L1 → L2', flow:'Alice → A (→ B\') → B',
-  dir:'L1 calls L2 — crosses to L2 for B, returns to L1 with result',
+  title:'Scenario 1: L1 -> L2', flow:'Alice -> A (-> B\') -> B',
+  dir:'L1 calls L2 -- single entry per chain, flat calls[], sequential consumption via executionIndex',
   contracts:{ l1:['A.counter','A.targetCounter'], l2:['B.counter'], extra:['L2 State'] },
   steps:[
     { chain:'l1', title:'Setup L1: rollups.postBatch(1 entry)',
-      detail:'Stores deferred entry: hash(CALL{B}) → RESULT{1}, with L2 state delta S0→S1.',
+      detail:'Stores 1 deferred entry at executionIndex 0: actionHash = hash(L2,B,inc,src=A), calls[] = [{B, inc, src=A}], callCount=1, returnData=abi.encode(1), rollingHash = hash(CALL_BEGIN(1) + CALL_END(1)). State delta: L2 S0->S1.',
       l1Add:['s1e1'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Prover'], activeEdges:['Prover→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(1 entry)',
-      detail:'Stores entry: hash(RESULT{1}) → RESULT{1} (terminal self-ref).',
+      detail:'Stores 1 entry at executionIndex 0: same actionHash, calls[] = [{B, inc, src=A}], callCount=1, returnData=abi.encode(1). The L2 entry mirrors the L1 entry for the same cross-chain call.',
       l1Add:[], l1Rm:[], l2Add:['s1e2'], l2Rm:[], state:{},
       activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
-    { chain:'l1', title:'L1: Alice calls A.incrementProxy() → A calls B\'',
-      detail:'A(CounterAndProxy) calls B\'(proxy for B on L2). B\'.fallback() → Rollups.executeCrossChainCall. Builds CALL{L2,B,src=A} → matches L1 entry → consumed. L2 state S0→S1 applied.',
+    { chain:'l1', title:'L1: Alice calls A.incrementProxy() -> A calls B\'',
+      detail:'A(CounterAndProxy) calls B\'(proxy for B on L2). B\'.fallback() -> Rollups.executeCrossChainCall. Computes actionHash = hash(L2,B,inc,src=A) -> matches entry at executionIndex. _consumeAndExecute: applies state delta (L2 S0->S1), _processNCalls(1) executes calls[0] via B\'.executeOnBehalf. Rolling hash: CALL_BEGIN(1) tag recorded, call executes, CALL_END(1) tag recorded. Hash verified against entry.rollingHash.',
       l1Add:[], l1Rm:['s1e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Alice','A','Bprime','Rollups'], activeEdges:['Alice→A','A→Bprime','Bprime→Rollups'],
       diagram:[ ['Alice','','user',''], 'incrementProxy()', ['A','CounterAndProxy','contract','l1'], 'increment()', ["B'",'Proxy for B','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
-    { chain:'l2', title:'↗ Cross to L2: B.increment() executes',
-      detail:'executeIncomingCrossChainCall(dest=B, src=A) → newScope → A\'.executeOnBehalf(B, inc) → B.counter 0→1, returns 1 → RESULT{1} consumed from L2 table.',
+    { chain:'l2', title:'Cross to L2: _processNCalls executes B.increment()',
+      detail:'executeCrossChainCall(src=A) -> _consumeAndExecute -> _processNCalls(1): A\'.executeOnBehalf(B, inc) -> B.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed, executionIndex++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s1e2'], state:{'B.counter':1},
       activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime→ManagerL2'],
-      diagram:[ ['SYSTEM','','user',''], 'execIncoming', ['ManagerL2','','system','l2'], 'execOnBehalf', ["A'",'Proxy for A','proxy','l2'], 'inc()', ['B','counter: 0→1','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["A'",'Proxy for A','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
     },
-    { chain:'l1', title:'↙ Back to L1: RESULT{1} returned to A',
-      detail:'executeCrossChainCall returned RESULT{1} to B\'.fallback → returned to A. A decodes result: targetCounter=1, counter++.',
+    { chain:'l1', title:'Back to L1: returnData returned to A',
+      detail:'_consumeAndExecute returns entry.returnData = abi.encode(1) to B\'.fallback -> returned to A. A decodes result: targetCounter=1, counter++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'A.counter':1,'A.targetCounter':1},
       activeNodes:['Rollups','Bprime','A'], activeEdges:['Rollups→Bprime','Bprime→A'],
-      diagram:[ ['Rollups','RESULT{1}','system','l1'], 'returns to', ['A','counter=1, tgt=1','contract','l1'], 'returns to', ['Alice','done','user',''] ]
+      diagram:[ ['Rollups','returnData','system','l1'], 'returns to', ['A','counter=1, tgt=1','contract','l1'], 'returns to', ['Alice','done','user',''] ]
     }
   ]
 },
 
 s2: {
-  title:'Scenario 2: L2 → L1', flow:'Alice → D (→ C\') → C',
-  dir:'L2 calls L1 — crosses to L1 for C, returns to L2 with result',
+  title:'Scenario 2: L2 -> L1', flow:'Alice -> D (-> C\') -> C',
+  dir:'L2 calls L1 -- single entry per chain, sequential executionIndex consumption',
   contracts:{ l1:['C.counter'], l2:['D.counter','D.targetCounter'], extra:['L2 State'] },
   steps:[
-    { chain:'l1', title:'Setup L1: rollups.postBatch(2 entries)',
-      detail:'Entry 1: hash(L2TX) → CALL{C}, L2 delta S0→S1. Entry 2: hash(RESULT{1}) → RESULT{1}, L2 delta S1→S2.',
-      l1Add:['s2e1','s2e2'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+    { chain:'l1', title:'Setup L1: rollups.postBatch(1 entry)',
+      detail:'1 deferred entry: actionHash = hash(L2TX, rlp=0x01), calls[] = [{C, inc, src=D}], callCount=1, returnData=abi.encode(1). State delta: L2 S0->S1.',
+      l1Add:['s2e1'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Prover'], activeEdges:['Prover→Rollups'],
-      diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 2', ['L1 Table','','system','l1'] ]
+      diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 1', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(1 entry)',
-      detail:'Entry: hash(CALL{C}) → RESULT{1}.',
-      l1Add:[], l1Rm:[], l2Add:['s2e3'], l2Rm:[], state:{},
+      detail:'1 entry: actionHash = hash(MAIN,C,inc,src=D), calls[] = [{C, inc, src=D}], callCount=1, returnData=abi.encode(1).',
+      l1Add:[], l1Rm:[], l2Add:['s2e2'], l2Rm:[], state:{},
       activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
-    { chain:'l2', title:'L2: Alice calls D.incrementProxy() → D calls C\'',
-      detail:'D(CounterAndProxy) calls C\'(proxy for C on L1). C\'.fallback() → executeCrossChainCall. Builds CALL{MAIN,C,src=D} → matches L2 entry → consumed.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s2e3'], state:{},
+    { chain:'l2', title:'L2: Alice calls D.incrementProxy() -> D calls C\'',
+      detail:'D(CounterAndProxy) calls C\'(proxy for C on L1). C\'.fallback() -> ManagerL2.executeCrossChainCall. Computes actionHash = hash(MAIN,C,inc,src=D) -> matches entry. _consumeAndExecute: _processNCalls(1) executes calls[0]. Rolling hash verified. Entry consumed.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s2e2'], state:{},
       activeNodes:['Alice','D','Cprime','ManagerL2'], activeEdges:['Alice→D','D→Cprime','Cprime→ManagerL2'],
       diagram:[ ['Alice','','user',''], 'incrementProxy()', ['D','CounterAndProxy','contract','l2'], 'increment()', ["C'",'Proxy for C','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
-    { chain:'l1', title:'↗ Cross to L1: executeL2TX → C.increment() executes',
-      detail:'executeL2TX(L2_ROLLUP_ID, 0x01) → L2TX consumed [S0→S1] → CALL{C} → scope nav → D\'.executeOnBehalf(C, inc) → C.counter 0→1 → RESULT{1} consumed [S1→S2]. Both L1 entries consumed.',
-      l1Add:[], l1Rm:['s2e1','s2e2'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S2'},
+    { chain:'l1', title:'Cross to L1: executeL2TX -> _processNCalls executes C.increment()',
+      detail:'executeL2TX(L2_ROLLUP_ID, 0x01) -> _consumeAndExecute: applies L2 delta S0->S1. _processNCalls(1): D\'.executeOnBehalf(C, inc) -> C.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed.',
+      l1Add:[], l1Rm:['s2e1'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S1'},
       activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime→Rollups'],
-      diagram:[ ['Rollups','executeL2TX','system','l1'], 'execOnBehalf', ["D'",'Proxy for D','proxy','l1'], 'inc()', ['C','counter: 0→1','contract','l1'] ]
+      diagram:[ ['Rollups','executeL2TX','system','l1'], 'execOnBehalf', ["D'",'Proxy for D','proxy','l1'], 'inc()', ['C','counter: 0->1','contract','l1'] ]
     },
-    { chain:'l2', title:'↙ Back to L2: RESULT{1} returned to D',
-      detail:'executeCrossChainCall returned RESULT{1}. D decodes result: targetCounter=1, counter++.',
+    { chain:'l2', title:'Back to L2: returnData returned to D',
+      detail:'executeCrossChainCall returns entry.returnData = abi.encode(1). D decodes result: targetCounter=1, counter++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'D.counter':1,'D.targetCounter':1},
       activeNodes:['ManagerL2','Cprime','D'], activeEdges:['ManagerL2→Cprime','Cprime→D'],
-      diagram:[ ['ManagerL2','RESULT{1}','system','l2'], 'returns to', ['D','counter=1, tgt=1','contract','l2'], 'returns to', ['Alice','done','user',''] ]
+      diagram:[ ['ManagerL2','returnData','system','l2'], 'returns to', ['D','counter=1, tgt=1','contract','l2'], 'returns to', ['Alice','done','user',''] ]
     }
   ]
 },
 
 s3: {
-  title:'Scenario 3: L2 → L1 → L2', flow:'Alice → A\' (→ A → B\') → B',
-  dir:'Starts L2, crosses L1 (A runs), crosses L2 (B runs), back to L1, back to L2',
+  title:'Scenario 3: L2 -> L1 -> L2', flow:'Alice -> A\' (-> A -> B\') -> B',
+  dir:'Starts L2, crosses L1 (A runs), A triggers nested call to B via _consumeNestedAction, back to L2',
   contracts:{ l1:['A.counter','A.targetCounter'], l2:['B.counter'], extra:['L2 State'] },
   steps:[
-    { chain:'l1', title:'Setup L1: rollups.postBatch(3 entries)',
-      detail:'E1: L2TX→CALL(A) [S0→S1]. E2: CALL(B)→RESULT(1) [S1→S2]. E3: RESULT(void)→RESULT(void) [S2→S3].',
-      l1Add:['s3e1','s3e2','s3e3'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+    { chain:'l1', title:'Setup L1: rollups.postBatch(1 entry)',
+      detail:'1 deferred entry: actionHash = hash(L2TX, rlp=0x02), calls[] = [{A, incProxy, src=alice}], callCount=1, nestedActions = [{hash(L2,B,inc,src=A), callCount=1, ret=abi.encode(1)}], returnData="". State delta: L2 S0->S1. Rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1).',
+      l1Add:['s3e1'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Prover'], activeEdges:['Prover→Rollups'],
-      diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 3', ['L1 Table','','system','l1'] ]
+      diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 1', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(2 entries)',
-      detail:'E1: CALL#1(A,scope=[])→CALL#2(B,scope=[0]). E2: RESULT(1)→RESULT(1) terminal.',
-      l1Add:[], l1Rm:[], l2Add:['s3e4','s3e5'], l2Rm:[], state:{},
+      detail:'E1: actionHash = hash(MAIN,A,incProxy,src=alice), calls[] = [{A, incProxy, src=alice}], callCount=1, nestedActions = [{hash(L2,B,inc,src=A), callCount=1, ret=abi.encode(1)}], returnData="". E2: actionHash = hash(L2,B,inc,src=A), calls[] = [{B, inc, src=A}], callCount=1. Consumed sequentially via executionIndex.',
+      l1Add:[], l1Rm:[], l2Add:['s3e2','s3e3'], l2Rm:[], state:{},
       activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 2', ['L2 Table','','system','l2'] ]
     },
     { chain:'l2', title:'L2: Alice calls A\' (proxy for A on L1)',
-      detail:'A\'.fallback() → executeCrossChainCall(src=Alice) → builds CALL#1{MAIN,A,incProxy,src=Alice} → matches L2 entry → consumed → returns CALL#2{L2,B,scope=[0]}.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e4'], state:{},
+      detail:'A\'.fallback() -> ManagerL2.executeCrossChainCall(src=Alice). Computes actionHash = hash(MAIN,A,incProxy,src=alice) -> matches L2 entry 1. _consumeAndExecute: _processNCalls(1) starts executing calls[0] via A\'.executeOnBehalf(A, incProxy). Entry 1 is consumed.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e2'], state:{},
       activeNodes:['Alice','Aprime','ManagerL2'], activeEdges:['Alice→Aprime','Aprime-execCC'],
       diagram:[ ['Alice','','user',''], 'incProxy()', ["A'",'Proxy for A','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
-    { chain:'l1', title:'↗ Cross to L1: executeL2TX → A.incrementProxy() runs',
-      detail:'executeL2TX → L2TX consumed [S0→S1] → CALL{A,incProxy} → scope nav → AliceProxy.executeOnBehalf(A, incProxy) → A.incrementProxy() starts.',
+    { chain:'l1', title:'Cross to L1: executeL2TX -> _processNCalls(1) -> A.incrementProxy() runs',
+      detail:'executeL2TX(rlp=0x02) -> _consumeAndExecute: applies L2 delta S0->S1. _processNCalls(1): Alice\'.executeOnBehalf(A, incProxy) -> A.incrementProxy() starts. Rolling hash records CALL_BEGIN(1).',
       l1Add:[], l1Rm:['s3e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Rollups','AliceProxy','A'], activeEdges:['Rollups→AliceProxy','AliceProxy→A'],
-      diagram:[ ['Rollups','executeL2TX','system','l1'], 'scopeNav', ['Alice Proxy','','proxy','l1'], 'execOnBehalf', ['A','CounterAndProxy','contract','l1'] ]
+      diagram:[ ['Rollups','executeL2TX','system','l1'], '_processNCalls', ['Alice Proxy','','proxy','l1'], 'execOnBehalf', ['A','CounterAndProxy','contract','l1'] ]
     },
-    { chain:'l1', title:'L1: A calls B\' → REENTRANT cross-chain call',
-      detail:'Inside A.incrementProxy(): A calls B\'(proxy for B) → REENTRANT executeCrossChainCall → CALL{L2,B,src=A} consumed [S1→S2] → RESULT{1} returned to A. A: targetCounter=1, counter=1.',
-      l1Add:[], l1Rm:['s3e2'], l2Add:[], l2Rm:[], state:{'A.counter':1,'A.targetCounter':1,'L2 State':'S2'},
+    { chain:'l1', title:'L1: A calls B\' -> _consumeNestedAction (reentrant)',
+      detail:'Inside A.incrementProxy(): A calls B\'(proxy for B) -> REENTRANT executeCrossChainCall. Computes actionHash = hash(L2,B,inc,src=A) -> matches nestedActions[0]. _consumeNestedAction returns returnData = abi.encode(1). Rolling hash: NESTED_BEGIN(1) + NESTED_END(1) accumulated. A: targetCounter=1, counter=1.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'A.counter':1,'A.targetCounter':1},
       activeNodes:['A','Bprime','Rollups'], activeEdges:['A→Bprime','Bprime→Rollups','Rollups→Bprime','Bprime→A'],
-      diagram:[ ['A','calls B\'','contract','l1'], 'inc()', ["B'",'Proxy for B','proxy','l1'], 'REENTRANT', ['Rollups','consumes CALL(B)','system','l1'] ],
-      diagram2:[ ['Rollups','RESULT{1}','system','l1'], '→', ['A','tgt=1, ctr=1','contract','l1'] ],
+      diagram:[ ['A','calls B\'','contract','l1'], 'inc()', ["B'",'Proxy for B','proxy','l1'], 'REENTRANT', ['Rollups','_consumeNestedAction','system','l1'] ],
+      diagram2:[ ['Rollups','ret=abi.encode(1)','system','l1'], '->', ['A','tgt=1, ctr=1','contract','l1'] ],
       d2label:'Returns:'
     },
-    { chain:'l2', title:'↗ Cross to L2: B.increment() via scope navigation',
-      detail:'_resolveScopes(CALL#2) → newScope([0]) → A\'.executeOnBehalf(B, inc) [A\' REENTRANT: fallback then execOnBehalf]. B.counter 0→1 → RESULT consumed from L2 table.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e5'], state:{'B.counter':1},
+    { chain:'l2', title:'Cross to L2: _processNCalls executes B.increment()',
+      detail:'On L2, _consumeNestedAction consumed L2 entry 2 for the nested call: _processNCalls(1) -> A\'.executeOnBehalf(B, inc). B.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. _lastNestedActionConsumed incremented.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e3'], state:{'B.counter':1},
       activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime-RESULT'],
-      diagram:[ ['ManagerL2','scope=[0]','system','l2'], 'execOnBehalf', ["A'",'REENTRANT','proxy','l2'], 'inc()', ['B','counter: 0→1','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["A'",'REENTRANT','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
     },
-    { chain:'l1', title:'↙ Back to L1: A returns → RESULT(void) consumed',
-      detail:'A.incrementProxy() returns (void). Builds RESULT{MAIN,data=""} → matches L1 entry 3 → consumed [S2→S3] → terminal.',
-      l1Add:[], l1Rm:['s3e3'], l2Add:[], l2Rm:[], state:{'L2 State':'S3'},
+    { chain:'l1', title:'Back to L1: A returns -> CALL_END(1) completes rolling hash',
+      detail:'A.incrementProxy() returns (void). _processNCalls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash. All entries consumed.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['A','Bprime','Rollups'], activeEdges:['A-return-Bprime','Bprime-return-Rollups'],
-      diagram:[ ['A','returns void','contract','l1'], 'RESULT{""}', ['Rollups','terminal','system','l1'] ]
+      diagram:[ ['A','returns void','contract','l1'], 'CALL_END', ['Rollups','hash verified','system','l1'] ]
     },
-    { chain:'l2', title:'↙ Back to L2: scope nav returns → Alice\'s call completes',
-      detail:'Scope navigation unwinds. RESULT propagates back through A\' → executeCrossChainCall → A\'.fallback returns to Alice.',
+    { chain:'l2', title:'Back to L2: returnData propagated -> Alice\'s call completes',
+      detail:'_consumeAndExecute returns entry.returnData (void). Control returns through A\' -> executeCrossChainCall -> A\'.fallback returns to Alice.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['ManagerL2','Aprime','Alice'], activeEdges:['ManagerL2-return-Aprime','Aprime→Alice'],
-      diagram:[ ['ManagerL2','RESULT','system','l2'], 'returns', ["A'",'','proxy','l2'], 'returns', ['Alice','done','user',''] ]
+      diagram:[ ['ManagerL2','returnData','system','l2'], 'returns', ["A'",'','proxy','l2'], 'returns', ['Alice','done','user',''] ]
     }
   ]
 },
 
 s4: {
-  title:'Scenario 4: L1 → L2 → L1', flow:'Alice → D\' (→ D → C\') → C',
-  dir:'Starts L1, crosses L2 (D runs), crosses L1 (C runs), back to L2, back to L1',
+  title:'Scenario 4: L1 -> L2 -> L1', flow:'Alice -> D\' (-> D -> C\') -> C',
+  dir:'Starts L1, crosses L2 (D runs), D triggers nested call to C via _consumeNestedAction, back to L1',
   contracts:{ l1:['C.counter'], l2:['D.counter','D.targetCounter'], extra:['L2 State'] },
   steps:[
     { chain:'l1', title:'Setup L1: rollups.postBatch(2 entries)',
-      detail:'E1: CALL#1(D,incProxy)→CALL#2(C,scope=[0]), L2 delta S0→S1. E2: RESULT(1)→RESULT(1), L2 delta S1→S2.',
-      l1Add:['s4e1','s4e2'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+      detail:'E1: actionHash = hash(L2,D,incProxy,src=alice), calls[] = [{D, incProxy, src=alice}], callCount=1, nestedActions = [{hash(MAIN,C,inc,src=D), callCount=1, ret=abi.encode(1)}], returnData="", L2 delta S0->S1. E2: actionHash = hash(MAIN,C,inc,src=D), calls[] = [{C, inc, src=D}], callCount=1. L2 delta S1->S2.',
+      l1Add:['s4e1','s4e3'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Prover'], activeEdges:['Prover→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 2', ['L1 Table','','system','l1'] ]
     },
-    { chain:'l2', title:'Setup L2: loadExecutionTable(2 entries)',
-      detail:'E1: CALL(C)→RESULT(1). E2: RESULT(void)→RESULT(void) terminal.',
-      l1Add:[], l1Rm:[], l2Add:['s4e3','s4e4'], l2Rm:[], state:{},
+    { chain:'l2', title:'Setup L2: loadExecutionTable(1 entry)',
+      detail:'1 entry: actionHash = hash(L2,D,incProxy,src=alice), calls[] = [{D, incProxy, src=alice}], callCount=1, nestedActions = [{hash(MAIN,C,inc,src=D), callCount=1, ret=abi.encode(1)}], returnData="".',
+      l1Add:[], l1Rm:[], l2Add:['s4e2'], l2Rm:[], state:{},
       activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
-      diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 2', ['L2 Table','','system','l2'] ]
+      diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 1', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice calls D\' (proxy for D on L2)',
-      detail:'D\'.fallback() → executeCrossChainCall(src=Alice) → builds CALL#1{L2,D,incProxy,src=Alice} → matches L1 entry → consumed [S0→S1]. Returns CALL#2{MAIN,C,scope=[0]}.',
+      detail:'D\'.fallback() -> Rollups.executeCrossChainCall(src=Alice). Computes actionHash = hash(L2,D,incProxy,src=alice) -> matches L1 entry 1. _consumeAndExecute: applies L2 delta S0->S1, _processNCalls(1) starts. Entry 1 consumed.',
       l1Add:[], l1Rm:['s4e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Alice','Dprime','Rollups'], activeEdges:['Alice→Dprime','Dprime-execCC'],
       diagram:[ ['Alice','','user',''], 'inc()', ["D'",'Proxy for D','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
-    { chain:'l2', title:'↗ Cross to L2: executeIncomingCrossChainCall → D.incrementProxy() runs',
-      detail:'SYSTEM calls executeIncomingCrossChainCall(D, incProxy, src=Alice) → newScope → AliceProxy.executeOnBehalf(D, incProxy) → D.incrementProxy() starts.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
+    { chain:'l2', title:'Cross to L2: _processNCalls(1) -> D.incrementProxy() runs',
+      detail:'_processNCalls(1) on L2: Alice\'.executeOnBehalf(D, incProxy) -> D.incrementProxy() starts. _consumeAndExecute consumed entry. Rolling hash records CALL_BEGIN(1).',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e2'], state:{},
       activeNodes:['ManagerL2','AliceProxy','D'], activeEdges:['ManagerL2→AliceProxy','AliceProxy→D'],
-      diagram:[ ['SYSTEM','','user',''], 'execIncoming', ['ManagerL2','','system','l2'], 'execOnBehalf', ['Alice Proxy','','proxy','l2'], 'inc()', ['D','CounterAndProxy','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ['Alice Proxy','','proxy','l2'], 'inc()', ['D','CounterAndProxy','contract','l2'] ]
     },
-    { chain:'l2', title:'L2: D calls C\' → REENTRANT cross-chain call',
-      detail:'Inside D.incrementProxy(): D calls C\'(proxy for C) → REENTRANT executeCrossChainCall → CALL{MAIN,C,src=D} consumed → RESULT{1} returned to D. D: targetCounter=1, counter=1.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e3'], state:{'D.counter':1,'D.targetCounter':1},
+    { chain:'l2', title:'L2: D calls C\' -> _consumeNestedAction (reentrant)',
+      detail:'Inside D.incrementProxy(): D calls C\'(proxy for C) -> REENTRANT executeCrossChainCall. Computes actionHash = hash(MAIN,C,inc,src=D) -> matches nestedActions[0]. _consumeNestedAction returns returnData = abi.encode(1). Rolling hash: NESTED_BEGIN(1) + NESTED_END(1). D: targetCounter=1, counter=1.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'D.counter':1,'D.targetCounter':1},
       activeNodes:['D','Cprime','ManagerL2'], activeEdges:['D→Cprime','Cprime→ManagerL2','ManagerL2→Cprime','Cprime→D'],
-      diagram:[ ['D','calls C\'','contract','l2'], 'inc()', ["C'",'Proxy for C','proxy','l2'], 'REENTRANT', ['ManagerL2','consumes CALL(C)','system','l2'] ],
-      diagram2:[ ['ManagerL2','RESULT{1}','system','l2'], '→', ['D','tgt=1, ctr=1','contract','l2'] ],
+      diagram:[ ['D','calls C\'','contract','l2'], 'inc()', ["C'",'Proxy for C','proxy','l2'], 'REENTRANT', ['ManagerL2','_consumeNestedAction','system','l2'] ],
+      diagram2:[ ['ManagerL2','ret=abi.encode(1)','system','l2'], '->', ['D','tgt=1, ctr=1','contract','l2'] ],
       d2label:'Returns:'
     },
-    { chain:'l1', title:'↗ Cross to L1: C.increment() via scope navigation',
-      detail:'_resolveScopes(CALL#2) → newScope([0]) → D\'.executeOnBehalf(C, inc) [D\' REENTRANT: fallback then execOnBehalf]. C.counter 0→1 → RESULT consumed [S1→S2] from L1 table.',
-      l1Add:[], l1Rm:['s4e2'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S2'},
+    { chain:'l1', title:'Cross to L1: _processNCalls executes C.increment()',
+      detail:'On L1, _consumeNestedAction consumed L1 entry 2 for the nested call: _processNCalls(1) -> D\'.executeOnBehalf(C, inc). C.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. L2 delta S1->S2 applied. _lastNestedActionConsumed incremented.',
+      l1Add:[], l1Rm:['s4e3'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S2'},
       activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime-RESULT'],
-      diagram:[ ['Rollups','scope=[0]','system','l1'], 'execOnBehalf', ["D'",'REENTRANT','proxy','l1'], 'inc()', ['C','counter: 0→1','contract','l1'] ]
+      diagram:[ ['Rollups','_processNCalls(1)','system','l1'], 'execOnBehalf', ["D'",'REENTRANT','proxy','l1'], 'inc()', ['C','counter: 0->1','contract','l1'] ]
     },
-    { chain:'l2', title:'↙ Back to L2: D returns → RESULT(void) consumed',
-      detail:'D.incrementProxy() returns (void). Builds RESULT{L2,data=""} → matches L2 entry 2 → consumed → terminal.',
-      l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e4'], state:{},
+    { chain:'l2', title:'Back to L2: D returns -> CALL_END(1) completes rolling hash',
+      detail:'D.incrementProxy() returns (void). _processNCalls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash.',
+      l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['D','Cprime','ManagerL2'], activeEdges:['D-return-Cprime','Cprime-return-ManagerL2'],
-      diagram:[ ['D','returns void','contract','l2'], 'RESULT{""}', ['ManagerL2','terminal','system','l2'] ]
+      diagram:[ ['D','returns void','contract','l2'], 'CALL_END', ['ManagerL2','hash verified','system','l2'] ]
     },
-    { chain:'l1', title:'↙ Back to L1: scope nav returns → Alice\'s call completes',
-      detail:'Scope navigation unwinds. RESULT propagates back through D\' → executeCrossChainCall → D\'.fallback returns to Alice.',
+    { chain:'l1', title:'Back to L1: returnData propagated -> Alice\'s call completes',
+      detail:'_consumeAndExecute returns entry.returnData (void). Control returns through D\' -> executeCrossChainCall -> D\'.fallback returns to Alice.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Dprime','Alice'], activeEdges:['Rollups-return-Dprime','Dprime→Alice'],
-      diagram:[ ['Rollups','RESULT','system','l1'], 'returns', ["D'",'','proxy','l1'], 'returns', ['Alice','done','user',''] ]
+      diagram:[ ['Rollups','returnData','system','l1'], 'returns', ["D'",'','proxy','l1'], 'returns', ['Alice','done','user',''] ]
     }
   ]
 },
 
 s5: {
-  title:'Scenario 5: Cross-Chain Flash Loan', flow:'Alice → Executor → FlashLoan → Bridge ↔ L2 → NFT',
-  dir:'Flash loan on L1, bridge tokens to L2, claim token-gated NFT, bridge back, repay',
+  title:'Scenario 5: Cross-Chain Flash Loan', flow:'Alice -> Executor -> FlashLoan -> Bridge <-> L2 -> NFT',
+  dir:'Flash loan on L1, bridge tokens to L2, claim token-gated NFT, bridge back, repay. Uses nestedActions for bridge return.',
   contracts:{ l1:['FlashLoan.tokens','Bridge_L1.locked','Executor.tokens'], l2:['ExecL2.wrapped','NFT.claimed'], extra:['L2 State'] },
   steps:[
     { chain:'l1', title:'Setup L1: rollups.postBatch(3 entries)',
-      detail:'3 deferred entries: E1: CALL(bridge forward)→RESULT terminal [S0→S1]. E2: CALL(claimBack)→CALL(bridge return, scope=[0]) [S1→S2]. E3: RESULT(void)→RESULT terminal [S2→S3].',
+      detail:'3 deferred entries consumed sequentially: E1: bridge forward (1 call, no nested). E2: claimBack (1 call + 1 nestedAction for bridge return). E3: nested bridge return (1 call). State deltas: L2 S0->S1, S1->S2, S2->S3.',
       l1Add:['s5e1','s5e2','s5e3'], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['Rollups','Prover'], activeEdges:['Prover→Rollups'],
       diagram:[ ['Batch+Proof','','user',''], 'postBatch()', ['Rollups','','system','l1'], 'stores 3', ['L1 Table','','system','l1'] ]
     },
     { chain:'l2', title:'Setup L2: loadExecutionTable(3 entries)',
-      detail:'E1: RESULT(void)→CALL(claimBack) continuation. E2: CALL(bridge return)→RESULT(void). E3: RESULT(void)→RESULT(void) terminal.',
+      detail:'3 entries consumed sequentially: E1: bridge forward (1 call). E2: claimBack (1 call + 1 nestedAction for bridge return). E3: nested bridge return (1 call).',
       l1Add:[], l1Rm:[], l2Add:['s5e4','s5e5','s5e6'], l2Rm:[], state:{},
       activeNodes:['ManagerL2','System'], activeEdges:['System→ManagerL2'],
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 3', ['L2 Table','','system','l2'] ]
     },
-    { chain:'l1', title:'L1: Alice → executor.execute() → FlashLoan → bridgeTokens',
-      detail:'Alice triggers the flow. executor.execute() → FlashLoan.flashLoan(token, 10k) → onFlashLoan: bridgeL1.bridgeTokens → proxy → executeCrossChainCall → CALL(forward) consumed [S0→S1] → RESULT terminal. Tokens locked in Bridge_L1.',
+    { chain:'l1', title:'L1: Alice -> executor.execute() -> FlashLoan -> bridgeTokens',
+      detail:'Alice triggers the flow. executor.execute() -> FlashLoan.flashLoan(token, 10k) -> onFlashLoan: bridgeL1.bridgeTokens -> proxy -> executeCrossChainCall -> actionHash matches entry 1. _consumeAndExecute: _processNCalls(1) executes bridge forward call. Rolling hash verified. L2 S0->S1 applied. Tokens locked in Bridge_L1.',
       l1Add:[], l1Rm:['s5e1'], l2Add:[], l2Rm:[], state:{'FlashLoan.tokens':'0 (loaned)','Bridge_L1.locked':'10k','L2 State':'S1'},
       activeNodes:['Alice','Executor','FlashLoan','BridgeL1','Rollups'], activeEdges:['Alice→Executor','Executor→FlashLoan','FlashLoan→Executor','Executor→BridgeL1','BridgeL1→Rollups'],
-      diagram:[ ['Alice','','user',''], 'execute()', ['Executor','','contract','l1'], 'flashLoan', ['FlashLoan','→ onFlashLoan','contract','l1'], 'bridgeTokens', ['Bridge_L1','locks 10k','contract','l1'], 'execCC', ['Rollups','consumed','system','l1'] ]
+      diagram:[ ['Alice','','user',''], 'execute()', ['Executor','','contract','l1'], 'flashLoan', ['FlashLoan','-> onFlashLoan','contract','l1'], 'bridgeTokens', ['Bridge_L1','locks 10k','contract','l1'], 'execCC', ['Rollups','consumed','system','l1'] ]
     },
-    { chain:'l2', title:'↗ Cross to L2: Bridge_L2.receiveTokens (mints wrapped)',
-      detail:'executeIncomingCrossChainCall(Bridge_L2, receiveTokens, src=BridgeL1) → BridgeL1\'.executeOnBehalf(Bridge_L2, receiveTokens) → deploys WrappedToken, mints 10k to ExecutorL2. RESULT consumed → returns CALL B (continuation).',
+    { chain:'l2', title:'Cross to L2: Bridge_L2.receiveTokens (mints wrapped)',
+      detail:'executeCrossChainCall -> _consumeAndExecute entry 1: _processNCalls(1) -> BridgeL1\'.executeOnBehalf(Bridge_L2, receiveTokens) -> deploys WrappedToken, mints 10k to ExecutorL2. Rolling hash verified. Entry consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s5e4'], state:{'ExecL2.wrapped':'10k'},
       activeNodes:['ManagerL2','BridgeL1Proxy','BridgeL2','ExecutorL2'], activeEdges:['MgrL2-BridgeL1Proxy','BridgeL1Proxy-BridgeL2'],
-      diagram:[ ['SYSTEM','','user',''], 'execIncoming', ['ManagerL2','','system','l2'], 'execOnBehalf', ["BridgeL1'",'Proxy','proxy','l2'], 'recvTokens', ['Bridge_L2','mints 10k','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["BridgeL1'",'Proxy','proxy','l2'], 'recvTokens', ['Bridge_L2','mints 10k','contract','l2'] ]
     },
-    { chain:'l1', title:'↙ Back to L1: executor → ExecL2\' (claimBack)',
-      detail:'executor calls ExecL2\'(proxy for ExecutorL2) → execCC → builds CALL{L2, ExecL2, claimBack, src=Executor} → matches L1 entry → consumed [S1→S2]. Returns CALL(bridge return, scope=[0]).',
+    { chain:'l1', title:'Back to L1: executor -> ExecL2\' (claimBack)',
+      detail:'executor calls ExecL2\'(proxy for ExecutorL2) -> executeCrossChainCall -> actionHash matches entry 2. _consumeAndExecute: _processNCalls(1) starts. L2 S1->S2 applied. Entry 2 consumed.',
       l1Add:[], l1Rm:['s5e2'], l2Add:[], l2Rm:[], state:{'L2 State':'S2'},
       activeNodes:['Executor','ExecL2Proxy','Rollups'], activeEdges:['Exec-ExecL2Proxy','ExecL2Proxy-Rollups'],
       diagram:[ ['Executor','','contract','l1'], 'claimBack', ["ExecL2'",'Proxy','proxy','l1'], 'execCC', ['Rollups','consumed','system','l1'] ]
     },
-    { chain:'l2', title:'↗ Cross to L2: ExecutorL2.claimAndBridgeBack',
-      detail:'Continuation CALL B: ExecutorL2.claimAndBridgeBack → claims NFT (balance check passes), burns wrapped via Bridge_L2.bridgeTokens → REENTRANT execCC → CALL(bridge return) consumed. RESULT consumed → terminal. All L2 entries consumed.',
+    { chain:'l2', title:'Cross to L2: ExecutorL2.claimAndBridgeBack',
+      detail:'_consumeAndExecute entry 2: _processNCalls(1) -> ExecL2.claimAndBridgeBack -> claims NFT, burns wrapped via Bridge_L2.bridgeTokens -> REENTRANT executeCrossChainCall -> _consumeNestedAction: matches nestedActions[0] for bridge return. Rolling hash: NESTED_BEGIN + NESTED_END. _consumeNestedAction consumed L2 entry 3.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s5e5','s5e6'], state:{'ExecL2.wrapped':'0','NFT.claimed':'yes'},
       activeNodes:['ManagerL2','ExecutorL2','NFT','BridgeL2'], activeEdges:['MgrL2-ExecL2','ExecL2-NFT','ExecL2-BridgeL2','BridgeL2-MgrL2'],
-      diagram:[ ['ManagerL2','continuation','system','l2'], 'execOnBehalf', ['ExecutorL2','','contract','l2'], 'claim()', ['NFT','claimed!','contract','l2'] ],
-      diagram2:[ ['ExecutorL2','burns wrapped','contract','l2'], 'bridgeTokens', ['Bridge_L2','','contract','l2'], 'REENTRANT', ['ManagerL2','execCC','system','l2'] ],
+      diagram:[ ['ManagerL2','_processNCalls','system','l2'], 'execOnBehalf', ['ExecutorL2','','contract','l2'], 'claim()', ['NFT','claimed!','contract','l2'] ],
+      diagram2:[ ['ExecutorL2','burns wrapped','contract','l2'], 'bridgeTokens', ['Bridge_L2','','contract','l2'], 'REENTRANT', ['ManagerL2','_consumeNestedAction','system','l2'] ],
       d2label:'Reentrant bridge back:'
     },
-    { chain:'l1', title:'↙ Back to L1: scope nav → Bridge_L1.receiveTokens',
-      detail:'newScope([0]) → proxy.executeOnBehalf → Bridge_L1.receiveTokens → releases 10k to executor. RESULT consumed [S2→S3] → terminal. All entries consumed.',
+    { chain:'l1', title:'Back to L1: _consumeNestedAction -> Bridge_L1.receiveTokens',
+      detail:'_consumeNestedAction consumed L1 entry 3: _processNCalls(1) -> proxy.executeOnBehalf -> Bridge_L1.receiveTokens -> releases 10k to executor. Rolling hash verified. L2 S2->S3 applied. All entries consumed.',
       l1Add:[], l1Rm:['s5e3'], l2Add:[], l2Rm:[], state:{'Bridge_L1.locked':'0','Executor.tokens':'10k','L2 State':'S3'},
       activeNodes:['Rollups','BridgeL1','Executor'], activeEdges:['Rollups-BridgeL1-recv'],
-      diagram:[ ['Rollups','scope=[0]','system','l1'], 'recvTokens', ['Bridge_L1','releases 10k','contract','l1'], '→', ['Executor','has 10k','contract','l1'] ]
+      diagram:[ ['Rollups','_processNCalls','system','l1'], 'recvTokens', ['Bridge_L1','releases 10k','contract','l1'], '->', ['Executor','has 10k','contract','l1'] ]
     },
     { chain:'l1', title:'L1: Flash loan repaid',
       detail:'executor transfers 10k tokens back to FlashLoan inside onFlashLoan callback. Flash loan balance restored. All L1 and L2 entries consumed. L2 state = S3.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{'FlashLoan.tokens':'10k (repaid)','Executor.tokens':'0'},
       activeNodes:['Rollups','ExecL2Proxy','Executor','FlashLoan'], activeEdges:['Rollups-ExecL2Proxy-return','ExecL2Proxy-Executor-return','Executor-FlashLoan-repay'],
-      diagram:[ ['Rollups','RESULT','system','l1'], 'returns to', ['Executor','repays','contract','l1'], 'transfer 10k', ['FlashLoan','10k restored','contract','l1'], 'returns to', ['Alice','done','user',''] ]
+      diagram:[ ['Rollups','returnData','system','l1'], 'returns to', ['Executor','repays','contract','l1'], 'transfer 10k', ['FlashLoan','10k restored','contract','l1'], 'returns to', ['Alice','done','user',''] ]
     }
   ]
 }
@@ -1105,9 +1026,9 @@ function render() {
   sc.steps.forEach((s,i)=>{
     let c='future'; if(i<cs)c='played'; else if(i===cs)c='active';
     let tc='';
-    if(s.l1Add.length) tc+=s.l1Add.map(id=>`<span class="tc-a">+L1 ${E[id].hash.split('{')[0]}…</span> `).join('');
+    if(s.l1Add.length) tc+=s.l1Add.map(id=>`<span class="tc-a">+L1 entry</span> `).join('');
     if(s.l1Rm.length) tc+=`<span class="tc-r">-L1 ${s.l1Rm.length} consumed</span> `;
-    if(s.l2Add.length) tc+=s.l2Add.map(id=>`<span class="tc-a">+L2 ${E[id].hash.split('{')[0]}…</span> `).join('');
+    if(s.l2Add.length) tc+=s.l2Add.map(id=>`<span class="tc-a">+L2 entry</span> `).join('');
     if(s.l2Rm.length) tc+=`<span class="tc-r">-L2 ${s.l2Rm.length} consumed</span>`;
     h += `<div class="si ${c}" onclick="jump(${i})">
       <div class="si-num">${i+1}</div>
@@ -1285,16 +1206,40 @@ function renderTbl(title, chain, entries) {
       h += `<div class="te ${e.status}">`;
       h += `<div class="te-summary" onclick="tog('${e.id}')">`;
       h += `<div class="te-idx">${i+1}</div>`;
-      h += `<div class="te-compact"><span class="te-h">${e.hash}</span><span class="te-arr"> → </span><span class="te-n">${e.next}</span>`;
+      h += `<div class="te-compact"><span class="te-h">${e.summary}</span>`;
       if(e.delta) h += `<span class="te-d">${e.delta}</span>`;
       h += `</div><div class="te-toggle">${isExp?'▲':'▼'}</div></div>`;
       if (isExp) {
         h += '<div class="te-details">';
-        h += renderAction('Action (hashed as actionHash)', e.action);
-        h += renderAction('Next Action (returned on match)', e.nextAct);
+        h += renderEntryFields('ExecutionEntry', e.entry);
+        if (e.calls && e.calls.length) {
+          h += '<div class="te-section"><div class="te-sec-hdr">calls[] (CrossChainCall)</div>';
+          e.calls.forEach((c, ci) => {
+            h += `<div style="margin-left:0.3rem;margin-bottom:0.2rem"><div style="font-size:0.48rem;color:var(--warn);margin-bottom:0.08rem">calls[${ci}]</div><div class="te-kv">`;
+            h += kv('destination', c.destination);
+            h += kv('value', c.value);
+            h += kv('data', c.data, true);
+            h += kv('sourceAddress', c.sourceAddress);
+            h += kv('sourceRollup', c.sourceRollup);
+            h += kv('revertSpan', c.revertSpan);
+            h += '</div></div>';
+          });
+          h += '</div>';
+        }
+        if (e.nestedActions && e.nestedActions.length) {
+          h += '<div class="te-section"><div class="te-sec-hdr">nestedActions[] (NestedAction)</div>';
+          e.nestedActions.forEach((na, ni) => {
+            h += `<div style="margin-left:0.3rem;margin-bottom:0.2rem"><div style="font-size:0.48rem;color:var(--warn);margin-bottom:0.08rem">nestedActions[${ni}]</div><div class="te-kv">`;
+            h += kv('actionHash', na.actionHash, true);
+            h += kv('callCount', na.callCount);
+            h += kv('returnData', na.returnData);
+            h += '</div></div>';
+          });
+          h += '</div>';
+        }
         if (e.sd) {
-          h += '<div class="te-section"><div class="te-sec-hdr">State Delta</div><div class="te-kv">';
-          h += kv('rollupId', e.sd.rollupId) + kv('currentState', e.sd.currentState) + kv('newState', e.sd.newState, true) + kv('etherDelta', e.sd.etherDelta);
+          h += '<div class="te-section"><div class="te-sec-hdr">StateDelta</div><div class="te-kv">';
+          h += kv('rollupId', e.sd.rollupId) + kv('newState', e.sd.newState, true) + kv('etherDelta', e.sd.etherDelta);
           h += '</div></div>';
         }
         h += '</div>';
@@ -1306,17 +1251,13 @@ function renderTbl(title, chain, entries) {
   return h;
 }
 
-function renderAction(title, a) {
+function renderEntryFields(title, entry) {
   let h = `<div class="te-section"><div class="te-sec-hdr">${title}</div><div class="te-kv">`;
-  h += kv('actionType', a.actionType, true);
-  h += kv('rollupId', a.rollupId);
-  h += kv('destination', a.destination);
-  h += kv('value', a.value);
-  h += kv('data', a.data, a.data && a.data !== '0' && a.data !== 'address(0)');
-  h += kv('failed', a.failed);
-  h += kv('sourceAddress', a.sourceAddress);
-  h += kv('sourceRollup', a.sourceRollup);
-  h += kv('scope', a.scope);
+  h += kv('actionHash', entry.actionHash, true);
+  h += kv('callCount', entry.callCount);
+  h += kv('returnData', entry.returnData, entry.returnData && entry.returnData !== '""');
+  h += kv('failed', entry.failed);
+  h += kv('rollingHash', entry.rollingHash);
   h += '</div></div>';
   return h;
 }
