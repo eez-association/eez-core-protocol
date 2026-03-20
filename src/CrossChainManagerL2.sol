@@ -100,6 +100,19 @@ contract CrossChainManagerL2 is ICrossChainManager {
     /// @notice Emitted when a cross-chain call is executed via proxy
     event CrossChainCallExecuted(bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value);
 
+    /// @notice Emitted after each call completes in _processNCalls
+    /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert)
+    event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
+
+    /// @notice Emitted when a nested action is consumed during reentrant execution
+    event NestedActionConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 actionHash, uint256 callCount);
+
+    /// @notice Emitted after an entry's execution completes and all verifications pass
+    event EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActionsConsumed);
+
+    /// @notice Emitted after a revert span is processed via executeInContext
+    event RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span);
+
     /// @param _rollupId The rollup ID this L2 instance belongs to
     /// @param _systemAddress The privileged address allowed to load execution tables
     constructor(uint256 _rollupId, address _systemAddress) {
@@ -217,6 +230,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         if (nested.actionHash != actionHash) revert ExecutionNotFound();
 
         uint256 nestedNumber = idx + 1; // 1-indexed
+        emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
         _processNCalls(nested.callCount);
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
@@ -247,6 +261,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         if (_currentCallNumber != entry.calls.length) revert UnconsumedCalls();
         if (_lastNestedActionConsumed != entry.nestedActions.length) revert UnconsumedNestedActions();
 
+        emit EntryExecuted(idx, _rollingHash, _currentCallNumber, _lastNestedActionConsumed);
         _currentCallNumber = 0; // reset so _insideExecution() returns false
 
         bytes memory returnData = entry.returnData;
@@ -290,6 +305,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
                 );
 
                 _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, _currentCallNumber, success, retData));
+                emit CallResult(_currentEntryIndex, _currentCallNumber, success, retData);
                 processed++;
             } else {
                 uint256 savedCallNumber = _currentCallNumber;
@@ -300,6 +316,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
                 }
 
                 entry.calls[savedCallNumber].revertSpan = revertSpan;
+                emit RevertSpanExecuted(_currentEntryIndex, savedCallNumber, revertSpan);
                 processed += revertSpan;
             }
         }

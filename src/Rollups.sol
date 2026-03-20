@@ -98,6 +98,19 @@ contract Rollups is ICrossChainManager {
     /// @notice Emitted when a batch is posted via postBatch
     event BatchPosted(ExecutionEntry[] entries, bytes32 publicInputsHash);
 
+    /// @notice Emitted after each call completes in _processNCalls
+    /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert)
+    event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
+
+    /// @notice Emitted when a nested action is consumed during reentrant execution
+    event NestedActionConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 actionHash, uint256 callCount);
+
+    /// @notice Emitted after an entry's execution completes and all verifications pass
+    event EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActionsConsumed);
+
+    /// @notice Emitted after a revert span is processed via executeInContext
+    event RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span);
+
     /// @notice Error when proof verification fails
     error InvalidProof();
 
@@ -355,6 +368,7 @@ contract Rollups is ICrossChainManager {
         if (nested.actionHash != actionHash) revert ExecutionNotFound();
 
         uint256 nestedNumber = idx + 1; // 1-indexed
+        emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
         _processNCalls(nested.callCount);
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
@@ -409,6 +423,7 @@ contract Rollups is ICrossChainManager {
         if (_lastNestedActionConsumed != entry.nestedActions.length) revert UnconsumedNestedActions();
         if (totalEtherDelta != etherIn - etherOut) revert EtherDeltaMismatch();
 
+        emit EntryExecuted(_currentEntryIndex, _rollingHash, _currentCallNumber, _lastNestedActionConsumed);
         _currentCallNumber = 0; // reset so _insideExecution() returns false
     }
 
@@ -441,6 +456,7 @@ contract Rollups is ICrossChainManager {
                 }
 
                 _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, _currentCallNumber, success, retData));
+                emit CallResult(_currentEntryIndex, _currentCallNumber, success, retData);
                 processed++;
             } else {
                 uint256 savedCallNumber = _currentCallNumber;
@@ -451,6 +467,7 @@ contract Rollups is ICrossChainManager {
                 }
 
                 entry.calls[savedCallNumber].revertSpan = revertSpan;
+                emit RevertSpanExecuted(_currentEntryIndex, savedCallNumber, revertSpan);
                 processed += revertSpan;
             }
         }

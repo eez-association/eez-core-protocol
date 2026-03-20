@@ -1,51 +1,69 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Test.sol";
 import {Rollups, RollupConfig} from "../src/Rollups.sol";
 import {CrossChainManagerL2} from "../src/CrossChainManagerL2.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
-import {Action, ActionType, ExecutionEntry, StateDelta, ProxyInfo} from "../src/ICrossChainManager.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    CrossChainCall,
+    NestedAction,
+    StaticCall,
+    ProxyInfo
+} from "../src/ICrossChainManager.sol";
+import {IZKVerifier} from "../src/IZKVerifier.sol";
 import {Bridge} from "../src/periphery/Bridge.sol";
 import {WrappedToken} from "../src/periphery/WrappedToken.sol";
 import {FlashLoan} from "../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";
 import {FlashLoanersNFT} from "../src/periphery/defiMock/FlashLoanersNFT.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MockZKVerifier, IntegrationTestBase} from "./helpers/TestBase.sol";
 
-contract TestToken is ERC20 {
+contract MockZKVerifierFL is IZKVerifier {
+    function verify(bytes calldata, bytes32) external pure override returns (bool) {
+        return true;
+    }
+}
+
+contract FlashLoanTestToken is ERC20 {
     constructor() ERC20("Test Token", "TT") {
-        _mint(msg.sender, 1_000_000e18);
+        _mint(msg.sender, 100_000e18);
     }
 }
 
 /// @title IntegrationTestFlashLoan
-/// @notice End-to-end test: cross-chain flash loan on L1, bridge to L2, claim token-gated NFT, bridge back, repay
+/// @notice End-to-end test of a cross-chain flash loan scenario
 ///
-/// ┌──────────────────────────────────────────────────────────────────────────┐
-/// │  Legend                                                                  │
-/// │    flashLoanL1  = FlashLoan pool on L1 (holds 10k tokens)               │
-/// │    executorL2   = FlashLoanBridgeExecutor on L2 (receives wrapped,      │
-/// │                   claims NFT, bridges back)                             │
-/// │    executor     = FlashLoanBridgeExecutor on L1 (orchestrates the flow) │
-/// │    bridgeL1     = Bridge on L1 (locks/releases native tokens)           │
-/// │    bridgeL2     = Bridge on L2 (mints/burns wrapped tokens)             │
-/// │    flashLoanersNFT = FlashLoanersNFT on L2 (token-gated NFT claim)     │
-/// └──────────────────────────────────────────────────────────────────────────┘
+/// The flow:
+///   1. Phase 1 (setup): Bridge 10,000 tokens from L1 to L2, delivering wrapped tokens
+///      to executorL2. Deploy FlashLoanersNFT (gated by wrapped token balance) and executors.
+///   2. Phase 2 (flash loan):
+///      - executorL1.execute() triggers flash loan on L1
+///      - Inside onFlashLoan:
+///        a. bridgeL1.bridgeTokens locks tokens on L1 (consumes L1 entry #0)
+///        b. executorL2Proxy.call(claimAndBridgeBack) (consumes L1 entry #1):
+///           - L1 entry #1 calls[] run claimAndBridgeBack on executorL2 via proxy:
+///             * NFT claimed (executorL2 holds >= 10,000 wrapped tokens)
+///             * bridgeL2.bridgeTokens burns wrapped, calls L2 proxy (consumes L2 entry #0)
+///           - L1 entry #1 calls[] then run receiveTokens on bridgeL1 via proxy:
+///             * Releases 10,000 tokens to executorL1
+///        c. executorL1 repays flash loan pool
 ///
-/// ┌────────────────────────────────────────────────────────────────────────────────────┐
-/// │  Flow                                                                              │
-/// │                                                                                    │
-/// │  Alice → executor.execute()                                                        │
-/// │    → FlashLoan_L1.flashLoan(token, 10k)                                            │
-/// │      → onFlashLoan:                                                                │
-/// │        1. bridge.bridgeTokens → CALL#1: Bridge_L1 → Bridge_L2.receiveTokens        │
-/// │        2. executorL2Proxy.call(claimAndBridgeBack) → CALL#2                        │
-/// │           On L2: claim NFT, bridge tokens back → CALL#3 (scope=[0])                │
-/// │        3. repay flash loan                                                         │
-/// └────────────────────────────────────────────────────────────────────────────────────┘
-contract IntegrationTestFlashLoan is IntegrationTestBase {
+/// ┌────┬─────────────────────────────────────────┬──────────┬─────────────────────┐
+/// │  # │ Step                                    │ Chain    │ Entry consumed       │
+/// ├────┼─────────────────────────────────────────┼──────────┼─────────────────────┤
+/// │  1 │ bridgeTokens (lock on L1)               │ L1       │ L1 entry #0 (defer) │
+/// │  2 │ claimAndBridgeBack (NFT + burn wrapped) │ L1+L2    │ L1 entry #1 (defer) │
+/// │  3 │ bridgeL2.bridgeTokens (burn wrapped)    │ L2       │ L2 entry #0 (defer) │
+/// │  4 │ receiveTokens (release on L1)           │ L1       │ (L1 entry #1 call)  │
+/// └────┴─────────────────────────────────────────┴──────────┴─────────────────────┘
+contract IntegrationTestFlashLoan is Test {
+    // ── L1 contracts ──
+    Rollups public rollups;
+    MockZKVerifierFL public verifier;
+
     // ── L2 contracts ──
     CrossChainManagerL2 public managerL2;
 
@@ -53,338 +71,423 @@ contract IntegrationTestFlashLoan is IntegrationTestBase {
     Bridge public bridgeL1;
     Bridge public bridgeL2;
 
-    // ── Application contracts ──
-    TestToken public token;
-    FlashLoan public flashLoanL1;
+    // ── Flash loan ──
+    FlashLoan public flashLoanPool;
+
+    // ── Token ──
+    FlashLoanTestToken public token;
+
+    // ── DeFi contracts (L2) ──
+    FlashLoanersNFT public nftL2;
+
+    // ── Executors ──
+    FlashLoanBridgeExecutor public executorL1;
     FlashLoanBridgeExecutor public executorL2;
-    FlashLoanBridgeExecutor public executor;
-    FlashLoanersNFT public flashLoanersNFT;
 
-    // ── Pre-computed addresses ──
+    // ── Proxy addresses ──
+    address public executorL2ProxyL1; // L1 Rollups proxy for (executorL2, L2)
+    address public proxyBridgeL1OnL2; // L2 managerL2 proxy for (bridgeL1, MAINNET)
+
+    // ── Wrapped token on L2 ──
     address public wrappedTokenL2;
-    address public executorL2Proxy;
 
-    address public alice = makeAddr("alice");
+    // ── Constants ──
+    uint256 constant L2_ROLLUP_ID = 1;
+    uint256 constant MAINNET_ROLLUP_ID = 0;
+    address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
+    bytes32 constant DEFAULT_VK = keccak256("verificationKey");
+
+    // Rolling hash tag constants (must match contracts)
+    uint8 constant CALL_BEGIN = 1;
+    uint8 constant CALL_END = 2;
+    uint8 constant NESTED_BEGIN = 3;
+    uint8 constant NESTED_END = 4;
 
     function setUp() public {
         // ── L1 infrastructure ──
-        verifier = new MockZKVerifier();
+        verifier = new MockZKVerifierFL();
         rollups = new Rollups(address(verifier), 1);
         rollups.createRollup(keccak256("l2-initial-state"), DEFAULT_VK, address(this));
 
         // ── L2 infrastructure ──
         managerL2 = new CrossChainManagerL2(L2_ROLLUP_ID, SYSTEM_ADDRESS);
 
-        // ── Token ──
-        token = new TestToken();
-
         // ── Bridge deployment ──
         bridgeL1 = new Bridge();
         bridgeL2 = new Bridge();
         bridgeL1.initialize(address(rollups), MAINNET_ROLLUP_ID, address(this));
         bridgeL2.initialize(address(managerL2), L2_ROLLUP_ID, address(this));
-        // Cross-reference canonical addresses (critical for onlyBridgeProxy checks)
-        bridgeL1.setCanonicalBridgeAddress(address(bridgeL2));
+        // Cross-reference canonical addresses for bidirectional bridging
         bridgeL2.setCanonicalBridgeAddress(address(bridgeL1));
+        bridgeL1.setCanonicalBridgeAddress(address(bridgeL2));
 
-        // ── FlashLoan pool on L1 ──
-        flashLoanL1 = new FlashLoan();
-        token.transfer(address(flashLoanL1), 10_000e18);
+        // ── Token setup ──
+        token = new FlashLoanTestToken(); // 100,000e18 minted to address(this)
 
-        // ── Executor on L2 (receives wrapped tokens, claims NFT, bridges back) ──
-        // Constructor args unused by claimAndBridgeBack — all params passed as function args
+        // ── Flash loan pool ──
+        flashLoanPool = new FlashLoan();
+        token.transfer(address(flashLoanPool), 10_000e18);
+
+        // ── Deploy executorL2 with placeholder immutables ──
+        // Only claimAndBridgeBack (parameter-based) is called on executorL2; immutables unused.
         executorL2 = new FlashLoanBridgeExecutor(
             address(0), address(0), address(0), address(0),
             address(0), address(0), address(0), 0, address(0)
         );
 
-        // ── Pre-compute WrappedToken address on L2 (CREATE2 from Bridge_L2) ──
-        bytes32 wrappedSalt = keccak256(abi.encodePacked(address(token), MAINNET_ROLLUP_ID));
-        bytes32 wrappedBytecodeHash = keccak256(
-            abi.encodePacked(
-                type(WrappedToken).creationCode,
-                abi.encode("Test Token", "TT", uint8(18), address(bridgeL2))
-            )
-        );
-        wrappedTokenL2 = address(
-            uint160(
-                uint256(keccak256(abi.encodePacked(bytes1(0xff), address(bridgeL2), wrappedSalt, wrappedBytecodeHash)))
-            )
-        );
+        // ── Create proxies ──
+        proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
+        executorL2ProxyL1 = rollups.createCrossChainProxy(address(executorL2), L2_ROLLUP_ID);
+    }
 
-        // ── FlashLoanersNFT on L2 (needs wrapped token address) ──
-        flashLoanersNFT = new FlashLoanersNFT(wrappedTokenL2);
+    // ──────────────────────────────────────────────
+    //  Helpers
+    // ──────────────────────────────────────────────
 
-        // ── Proxy for executorL2 on L1 ──
-        executorL2Proxy = rollups.createCrossChainProxy(address(executorL2), L2_ROLLUP_ID);
+    function _getRollupState(uint256 rollupId) internal view returns (bytes32) {
+        (,, bytes32 stateRoot,) = rollups.rollups(rollupId);
+        return stateRoot;
+    }
 
-        // ── Executor on L1 (orchestrates flash loan + cross-chain flow) ──
-        executor = new FlashLoanBridgeExecutor(
-            address(flashLoanL1),
-            address(bridgeL1),
-            executorL2Proxy,
-            address(executorL2),
-            wrappedTokenL2,
-            address(flashLoanersNFT),
-            address(bridgeL2),
-            L2_ROLLUP_ID,
-            address(token)
-        );
+    /// @dev Computes action hash the same way contracts do
+    function _actionHash(
+        uint256 rollupId,
+        address destination,
+        uint256 value,
+        bytes memory data,
+        address sourceAddress,
+        uint256 sourceRollup
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(rollupId, destination, value, data, sourceAddress, sourceRollup));
+    }
+
+    /// @dev Helper to create an empty StaticCall array
+    function _noStaticCalls() internal pure returns (StaticCall[] memory) {
+        return new StaticCall[](0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  Test: Cross-chain flash loan with token-gated NFT claim
+    //  Test: Cross-chain flash loan
     //
-    //  Phase 1 — L2 execution (1 system call, chained via continuation):
-    //    Call A: Bridge_L2.receiveTokens() mints wrapped tokens to executorL2
-    //    Call B (continuation): executorL2.claimAndBridgeBack():
-    //            → FlashLoanersNFT.claim() (balance check passes)
-    //            → Bridge_L2.bridgeTokens (burns wrapped, calls bridge proxy)
-    //
-    //  Phase 2 — L1 execution:
-    //    Alice → executor.execute() → FlashLoan_L1.flashLoan() → onFlashLoan:
-    //      1. bridgeL1.bridgeTokens → CALL#1 matched → RESULT (terminal)
-    //      2. executorL2Proxy.call(claimAndBridgeBack) → CALL#2 matched → CALL#3 (scope=[0])
-    //         → _processCallAtScope → Bridge_L1.receiveTokens releases tokens
-    //         → RESULT#3 matched → RESULT (terminal)
-    //      3. repay flash loan ✓
+    //  Phase 1: Bridge 10,000 tokens from L1 to L2, funding executorL2
+    //  Phase 2: Execute flash loan on L1 with cross-chain NFT claim + bridge-back
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_CrossChainFlashLoan() public {
-        // ── Build calldata ──
+        // ════════════════════════════════════════════
+        //  Phase 1a: L1 — Bridge 10,000 tokens to executorL2 on L2
+        // ════════════════════════════════════════════
+        //
+        //  bridgeL1._bridgeAddress() = bridgeL2 (canonical override)
+        //  bridgeL1.bridgeTokens creates proxy(bridgeL2, L2) on L1
+        //  proxy fallback -> Rollups.executeCrossChainCall(bridgeL1, receiveTokensCalldata)
+        //  proxyInfo: (bridgeL2, L2)
+        //  actionHash = hash(L2, bridgeL2, 0, receiveTokensCalldata, bridgeL1, MAINNET)
 
-        // Forward receiveTokens: L1 → L2, mint wrapped tokens to executorL2
-        bytes memory fwdReceiveTokensCalldata = abi.encodeCall(
+        bytes memory phase1ReceiveCalldata = abi.encodeCall(
             Bridge.receiveTokens,
             (address(token), MAINNET_ROLLUP_ID, address(executorL2), 10_000e18, "Test Token", "TT", 18, MAINNET_ROLLUP_ID)
         );
 
-        // claimAndBridgeBack: called on executorL2 via proxy
-        bytes memory claimAndBridgeBackCalldata = abi.encodeCall(
-            FlashLoanBridgeExecutor.claimAndBridgeBack,
-            (wrappedTokenL2, address(flashLoanersNFT), address(bridgeL2), MAINNET_ROLLUP_ID, address(executor), alice)
+        bytes32 phase1L1ActionHash = _actionHash(
+            L2_ROLLUP_ID, address(bridgeL2), 0, phase1ReceiveCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
         );
 
-        // Return receiveTokens: L2 → L1, release native tokens to executor
-        bytes memory retReceiveTokensCalldata = abi.encodeCall(
-            Bridge.receiveTokens,
-            (address(token), MAINNET_ROLLUP_ID, address(executor), 10_000e18, "Test Token", "TT", 18, L2_ROLLUP_ID)
-        );
+        bytes32 s1 = keccak256("l2-state-after-phase1-bridge");
 
-        // ── Define shared action templates ──
-
-        // RESULT: void return with rollupId=L2 (used as terminal for L2-targeted calls)
-        Action memory result_L2_void = Action({
-            actionType: ActionType.RESULT,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
-
-        // RESULT: void return with rollupId=MAINNET (used as terminal for MAINNET-targeted calls)
-        Action memory result_MAINNET_void = Action({
-            actionType: ActionType.RESULT,
-            rollupId: MAINNET_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
-
-        // CALL for bridge return trip: Bridge_L2 → Bridge_L1 (built by L2's executeCrossChainCall)
-        Action memory callBridgeReturn = Action({
-            actionType: ActionType.CALL,
-            rollupId: MAINNET_ROLLUP_ID,
-            destination: address(bridgeL1),
-            value: 0,
-            data: retReceiveTokensCalldata,
-            failed: false,
-            sourceAddress: address(bridgeL2),
-            sourceRollup: L2_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
-
-        // CALL B: executor → executorL2 (claimAndBridgeBack) — chained as nextAction from Entry 1
-        Action memory callB = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(executorL2),
-            value: 0,
-            data: claimAndBridgeBackCalldata,
-            failed: false,
-            sourceAddress: address(executor),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
-
-        // ════════════════════════════════════════════
-        //  Phase 1: L2 — Single SYSTEM call executes both receiveTokens + claimAndBridgeBack
-        // ════════════════════════════════════════════
-        //
-        //  executeIncomingCrossChainCall(bridgeL2, receiveTokens, bridgeL1, MAINNET, [])
-        //    → _processCallAtScope: receiveTokens → mints wrapped to executorL2
-        //    → RESULT(L2,void) consumed → Entry 1 returns CALL B (continuation)
-        //    → _processCallAtScope: claimAndBridgeBack → claim NFT, bridge tokens back
-        //      → reentrant executeCrossChainCall → CALL(bridge return) consumed → Entry 2
-        //    → RESULT(L2,void) consumed → Entry 3 returns terminal
-        //
-        //  L2 execution table (3 entries):
-        //    1. RESULT(L2,void) hash → CALL B (continuation)     — consumed after receiveTokens returns
-        //    2. CALL(bridge return) hash → RESULT(MAINNET,void)   — consumed by reentrant executeCrossChainCall of B
-        //    3. RESULT(L2,void) hash → RESULT(L2,void) terminal  — consumed after claimAndBridgeBack returns
         {
-            ExecutionEntry[] memory l2Entries = new ExecutionEntry[](3);
-            StateDelta[] memory emptyDeltas = new StateDelta[](0);
+            StateDelta[] memory stateDeltas = new StateDelta[](1);
+            stateDeltas[0] = StateDelta({rollupId: L2_ROLLUP_ID, newState: s1, etherDelta: 0});
 
-            // Entry 1: consumed after receiveTokens → continues with CALL B
-            l2Entries[0].stateDeltas = emptyDeltas;
-            l2Entries[0].actionHash = keccak256(abi.encode(result_L2_void));
-            l2Entries[0].nextAction = callB;
+            ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+            entries[0].stateDeltas = stateDeltas;
+            entries[0].actionHash = phase1L1ActionHash;
+            // No calls, returnData = "", rollingHash = 0
 
-            // Entry 2: consumed by reentrant executeCrossChainCall of B, when Bridge_L2.bridgeTokens calls proxy
-            l2Entries[1].stateDeltas = emptyDeltas;
-            l2Entries[1].actionHash = keccak256(abi.encode(callBridgeReturn));
-            l2Entries[1].nextAction = result_MAINNET_void;
-
-            // Entry 3: consumed after claimAndBridgeBack returns void → terminal
-            l2Entries[2].stateDeltas = emptyDeltas;
-            l2Entries[2].actionHash = keccak256(abi.encode(result_L2_void));
-            l2Entries[2].nextAction = result_L2_void;
-
-            vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(l2Entries);
+            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
         }
 
-        // Single system call: receiveTokens on Bridge_L2, then claimAndBridgeBack on executorL2
-        //   Call A: proxy(Bridge_L1,MAINNET).executeOnBehalf(Bridge_L2, receiveTokens)
-        //     → mints 10k wrapped to executorL2 → RESULT consumed → returns CALL B
-        //   Call B (continuation): proxy(executor,MAINNET).executeOnBehalf(executorL2, claimAndBridgeBack)
-        //     → claim NFT, burn wrapped, bridge back → RESULT consumed → terminal
-        vm.prank(SYSTEM_ADDRESS);
-        managerL2.executeIncomingCrossChainCall(
-            address(bridgeL2),        // dest = Bridge_L2
-            0,                        // value = 0
-            fwdReceiveTokensCalldata, // data = receiveTokens(...)
-            address(bridgeL1),        // source = Bridge_L1
-            MAINNET_ROLLUP_ID,        // sourceRollup = MAINNET
-            new uint256[](0)          // scope = [] (root)
-        );
+        // Bridge tokens from test contract
+        token.approve(address(bridgeL1), 10_000e18);
+        bridgeL1.bridgeTokens(address(token), 10_000e18, L2_ROLLUP_ID, address(executorL2));
 
-        // Verify wrapped token deployed, NFT claimed, wrapped tokens burned
-        assertEq(bridgeL2.getWrappedToken(address(token), MAINNET_ROLLUP_ID), wrappedTokenL2);
-        assertEq(WrappedToken(wrappedTokenL2).balanceOf(address(executorL2)), 0, "Wrapped tokens burned");
-        assertTrue(flashLoanersNFT.hasClaimed(address(executorL2)), "executorL2 should have claimed NFT");
-        assertEq(flashLoanersNFT.nextTokenId(), 1, "One NFT should be minted");
+        assertEq(token.balanceOf(address(bridgeL1)), 10_000e18, "Phase 1a: bridgeL1 should hold locked tokens");
+        assertEq(_getRollupState(L2_ROLLUP_ID), s1, "Phase 1a: L2 state should be updated");
 
         // ════════════════════════════════════════════
-        //  Phase 2: L1 — Flash loan + cross-chain execution
+        //  Phase 1b: L2 — Deliver wrapped tokens to executorL2
         // ════════════════════════════════════════════
         //
-        //  postBatch loads 3 deferred entries. Alice → executor.execute():
-        //    1. bridgeL1.bridgeTokens → proxy → CALL#1 matched → RESULT (terminal)
-        //    2. executorL2Proxy.call(claimAndBridgeBack) → CALL#2 matched → CALL#3 (scope=[0])
-        //       → newScope → _processCallAtScope → Bridge_L1.receiveTokens releases tokens
-        //       → RESULT#3 matched → RESULT (terminal)
-        //    3. repay: transfer 10k tokens back to FlashLoan_L1
+        //  Trigger: test contract calls proxyBridgeL1OnL2 with empty data
+        //    -> managerL2.executeCrossChainCall(address(this), "")
+        //    -> proxyInfo: (bridgeL1, MAINNET)
+        //    -> actionHash = hash(MAINNET, bridgeL1, 0, "", address(this), L2)
+        //    -> entry consumed -> calls[0] routes receiveTokens to bridgeL2
 
-        // CALL#1: Bridge_L1 → Bridge_L2 (forward trip)
-        // Built by executeCrossChainCall when bridgeL1 calls proxy for (bridgeL2, L2)
-        Action memory callForward = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
+        bytes32 phase1L2TriggerHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", address(this), L2_ROLLUP_ID
+        );
+
+        CrossChainCall[] memory phase1L2Calls = new CrossChainCall[](1);
+        phase1L2Calls[0] = CrossChainCall({
             destination: address(bridgeL2),
             value: 0,
-            data: fwdReceiveTokensCalldata,
-            failed: false,
+            data: phase1ReceiveCalldata,
             sourceAddress: address(bridgeL1),
             sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
+            revertSpan: 0
         });
 
-        // CALL#2: executor → executorL2 (claimAndBridgeBack)
-        // Built by executeCrossChainCall when executor calls proxy for (executorL2, L2)
-        Action memory callClaimAndBridge = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
+        // Rolling hash: 1 call, receiveTokens returns void -> success=true, retData=""
+        bytes32 phase1L2RollingHash;
+        {
+            bytes32 h = bytes32(0);
+            h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
+            h = keccak256(abi.encodePacked(h, CALL_END, uint256(1), true, bytes("")));
+            phase1L2RollingHash = h;
+        }
+
+        {
+            ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+            entries[0].stateDeltas = new StateDelta[](0);
+            entries[0].actionHash = phase1L2TriggerHash;
+            entries[0].calls = phase1L2Calls;
+            entries[0].nestedActions = new NestedAction[](0);
+            entries[0].callCount = 1;
+            entries[0].returnData = "";
+            entries[0].rollingHash = phase1L2RollingHash;
+
+            vm.prank(SYSTEM_ADDRESS);
+            managerL2.loadExecutionTable(entries, _noStaticCalls());
+        }
+
+        // Trigger L2 delivery
+        (bool success,) = proxyBridgeL1OnL2.call("");
+        assertTrue(success, "Phase 1b: L2 trigger call should succeed");
+
+        // Verify wrapped token deployed and executorL2 funded
+        wrappedTokenL2 = bridgeL2.getWrappedToken(address(token), MAINNET_ROLLUP_ID);
+        assertTrue(wrappedTokenL2 != address(0), "Phase 1b: wrapped token should be deployed on L2");
+        assertEq(
+            WrappedToken(wrappedTokenL2).balanceOf(address(executorL2)),
+            10_000e18,
+            "Phase 1b: executorL2 should have 10,000 wrapped tokens"
+        );
+
+        // ════════════════════════════════════════════
+        //  Deploy remaining contracts (need wrappedTokenL2 address)
+        // ════════════════════════════════════════════
+
+        nftL2 = new FlashLoanersNFT(wrappedTokenL2);
+
+        executorL1 = new FlashLoanBridgeExecutor(
+            address(flashLoanPool),
+            address(bridgeL1),
+            executorL2ProxyL1,
+            address(executorL2),
+            wrappedTokenL2,
+            address(nftL2),
+            address(bridgeL2),
+            L2_ROLLUP_ID,
+            address(token)
+        );
+
+        // ════════════════════════════════════════════
+        //  Phase 2: Execute the flash loan
+        // ════════════════════════════════════════════
+        //
+        //  executorL1.execute():
+        //    -> flashLoanPool.flashLoan(token, 10,000e18)
+        //    -> onFlashLoan:
+        //       (a) bridge.bridgeTokens -> consumes L1 entry #0
+        //       (b) executorL2Proxy.call(claimAndBridgeBack) -> consumes L1 entry #1
+        //           entry #1 calls[0]: claimAndBridgeBack on executorL2
+        //             -> NFT claim + burn wrapped via bridgeL2 (consumes L2 entry #0)
+        //           entry #1 calls[1]: receiveTokens on bridgeL1 (release tokens to executorL1)
+        //       (c) repay flash loan
+
+        // ── Compute all action hashes ──
+
+        // L1 Entry #0: bridgeTokens proxy call
+        //   bridgeL1._bridgeAddress() = bridgeL2
+        //   proxy(bridgeL2, L2) on L1
+        //   sourceAddress = executorL1 (bridgeL1 calls the proxy from within bridgeTokens)
+        //
+        //   Wait: bridgeL1 itself calls bridgeProxy.call(...), so msg.sender at proxy = bridgeL1.
+        //   executeCrossChainCall(sourceAddress=bridgeL1, callData=receiveTokensCalldata_bridge)
+        //   proxyInfo: (bridgeL2, L2)
+        //   actionHash = hash(L2, bridgeL2, 0, calldata, bridgeL1, MAINNET)
+
+        bytes memory bridgeReceiveCalldata = abi.encodeCall(
+            Bridge.receiveTokens,
+            (address(token), MAINNET_ROLLUP_ID, address(executorL2), 10_000e18, "Test Token", "TT", 18, MAINNET_ROLLUP_ID)
+        );
+
+        bytes32 l1Entry0ActionHash = _actionHash(
+            L2_ROLLUP_ID, address(bridgeL2), 0, bridgeReceiveCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
+        );
+
+        // L1 Entry #1: executorL2Proxy.call(claimAndBridgeBack)
+        //   msg.sender at proxy = executorL1 (executorL1 calls executorL2Proxy from onFlashLoan)
+        //   executeCrossChainCall(sourceAddress=executorL1, callData=claimAndBridgeBackCalldata)
+        //   proxyInfo: (executorL2, L2)
+        //   actionHash = hash(L2, executorL2, 0, calldata, executorL1, MAINNET)
+
+        bytes memory claimAndBridgeBackCalldata = abi.encodeCall(
+            FlashLoanBridgeExecutor.claimAndBridgeBack,
+            (wrappedTokenL2, address(nftL2), address(bridgeL2), MAINNET_ROLLUP_ID, address(executorL1))
+        );
+
+        bytes32 l1Entry1ActionHash = _actionHash(
+            L2_ROLLUP_ID, address(executorL2), 0, claimAndBridgeBackCalldata, address(executorL1), MAINNET_ROLLUP_ID
+        );
+
+        // L2 Entry #0: consumed by bridgeL2.bridgeTokens inside claimAndBridgeBack
+        //   bridgeL2.bridgeTokens calls proxy(bridgeL1, MAINNET) on L2
+        //   msg.sender at L2 proxy = bridgeL2
+        //   managerL2.executeCrossChainCall(bridgeL2, retReceiveCalldata)
+        //   proxyInfo: (bridgeL1, MAINNET)
+        //   actionHash = hash(MAINNET, bridgeL1, 0, retReceiveCalldata, bridgeL2, L2)
+
+        bytes memory retReceiveCalldata = abi.encodeCall(
+            Bridge.receiveTokens,
+            (address(token), MAINNET_ROLLUP_ID, address(executorL1), 10_000e18, "Test Token", "TT", 18, L2_ROLLUP_ID)
+        );
+
+        bytes32 l2Entry0ActionHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, retReceiveCalldata, address(bridgeL2), L2_ROLLUP_ID
+        );
+
+        // ── Compute rolling hashes ──
+
+        // L1 Entry #0: no calls -> rollingHash = 0
+        // (already default)
+
+        // L1 Entry #1: 2 calls
+        //   Call 0 (callNumber=1): claimAndBridgeBack on executorL2 -> void -> success=true, retData=""
+        //   Call 1 (callNumber=2): receiveTokens on bridgeL1 -> void -> success=true, retData=""
+        bytes32 l1Entry1RollingHash;
+        {
+            bytes32 h = bytes32(0);
+            // Call 0
+            h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
+            h = keccak256(abi.encodePacked(h, CALL_END, uint256(1), true, bytes("")));
+            // Call 1
+            h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(2)));
+            h = keccak256(abi.encodePacked(h, CALL_END, uint256(2), true, bytes("")));
+            l1Entry1RollingHash = h;
+        }
+
+        // ── Build L1 Entry #1 calls ──
+        CrossChainCall[] memory l1Entry1Calls = new CrossChainCall[](2);
+
+        // Call 0: execute claimAndBridgeBack on executorL2
+        //   sourceProxy = rollups.proxy(executorL2, L2)
+        //   Since msg.sender=Rollups (manager), proxy calls executorL2.claimAndBridgeBack(...)
+        l1Entry1Calls[0] = CrossChainCall({
             destination: address(executorL2),
             value: 0,
             data: claimAndBridgeBackCalldata,
-            failed: false,
-            sourceAddress: address(executor),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
+            sourceAddress: address(executorL2),
+            sourceRollup: L2_ROLLUP_ID,
+            revertSpan: 0
         });
 
-        // CALL#3: Bridge_L2 → Bridge_L1 (return trip, nested at scope=[0])
-        // This is callBridgeReturn with scope=[0] added for L1 scope navigation
-        uint256[] memory scope0 = new uint256[](1);
-        scope0[0] = 0;
-        Action memory callReturnScoped = Action({
-            actionType: ActionType.CALL,
-            rollupId: MAINNET_ROLLUP_ID,
+        // Call 1: release tokens to executorL1 via receiveTokens on bridgeL1
+        //   sourceProxy = rollups.proxy(bridgeL2, L2)
+        //   proxy calls bridgeL1.receiveTokens(...)
+        //   bridgeL1.onlyBridgeProxy(L2): checks msg.sender == rollups.proxy(bridgeL2, L2) -> MATCH
+        l1Entry1Calls[1] = CrossChainCall({
             destination: address(bridgeL1),
             value: 0,
-            data: retReceiveTokensCalldata,
-            failed: false,
+            data: retReceiveCalldata,
             sourceAddress: address(bridgeL2),
             sourceRollup: L2_ROLLUP_ID,
-            scope: scope0
+            revertSpan: 0
         });
 
-        bytes32 s0 = keccak256("l2-initial-state");
-        bytes32 s1 = keccak256("l2-tokens-bridged-to-executor");
-        bytes32 s2 = keccak256("l2-nft-claimed-tokens-bridged-back");
-        bytes32 s3 = keccak256("l2-bridge-return-executed");
+        // ── New block for postBatch ──
+        vm.roll(block.number + 1);
 
-        // postBatch: 3 deferred entries on L1
+        // ── Load L2 execution table (must be same block as L1 execution) ──
         {
-            StateDelta[] memory deltas1 = new StateDelta[](1);
-            deltas1[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s0, newState: s1, etherDelta: 0});
+            ExecutionEntry[] memory l2Entries = new ExecutionEntry[](1);
+            l2Entries[0].stateDeltas = new StateDelta[](0);
+            l2Entries[0].actionHash = l2Entry0ActionHash;
+            // No calls, returnData = "", rollingHash = 0
 
-            StateDelta[] memory deltas2 = new StateDelta[](1);
-            deltas2[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
-
-            StateDelta[] memory deltas3 = new StateDelta[](1);
-            deltas3[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0});
-
-            ExecutionEntry[] memory entries = new ExecutionEntry[](3);
-
-            // Entry 1: CALL#1 → RESULT(L2,void) terminal
-            entries[0].stateDeltas = deltas1;
-            entries[0].actionHash = keccak256(abi.encode(callForward));
-            entries[0].nextAction = result_L2_void;
-
-            // Entry 2: CALL#2 → CALL#3 (nested scope=[0])
-            entries[1].stateDeltas = deltas2;
-            entries[1].actionHash = keccak256(abi.encode(callClaimAndBridge));
-            entries[1].nextAction = callReturnScoped;
-
-            // Entry 3: RESULT#3 (MAINNET,void) → RESULT(L2,void) terminal
-            entries[2].stateDeltas = deltas3;
-            entries[2].actionHash = keccak256(abi.encode(result_MAINNET_void));
-            entries[2].nextAction = result_L2_void;
-
-            rollups.postBatch(entries, 0, "", "proof");
+            vm.prank(SYSTEM_ADDRESS);
+            managerL2.loadExecutionTable(l2Entries, _noStaticCalls());
         }
 
-        // Alice triggers the flash loan → full cross-chain flow
-        vm.prank(alice);
-        executor.execute();
+        // ── Post L1 batch ──
+
+        bytes32 s2 = keccak256("l2-state-after-flash-loan-bridge");
+        bytes32 s3 = keccak256("l2-state-after-flash-loan-complete");
+
+        {
+            ExecutionEntry[] memory l1Entries = new ExecutionEntry[](2);
+
+            // Entry #0: bridgeTokens proxy call (no calls, simple state delta)
+            StateDelta[] memory deltas0 = new StateDelta[](1);
+            deltas0[0] = StateDelta({rollupId: L2_ROLLUP_ID, newState: s2, etherDelta: 0});
+            l1Entries[0].stateDeltas = deltas0;
+            l1Entries[0].actionHash = l1Entry0ActionHash;
+            // calls[], nestedActions[], callCount, returnData, rollingHash all default (empty/zero)
+
+            // Entry #1: executorL2Proxy call (with calls to claimAndBridgeBack + receiveTokens)
+            StateDelta[] memory deltas1 = new StateDelta[](1);
+            deltas1[0] = StateDelta({rollupId: L2_ROLLUP_ID, newState: s3, etherDelta: 0});
+            l1Entries[1].stateDeltas = deltas1;
+            l1Entries[1].actionHash = l1Entry1ActionHash;
+            l1Entries[1].calls = l1Entry1Calls;
+            l1Entries[1].nestedActions = new NestedAction[](0);
+            l1Entries[1].callCount = 2;
+            l1Entries[1].returnData = "";
+            l1Entries[1].rollingHash = l1Entry1RollingHash;
+
+            rollups.postBatch(l1Entries, _noStaticCalls(), 0, "", "proof");
+        }
+
+        // ── Pre-flash-loan state ──
+        uint256 flashLoanPoolBalanceBefore = token.balanceOf(address(flashLoanPool));
+        assertEq(flashLoanPoolBalanceBefore, 10_000e18, "Flash loan pool should have 10,000 tokens");
+
+        // ── Execute the flash loan ──
+        executorL1.execute();
 
         // ── Assertions ──
-        assertTrue(flashLoanersNFT.hasClaimed(address(executorL2)), "executorL2 has claimed NFT");
-        assertEq(flashLoanersNFT.nextTokenId(), 1, "One NFT minted (tokenId=0)");
-        assertEq(token.balanceOf(address(flashLoanL1)), 10_000e18, "FlashLoan_L1 balance unchanged (loan repaid)");
-        assertEq(token.balanceOf(address(executor)), 0, "Executor has no tokens remaining");
-        assertEq(token.balanceOf(address(bridgeL1)), 0, "Bridge_L1 has no locked tokens (released back)");
-        assertEq(_getRollupState(L2_ROLLUP_ID), s3, "L2 rollup state updated after all phases");
+
+        // Flash loan pool should be whole (no fee in this implementation)
+        assertEq(
+            token.balanceOf(address(flashLoanPool)),
+            10_000e18,
+            "Flash loan pool should still have 10,000 tokens after repayment"
+        );
+
+        // NFT should be minted to executorL2
+        assertEq(nftL2.balanceOf(address(executorL2)), 1, "executorL2 should own 1 NFT");
+        assertTrue(nftL2.hasClaimed(address(executorL2)), "executorL2 should be marked as claimed");
+
+        // Wrapped tokens burned on L2
+        assertEq(
+            WrappedToken(wrappedTokenL2).balanceOf(address(executorL2)),
+            0,
+            "executorL2 wrapped token balance should be 0"
+        );
+
+        // bridgeL1 token balance: 10,000 (Phase 1) + 10,000 (Phase 2 bridge) - 10,000 (released) = 10,000
+        assertEq(
+            token.balanceOf(address(bridgeL1)),
+            10_000e18,
+            "bridgeL1 should have 10,000 tokens locked (Phase 2 bridge unreturned)"
+        );
+
+        // L2 rollup state updated
+        assertEq(_getRollupState(L2_ROLLUP_ID), s3, "L2 state should be updated to s3");
+
+        // Execution entries consumed
+        assertEq(rollups.executionIndex(), 2, "Both L1 entries should be consumed");
+        assertEq(managerL2.executionIndex(), 1, "L2 entry should be consumed");
     }
 }

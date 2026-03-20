@@ -204,3 +204,40 @@ If entries are posted via `postBatch` but cannot be consumed in the same block (
 ## 6. Action struct unused on-chain
 
 The `Action` struct in `ICrossChainManager.sol` is declared but never used by any contract function. It exists only for off-chain tooling to compute `actionHash`. Consider moving it to a separate file or adding a comment clarifying its off-chain-only purpose.
+
+---
+
+## 7. Rewrite stubbed scripts
+
+The following scripts were stubbed out during the flatten refactor because they used removed types (`Action`, `ActionType`, `ExecutionEntry.nextAction`, `StateDelta.currentState`). They need full rewrites for the new model:
+
+- `script/DecodeExecutions.s.sol` — execution entry decoder/visualizer
+- `script/e2e-decode/E2EDecode.s.sol` — e2e test decoder
+- `script/e2e-decode/E2EBridgeDecode.s.sol` — e2e bridge test decoder
+- `script/flash-loan-test/ExecuteFlashLoan.s.sol` — flash loan e2e executor
+
+---
+
+## 8. Update visualizator dashboard
+
+`visualizator/dashboard/index.html` and the Remotion video source (`visualizator/video/src/`) reference the old execution model (scope-based navigation, Action/ActionType structs, nextAction flow). Update to reflect:
+- Flat `calls[]` array with `callCount`
+- `NestedAction` with `callCount` instead of `calls[]`
+- Rolling hash with 4 tagged events (CALL_BEGIN, CALL_END, NESTED_BEGIN, NESTED_END)
+- `revertSpan` instead of scope-based revert handling
+
+---
+
+## 9. Update integration test plan documentation
+
+`test/INTEGRATION_TEST_PLAN.md` describes the old scope-based scenarios and is now deprecated. Rewrite to document the current test scenarios:
+- Scenario 1: L1 calls L2 (simple deferred entry)
+- Scenario 2: L2 calls L1 (simple deferred entry)
+- Scenario 3: Nested L2 entry (cross-manager)
+- Scenario 4: Nested L1 entry (cross-manager)
+- Bridge tests: ether bridge, token bridge, roundtrip
+- Flash loan: cross-chain atomic flash loan
+
+---
+
+## 10. Add events for data only in rolling hash (see `src/events.md`)

@@ -5,7 +5,8 @@ import {console} from "forge-std/Test.sol";
 import {Rollups, RollupConfig} from "../src/Rollups.sol";
 import {CrossChainManagerL2} from "../src/CrossChainManagerL2.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
-import {Action, ActionType, ExecutionEntry, StateDelta, ProxyInfo} from "../src/ICrossChainManager.sol";
+import {ExecutionEntry, StateDelta, CrossChainCall, NestedAction, StaticCall, ProxyInfo} from "../src/ICrossChainManager.sol";
+import {IZKVerifier} from "../src/IZKVerifier.sol";
 import {Bridge} from "../src/periphery/Bridge.sol";
 import {WrappedToken} from "../src/periphery/WrappedToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -21,13 +22,15 @@ contract TestToken is ERC20 {
 /// @title IntegrationTestBridge
 /// @notice End-to-end tests of L1 <-> L2 bridging flows for ETH and ERC20 tokens
 ///
-/// ┌──────────────────────────────────────────────────────────────────────────┐
-/// │  Legend                                                                  │
-/// │    bridgeL1 = Bridge on L1 (manager = rollups)                          │
-/// │    bridgeL2 = Bridge on L2 (manager = managerL2)                        │
-/// │    Both share the same canonical bridge identity via                     │
-/// │    bridgeL2.setCanonicalBridgeAddress(address(bridgeL1))                │
-/// └──────────────────────────────────────────────────────────────────────────┘
+/// Adapted to the new flat-calls + rolling-hash execution model:
+///   - ExecutionEntry now has: calls[], nestedActions[], callCount, returnData, failed, rollingHash
+///   - StateDelta no longer has currentState
+///   - actionHash = keccak256(abi.encode(rollupId, destination, value, data, sourceAddress, sourceRollup))
+///   - Rolling hash computed with tagged events: CALL_BEGIN(1), CALL_END(2), NESTED_BEGIN(3), NESTED_END(4)
+///   - No executeIncomingCrossChainCall on L2 -- all entries consumed via proxy calls
+///   - executeL2TX() takes no args on L1
+///   - postBatch takes (entries, staticCalls, blobCount, callData, proof)
+///   - loadExecutionTable takes (entries, staticCalls)
 ///
 /// ┌────┬───────────────────────────────────────┬──────────┬──────────────────┐
 /// │  # │ Flow                                  │ Direction│ Asset            │
@@ -46,6 +49,18 @@ contract IntegrationTestBridge is IntegrationTestBase {
 
     // ── Test token ──
     TestToken public token;
+
+    // ── Constants ──
+    uint256 constant L2_ROLLUP_ID = 1;
+    uint256 constant MAINNET_ROLLUP_ID = 0;
+    address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
+    bytes32 constant DEFAULT_VK = keccak256("verificationKey");
+
+    // Rolling hash tag constants (must match contracts)
+    uint8 constant CALL_BEGIN = 1;
+    uint8 constant CALL_END = 2;
+    uint8 constant NESTED_BEGIN = 3;
+    uint8 constant NESTED_END = 4;
 
     address public alice = makeAddr("alice");
 
@@ -73,79 +88,93 @@ contract IntegrationTestBridge is IntegrationTestBase {
         vm.deal(alice, 10 ether);
     }
 
+    function _getRollupState(uint256 rollupId) internal view returns (bytes32) {
+        (,, bytes32 stateRoot,) = rollups.rollups(rollupId);
+        return stateRoot;
+    }
+
+    /// @dev Computes action hash the same way contracts do
+    function _actionHash(
+        uint256 rollupId,
+        address destination,
+        uint256 value,
+        bytes memory data,
+        address sourceAddress,
+        uint256 sourceRollup
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(rollupId, destination, value, data, sourceAddress, sourceRollup));
+    }
+
+    /// @dev Computes rolling hash for a sequence of calls (no nesting)
+    /// Each call: CALL_BEGIN(callNumber) then CALL_END(callNumber, success, retData)
+    /// @param calls The calls in the entry
+    /// @param successes Whether each call succeeds
+    /// @param retDatas The return data from each call
+    function _computeRollingHash(
+        CrossChainCall[] memory calls,
+        bool[] memory successes,
+        bytes[] memory retDatas
+    ) internal pure returns (bytes32 hash) {
+        hash = bytes32(0);
+        for (uint256 i = 0; i < calls.length; i++) {
+            uint256 callNumber = i + 1; // 1-indexed
+            hash = keccak256(abi.encodePacked(hash, CALL_BEGIN, callNumber));
+            hash = keccak256(abi.encodePacked(hash, CALL_END, callNumber, successes[i], retDatas[i]));
+        }
+    }
+
+    /// @dev Helper to create an empty StaticCall array
+    function _noStaticCalls() internal pure returns (StaticCall[] memory) {
+        return new StaticCall[](0);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  Test 1: Alice bridges 1 ETH from L1 to L2
     //
-    //  Call chain (L1):
-    //    Alice calls bridgeL1.bridgeEther{value: 1 ether}(L2_ROLLUP_ID)
-    //    → Bridge creates proxy for (alice, L2_ROLLUP_ID) via rollups
+    //  Phase 1 (L1):
+    //    Alice calls bridgeL1.bridgeEther{value: 1 ether}(L2_ROLLUP_ID, alice)
+    //    → Bridge creates proxy for (alice, L2_ROLLUP_ID) on L1
     //    → proxy.call{value: 1 ether}("") → proxy fallback
     //    → Rollups.executeCrossChainCall(bridgeL1, "") with 1 ether
-    //    → CALL{L2, alice, 1 ether, "", bridgeL1, MAINNET} matched → RESULT
+    //    → actionHash matches deferred entry → state delta applied → returnData="" returned
     //
-    //  Meanwhile on L2:
-    //    SYSTEM calls executeIncomingCrossChainCall{value: 1 ether}(alice, ...)
-    //    → proxy for (bridgeL1, MAINNET) sends 1 ether to alice
+    //  Phase 2 (L2):
+    //    System loads execution table with entry containing ETH delivery call.
+    //    Alice triggers by calling proxy(bridgeL1, MAINNET) on L2.
+    //    Entry's calls[] send 1 ETH to alice via proxy(bridgeL1, MAINNET).
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_BridgeEther_L1toL2() public {
-        // RESULT: alice is EOA, empty return data (shared by both phases)
-        Action memory resultAction = Action({
-            actionType: ActionType.RESULT,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
-
         // ════════════════════════════════════════════
         //  Phase 1: L1 — Alice bridges 1 ether via bridgeL1
         // ════════════════════════════════════════════
-        //
-        //  postBatch loads a deferred entry on L1. When Alice calls bridgeEther:
-        //    1. Bridge creates proxy for (alice, L2_ROLLUP_ID) via rollups
-        //    2. proxy.call{value: 1 ether}("") → proxy fallback
-        //    3. Rollups.executeCrossChainCall(bridgeL1, "") with 1 ether
-        //    4. Builds CALL{rollupId=L2, dest=alice, value=1 ether, source=bridgeL1, sourceRollup=MAINNET}
-        //    5. _findAndApplyExecution matches entry → applies L2 state delta (+1 ether) → returns RESULT
 
-        // The CALL action that executeCrossChainCall will build
-        // dest=alice (proxy's originalAddress), source=bridgeL1 (msg.sender to proxy)
-        Action memory callAction = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
-            destination: alice,
-            value: 1 ether,
-            data: "",
-            failed: false,
-            sourceAddress: address(bridgeL1),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
+        // The actionHash that executeCrossChainCall will compute when bridgeL1 calls
+        // proxy(alice, L2_ROLLUP_ID) on L1:
+        //   proxyInfo: originalAddress=alice, originalRollupId=L2_ROLLUP_ID
+        //   actionHash = keccak256(abi.encode(L2_ROLLUP_ID, alice, 1 ether, "", bridgeL1, MAINNET_ROLLUP_ID))
+        bytes32 l1ActionHash = _actionHash(
+            L2_ROLLUP_ID, alice, 1 ether, "", address(bridgeL1), MAINNET_ROLLUP_ID
+        );
 
-        bytes32 currentState = keccak256("l2-initial-state");
         bytes32 newState = keccak256("l2-state-after-ether-bridge");
 
-        // L1 deferred entry: CALL hash → RESULT, with L2 state transition (+1 ether)
+        // L1 deferred entry: no calls (simple hash resolution), returnData = ""
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
             stateDeltas[0] = StateDelta({
                 rollupId: L2_ROLLUP_ID,
-                currentState: currentState,
                 newState: newState,
                 etherDelta: 1 ether
             });
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateDeltas = stateDeltas;
-            entries[0].actionHash = keccak256(abi.encode(callAction));
-            entries[0].nextAction = resultAction;
+            entries[0].actionHash = l1ActionHash;
+            // calls[] empty, nestedActions[] empty, callCount=0, returnData="", rollingHash=0, failed=false
+            // (all default zero values)
 
-            rollups.postBatch(entries, 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
         }
 
         // Alice triggers the bridge
@@ -157,42 +186,67 @@ contract IntegrationTestBridge is IntegrationTestBase {
         assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
 
         // ════════════════════════════════════════════
-        //  Phase 2: L2 — SYSTEM delivers 1 ether to alice
+        //  Phase 2: L2 — Deliver 1 ether to alice
         // ════════════════════════════════════════════
         //
-        //  SYSTEM pre-loads execution table with the expected RESULT,
-        //  then calls executeIncomingCrossChainCall which:
-        //    1. Builds CALL{rollupId=L2, dest=alice, value=1 ether, source=bridgeL1, sourceRollup=MAINNET}
-        //    2. newScope → _processCallAtScope → auto-creates proxy for (bridgeL1, MAINNET) on L2
-        //    3. proxy.executeOnBehalf(alice, "") with 1 ether → alice receives 1 ether
-        //    4. Builds RESULT{data=""} → hash matches table entry → consumed
+        //  The execution entry on L2 contains a call that sends 1 ETH to alice
+        //  via proxy(bridgeL1, MAINNET). The entry is triggered by alice calling
+        //  proxy(bridgeL1, MAINNET) on L2.
+        //
+        //  Trigger call: alice calls proxy(bridgeL1, MAINNET) with empty data
+        //    → proxy fallback → executeCrossChainCall(alice, "")
+        //    → actionHash = keccak256(abi.encode(MAINNET, bridgeL1, 0, "", alice, L2))
+        //    → entry consumed → calls[] execute → alice receives 1 ETH
 
-        // L2 execution table: RESULT hash → RESULT (terminal, self-referencing)
+        // Create proxy for (bridgeL1, MAINNET) on L2
+        address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
+
+        // Fund managerL2 with ETH for the delivery
+        vm.deal(address(managerL2), 1 ether);
+
+        // Build the L2 execution entry
+        bytes32 l2TriggerHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID
+        );
+
+        CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
+        l2Calls[0] = CrossChainCall({
+            destination: alice,
+            value: 1 ether,
+            data: "",
+            sourceAddress: address(bridgeL1),
+            sourceRollup: MAINNET_ROLLUP_ID,
+            revertSpan: 0
+        });
+
+        // Compute rolling hash for the single call
+        // Call sends 1 ETH to alice (EOA) → success=true, retData=""
+        bool[] memory successes = new bool[](1);
+        successes[0] = true;
+        bytes[] memory retDatas = new bytes[](1);
+        retDatas[0] = "";
+        bytes32 l2RollingHash = _computeRollingHash(l2Calls, successes, retDatas);
+
         {
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateDeltas = new StateDelta[](0);
-            entries[0].actionHash = keccak256(abi.encode(resultAction));
-            entries[0].nextAction = resultAction;
+            entries[0].actionHash = l2TriggerHash;
+            entries[0].calls = l2Calls;
+            entries[0].nestedActions = new NestedAction[](0);
+            entries[0].callCount = 1;
+            entries[0].returnData = "";
+            entries[0].rollingHash = l2RollingHash;
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries);
+            managerL2.loadExecutionTable(entries, _noStaticCalls());
         }
-
-        // Fund SYSTEM with 1 ether for the delivery
-        vm.deal(SYSTEM_ADDRESS, 1 ether);
 
         uint256 aliceBalanceBefore = alice.balance;
 
-        // SYSTEM delivers 1 ether to alice via proxy for (bridgeL1, MAINNET)
-        vm.prank(SYSTEM_ADDRESS);
-        managerL2.executeIncomingCrossChainCall{value: 1 ether}(
-            alice,                    // dest = alice
-            1 ether,                  // value
-            "",                       // data (empty — ether transfer to EOA)
-            address(bridgeL1),        // source = bridgeL1
-            MAINNET_ROLLUP_ID,        // sourceRollup = MAINNET
-            new uint256[](0)          // scope = [] (root)
-        );
+        // Alice triggers the L2 delivery by calling proxy(bridgeL1, MAINNET)
+        vm.prank(alice);
+        (bool success,) = proxyBridgeL1OnL2.call("");
+        assertTrue(success, "L2 trigger call should succeed");
 
         assertEq(alice.balance, aliceBalanceBefore + 1 ether, "Alice should receive 1 ether on L2");
     }
@@ -200,19 +254,18 @@ contract IntegrationTestBridge is IntegrationTestBase {
     // ═══════════════════════════════════════════════════════════════════════
     //  Test 2: Alice bridges 100 tokens from L1 to L2
     //
-    //  Call chain (L1):
-    //    Alice calls bridgeL1.bridgeTokens(token, 100e18, L2_ROLLUP_ID)
-    //    → Bridge locks tokens (safeTransferFrom alice → bridgeL1)
-    //    → Bridge creates proxy for (bridgeL1, L2_ROLLUP_ID) via rollups
-    //    → proxy.call(receiveTokens calldata) → proxy fallback
+    //  Phase 1 (L1):
+    //    Alice calls bridgeL1.bridgeTokens(token, 100e18, L2_ROLLUP_ID, alice)
+    //    → Bridge locks tokens, creates proxy for (bridgeL1, L2_ROLLUP_ID) on L1
+    //    → proxy.call(receiveTokensCalldata) → proxy fallback
     //    → Rollups.executeCrossChainCall(bridgeL1, receiveTokensCalldata)
-    //    → CALL{L2, bridgeL1, 0, calldata, bridgeL1, MAINNET} matched → RESULT
+    //    → actionHash matches → state delta → returnData="" → done
     //
-    //  Meanwhile on L2:
-    //    SYSTEM calls executeIncomingCrossChainCall(bridgeL2, 0, calldata, bridgeL1, MAINNET, [])
-    //    → proxy for (bridgeL1, MAINNET) calls bridgeL2.receiveTokens(...)
-    //    → onlyBridgeProxy check passes (proxy identity matches canonical bridge)
-    //    → Foreign token → deploys WrappedToken, mints 100e18 to alice
+    //  Phase 2 (L2):
+    //    System loads execution table with entry containing receiveTokens call.
+    //    Alice triggers by calling proxy(bridgeL1, MAINNET) on L2.
+    //    Entry's calls[] route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET).
+    //    bridgeL2 deploys WrappedToken, mints 100e18 to alice.
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_BridgeTokens_L1toL2() public {
@@ -222,64 +275,35 @@ contract IntegrationTestBridge is IntegrationTestBase {
             (address(token), MAINNET_ROLLUP_ID, alice, 100e18, "Test Token", "TT", 18, MAINNET_ROLLUP_ID)
         );
 
-        // RESULT: receiveTokens returns void → empty return data (shared by both phases)
-        Action memory resultAction = Action({
-            actionType: ActionType.RESULT,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
-
         // ════════════════════════════════════════════
         //  Phase 1: L1 — Alice bridges tokens via bridgeL1
         // ════════════════════════════════════════════
-        //
-        //  postBatch loads a deferred entry on L1. When Alice calls bridgeTokens:
-        //    1. Bridge locks 100e18 tokens (safeTransferFrom alice → bridgeL1)
-        //    2. Bridge creates proxy for (_bridgeAddress()=bridgeL1, L2_ROLLUP_ID) via rollups
-        //    3. proxy.call(receiveTokensCalldata) → proxy fallback
-        //    4. Rollups.executeCrossChainCall(bridgeL1, receiveTokensCalldata)
-        //    5. Builds CALL{rollupId=L2, dest=bridgeL1, data=calldata, source=bridgeL1, sourceRollup=MAINNET}
-        //    6. _findAndApplyExecution matches entry → applies L2 state delta → returns RESULT
 
-        // The CALL action that executeCrossChainCall will build
-        // dest=bridgeL1 (proxy's originalAddress = _bridgeAddress()), source=bridgeL1 (bridge calls proxy)
-        Action memory callAction = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(bridgeL1),
-            value: 0,
-            data: receiveTokensCalldata,
-            failed: false,
-            sourceAddress: address(bridgeL1),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
+        // bridgeL1._bridgeAddress() = bridgeL1 (no canonical override)
+        // Bridge creates proxy for (bridgeL1, L2_ROLLUP_ID) on L1
+        // proxy.call(receiveTokensCalldata) from bridgeL1
+        // proxyInfo: originalAddress=bridgeL1, originalRollupId=L2_ROLLUP_ID
+        // actionHash = keccak256(abi.encode(L2_ROLLUP_ID, bridgeL1, 0, calldata, bridgeL1, MAINNET))
+        bytes32 l1ActionHash = _actionHash(
+            L2_ROLLUP_ID, address(bridgeL1), 0, receiveTokensCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
+        );
 
-        bytes32 currentState = keccak256("l2-initial-state");
         bytes32 newState = keccak256("l2-state-after-token-bridge");
 
-        // L1 deferred entry: CALL hash → RESULT, with L2 state transition (no ether)
+        // L1 deferred entry: no calls, just hash resolution
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
             stateDeltas[0] = StateDelta({
                 rollupId: L2_ROLLUP_ID,
-                currentState: currentState,
                 newState: newState,
                 etherDelta: 0
             });
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateDeltas = stateDeltas;
-            entries[0].actionHash = keccak256(abi.encode(callAction));
-            entries[0].nextAction = resultAction;
+            entries[0].actionHash = l1ActionHash;
 
-            rollups.postBatch(entries, 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
         }
 
         // Alice approves and bridges tokens
@@ -294,40 +318,60 @@ contract IntegrationTestBridge is IntegrationTestBase {
         assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
 
         // ════════════════════════════════════════════
-        //  Phase 2: L2 — SYSTEM delivers receiveTokens to bridgeL2
+        //  Phase 2: L2 — Deliver wrapped tokens to alice
         // ════════════════════════════════════════════
         //
-        //  SYSTEM pre-loads execution table with the expected RESULT,
-        //  then calls executeIncomingCrossChainCall which:
-        //    1. Builds CALL{rollupId=L2, dest=bridgeL2, source=bridgeL1, sourceRollup=MAINNET}
-        //    2. newScope → _processCallAtScope → auto-creates proxy for (bridgeL1, MAINNET) on L2
-        //    3. proxy.executeOnBehalf(bridgeL2, receiveTokensCalldata)
-        //       → bridgeL2.receiveTokens(...) → onlyBridgeProxy(MAINNET) passes
-        //       → originalRollupId(MAINNET) ≠ rollupId(L2) → foreign token
-        //       → deploys WrappedToken, mints 100e18 to alice
-        //    4. Builds RESULT{data=""} (void return) → hash matches → consumed
+        //  Entry contains a call that routes receiveTokens to bridgeL2
+        //  via proxy(bridgeL1, MAINNET). bridgeL2.receiveTokens deploys
+        //  WrappedToken and mints 100e18 to alice.
+        //
+        //  Trigger: alice calls proxy(bridgeL1, MAINNET) on L2 with empty data
+        //    → executeCrossChainCall(alice, "") → entry consumed
 
-        // L2 execution table: RESULT hash → RESULT (terminal, self-referencing)
+        // Create proxy for (bridgeL1, MAINNET) on L2
+        address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
+
+        // Trigger actionHash
+        bytes32 l2TriggerHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID
+        );
+
+        // Entry's calls: route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET)
+        CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
+        l2Calls[0] = CrossChainCall({
+            destination: address(bridgeL2),
+            value: 0,
+            data: receiveTokensCalldata,
+            sourceAddress: address(bridgeL1),
+            sourceRollup: MAINNET_ROLLUP_ID,
+            revertSpan: 0
+        });
+
+        // Compute rolling hash: receiveTokens returns void → success=true, retData=""
+        bool[] memory successes = new bool[](1);
+        successes[0] = true;
+        bytes[] memory retDatas = new bytes[](1);
+        retDatas[0] = "";
+        bytes32 l2RollingHash = _computeRollingHash(l2Calls, successes, retDatas);
+
         {
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateDeltas = new StateDelta[](0);
-            entries[0].actionHash = keccak256(abi.encode(resultAction));
-            entries[0].nextAction = resultAction;
+            entries[0].actionHash = l2TriggerHash;
+            entries[0].calls = l2Calls;
+            entries[0].nestedActions = new NestedAction[](0);
+            entries[0].callCount = 1;
+            entries[0].returnData = "";
+            entries[0].rollingHash = l2RollingHash;
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries);
+            managerL2.loadExecutionTable(entries, _noStaticCalls());
         }
 
-        // SYSTEM delivers receiveTokens to bridgeL2
-        vm.prank(SYSTEM_ADDRESS);
-        managerL2.executeIncomingCrossChainCall(
-            address(bridgeL2),        // dest = bridgeL2
-            0,                        // value = 0 (token bridge, no ether)
-            receiveTokensCalldata,    // data = receiveTokens(...)
-            address(bridgeL1),        // source = bridgeL1
-            MAINNET_ROLLUP_ID,        // sourceRollup = MAINNET
-            new uint256[](0)          // scope = [] (root)
-        );
+        // Trigger L2 delivery
+        vm.prank(alice);
+        (bool success,) = proxyBridgeL1OnL2.call("");
+        assertTrue(success, "L2 trigger call should succeed");
 
         // Assert wrapped token was deployed and minted
         address wrappedAddr = bridgeL2.getWrappedToken(address(token), MAINNET_ROLLUP_ID);
@@ -340,15 +384,10 @@ contract IntegrationTestBridge is IntegrationTestBase {
     //
     //  Round-trip: lock on L1 → mint wrapped on L2 → burn wrapped on L2 → release on L1
     //
-    //  In test (single EVM), bridgeL1 and bridgeL2 have different addresses.
-    //  For the return trip to pass onlyBridgeProxy checks in both directions,
-    //  we set canonicalBridgeAddress on BOTH bridges (cross-referencing each other).
-    //  In production (CREATE2), both would share the same address.
-    //
-    //  Forward:  bridgeL1._bridgeAddress() = bridgeL2  →  proxy for (bridgeL2, L2) on L1
-    //  Return:   bridgeL2._bridgeAddress() = bridgeL1  →  proxy for (bridgeL1, MAINNET) on L2
-    //  onlyBridgeProxy on L1 expects proxy for (bridgeL2, L2) — matches source proxy  ✓
-    //  onlyBridgeProxy on L2 expects proxy for (bridgeL1, MAINNET) — matches source proxy  ✓
+    //  Phase 1 (L1): Lock tokens — deferred entry consumed by bridgeTokens call
+    //  Phase 2 (L2): Mint wrapped — entry with calls[] delivering receiveTokens
+    //  Phase 3 (L2): Burn wrapped — entry consumed by bridgeTokens proxy call
+    //  Phase 4 (L1): Release tokens — entry with calls[] delivering receiveTokens to bridgeL1
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_BridgeTokens_Roundtrip() public {
@@ -360,55 +399,32 @@ contract IntegrationTestBridge is IntegrationTestBase {
         //  Phase 1: L1 — Lock tokens
         // ════════════════════════════════════════════
         //
-        //  With bridgeL1._bridgeAddress() = bridgeL2:
-        //    Bridge creates proxy for (bridgeL2, L2_ROLLUP_ID) via rollups
-        //    proxy.call(receiveTokensCalldata) → executeCrossChainCall
-        //    CALL{L2, bridgeL2, 0, calldata, bridgeL1, MAINNET} matched → RESULT
+        //  bridgeL1._bridgeAddress() = bridgeL2 (canonical override set above)
+        //  Bridge creates proxy for (bridgeL2, L2_ROLLUP_ID) on L1
+        //  proxy.call(receiveTokensCalldata) from bridgeL1
+        //  proxyInfo: originalAddress=bridgeL2, originalRollupId=L2_ROLLUP_ID
+        //  actionHash = keccak256(abi.encode(L2_ROLLUP_ID, bridgeL2, 0, calldata, bridgeL1, MAINNET))
 
-        // Forward calldata: bridgeL1 sends to bridgeL2 on L2
         bytes memory fwdCalldata = abi.encodeCall(
             Bridge.receiveTokens,
             (address(token), MAINNET_ROLLUP_ID, alice, 100e18, "Test Token", "TT", 18, MAINNET_ROLLUP_ID)
         );
 
-        // Forward CALL: proxy for (bridgeL2, L2) on L1 → dest=bridgeL2, source=bridgeL1
-        Action memory fwdCall = Action({
-            actionType: ActionType.CALL,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(bridgeL2),
-            value: 0,
-            data: fwdCalldata,
-            failed: false,
-            sourceAddress: address(bridgeL1),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
+        bytes32 fwdActionHash = _actionHash(
+            L2_ROLLUP_ID, address(bridgeL2), 0, fwdCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
+        );
 
-        Action memory fwdResult = Action({
-            actionType: ActionType.RESULT,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
-
-        bytes32 s0 = keccak256("l2-initial-state");
         bytes32 s1 = keccak256("l2-state-after-roundtrip-fwd");
 
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
-            stateDeltas[0] = StateDelta({ rollupId: L2_ROLLUP_ID, currentState: s0, newState: s1, etherDelta: 0 });
+            stateDeltas[0] = StateDelta({rollupId: L2_ROLLUP_ID, newState: s1, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateDeltas = stateDeltas;
-            entries[0].actionHash = keccak256(abi.encode(fwdCall));
-            entries[0].nextAction = fwdResult;
+            entries[0].actionHash = fwdActionHash;
 
-            rollups.postBatch(entries, 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
         }
 
         vm.prank(alice);
@@ -425,56 +441,88 @@ contract IntegrationTestBridge is IntegrationTestBase {
         //  L2 execution table: load ALL entries for Phase 2 + Phase 3 in one call
         // ════════════════════════════════════════════
         //
-        //  In production the system loads the full execution table once per block.
-        //  Phase 2 needs: fwdResult hash → fwdResult (terminal)
-        //  Phase 3 needs: retCall hash → retResult (terminal)
+        //  Entry's calls[] route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET).
+        //  onlyBridgeProxy(MAINNET): proxy for (_bridgeAddress()=bridgeL1, MAINNET) ✓
+        //  Foreign token → deploys WrappedToken, mints to alice.
+        //
+        //  Trigger: alice calls proxy(bridgeL1, MAINNET) on L2 with empty data.
 
-        // Return calldata: bridgeL2 sends back to bridgeL1 on L1
-        // originalToken = token, originalRollupId = MAINNET (traced from wrappedTokenInfo)
-        // sourceRollupId (last param) = bridgeL2.rollupId = L2_ROLLUP_ID
+        address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
+
+        bytes32 l2FwdTriggerHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID
+        );
+
+        CrossChainCall[] memory fwdL2Calls = new CrossChainCall[](1);
+        fwdL2Calls[0] = CrossChainCall({
+            destination: address(bridgeL2),
+            value: 0,
+            data: fwdCalldata,
+            sourceAddress: address(bridgeL1),
+            sourceRollup: MAINNET_ROLLUP_ID,
+            revertSpan: 0
+        });
+
+        bool[] memory fwdSuccesses = new bool[](1);
+        fwdSuccesses[0] = true;
+        bytes[] memory fwdRetDatas = new bytes[](1);
+        fwdRetDatas[0] = "";
+        bytes32 fwdL2RollingHash = _computeRollingHash(fwdL2Calls, fwdSuccesses, fwdRetDatas);
+
+        {
+            ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+            entries[0].stateDeltas = new StateDelta[](0);
+            entries[0].actionHash = l2FwdTriggerHash;
+            entries[0].calls = fwdL2Calls;
+            entries[0].nestedActions = new NestedAction[](0);
+            entries[0].callCount = 1;
+            entries[0].returnData = "";
+            entries[0].rollingHash = fwdL2RollingHash;
+
+            vm.prank(SYSTEM_ADDRESS);
+            managerL2.loadExecutionTable(entries, _noStaticCalls());
+        }
+
+        vm.prank(alice);
+        (bool success,) = proxyBridgeL1OnL2.call("");
+        assertTrue(success, "Phase 2: L2 trigger call should succeed");
+
+        address wrappedAddr = bridgeL2.getWrappedToken(address(token), MAINNET_ROLLUP_ID);
+        assertTrue(wrappedAddr != address(0), "Phase 2: wrapped token should be deployed");
+        assertEq(WrappedToken(wrappedAddr).balanceOf(alice), 100e18, "Phase 2: alice should have 100e18 wrapped");
+
+        // ════════════════════════════════════════════
+        //  Phase 3: L2 — Burn wrapped tokens (bridgeTokens back to L1)
+        // ════════════════════════════════════════════
+        //
+        //  Alice calls bridgeL2.bridgeTokens(wrappedToken, 100e18, MAINNET_ROLLUP_ID, alice)
+        //    → Burns wrapped tokens
+        //    → bridgeL2._bridgeAddress() = bridgeL1 (canonical override)
+        //    → Creates/finds proxy for (bridgeL1, MAINNET) on L2
+        //    → proxy.call(retCalldata) from bridgeL2
+        //    → executeCrossChainCall(bridgeL2, retCalldata) with value=0
+        //    → proxyInfo: originalAddress=bridgeL1, originalRollupId=MAINNET
+        //    → actionHash = keccak256(abi.encode(MAINNET, bridgeL1, 0, retCalldata, bridgeL2, L2))
+        //    → Entry consumed → returnData="" → done
+
         bytes memory retCalldata = abi.encodeCall(
             Bridge.receiveTokens,
             (address(token), MAINNET_ROLLUP_ID, alice, 100e18, "Test Token", "TT", 18, L2_ROLLUP_ID)
         );
 
-        // Return CALL: proxy for (bridgeL1, MAINNET) on L2 → dest=bridgeL1, source=bridgeL2
-        Action memory retCall = Action({
-            actionType: ActionType.CALL,
-            rollupId: MAINNET_ROLLUP_ID,
-            destination: address(bridgeL1),
-            value: 0,
-            data: retCalldata,
-            failed: false,
-            sourceAddress: address(bridgeL2),
-            sourceRollup: L2_ROLLUP_ID,
-            scope: new uint256[](0)
-        });
-
-        Action memory retResult = Action({
-            actionType: ActionType.RESULT,
-            rollupId: MAINNET_ROLLUP_ID,
-            destination: address(0),
-            value: 0,
-            data: "",
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: 0,
-            scope: new uint256[](0)
-        });
+        bytes32 retActionHash = _actionHash(
+            MAINNET_ROLLUP_ID, address(bridgeL1), 0, retCalldata, address(bridgeL2), L2_ROLLUP_ID
+        );
 
         {
             ExecutionEntry[] memory entries = new ExecutionEntry[](2);
             // Phase 2 entry: incoming call result
             entries[0].stateDeltas = new StateDelta[](0);
-            entries[0].actionHash = keccak256(abi.encode(fwdResult));
-            entries[0].nextAction = fwdResult;
-            // Phase 3 entry: outgoing bridge-back call
-            entries[1].stateDeltas = new StateDelta[](0);
-            entries[1].actionHash = keccak256(abi.encode(retCall));
-            entries[1].nextAction = retResult;
+            entries[0].actionHash = retActionHash;
+            // No calls (simple resolution), no rolling hash needed
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries);
+            managerL2.loadExecutionTable(entries, _noStaticCalls());
         }
 
         // ════════════════════════════════════════════
@@ -514,66 +562,56 @@ contract IntegrationTestBridge is IntegrationTestBase {
         //  Phase 4: L1 — Release tokens via executeL2TX
         // ════════════════════════════════════════════
         //
-        //  executeL2TX → L2TX matched → CALL{MAINNET, bridgeL1, retCalldata, bridgeL2, L2}
-        //    _processCallAtScope: proxy for (bridgeL2, L2) on L1
-        //    proxy.executeOnBehalf(bridgeL1, retCalldata) → bridgeL1.receiveTokens
-        //    onlyBridgeProxy(L2): expects proxy for (_bridgeAddress()=bridgeL2, L2) ✓
-        //    originalRollupId(MAINNET) == rollupId(MAINNET) → native → release tokens to alice
+        //  executeL2TX() consumes the next entry with actionHash == bytes32(0).
+        //  The entry's calls[] route receiveTokens to bridgeL1 via proxy(bridgeL2, L2).
+        //  bridgeL1.receiveTokens → onlyBridgeProxy(L2): proxy for (_bridgeAddress()=bridgeL2, L2) ✓
+        //  originalRollupId(MAINNET) == rollupId(MAINNET) → native → release tokens to alice
 
-        // Need new block for postBatch (StateAlreadyUpdatedThisBlock)
-        vm.roll(block.number + 1);
+        vm.roll(block.number + 1); // new block for postBatch
 
-        // Real signed L2 tx: Alice calls bridgeL2.bridgeTokens() on L2
-        bytes memory rlpData = RLPTxEncoder.signedCallTx(
-            address(bridgeL2),
-            abi.encodeWithSelector(Bridge.bridgeTokens.selector, wrappedAddr, 100e18, MAINNET_ROLLUP_ID, alice),
-            0, // alice's first L2 tx
-            TX_SIGNER_PK
-        );
+        bytes32 s2 = keccak256("l2-state-after-roundtrip-ret");
 
-        Action memory l2txAction = Action({
-            actionType: ActionType.L2TX,
-            rollupId: L2_ROLLUP_ID,
-            destination: address(0),
+        // The call inside the entry: proxy(bridgeL2, L2).executeOnBehalf(bridgeL1, retCalldata)
+        CrossChainCall[] memory retL1Calls = new CrossChainCall[](1);
+        retL1Calls[0] = CrossChainCall({
+            destination: address(bridgeL1),
             value: 0,
-            data: rlpData,
-            failed: false,
-            sourceAddress: address(0),
-            sourceRollup: MAINNET_ROLLUP_ID,
-            scope: new uint256[](0)
+            data: retCalldata,
+            sourceAddress: address(bridgeL2),
+            sourceRollup: L2_ROLLUP_ID,
+            revertSpan: 0
         });
 
-        bytes32 s2 = keccak256("l2-state-after-roundtrip-ret1");
-        bytes32 s3 = keccak256("l2-state-after-roundtrip-ret2");
+        // Compute rolling hash: receiveTokens returns void → success=true, retData=""
+        bool[] memory retSuccesses = new bool[](1);
+        retSuccesses[0] = true;
+        bytes[] memory retRetDatas = new bytes[](1);
+        retRetDatas[0] = "";
+        bytes32 retRollingHash = _computeRollingHash(retL1Calls, retSuccesses, retRetDatas);
 
         {
-            StateDelta[] memory deltas1 = new StateDelta[](1);
-            deltas1[0] = StateDelta({ rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0 });
+            StateDelta[] memory stateDeltas = new StateDelta[](1);
+            stateDeltas[0] = StateDelta({rollupId: L2_ROLLUP_ID, newState: s2, etherDelta: 0});
 
-            StateDelta[] memory deltas2 = new StateDelta[](1);
-            deltas2[0] = StateDelta({ rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0 });
+            ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+            entries[0].stateDeltas = stateDeltas;
+            entries[0].actionHash = bytes32(0); // immediate / L2TX
+            entries[0].calls = retL1Calls;
+            entries[0].nestedActions = new NestedAction[](0);
+            entries[0].callCount = 1;
+            entries[0].returnData = "";
+            entries[0].rollingHash = retRollingHash;
 
-            ExecutionEntry[] memory entries = new ExecutionEntry[](2);
-
-            // Entry 1: L2TX → CALL to bridgeL1.receiveTokens
-            entries[0].stateDeltas = deltas1;
-            entries[0].actionHash = keccak256(abi.encode(l2txAction));
-            entries[0].nextAction = retCall;
-
-            // Entry 2: RESULT → RESULT (terminal)
-            entries[1].stateDeltas = deltas2;
-            entries[1].actionHash = keccak256(abi.encode(retResult));
-            entries[1].nextAction = retResult;
-
-            rollups.postBatch(entries, 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
         }
 
-        rollups.executeL2TX(L2_ROLLUP_ID, rlpData);
+        // The immediate entry (actionHash==0) was already executed during postBatch.
+        // Tokens should be released to alice.
 
         // ── Final assertions ──
         assertEq(token.balanceOf(alice), 1000e18, "Roundtrip: alice should have all 1000e18 tokens back");
         assertEq(token.balanceOf(address(bridgeL1)), 0, "Roundtrip: bridgeL1 should have 0 locked tokens");
         assertEq(WrappedToken(wrappedAddr).balanceOf(alice), 0, "Roundtrip: alice wrapped balance should be 0");
-        assertEq(_getRollupState(L2_ROLLUP_ID), s3, "Roundtrip: L2 state should be S3");
+        assertEq(_getRollupState(L2_ROLLUP_ID), s2, "Roundtrip: L2 state should be S2");
     }
 }
