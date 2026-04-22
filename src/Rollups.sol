@@ -3,7 +3,16 @@ pragma solidity ^0.8.28;
 
 import {IZKVerifier} from "./IZKVerifier.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
-import {ICrossChainManager, StateDelta, CrossChainCall, NestedAction, StaticCall, ExecutionEntry, ProxyInfo} from "./ICrossChainManager.sol";
+import {
+    ICrossChainManager,
+    StateDelta,
+    CrossChainCall,
+    NestedAction,
+    StaticCall,
+    ExecutionEntry,
+    ProxyInfo
+} from "./ICrossChainManager.sol";
+import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol";
 
 /// @notice Rollup configuration
 struct RollupConfig {
@@ -16,8 +25,22 @@ struct RollupConfig {
 /// @title Rollups
 /// @notice L1 contract managing rollup state roots, ZK-proven batch posting, and cross-chain call execution
 /// @dev Execution entries are posted via `postBatch()` with a ZK proof. Immediate entries (actionHash == 0)
-///      update state on the spot. Deferred entries are stored in a flat execution table and consumed
-///      sequentially. Each entry contains pre-computed calls and a rolling hash for verification.
+///      update state on the spot. Deferred entries live either in a transient-backed table
+///      (`_transientExecutions`, first `transientCount` entries of a batch — consumed within the
+///      same transaction via the IMetaCrossChainReceiver hook) or in the persistent `executions`
+///      table. Consumers always consult the transient table first.
+///      Each entry contains pre-computed calls and a rolling hash for verification.
+///
+/// TODO(callers): `postBatch` now takes TWO transient-count parameters between `_staticCalls`
+///                and `blobCount`: `transientCount` (entries) and `transientStaticCallCount`
+///                (static calls). Update tests/scripts/README/visualizator/E2E helpers to the
+///                new 7-arg signature. There is no longer a legacy path: to get immediate
+///                execution of entries[0] (actionHash == 0), `transientCount` must be >= 1.
+///                Callers that want purely-deferred batches pass 0 and entries[0] will land
+///                in `executions` for a later executeL2TX().
+/// TODO(docs):    Update CLAUDE.md `postBatch` description to document the two transient
+///                counts, the IMetaCrossChainReceiver hook, and the "immediate entry covers
+///                pure L2 transactions + L2 transactions that touch L1" framing.
 contract Rollups is ICrossChainManager {
     /// @notice The rollup ID representing L1 mainnet
     uint256 public constant MAINNET_ROLLUP_ID = 0;
@@ -51,6 +74,28 @@ contract Rollups is ICrossChainManager {
     uint8 internal constant CALL_END = 2;
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
+
+    // ── Transient-backed execution entries & static calls ──
+    //
+    // First N entries / M static calls of a batch live here instead of the persistent
+    // `executions` / `staticCalls` arrays to save storage gas. Semantically transient
+    // (populated and cleared within a single postBatch call) but declared as regular
+    // storage since Solidity 0.8.34 does not yet support `transient` data location for
+    // reference types with nested dynamic arrays. Both are cleared at the end of every
+    // postBatch, regardless of success.
+    // TODO: promote to real `transient` once Solidity supports transient reference types
+    //       with nested dynamic arrays — until then, we rely on manual `delete` at the
+    //       end of every postBatch plus SSTORE refunds from zeroing the slots.
+    ExecutionEntry[] public _transientExecutions;
+    StaticCall[] public _transientStaticCalls;
+
+    /// @notice Cursor into `_transientExecutions` for the next entry to consume.
+    /// @dev Only meaningful while `_transientExecutions.length != 0`. The table's length
+    ///      itself is what flags "inside a transient batch" for `_currentEntryStorage()`
+    ///      and `_consumeAndExecute`; this variable just tracks progress. Transient so it
+    ///      resets between transactions automatically, and explicitly reset at the end
+    ///      of every postBatch.
+    uint256 transient _transientExecutionIndex;
 
     // ── Transient execution state (4 variables) ──
 
@@ -159,6 +204,12 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when executeL2TX is called while already inside a cross-chain execution
     error L2TXNotAllowedDuringExecution();
 
+    /// @notice Error when `transientCount` passed to postBatch exceeds the number of entries
+    error TransientCountExceedsEntries();
+
+    /// @notice Error when `transientStaticCallCount` exceeds the number of static calls
+    error TransientStaticCallCountExceedsStaticCalls();
+
     /// @param _zkVerifier The ZK verifier contract address
     /// @param startingRollupId The starting ID for rollup numbering
     constructor(address _zkVerifier, uint256 startingRollupId) {
@@ -205,22 +256,54 @@ contract Rollups is ICrossChainManager {
     // ──────────────────────────────────────────────
 
     /// @notice Posts a batch of execution entries with a single ZK proof
-    /// @dev Only the first entry may have actionHash == bytes32(0) (immediate state commitment + optional calls).
-    ///      All remaining entries must have actionHash != bytes32(0) and are stored for deferred consumption.
-    /// @param entries The execution entries to process
+    /// @dev Flow:
+    ///      1. Proof is verified against hashes of all entries.
+    ///      2. The first `transientCount` entries are loaded into `_transientExecutions`
+    ///         (semantically transient — cleared before the call returns).
+    ///      3. If entries[0].actionHash == 0, that entry is the batch's immediate
+    ///         execution (pure L2 transactions + L2 transactions that touch L1) and is
+    ///         applied on the spot from the transient table so the cursor advances past it.
+    ///      4. If msg.sender has code, its IMetaCrossChainReceiver hook is invoked so it
+    ///         can drive the rest of the transient-backed entries via cross-chain proxy
+    ///         calls within the same transaction.
+    ///      5. If the hook drained every transient entry, the remainder
+    ///         (index >= transientCount) is pushed to persistent `executions` for
+    ///         deferred consumption via executeL2TX / proxy calls later in the same block.
+    ///         If it did not, the remainder is discarded — the ZK proof blessed the batch
+    ///         as an ordered group, and partial transient consumption means we can't
+    ///         soundly promise the rest.
+    ///      `transientCount == 0` is allowed but skips immediate execution: all entries
+    ///      (including entries[0] with actionHash == 0) are deferred to persistent
+    ///      `executions` after the hook returns, to be consumed later via executeL2TX()
+    ///      or proxy calls. The hook is still fired unconditionally when msg.sender has code.
+    /// @param entries The execution entries to process, expected to be consumed sequentially
     /// @param _staticCalls The static call results to store
+    /// @param transientCount Number of leading entries routed through `_transientExecutions`;
+    ///                       the rest are deferred to persistent storage only if transient is
+    ///                       fully consumed by the immediate entry and the meta hook
+    /// @param transientStaticCallCount Number of leading static calls routed through
+    ///                       `_transientStaticCalls`; the rest are deferred to persistent
+    ///                       `staticCalls` under the same "transient executions drained" gate
     /// @param blobCount Number of blobs containing shared data
     /// @param callData Shared data passed via calldata
     /// @param proof The ZK proof covering all entries
     function postBatch(
         ExecutionEntry[] calldata entries,
         StaticCall[] calldata _staticCalls,
+        uint256 transientCount,
+        uint256 transientStaticCallCount,
         uint256 blobCount,
         bytes calldata callData,
         bytes calldata proof
     ) external {
         if (lastStateUpdateBlock == block.number) {
             revert StateAlreadyUpdatedThisBlock();
+        }
+        if (transientCount > entries.length) {
+            revert TransientCountExceedsEntries();
+        }
+        if (transientStaticCallCount > _staticCalls.length) {
+            revert TransientStaticCallCountExceedsStaticCalls();
         }
 
         // --- Build public inputs ---
@@ -243,29 +326,73 @@ contract Rollups is ICrossChainManager {
 
         _verifyProof(proof, publicInputsHash);
 
-        // Delete previous execution table and reset index
+        // Mark this block as state-updated BEFORE any external calls (the immediate
+        // entry's `_processNCalls` and the meta hook). Two reasons:
+        //   1. `executeCrossChainCall` / `executeL2TX` guard on
+        //      `lastStateUpdateBlock == block.number`. Without this early write the
+        //      meta hook couldn't call either — it would revert ExecutionNotInCurrentBlock.
+        //   2. Doubles as re-entrancy protection against a nested `postBatch`: the
+        //      outer guard (`lastStateUpdateBlock == block.number` reverts
+        //      `StateAlreadyUpdatedThisBlock`) now triggers on any recursive entry,
+        //      keeping `executions` / `staticCalls` / `_transientExecutions` from
+        //      being wiped mid-flight by an untrusted hook.
+        lastStateUpdateBlock = block.number;
+
+        // Reset persistent tables. `_transientExecutions` is only cleared at the end
+        // of this call — every path below reaches that cleanup, so doing it here too
+        // would just be redundant SSTOREs.
         delete executions;
         delete staticCalls;
         executionIndex = 0;
 
-        // --- Process entries ---
-        // Push all entries first so _processNCalls can read entry.calls[] from storage
-        for (uint256 i = 0; i < entries.length; i++) {
-            executions.push(entries[i]);
+        // Load transient-backed tables. Static calls don't have a consumption cursor
+        // (they're content-addressed by actionHash + callNumber + lastNestedActionConsumed),
+        // so the transient-first split is purely about where `staticCallLookup` reads from.
+        for (uint256 i = 0; i < transientStaticCallCount; i++) {
+            _transientStaticCalls.push(_staticCalls[i]);
         }
-        for (uint256 i = 0; i < _staticCalls.length; i++) {
-            staticCalls.push(_staticCalls[i]);
+        for (uint256 i = 0; i < transientCount; i++) {
+            _transientExecutions.push(entries[i]);
         }
 
-        // If the first entry has actionHash == 0, apply it immediately
-        if (entries.length > 0 && entries[0].actionHash == bytes32(0)) {
+        // Immediate entry (pure L2 transactions + L2 transactions that touch L1) runs
+        // from the transient table so the cursor advances past it before the hook fires.
+        // Requires `transientCount >= 1` — callers that want an immediate entry must put
+        // at least entries[0] in the transient region. `_currentEntryStorage()` routes
+        // into `_transientExecutions` because its length is non-zero.
+        if (transientCount > 0 && entries[0].actionHash == bytes32(0)) {
             _currentEntryIndex = 0;
             _applyAndExecute(entries[0].stateDeltas, entries[0].callCount, entries[0].rollingHash, 0);
-            executionIndex = 1;
+            _transientExecutionIndex = 1;
         }
 
+        // Give the caller (if it is a contract) a chance to drive the rest of the
+        // transient table via cross-chain proxy calls in this same transaction.
+        if (msg.sender.code.length > 0) {
+            IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions();
+        }
+
+        // Only publish the deferred remainder if the hook honored the proven ordering
+        // and drained the transient execution table. Partial consumption means we're in
+        // an unknown state wrt the batch ordering — drop the residual entries AND their
+        // associated static calls instead of committing them as if the prefix had
+        // executed cleanly.
+        if (_transientExecutionIndex == _transientExecutions.length) {
+            for (uint256 i = transientCount; i < entries.length; i++) {
+                executions.push(entries[i]);
+            }
+            for (uint256 i = transientStaticCallCount; i < _staticCalls.length; i++) {
+                staticCalls.push(_staticCalls[i]);
+            }
+        }
+
+        // Clear the semantically-transient tables so their slots go back to zero
+        // (SSTORE refund) and nothing leaks into the next transaction.
+        delete _transientExecutions;
+        delete _transientStaticCalls;
+        _transientExecutionIndex = 0;
+
         emit BatchPosted(entries, publicInputsHash);
-        lastStateUpdateBlock = block.number;
     }
 
     /// @notice Computes entry hashes for the public inputs, including verification keys and previous state roots
@@ -359,9 +486,22 @@ contract Rollups is ICrossChainManager {
     //  Internal execution
     // ──────────────────────────────────────────────
 
+    /// @notice Resolves the entry currently being processed.
+    /// @dev `_transientExecutions.length != 0` is the single discriminator: a non-empty
+    ///      transient table means we're inside a transient batch and `_currentEntryIndex`
+    ///      indexes `_transientExecutions`; empty means it indexes persistent `executions`.
+    ///      Both arrays are regular storage, so the pointer type is the same.
+    function _currentEntryStorage() internal view returns (ExecutionEntry storage entry) {
+        if (_transientExecutions.length != 0) {
+            entry = _transientExecutions[_currentEntryIndex];
+        } else {
+            entry = executions[_currentEntryIndex];
+        }
+    }
+
     /// @notice Consumes the next nested action from the current entry
     function _consumeNestedAction(bytes32 actionHash) internal returns (bytes memory) {
-        ExecutionEntry storage entry = executions[_currentEntryIndex];
+        ExecutionEntry storage entry = _currentEntryStorage();
         uint256 idx = _lastNestedActionConsumed++;
         if (idx >= entry.nestedActions.length) revert NoNestedActionAvailable();
 
@@ -378,14 +518,34 @@ contract Rollups is ICrossChainManager {
     }
 
     /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies rolling hash
+    /// @dev Consults the transient table first ("always look for transient calls before storage calls").
+    ///      While a postBatch call is running, `_transientExecutions` is non-empty and ALL consumption
+    ///      is routed through it — the entries are NOT popped, only `_transientExecutionIndex` advances.
+    ///      Running past the end inside a transient batch is treated as a hard `ExecutionNotFound`
+    ///      (not a fall-through): the ZK proof sized the batch, and the hook trying to consume more
+    ///      than that is a protocol bug. Outside a transient batch (`_transientExecutions.length == 0`),
+    ///      consumption goes straight to persistent `executions`.
     /// @param actionHash The expected action input hash for the next entry
     /// @param etherIn The ETH value received (msg.value) for ether accounting
     /// @return result The pre-computed return data from the action
     function _consumeAndExecute(bytes32 actionHash, int256 etherIn) internal returns (bytes memory result) {
-        uint256 idx = executionIndex++;
-        if (idx >= executions.length) revert ExecutionNotFound();
+        uint256 idx;
+        ExecutionEntry storage entry;
 
-        ExecutionEntry storage entry = executions[idx];
+        // Inside a transient batch, all consumption comes from `_transientExecutions`.
+        // Running past the end is a protocol bug (the batch is shorter than the hook
+        // tried to consume), not a fall-through to persistent `executions` — those
+        // haven't been written yet.
+        if (_transientExecutions.length != 0) {
+            idx = _transientExecutionIndex++;
+            if (idx >= _transientExecutions.length) revert ExecutionNotFound();
+            entry = _transientExecutions[idx];
+        } else {
+            idx = executionIndex++;
+            if (idx >= executions.length) revert ExecutionNotFound();
+            entry = executions[idx];
+        }
+
         if (entry.actionHash != actionHash) revert ExecutionNotFound();
 
         emit ExecutionConsumed(actionHash, idx);
@@ -418,7 +578,7 @@ contract Rollups is ICrossChainManager {
         int256 etherOut = _processNCalls(callCount);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
-        ExecutionEntry storage entry = executions[_currentEntryIndex];
+        ExecutionEntry storage entry = _currentEntryStorage();
         if (_rollingHash != rollingHash) revert RollingHashMismatch();
         if (_currentCallNumber != entry.calls.length) revert UnconsumedCalls();
         if (_lastNestedActionConsumed != entry.nestedActions.length) revert UnconsumedNestedActions();
@@ -432,7 +592,7 @@ contract Rollups is ICrossChainManager {
     /// @param count Number of iterations to process
     /// @return etherOut Total ETH sent in successful (non-reverted) calls
     function _processNCalls(uint256 count) internal returns (int256 etherOut) {
-        ExecutionEntry storage entry = executions[_currentEntryIndex];
+        ExecutionEntry storage entry = _currentEntryStorage();
         uint256 processed = 0;
         while (processed < count) {
             uint256 revertSpan = entry.calls[_currentCallNumber].revertSpan;
@@ -591,7 +751,10 @@ contract Rollups is ICrossChainManager {
 
     /// @notice Looks up a pre-computed static call result from the staticCalls table
     /// @dev Matches by actionHash + current call number + last nested action consumed.
-    ///      tload works in static context, so transient tracking variables are readable.
+    ///      Consults `_transientStaticCalls` first (populated only while a postBatch is
+    ///      executing its transient prefix) and falls through to the persistent
+    ///      `staticCalls` array. tload works in static context, so the transient tracking
+    ///      variables used to compute the match keys are readable.
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
@@ -611,24 +774,39 @@ contract Rollups is ICrossChainManager {
         uint64 callNum = uint64(_currentCallNumber);
         uint64 lastNA = uint64(_lastNestedActionConsumed);
 
+        // Transient-first, then persistent. Each hit is terminal (returns or reverts
+        // from within `_resolveStaticCall`).
+        for (uint256 i = 0; i < _transientStaticCalls.length; i++) {
+            StaticCall storage sc = _transientStaticCalls[i];
+            if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
+                return _resolveStaticCall(sc);
+            }
+        }
         for (uint256 i = 0; i < staticCalls.length; i++) {
             StaticCall storage sc = staticCalls[i];
             if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
-                if (sc.calls.length > 0) {
-                    bytes32 computedHash = _processNStaticCalls(sc.calls);
-                    if (computedHash != sc.rollingHash) revert RollingHashMismatch();
-                }
-                if (sc.failed) {
-                    bytes memory returnData = sc.returnData;
-                    assembly {
-                        revert(add(returnData, 0x20), mload(returnData))
-                    }
-                }
-                return sc.returnData;
+                return _resolveStaticCall(sc);
             }
         }
 
         revert ExecutionNotFound();
+    }
+
+    /// @notice Verifies and unpacks a matched static call entry — replaying the static
+    ///         call subcalls (if any), checking the rolling hash, and either returning
+    ///         the cached return data or bubbling up the cached revert.
+    function _resolveStaticCall(StaticCall storage sc) internal view returns (bytes memory) {
+        if (sc.calls.length > 0) {
+            bytes32 computedHash = _processNStaticCalls(sc.calls);
+            if (computedHash != sc.rollingHash) revert RollingHashMismatch();
+        }
+        if (sc.failed) {
+            bytes memory returnData = sc.returnData;
+            assembly {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return sc.returnData;
     }
 
     /// @notice Executes calls in static context and computes a rolling hash of results
