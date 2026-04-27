@@ -114,7 +114,8 @@ contract RollupsTest is Test {
 
     function _postBatch(ExecutionEntry[] memory entries) internal {
         StaticCall[] memory noStatic = new StaticCall[](0);
-        rollups.postBatch(entries, noStatic, 0, "", "proof");
+        uint256 tc = (entries.length > 0 && entries[0].actionHash == bytes32(0)) ? 1 : 0;
+        rollups.postBatch(entries, noStatic, tc, 0, 0, "", "proof");
     }
 
     // ══════════════════════════════════════════════
@@ -190,7 +191,7 @@ contract RollupsTest is Test {
         verifier.setVerifyResult(false);
         StaticCall[] memory noStatic = new StaticCall[](0);
         vm.expectRevert(Rollups.InvalidProof.selector);
-        rollups.postBatch(entries, noStatic, 0, "", "bad proof");
+        rollups.postBatch(entries, noStatic, 1, 0, 0, "", "bad proof");
     }
 
     function test_PostBatch_AfterBatchSameBlockReverts() public {
@@ -204,7 +205,7 @@ contract RollupsTest is Test {
         entries2[0] = _immediateEntry(rollupId, keccak256("another state"));
         StaticCall[] memory noStatic = new StaticCall[](0);
         vm.expectRevert(Rollups.StateAlreadyUpdatedThisBlock.selector);
-        rollups.postBatch(entries2, noStatic, 0, "", "proof");
+        rollups.postBatch(entries2, noStatic, 1, 0, 0, "", "proof");
         assertEq(_getRollupState(rollupId), newState);
     }
 
@@ -242,7 +243,7 @@ contract RollupsTest is Test {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(rollupId, keccak256("blobState"));
         StaticCall[] memory noStatic = new StaticCall[](0);
-        rollups.postBatch(entries, noStatic, 2, "", "proof");
+        rollups.postBatch(entries, noStatic, 1, 0, 2, "", "proof");
         assertEq(_getRollupState(rollupId), keccak256("blobState"));
     }
 

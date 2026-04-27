@@ -204,7 +204,7 @@ contract IntegrationTestFlashLoan is Test {
             entries[0].actionHash = phase1L1ActionHash;
             // No calls, returnData = "", rollingHash = 0
 
-            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // Bridge tokens from test contract
@@ -446,7 +446,7 @@ contract IntegrationTestFlashLoan is Test {
             l1Entries[1].returnData = "";
             l1Entries[1].rollingHash = l1Entry1RollingHash;
 
-            rollups.postBatch(l1Entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(l1Entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // ── Pre-flash-loan state ──

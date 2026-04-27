@@ -163,7 +163,7 @@ contract FlashLoanBatcher {
         StaticCall[] calldata staticCalls,
         FlashLoanBridgeExecutor executor
     ) external {
-        rollups.postBatch(entries, staticCalls, 0, "", "proof");
+        rollups.postBatch(entries, staticCalls, 0, 0, 0, "", "proof");
         executor.execute();
     }
 }

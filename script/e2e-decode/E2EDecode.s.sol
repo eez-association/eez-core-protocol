@@ -28,7 +28,7 @@ contract Batcher {
         StaticCall[] calldata staticCalls,
         CounterAndProxy cap
     ) external {
-        rollups.postBatch(entries, staticCalls, 0, "", "proof");
+        rollups.postBatch(entries, staticCalls, 0, 0, 0, "", "proof");
         cap.incrementProxy();
     }
 }

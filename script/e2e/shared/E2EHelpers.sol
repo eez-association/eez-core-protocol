@@ -77,7 +77,8 @@ library RollingHashBuilder {
 
 contract L2TXBatcher {
     function execute(Rollups rollups, ExecutionEntry[] calldata entries, StaticCall[] calldata staticCalls) external {
-        rollups.postBatch(entries, staticCalls, 0, "", "proof");
+        uint256 tc = (entries.length > 0 && entries[0].actionHash == bytes32(0)) ? 1 : 0;
+        rollups.postBatch(entries, staticCalls, tc, 0, 0, "", "proof");
         rollups.executeL2TX();
     }
 }

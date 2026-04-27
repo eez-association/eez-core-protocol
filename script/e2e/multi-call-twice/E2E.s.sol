@@ -123,7 +123,7 @@ contract Batcher {
         CallTwice caller,
         address counterProxy
     ) external returns (uint256 first, uint256 second) {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         (first, second) = caller.callCounterTwice(counterProxy);
     }
 }

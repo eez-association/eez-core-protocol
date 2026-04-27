@@ -31,7 +31,7 @@ contract BridgeBatcher {
         uint256 rollupId,
         address destination
     ) external payable {
-        rollups.postBatch(entries, staticCalls, 0, "", "proof");
+        rollups.postBatch(entries, staticCalls, 0, 0, 0, "", "proof");
         bridge.bridgeEther{value: msg.value}(rollupId, destination);
     }
 }

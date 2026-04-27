@@ -226,7 +226,7 @@ contract Scenario1_L1 is Script {
                 rollingHash: bytes32(0)
             });
 
-            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // Alice (= deployer) calls A.incrementProxy()

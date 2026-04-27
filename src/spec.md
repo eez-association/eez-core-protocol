@@ -12,6 +12,7 @@ The system consists of four core contracts that enable cross-chain execution bet
 | **CrossChainManagerL2** | L2 | Manages cross-chain execution via system-loaded execution tables. No ZK proofs or state deltas |
 | **CrossChainProxy** | Both | Deterministic proxy deployed per (address, rollupId) pair. Routes calls to the manager and forwards outbound calls to destinations |
 | **IZKVerifier** | L1 | Interface for external ZK proof verification. A single method: `verify(proof, publicInputsHash) -> bool` |
+| **IMetaCrossChainReceiver** | L1 | Callback interface (`src/interfaces/`). `postBatch` invokes `executeMetaCrossChainTransactions()` on `msg.sender` (when it has code) after the immediate entry, so the caller can consume transient entries via proxy calls |
 
 ### Shared Interface
 
@@ -183,17 +184,26 @@ Entries are consumed in order via `executionIndex`. Within an entry, nested acti
 function postBatch(
     ExecutionEntry[] calldata entries,
     StaticCall[] calldata _staticCalls,
+    uint256 transientCount,
+    uint256 transientStaticCallCount,
     uint256 blobCount,
     bytes calldata callData,
     bytes calldata proof
 ) external
 ```
 
-Posts a batch of execution entries with a single ZK proof. Only one `postBatch` per block (`lastStateUpdateBlock` check).
+Posts a batch of execution entries with a single ZK proof. Only one `postBatch` per block (`lastStateUpdateBlock` check). `lastStateUpdateBlock = block.number` is written immediately after proof verification — before any external calls — to (1) enable `executeCrossChainCall`/`executeL2TX` during the meta hook, and (2) block re-entrant `postBatch` from an untrusted hook.
 
-- ALL entries are pushed to `executions[]` storage first (so `_processNCalls` can read `entry.calls[]` from storage). Static calls are pushed to `staticCalls[]`.
-- If the first entry has `actionHash == bytes32(0)` (immediate state commitment with optional calls), it is executed during `postBatch` itself via `_applyAndExecute`, and `executionIndex` is set to 1 to skip it for deferred consumption.
-- Previous execution table and static calls are deleted at the start.
+The first `transientCount` entries are pushed to `_transientExecutions` (regular storage cleared at end of call). The first `transientStaticCallCount` static calls go to `_transientStaticCalls`. The flow:
+
+1. Previous persistent `executions` and `staticCalls` are deleted.
+2. Transient tables are populated from the leading entries/static calls.
+3. **Immediate entry**: if `transientCount >= 1` and `entries[0].actionHash == bytes32(0)`, entry 0 is executed immediately (state deltas applied, calls processed via `_applyAndExecute`). The transient cursor (`_transientExecutionIndex`) advances to 1.
+4. **Meta hook**: if `msg.sender` has code, `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` is called. The hook can consume remaining transient entries via cross-chain proxy calls within the same transaction.
+5. **Deferred remainder**: if the hook fully drained the transient table (`_transientExecutionIndex == _transientExecutions.length`), `entries[transientCount..]` and `_staticCalls[transientStaticCallCount..]` are pushed to persistent `executions`/`staticCalls`. Otherwise the remainder is dropped (partial consumption = unknown batch state).
+6. Transient tables are deleted (SSTORE-to-zero refund). `_transientExecutionIndex` (a `transient` value-type) is also explicitly reset.
+
+When `transientCount == 0`, no immediate execution occurs, no transient tables are populated, and all entries go directly to persistent storage (assuming the empty-transient drain check passes trivially).
 
 ### executeCrossChainCall (L1 and L2)
 
@@ -236,23 +246,39 @@ L2 equivalent of `postBatch`, without ZK proofs or state deltas. The system addr
 
 ### Transient Variables
 
-Four transient variables manage execution context within a single transaction. They are automatically cleared at transaction end.
+Five transient variables manage execution context within a single transaction. They are automatically cleared at transaction end.
 
 | Variable | Type | Purpose |
 |---|---|---|
-| `_currentEntryIndex` | uint256 | Index of the currently executing entry in `executions[]` |
+| `_currentEntryIndex` | uint256 | Index of the currently executing entry in the active table (`_transientExecutions` if non-empty, otherwise `executions`) |
 | `_rollingHash` | bytes32 | Accumulates tagged call/nesting events across the entire entry |
 | `_currentCallNumber` | uint256 | 1-indexed global call counter and cursor into `entry.calls[]`. Also serves as `_insideExecution` check: `_currentCallNumber != 0` means inside execution |
 | `_lastNestedActionConsumed` | uint256 | Sequential nested action consumption counter. Also used by `staticCallLookup` to disambiguate phases within the same call |
+| `_transientExecutionIndex` | uint256 | Tracks how many transient entries have been consumed. Not advanced on consumption — set explicitly by `postBatch` (immediate entry) and `_consumeAndExecute` (hook-driven entries). Used to gate whether deferred entries are published |
 
 The `_insideExecution()` internal view function returns `_currentCallNumber != 0`.
 
+### Transient-Backed Storage
+
+Two regular storage arrays act as semantically transient tables — populated at the start of `postBatch` and deleted at the end:
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `_transientExecutions` | ExecutionEntry[] | Leading `transientCount` entries, consumed during the immediate entry and meta hook |
+| `_transientStaticCalls` | StaticCall[] | Leading `transientStaticCallCount` static calls, scanned before persistent `staticCalls` in `staticCallLookup` |
+
+These use regular storage (not Solidity `transient` data location) because `transient` does not yet support reference types with nested dynamic arrays. The SSTORE-to-zero refund on the trailing `delete` recovers most of the gas cost.
+
+The discriminator `_transientExecutions.length != 0` routes all entry consumption (`_currentEntryStorage()`, `_consumeAndExecute`) to the transient table. Running off the end of the transient table during execution reverts with `ExecutionNotFound` — there is no silent fall-through to persistent storage.
+
 ### Execution Table Lifecycle
 
-1. **Load**: `postBatch` (L1) or `loadExecutionTable` (L2) clears previous data and stores new entries + static calls.
-2. **Consume**: Entries are consumed sequentially via `executionIndex`. Each `executeCrossChainCall` or `executeL2TX` increments the index.
-3. **Block constraint**: All entries must be consumed in the same block they were loaded. Enforced by `lastStateUpdateBlock` (L1) or `lastLoadBlock` (L2).
-4. **Nested actions**: Within an entry, nested actions are consumed sequentially. After execution completes, the contract verifies `_lastNestedActionConsumed == entry.nestedActions.length` (all consumed) and `_currentCallNumber == entry.calls.length` (all calls consumed).
+1. **Load**: `postBatch` (L1) or `loadExecutionTable` (L2) clears previous persistent data. On L1, the first `transientCount` entries go to `_transientExecutions` and the first `transientStaticCallCount` static calls go to `_transientStaticCalls`.
+2. **Immediate + hook consumption (L1 transient path)**: The immediate entry (if any) and the `IMetaCrossChainReceiver` hook consume transient entries in-order. The transient cursor `_transientExecutionIndex` tracks progress. If the hook fully drains the transient table, the deferred remainder is published to persistent storage.
+3. **Deferred consumption**: Entries in persistent `executions` are consumed sequentially via `executionIndex`. Each `executeCrossChainCall` or `executeL2TX` increments the index.
+4. **Block constraint**: All entries must be consumed in the same block they were loaded. Enforced by `lastStateUpdateBlock` (L1) or `lastLoadBlock` (L2).
+5. **Nested actions**: Within an entry, nested actions are consumed sequentially. After execution completes, the contract verifies `_lastNestedActionConsumed == entry.nestedActions.length` (all consumed) and `_currentCallNumber == entry.calls.length` (all calls consumed).
+6. **Cleanup (L1)**: `_transientExecutions`, `_transientStaticCalls`, and `_transientExecutionIndex` are cleared at the end of `postBatch`.
 
 ---
 

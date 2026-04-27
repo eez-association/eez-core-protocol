@@ -366,9 +366,11 @@ contract Rollups is ICrossChainManager {
             _transientExecutionIndex = 1;
         }
 
-        // Give the caller (if it is a contract) a chance to drive the rest of the
-        // transient table via cross-chain proxy calls in this same transaction.
-        if (msg.sender.code.length > 0) {
+        // Give the caller (if it is a contract) a chance to drive the remaining
+        // transient entries via cross-chain proxy calls in this same transaction.
+        // Only invoke when unconsumed transient entries remain — if the immediate
+        // entry drained the table (or transientCount == 0), there is nothing to drive.
+        if (_transientExecutionIndex < _transientExecutions.length && msg.sender.code.length > 0) {
             IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions();
         }
 

@@ -123,7 +123,7 @@ contract Batcher {
         StaticCall[] calldata statics,
         BridgeSender sender
     ) external payable {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         sender.bridge{value: msg.value}();
     }
 }

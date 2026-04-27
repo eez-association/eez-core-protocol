@@ -108,7 +108,7 @@ For nested actions (wrap inner calls):
 ## API Reference
 
 ```solidity
-postBatch(ExecutionEntry[] entries, StaticCall[] staticCalls, uint256 blobCount, bytes callData, bytes proof)
+postBatch(ExecutionEntry[] entries, StaticCall[] staticCalls, uint256 transientCount, uint256 transientStaticCallCount, uint256 blobCount, bytes callData, bytes proof)
 loadExecutionTable(ExecutionEntry[] entries, StaticCall[] staticCalls)
 executeL2TX()  // no arguments, consumes next entry with actionHash == 0
 ```

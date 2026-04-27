@@ -130,7 +130,7 @@ contract Batcher {
         address pA,
         address pB
     ) external returns (uint256 a, uint256 b) {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         (a, b) = caller.callBothCounters(pA, pB);
     }
 }

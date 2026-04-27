@@ -83,7 +83,7 @@ contract Batcher {
     function execute(Rollups rollups, ExecutionEntry[] calldata entries, StaticCall[] calldata statics, CounterAndProxy cap)
         external
     {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         cap.incrementProxy();
     }
 }

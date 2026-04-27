@@ -185,7 +185,7 @@ contract IntegrationTest is Test {
                 rollingHash: bytes32(0)
             });
 
-            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // Alice triggers the resolution
@@ -320,7 +320,7 @@ contract IntegrationTest is Test {
                 rollingHash: bytes32(0)
             });
 
-            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // ════════════════════════════════════════════
@@ -498,7 +498,7 @@ contract IntegrationTest is Test {
                 rollingHash: rollingHash
             });
 
-            rollups.postBatch(entries, _noStaticCalls(), 0, "", "proof");
+            rollups.postBatch(entries, _noStaticCalls(), 0, 0, 0, "", "proof");
         }
 
         // ════════════════════════════════════════════

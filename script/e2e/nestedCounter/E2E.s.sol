@@ -161,7 +161,7 @@ contract Batcher {
         StaticCall[] calldata statics,
         address capL2Proxy
     ) external {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         (bool ok,) = capL2Proxy.call(abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector));
         require(ok, "outer call failed");
     }

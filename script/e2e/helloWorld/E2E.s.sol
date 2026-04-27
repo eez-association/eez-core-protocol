@@ -105,7 +105,7 @@ contract Batcher {
         external
         returns (string memory greeting)
     {
-        rollups.postBatch(entries, statics, 0, "", "proof");
+        rollups.postBatch(entries, statics, 0, 0, 0, "", "proof");
         greeting = h1.helloL2World();
     }
 }
