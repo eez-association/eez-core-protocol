@@ -83,15 +83,15 @@ abstract contract DeepNestedActions {
 
     function _expectedRollingHash() internal pure returns (bytes32 h) {
         h = bytes32(0);
-        h = h.appendCallBegin(1);       // calls[0] -> NestedCaller.callNested()
-        h = h.appendNestedBegin(1);      // NestedCaller -> capProxy -> nestedActions[0]
-        // nestedActions[0].callCount=1 -> _processNCalls(1) inside nested
-        h = h.appendCallBegin(2);        // nested's calls[0] -> CAP -> counterProxy
-        h = h.appendNestedBegin(2);      // CAP -> counterProxy -> nestedActions[1]
+        h = h.appendCallBegin(1);        // calls[0] -> NestedCaller.callNested()  (_ccn=1)
+        h = h.appendNestedBegin(1);       // NestedCaller -> capProxy -> nestedActions[0]
+        h = h.appendCallBegin(2);         // calls[1] inside nested (_ccn=2)
+        h = h.appendNestedBegin(2);       // CAP -> counterProxy -> nestedActions[1]
         h = h.appendNestedEnd(2);
-        h = h.appendCallEnd(2, true, ""); // CAP.incrementProxy() returns void
+        h = h.appendCallEnd(2, true, ""); // calls[1] ends (_ccn=2)
         h = h.appendNestedEnd(1);
-        h = h.appendCallEnd(1, true, ""); // NestedCaller.callNested() returns void
+        // _currentCallNumber is now 2 (advanced by nested), so outer CALL_END uses 2
+        h = h.appendCallEnd(2, true, ""); // calls[0] ends (_ccn still 2)
     }
 
     function _l1Entries(
