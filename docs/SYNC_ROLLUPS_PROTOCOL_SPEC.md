@@ -3,7 +3,7 @@
 **Source**: `src/`
 **Purpose**: Formal reference for implementing the Rust rollup node. Supersedes informal comments in source code.
 
-This document covers the **flat sequential execution model**: the protocol no longer uses `ActionType` enums, `scope` arrays, recursive `newScope()` navigation, or `REVERT` / `REVERT_CONTINUE` action types. Every cross-chain entry is a flat list of `CrossChainCall`s processed sequentially, with reentrant calls resolved via a parallel `NestedAction[]` table and integrity verified by a single `rollingHash` per entry.
+This document covers the **flat sequential execution model**. Every cross-chain entry is a flat list of `CrossChainCall`s processed sequentially, with reentrant calls resolved via a parallel `NestedAction[]` table and integrity verified by a single `rollingHash` per entry.
 
 ---
 
@@ -40,11 +40,11 @@ struct Action {
 }
 ```
 
-There is no `ActionType` enum. There is no `scope` field. There is no `failed` field. Field declaration order matches the `abi.encode` preimage — do not reorder.
+The struct carries only the six fields above. Field declaration order matches the `abi.encode` preimage — do not reorder.
 
 #### StateDelta
 
-Describes one rollup's state transition caused by executing one entry. The previous state root (`currentState`) is **not** stored on-chain — the proof binds to the live `rollups[id].stateRoot` via the entry-hash construction in `_computeEntryHashes`.
+Describes one rollup's state transition caused by executing one entry. The previous state root is **not** stored in the delta — the proof binds to the live `rollups[id].stateRoot` via the entry-hash construction in `_computeEntryHashes`.
 
 ```solidity
 struct StateDelta {
@@ -377,7 +377,7 @@ address      = address(uint160(uint256(keccak256(abi.encodePacked(
                )))))
 ```
 
-The previous protocol's `domain` / `block.chainid` parameter is gone — the salt is exactly `(originalRollupId, originalAddress)`.
+The salt is exactly `(originalRollupId, originalAddress)` — no `domain` or `block.chainid` term is mixed in, so the same `(originalAddress, originalRollupId)` pair derives the same proxy address regardless of which manager / chain computes it.
 
 #### Owner functions
 
@@ -558,9 +558,9 @@ Same as L1, with two differences:
 
 L2's `_consumeAndExecute` reads from `executions` only — there is no transient table.
 
-#### `executeIncomingCrossChainCall` is gone
+#### Top-level call delivery on L2
 
-The previous protocol's `executeIncomingCrossChainCall` (system-only delivery of a CALL with explicit `scope`) does not exist in the flat model. Top-level calls on L2 are driven entirely by user transactions hitting proxies, and the `executeL2TX` mechanism on L1 handles the L1-side commit of L2 user actions.
+Top-level calls on L2 are driven entirely by user transactions hitting proxies (which forward to `executeCrossChainCall`). There is no system-only delivery path on L2; the `executeL2TX` mechanism lives on L1 and handles the L1-side commit of L2 user actions.
 
 #### `staticCallLookup` (L2)
 
@@ -682,7 +682,7 @@ When the destination contract called by `_processNCalls` calls back into a proxy
 
 **Failed reentrant calls cannot use `NestedAction`**. A revert inside the reentrant call would roll back the `_lastNestedActionConsumed++` write, making the consumption silent. Reverting reentrant calls must be modeled as `StaticCall` with `failed = true` (see §F).
 
-### D.4 Revert Span (replaces REVERT / REVERT_CONTINUE)
+### D.4 Revert Span
 
 `revertSpan > 0` opens an isolated EVM context for the next `revertSpan` calls. Mechanism:
 
@@ -694,13 +694,11 @@ When the destination contract called by `_processNCalls` calls back into a proxy
 4. Caller decodes `ContextResult` and writes the three values back into transient storage. The rolling hash and cursors now reflect what happened inside the span, even though the EVM rolled the state back.
 5. Caller restores `entry.calls[saved].revertSpan = revertSpan` and emits `RevertSpanExecuted`. `processed += revertSpan`.
 
-This single mechanism replaces the entire `REVERT` / `REVERT_CONTINUE` / `ScopeReverted` machinery: there are no continuation entries, no per-rollup state-root restoration, no scope tree to navigate. The "what happened" is encoded by the calls in the span; the "what state survives" is whatever the EVM rolled back.
+A single mechanism handles atomic rollback: there are no continuation entries, no per-rollup state-root restoration, no scope tree to navigate. The "what happened" is encoded by the calls in the span; the "what state survives" is whatever the EVM rolled back.
 
-### D.5 No Scope Navigation
+### D.5 Flat Call Model
 
-The protocol no longer has a scope tree. There is no `newScope`, no `_resolveScopes`, no `_handleScopeRevert`, no `ScopeReverted` error, no `_scopesMatch` / `_isChildScope` / `_appendToScope` helpers. The `scope` field on `Action` is gone, and the off-chain prover does not need to thread scope arrays through nested calls.
-
-The protocol also no longer uses `RESULT` / `REVERT` / `REVERT_CONTINUE` actions. Return data from a call is captured directly into the rolling hash via `CALL_END`; reverts are captured via `success=false` in the same `CALL_END` tag (or via `revertSpan` when an entire span must be replayed).
+The off-chain prover emits a flat `calls[]` array plus a parallel `NestedAction[]` table — it does not thread scope arrays through nested calls. Return data from a call is captured directly into the rolling hash via `CALL_END`; reverts are captured via `success=false` in the same `CALL_END` tag (or via `revertSpan` when an entire span must be replayed).
 
 ---
 
@@ -980,7 +978,7 @@ The previous-state binding lives in the proof: `_computeEntryHashes` reads `roll
 
 For each entry: `totalEtherDelta == etherIn - etherOut`, where `etherIn` is the `msg.value` received by the entry-point call (or 0 for `executeL2TX` and immediate entries) and `etherOut` is the sum of `value` fields on every **successful** call inside the entry.
 
-Per-entry localization (vs the previous protocol's transaction-wide `_etherDelta`) means each entry independently balances, simplifying the prover's job.
+Each entry independently balances — ether accounting is localized to a single entry rather than aggregated across the transaction — which simplifies the prover's job.
 
 The sum of `etherBalance` across all rollups plus `address(rollups).balance` is conserved modulo direct deposits/withdrawals outside the protocol.
 
@@ -1092,8 +1090,8 @@ Because `_consumeAndExecute` increments the cursor by exactly one and verifies `
 
 The single `_rollingHash == entry.rollingHash` check is the primary integrity guarantee. Because the hash chains every `(success, retData)` pair plus every `NESTED_BEGIN` / `NESTED_END` boundary with unique tags, a single mismatch anywhere — wrong return data, wrong nesting, missing call, extra call, reordered operations — produces a different final hash and is caught at the entry boundary.
 
-This is strictly stronger than the previous protocol's per-action hash matching: there is no path where execution diverges from the proof and still completes successfully.
+No path exists where execution diverges from the proof and still completes successfully — every divergence (return data, nesting, ordering, count) lands in the rolling hash and is rejected at the entry boundary.
 
 ---
 
-*End of specification. This document covers the flat sequential execution model on the `feature/flatten` branch.*
+*End of specification. This document covers the flat sequential execution model. For migration notes from the legacy scope-tree / `ActionType` model, see `CHANGES_FROM_PREVIOUS.md`.*

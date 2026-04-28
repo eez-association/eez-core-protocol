@@ -25,7 +25,7 @@ forge fmt            # Format code
 
 ### Data Types
 
-The protocol uses a **flat sequential execution model**: there is no `ActionType` enum, no `scope` array, no `RESULT`/`REVERT`/`REVERT_CONTINUE` actions, and no recursive scope navigation. Every entry contains a flat list of `CrossChainCall`s processed sequentially, with reentrant calls resolved via a parallel `NestedAction[]` table and integrity verified by a single `rollingHash` per entry.
+The protocol uses a **flat sequential execution model**: every entry contains a flat list of `CrossChainCall`s processed sequentially, with reentrant calls resolved via a parallel `NestedAction[]` table and integrity verified by a single `rollingHash` per entry.
 
 ```solidity
 // Off-chain only — used by tooling to compute actionHash.
@@ -42,7 +42,7 @@ struct Action {
 
 struct StateDelta {
     uint256 rollupId;
-    bytes32 newState;       // post-execution state root (no currentState — bound by proof)
+    bytes32 newState;       // post-execution state root (previous root is bound by the proof, not stored here)
     int256  etherDelta;     // signed ETH change for this rollup
 }
 
@@ -147,11 +147,9 @@ NESTED_END   (4)   keccak256(prev, 0x04, nestedNumber)
 
 A single mismatch anywhere — wrong return data, wrong success/failure flag, missing or extra calls, incorrect nesting structure — produces a different final hash and is caught with one comparison. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E for the full specification (formulas, worked example, multi-phase static-call disambiguation).
 
-### `revertSpan` (replaces REVERT / REVERT_CONTINUE)
+### `revertSpan`
 
 `revertSpan > 0` opens an isolated EVM context for the next `revertSpan` calls. The processor self-calls `executeInContext(revertSpan)` which always reverts with `error ContextResult(rollingHash, lastNestedActionConsumed, currentCallNumber)`. The EVM rolls back state inside the span, but the three values escape via the revert payload — the outer flow restores them so the rolling hash and counters reflect what happened inside the span.
-
-This single mechanism replaces the entire `REVERT` / `REVERT_CONTINUE` / `ScopeReverted` machinery from the previous protocol version.
 
 ### `NestedAction` vs `StaticCall`
 
@@ -179,6 +177,7 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 - `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` — formal protocol specification (data model, function specs, rolling-hash details with worked example, invariants, security).
 - `docs/EXECUTION_TABLE_SPEC.md` — how to build execution entries (entry structure, action hash, flow patterns).
 - `docs/CAVEATS.md` — edge cases and gotchas.
+- `docs/CHANGES_FROM_PREVIOUS.md` — migration notes from the legacy scope-tree / `ActionType` model. Read only when porting old code/docs or chasing a stale reference.
 
 ## Testing
 
