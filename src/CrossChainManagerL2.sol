@@ -220,22 +220,57 @@ contract CrossChainManagerL2 is ICrossChainManager {
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
-    /// @notice Consumes the next nested action from the current entry
+    /// @notice Consumes the next nested action, or replays a pre-computed reverting
+    ///         static call when no NestedAction matches.
+    /// @dev See L1 Rollups._consumeNestedAction for the full routing rules. L2 has no
+    ///      transient static-call table, so the fallback only scans persistent `staticCalls`.
     function _consumeNestedAction(bytes32 actionHash) internal returns (bytes memory) {
         ExecutionEntry storage entry = executions[_currentEntryIndex];
         uint256 idx = _lastNestedActionConsumed++;
-        if (idx >= entry.nestedActions.length) revert NoNestedActionAvailable();
 
-        NestedAction storage nested = entry.nestedActions[idx];
-        if (nested.actionHash != actionHash) revert ExecutionNotFound();
+        // 1. NestedAction priority. The `++` above is the commit; if we fall through, every
+        //    fallback path reverts and the EVM rolls the bump back.
+        if (idx < entry.nestedActions.length && entry.nestedActions[idx].actionHash == actionHash) {
+            NestedAction storage nested = entry.nestedActions[idx];
+            uint256 nestedNumber = idx + 1; // 1-indexed
+            emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
+            _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
+            _processNCalls(nested.callCount);
+            _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+            return nested.returnData;
+        }
 
-        uint256 nestedNumber = idx + 1; // 1-indexed
-        emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
-        _processNCalls(nested.callCount);
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+        // 2. Fallback. Lookup key uses `idx` (pre-bump) — that's what the prover observed.
+        uint64 callNum = uint64(_currentCallNumber);
+        uint64 lastNA = uint64(idx);
+        for (uint256 i = 0; i < staticCalls.length; i++) {
+            StaticCall storage sc = staticCalls[i];
+            if (
+                sc.failed && sc.actionHash == actionHash && sc.callNumber == callNum
+                    && sc.lastNestedActionConsumed == lastNA
+            ) {
+                _resolveStaticCall(sc); // always reverts (sc.failed == true)
+            }
+        }
 
-        return nested.returnData;
+        // 3. No match anywhere.
+        revert ExecutionNotFound();
+    }
+
+    /// @notice Verifies a matched static call entry and returns or reverts with cached data.
+    /// @dev Shared between `staticCallLookup` and `_consumeNestedAction`'s fallback path.
+    function _resolveStaticCall(StaticCall storage sc) internal view returns (bytes memory) {
+        if (sc.calls.length > 0) {
+            bytes32 computedHash = _processNStaticCalls(sc.calls);
+            if (computedHash != sc.rollingHash) revert RollingHashMismatch();
+        }
+        if (sc.failed) {
+            bytes memory returnData = sc.returnData;
+            assembly {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return sc.returnData;
     }
 
     /// @notice Consumes the next execution entry, executes calls, and verifies rolling hash
@@ -367,17 +402,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         for (uint256 i = 0; i < staticCalls.length; i++) {
             StaticCall storage sc = staticCalls[i];
             if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
-                if (sc.calls.length > 0) {
-                    bytes32 computedHash = _processNStaticCalls(sc.calls);
-                    if (computedHash != sc.rollingHash) revert RollingHashMismatch();
-                }
-                if (sc.failed) {
-                    bytes memory returnData = sc.returnData;
-                    assembly {
-                        revert(add(returnData, 0x20), mload(returnData))
-                    }
-                }
-                return sc.returnData;
+                return _resolveStaticCall(sc);
             }
         }
 

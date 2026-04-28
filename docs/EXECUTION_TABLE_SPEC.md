@@ -183,6 +183,16 @@ Together they form a coordinate that advances monotonically and never repeats. T
 | Reentrant cross-chain `STATICCALL` (read-only) | `StaticCall` with `failed = false` |
 | Top-level cross-chain call that reverts | Top-level `ExecutionEntry` with `failed = true` (immediate entry only) — or model the reverting call as a span via `revertSpan` |
 
+**How the manager picks between `NestedAction` and `StaticCall`** (for a reentrant call that hits `executeCrossChainCall`):
+
+1. If the proxy is in a real STATICCALL frame (its `tstore` self-check reverts), the proxy routes to `staticCallLookup`, which scans `staticCalls` (transient first on L1) for a `(actionHash, callNumber, lastNestedActionConsumed)` match — both `failed=true` and `failed=false` are valid here.
+2. Otherwise (normal CALL frame), the proxy routes to `executeCrossChainCall` → `_consumeNestedAction`:
+   - If `nestedActions[_lastNestedActionConsumed].actionHash == actionHash` → consume the NestedAction (priority).
+   - Otherwise scan `staticCalls` for a `failed=true` match at the current `(callNumber, lastNestedActionConsumed)` → revert with the cached `returnData`. The destination's `try/catch` catches it.
+   - No match → revert `ExecutionNotFound`.
+
+This means a reverting reentrant call inside try/catch needs **only** a `StaticCall` with `failed=true` — no companion `NestedAction`, no `revertSpan` wrapper. The cursor is not advanced for that call, so the EVM revert has nothing to roll back.
+
 ---
 
 ## State Deltas

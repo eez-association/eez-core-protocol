@@ -501,22 +501,65 @@ contract Rollups is ICrossChainManager {
         }
     }
 
-    /// @notice Consumes the next nested action from the current entry
+    /// @notice Consumes the next nested action, or replays a pre-computed reverting
+    ///         static call when no NestedAction matches.
+    /// @dev Routing rules:
+    ///      1. NestedAction at `_lastNestedActionConsumed` matches `actionHash` → consume
+    ///         (the speculative `++` bump is what commits, hash NESTED_BEGIN/END, return
+    ///         cached returnData).
+    ///      2. Otherwise scan `_transientStaticCalls` then `staticCalls` for a `failed=true`
+    ///         entry keyed by (actionHash, _currentCallNumber, idx) where `idx` is the
+    ///         pre-bump cursor value → revert with cached returnData. Every fallback path
+    ///         reverts, so the speculative bump is rolled back by the EVM automatically.
+    ///      3. No match → revert `ExecutionNotFound`.
+    ///
+    ///      Why fall back only on `failed=true`: a successful reentrant call in a normal CALL
+    ///      frame is expressed as a NestedAction; a successful read-only call is in a STATICCALL
+    ///      frame and routed to `staticCallLookup` instead. A static-call hit on this path only
+    ///      makes sense when the caller has try/catch and expects a revert. The fallback
+    ///      sidesteps the transient-rollback issue (TODO 1b): a successful match's bump
+    ///      persists; every other path reverts and the bump rolls back with it.
     function _consumeNestedAction(bytes32 actionHash) internal returns (bytes memory) {
         ExecutionEntry storage entry = _currentEntryStorage();
         uint256 idx = _lastNestedActionConsumed++;
-        if (idx >= entry.nestedActions.length) revert NoNestedActionAvailable();
 
-        NestedAction storage nested = entry.nestedActions[idx];
-        if (nested.actionHash != actionHash) revert ExecutionNotFound();
+        // 1. NestedAction priority. The `++` above is the commit; if we fall through, every
+        //    fallback path reverts and the EVM rolls the bump back.
+        if (idx < entry.nestedActions.length && entry.nestedActions[idx].actionHash == actionHash) {
+            NestedAction storage nested = entry.nestedActions[idx];
+            uint256 nestedNumber = idx + 1; // 1-indexed
+            emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
+            _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
+            _processNCalls(nested.callCount);
+            _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+            return nested.returnData;
+        }
 
-        uint256 nestedNumber = idx + 1; // 1-indexed
-        emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
-        _processNCalls(nested.callCount);
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+        // 2. Fallback. The lookup key uses `idx` (the pre-bump cursor) — that's what the
+        //    prover observed. Reading `_lastNestedActionConsumed` directly would give idx+1.
+        uint64 callNum = uint64(_currentCallNumber);
+        uint64 lastNA = uint64(idx);
+        for (uint256 i = 0; i < _transientStaticCalls.length; i++) {
+            StaticCall storage sc = _transientStaticCalls[i];
+            if (
+                sc.failed && sc.actionHash == actionHash && sc.callNumber == callNum
+                    && sc.lastNestedActionConsumed == lastNA
+            ) {
+                _resolveStaticCall(sc); // always reverts (sc.failed == true)
+            }
+        }
+        for (uint256 i = 0; i < staticCalls.length; i++) {
+            StaticCall storage sc = staticCalls[i];
+            if (
+                sc.failed && sc.actionHash == actionHash && sc.callNumber == callNum
+                    && sc.lastNestedActionConsumed == lastNA
+            ) {
+                _resolveStaticCall(sc); // always reverts (sc.failed == true)
+            }
+        }
 
-        return nested.returnData;
+        // 3. No match anywhere.
+        revert ExecutionNotFound();
     }
 
     /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies rolling hash

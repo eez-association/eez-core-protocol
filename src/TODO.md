@@ -29,27 +29,20 @@ See `src/DISCUSS.md` for 3 approaches.
 
 ---
 
-## 1b. Failed nested action (reentrant call reverts) blocks entry verification
+## 1b. Failed nested action (reentrant call reverts) — RESOLVED
 
-### Problem
+### Resolution
 
-If a reentrant call (one that triggers `_consumeNestedAction`) reverts, the EVM rolls back all state changes in that sub-context — including the `_lastNestedActionConsumed++` increment (transient storage follows revert rules). The nested action is never consumed, so the entry-level verification `_lastNestedActionConsumed == entry.nestedActions.length` fails with `UnconsumedNestedActions`.
+`_consumeNestedAction` now falls back to a `StaticCall` lookup when no `NestedAction` matches at the current cursor. The fallback only matches `failed=true` static calls keyed by `(actionHash, _currentCallNumber, _lastNestedActionConsumed)`, replays any sub-calls via STATICCALL for integrity, and reverts with the cached `returnData`. The destination's `try/catch` absorbs the revert, the outer `_processNCalls` continues, and `_lastNestedActionConsumed` is never bumped on this path — so the EVM revert has nothing to roll back.
 
-The current workaround is documented: "All nested actions must succeed. Failed calls should use StaticCall instead." But this pushes complexity to the off-chain precomputation, which must predict failures and route them through the static call path.
+Routing summary:
 
-### Possible solutions
+| Frame type | Routes to | Handles |
+|---|---|---|
+| Real STATICCALL (proxy `tstore` reverts) | `staticCallLookup` (external view) | Both `failed=true` and `failed=false` static entries |
+| Normal CALL, reentrant (`_insideExecution() == true`) | `_consumeNestedAction` | NestedAction first; on miss, only `failed=true` static entries (revert replay) |
 
-**A. Wrap failing calls in revertSpan (current design, off-chain)**
-
-The off-chain precomputation wraps calls that trigger failed reentrant calls in a `revertSpan`. The `ContextResult` carries `_lastNestedActionConsumed` out of the revert context.
-
-**B. Pre-consume nested actions before the proxy call**
-
-Move consumption into the outer `_processNCalls` loop via a new field on `CrossChainCall` (e.g., `uint256 nestedActionCount`). Consumption happens in outer context, immune to inner reverts.
-
-**C. Accept current design — document the constraint**
-
-"All nested actions must succeed. Failed calls should use StaticCall instead."
+Implementation: `src/Rollups.sol` `_consumeNestedAction` (L1, scans `_transientStaticCalls` then `staticCalls`); `src/CrossChainManagerL2.sol` `_consumeNestedAction` (L2, persistent `staticCalls` only). Both share a `_resolveStaticCall` helper.
 
 ---
 

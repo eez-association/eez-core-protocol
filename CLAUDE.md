@@ -162,6 +162,8 @@ A single mismatch anywhere — wrong return data, wrong success/failure flag, mi
 
 Reverting reentrant calls cannot be `NestedAction` — the failed call's revert rolls back the consumption index `tstore`, making consumption silent. `StaticCall` is content-addressed by `(actionHash, callNumber, lastNestedActionConsumed)` and replays the cached revert deterministically.
 
+`_consumeNestedAction` implements the routing: NestedAction at the cursor wins; on miss, it falls back to a `failed=true` `StaticCall` at the same `(actionHash, callNumber, lastNestedActionConsumed)` and reverts with the cached `returnData`. The fallback bumps no cursor, so the EVM revert has nothing to roll back. `staticCallLookup` (real STATICCALL frames) handles both `failed=true` and `failed=false` entries.
+
 ### CREATE2 Address Derivation
 
 ```

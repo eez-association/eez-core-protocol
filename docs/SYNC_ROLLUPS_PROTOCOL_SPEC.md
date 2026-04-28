@@ -670,17 +670,24 @@ _lastNestedActionConsumed == entry.nestedActions.length // UnconsumedNestedActio
 
 The sum of `entry.callCount` plus all `nestedAction.callCount`s **must** equal `entry.calls.length`. This is not enforced as a separate check; it falls out of the two equalities above plus the sequential cursor advance.
 
-### D.3 Reentrant Calls (NestedAction)
+### D.3 Reentrant Calls (NestedAction or failed StaticCall)
 
-When the destination contract called by `_processNCalls` calls back into a proxy, the proxy forwards to `executeCrossChainCall`. Inside that call, `_insideExecution() == true` (the global counter is non-zero), so the path branches to `_consumeNestedAction`:
+When the destination contract called by `_processNCalls` calls back into a proxy, the proxy forwards to `executeCrossChainCall`. Inside that call, `_insideExecution() == true` (the global counter is non-zero), so the path branches to `_consumeNestedAction`. The function speculatively bumps the cursor up front (`idx = _lastNestedActionConsumed++`) and then routes:
 
-1. Verify `nestedActions[_lastNestedActionConsumed].actionHash` matches the computed hash.
-2. Hash `NESTED_BEGIN` into `_rollingHash`.
-3. Recurse into `_processNCalls(nested.callCount)`. Inside that call, `entry.calls[]` is read at positions starting from the current `_currentCallNumber`.
-4. Hash `NESTED_END` into `_rollingHash`.
-5. Return `nested.returnData` to the destination.
+**1. NestedAction priority.** If `nestedActions[idx].actionHash == actionHash`:
+   1. The speculative `++` is the commit — no further cursor write.
+   2. Hash `NESTED_BEGIN` into `_rollingHash`.
+   3. Recurse into `_processNCalls(nested.callCount)`. Inside that call, `entry.calls[]` is read at positions starting from the current `_currentCallNumber`.
+   4. Hash `NESTED_END` into `_rollingHash`.
+   5. Return `nested.returnData` to the destination.
 
-**Failed reentrant calls cannot use `NestedAction`**. A revert inside the reentrant call would roll back the `_lastNestedActionConsumed++` write, making the consumption silent. Reverting reentrant calls must be modeled as `StaticCall` with `failed = true` (see §F).
+**2. Otherwise — fall back to a failed StaticCall.** Scan `_transientStaticCalls` then `staticCalls` for an entry with `failed == true` and matching key `(actionHash, _currentCallNumber, idx)` — note the lookup uses `idx` (the pre-bump cursor), which is what the prover observed; `_lastNestedActionConsumed` itself currently holds `idx + 1`:
+   - Hit → `_resolveStaticCall(sc)` replays any `sc.calls` via STATICCALL for integrity, then reverts with `sc.returnData`. The destination's `try/catch` absorbs the revert.
+   - No hit → revert `ExecutionNotFound`.
+
+**Why this works for reverts.** Every fallback path reverts, so the speculative `++` rolls back automatically (transient storage follows EVM revert rules). The cursors and `_rollingHash` outside the destination's `try/catch` reflect exactly what the prover simulated. A reverting reentrant call therefore needs **only** a `StaticCall` with `failed=true` — no companion `NestedAction`, no `revertSpan` wrapper.
+
+**Why a `failed=false` static call here is invalid.** A successful reentrant call in a normal CALL frame is expressed as a NestedAction; a successful read-only call is in a STATICCALL frame and routed to `staticCallLookup` (§F) instead. A `failed=false` static entry matching this fallback path is a prover bug — the loop simply doesn't match it, so it falls through to `ExecutionNotFound`.
 
 ### D.4 Revert Span
 
@@ -882,7 +889,12 @@ If `_currentCallNumber` advanced inside the nested action (the nested action con
 
 ## F. Static Call Lookup
 
-Static calls (read-only or reverting reentrant calls) are looked up — never executed via the normal call path. The proxy's `_fallback` detects STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts) and routes to `staticCallLookup` (a view function on the manager).
+Static calls (read-only or reverting reentrant calls) are looked up — never executed via the normal call path. There are two entry points into the lookup:
+
+1. **`staticCallLookup`** (external view) — used when the proxy's `_fallback` detects a real STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts). Handles both `failed=true` and `failed=false` entries.
+2. **Fallback inside `_consumeNestedAction`** — used when a normal-CALL reentrant call has no matching `NestedAction`. Only matches `failed=true` entries (the destination's `try/catch` consumes the revert). See §D.3.
+
+Both entry points share the same match key and `_resolveStaticCall` helper.
 
 ### F.1 Match Key
 
@@ -923,12 +935,12 @@ This lets a static lookup model a contract that performs read-only sub-calls: th
 
 ### F.4 When to use `StaticCall` vs `NestedAction`
 
-| Situation | Use |
-|---|---|
-| Reentrant call that **succeeds** | `NestedAction` |
-| Reentrant call that **reverts** (caller catches with try/catch) | `StaticCall` with `failed = true` |
-| Reentrant cross-chain `STATICCALL` (read-only) | `StaticCall` with `failed = false` |
-| Top-level call that should fail | Set `entry.failed = true` (immediate entry only) — or wrap in `revertSpan` |
+| Situation | Use | Routed via |
+|---|---|---|
+| Reentrant call that **succeeds** | `NestedAction` | `_consumeNestedAction` (priority branch) |
+| Reentrant call that **reverts** (caller catches with try/catch) | `StaticCall` with `failed = true` | `_consumeNestedAction` fallback |
+| Reentrant cross-chain `STATICCALL` (read-only, success or revert) | `StaticCall` with `failed` set as appropriate | `staticCallLookup` (real STATICCALL frame) |
+| Top-level call that should fail | Set `entry.failed = true` (immediate entry only) — or wrap in `revertSpan` | — |
 
 ---
 
