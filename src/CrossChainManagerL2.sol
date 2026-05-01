@@ -108,6 +108,16 @@ contract CrossChainManagerL2 is ICrossChainManager {
         bytes32 indexed actionHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value
     );
 
+    /// @notice Emitted when the system address initiates an incoming cross-chain call from another rollup
+    event IncomingCrossChainCallExecuted(
+        bytes32 indexed actionHash,
+        address destination,
+        uint256 value,
+        bytes data,
+        address sourceAddress,
+        uint256 sourceRollup
+    );
+
     /// @notice Emitted after each call completes in _processNCalls
     /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert)
     event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
@@ -149,7 +159,12 @@ contract CrossChainManagerL2 is ICrossChainManager {
         external
         onlySystemAddress
     {
-        // Delete previous execution table and reset index
+        _loadExecutionTable(entries, _lookupCalls);
+    }
+
+    /// @notice Internal: replaces the execution table and resets the consumption cursor
+    /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`
+    function _loadExecutionTable(ExecutionEntry[] calldata entries, LookupCall[] calldata _lookupCalls) internal {
         delete executions;
         delete lookupCalls;
         executionIndex = 0;
@@ -205,6 +220,76 @@ contract CrossChainManagerL2 is ICrossChainManager {
         }
 
         return _consumeAndExecute(actionHash);
+    }
+
+    /// @notice System-initiated execution of an incoming cross-chain call from another rollup
+    /// @dev Atomically replaces the execution table and drives `executions[0]` through the
+    ///      flat call processor. The first entry's `calls[0]` is the inbound call itself
+    ///      (its `sourceAddress` / `sourceRollupId` / `targetAddress` / `value` / `data` must
+    ///      match the explicit params passed here — the prover builds them consistently).
+    ///      `_processNCalls` makes the actual proxy invocation, advances the call counter,
+    ///      folds tagged events into the rolling hash, and handles `revertSpan`. Reentrant
+    ///      cross-chain calls during execution see `_insideExecution() == true` and consume
+    ///      from `executions[0].nestedActions`.
+    /// @param destination The L2 destination address (target of the inbound call)
+    /// @param value The ETH value forwarded to the destination
+    /// @param data The calldata for the destination
+    /// @param sourceAddress The original caller address on the source rollup
+    /// @param sourceRollup The source rollup ID
+    /// @param entries The execution entries to load (entries[0] is consumed by this call)
+    /// @param _lookupCalls The lookup call results to load (used for STATICCALL / failed reentrants)
+    /// @return result The pre-computed return data from `executions[0]`
+    function executeIncomingCrossChainCall(
+        address destination,
+        uint256 value,
+        bytes calldata data,
+        address sourceAddress,
+        uint256 sourceRollup,
+        ExecutionEntry[] calldata entries,
+        LookupCall[] calldata _lookupCalls
+    ) external payable onlySystemAddress returns (bytes memory result) {
+        // 1. Replace the execution table (same logic as loadExecutionTable)
+        _loadExecutionTable(entries, _lookupCalls);
+
+        // 2. Compute and emit the action hash binding this top-level call
+        bytes32 actionHash =
+            _computeActionInputHash(ROLLUP_ID, destination, value, data, sourceAddress, sourceRollup);
+        emit IncomingCrossChainCallExecuted(actionHash, destination, value, data, sourceAddress, sourceRollup);
+
+        // 3. Entry context preamble — the four transient counters
+        //    (`_currentEntryIndex`, `_rollingHash`, `_currentCallNumber`,
+        //    `_lastNestedActionConsumed`) all need to be 0 before `_processNCalls` runs.
+        //    They already are: this function is invoked directly by SYSTEM_ADDRESS as a
+        //    top-level call, and Solidity transient storage defaults to zero at the start
+        //    of every transaction. The would-be assignments are kept here as documentation
+        //    of the contract `_processNCalls` expects:
+        //
+        //        _currentEntryIndex       = 0;          // points _processNCalls at executions[0]
+        //        _rollingHash             = bytes32(0); // fresh accumulator
+        //        _currentCallNumber       = 0;          // _processNCalls reads calls[0] first, then bumps
+        //        _lastNestedActionConsumed= 0;          // first reentrant pulls nestedActions[0]
+        //
+        //    Caveat: if this function is ever called more than once per transaction (e.g.,
+        //    a batched system invocation), the second call would inherit non-zero
+        //    `_rollingHash` / `_lastNestedActionConsumed` / `_currentEntryIndex` left over
+        //    from the first call's execution. Step 6 only resets `_currentCallNumber`. If
+        //    multi-invocation-per-tx becomes a use case, uncomment the assignments above
+        //    (or extend step 6 to zero the rest).
+        ExecutionEntry storage entry = executions[0];
+
+        // 4. Drive the flat call processor — `entry.calls[0]` is the inbound call,
+        //    delivered via the source proxy by `_processNCalls`
+        _processNCalls(entry.callCount);
+
+        // 5. Verify invariants (mirrors `_consumeAndExecute`'s post-checks)
+        if (_rollingHash != entry.rollingHash) revert RollingHashMismatch();
+        if (_currentCallNumber != entry.calls.length) revert UnconsumedCalls();
+        if (_lastNestedActionConsumed != entry.nestedActions.length) revert UnconsumedNestedActions();
+
+        emit EntryExecuted(0, _rollingHash, _currentCallNumber, _lastNestedActionConsumed);
+        _currentCallNumber = 0; // reset so _insideExecution() returns false
+
+        return entry.returnData;
     }
 
     // ──────────────────────────────────────────────
