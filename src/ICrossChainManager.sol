@@ -55,9 +55,15 @@ struct NestedAction {
 }
 
 /// @notice Represents an execution entry with pre-computed calls and return hash verification
-/// @dev `failed` must always be false for deferred entries.
-///      A failed entry reverts in _consumeAndExecute, rolling back the queue cursor++ and
-///      permanently blocking that rollup's queue. TODO remove failed
+/// @dev Execution entries always SUCCEED at the top level — `executeCrossChainCall` returns
+///      `entry.returnData` as success. There is no `failed` flag because **a reverting
+///      top-level call isn't an execution; it's a lookup**. Reverting cross-chain results
+///      are expressed via `LookupCall { failed: true }` consumed through `staticCallLookup`
+///      (static-context entry point) or the failed-reentry fallback in `_consumeNestedAction`.
+///      Naturally-reverting INNER calls inside an entry are still expressible: the proxy
+///      `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`;
+///      the entry's outer `executeCrossChainCall` still returns success with `entry.returnData`.
+///      See `src/TODO.md` for the design discussion.
 /// @dev `destinationRollupId` is the rollup whose queue this entry is routed to on L1
 ///      (per-rollup queue model). Must match the rollupId derived from the consumer
 ///      (proxyInfo.originalRollupId for proxy calls; the explicit rollupId arg for
@@ -103,7 +109,6 @@ struct ExecutionEntry {
     /// across the execution tree. See the natspec above.
     uint256 callCount;
     bytes returnData;
-    bool failed;
     bytes32 rollingHash;
 }
 

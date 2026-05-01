@@ -310,15 +310,7 @@ contract CrossChainManagerL2 is ICrossChainManager {
         emit EntryExecuted(idx, _rollingHash, _currentCallNumber, _lastNestedActionConsumed);
         _currentCallNumber = 0; // reset so _insideExecution() returns false
 
-        bytes memory returnData = entry.returnData;
-
-        if (entry.failed) {
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
-
-        return returnData;
+        return entry.returnData;
     }
 
     /// @notice Executes calls in an isolated context that always reverts

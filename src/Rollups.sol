@@ -855,13 +855,7 @@ contract Rollups is ICrossChainManager {
         _currentEntryIndex = idx;
         _applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash, etherIn);
 
-        bytes memory returnData = entry.returnData;
-        if (entry.failed) {
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
-        return returnData;
+        return entry.returnData;
     }
 
     /// @notice Applies state deltas (with currentState validation), processes calls,

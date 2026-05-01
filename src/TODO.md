@@ -9,36 +9,50 @@ refactor's open questions and is updated as the design evolves.
 
 ---
 
-## 1. Failed entry (`entry.failed == true`) blocks the rollup queue
+## 1. DISCUSSION — execution vs lookup: `entry.failed` removed
 
-### Problem
+### Resolution applied
 
-When `_consumeAndExecute` processes a deferred entry with `failed == true`, it executes all calls (to verify the rolling hash), then reverts with `entry.returnData` via assembly. But the `cursor++` on `verificationByRollup[destRid].cursor` and the state-delta mutations applied just before the revert are **rolled back** — the revert propagates through `executeCrossChainCall`, which was called via `.call` from the proxy. The entire call frame is undone.
+Dropped `bool failed` from `ExecutionEntry`. Deferred entries always succeed at the top
+level — `executeCrossChainCall` returns `entry.returnData` as success.
 
-Result: the failed entry is never consumed, the per-rollup cursor stays the same, and **every subsequent call to that rollup hits the same failed entry forever** until a new `postBatch` lazy-resets the queue (next block, or different sub-batch group).
+### Rationale
 
-### Scenario
+A reverting top-level call **isn't an execution** — it's a *lookup*. Executions are
+"this happened and produced state changes." Reverts are "this happened and the cached
+result is a revert payload." The protocol already has a clean abstraction for the second
+case: `LookupCall { failed: true }`, consumed via `staticCallLookup` (static-context
+entry point) or via the failed-reentry fallback in `_consumeNestedAction`.
 
-```
-User calls proxy → proxy calls executeCrossChainCall via .call
-  → _consumeAndExecute(destRid, ...):
-    → verificationByRollup[destRid].cursor++ (0 → 1)
-    → applies state deltas, processes calls, verifies rolling hash — all good
-    → entry.failed == true
-    → assembly { revert(returnData) }
-  → revert propagates: cursor rolled back to 0, state deltas reverted
-proxy catches revert, returns failure to user
+Splitting along this seam:
+- **`ExecutionEntry`** = state-mutating execution. Always succeeds at the top level.
+  Inner calls may revert naturally; their `(success=false, retData)` is captured in the
+  rolling-hash `CALL_END` payload. The entry's outer `executeCrossChainCall` still
+  returns `entry.returnData` as success.
+- **`LookupCall`** with `failed: true` = revert replay. Content-addressed by
+  `(actionHash, callNumber, lastNestedActionConsumed)`, replays cached sub-calls if any,
+  and reverts with the cached payload. Survives EVM revert rollback because it's a
+  read-side lookup, not a queue advance.
 
-Next call: cursor still 0, same failed entry, same revert → stuck for the rest of the block
-```
+### What we gave up
 
-### Possible solutions
+The orchestrator can no longer express "this top-level cross-chain call reverted on the
+source side, propagate the revert to the destination caller" as an `ExecutionEntry`.
+Instead, the orchestrator must:
+- (a) Not construct a deferred entry for the reverted source-side call (drop it from the
+  cross-chain stream entirely), OR
+- (b) Express the reverting call as a `LookupCall` so destination-side callers can
+  observe the revert via the static-context entry point.
 
-1. **Drop `entry.failed` entirely.** Express top-level failures via `revertSpan = 0` and a naturally-reverting destination — `(success=false, retData)` is captured in `CALL_END`'s rolling-hash payload. The orchestrator never needs an explicit failed flag.
-2. **Two-phase consume**: do `cursor++` AND emit `ExecutionConsumed` in a frame that survives the revert (e.g., a trusted-self-call wrapper that catches `entry.failed`'s revert and bubbles it up after committing the cursor advance).
-3. **Cursor commit before content evaluation.** Restructure to bump the cursor + apply state deltas in an outer self-call, then evaluate `entry.failed` in an inner self-call whose revert is caught.
+This is a behavioral change for the off-chain spec — flag it to the spec maintainers.
 
-Option 1 is cleanest if no use case requires the explicit failed flag. Worth auditing the off-chain spec.
+### What this fixed
+
+The previous "stuck-queue" bug: when `_consumeAndExecute` reverted with
+`entry.returnData`, the cursor++ on `verificationByRollup[destRid].cursor` was rolled
+back along with the state-delta mutations. Every subsequent call to that rollup hit the
+same failed entry until the next-block lazy reset. Removing `entry.failed` removes the
+revert-from-`_consumeAndExecute` path, so the cursor++ always commits.
 
 ---
 
