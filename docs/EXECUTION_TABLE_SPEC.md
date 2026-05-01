@@ -86,26 +86,44 @@ struct CrossChainCall {
     bytes   data;           // calldata
     address sourceAddress;  // caller identity (used to derive sourceProxy)
     uint256 sourceRollupId; // caller's rollup ID
-    uint256 revertSpan;     // 0 = normal call; N>0 = open isolated revert context for the next N calls
+    uint256 revertSpan;     // 0 = normal call; N>0 = force-revert the next N calls' state effects
 }
 ```
 
-The processor reads `entry.calls[_currentCallNumber]` from storage and, for each non-revert-span call, derives the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creates the proxy if it doesn't exist, and routes the call through `CrossChainProxy.executeOnBehalf(targetAddress, data){value: value}`.
+The processor reads `entry.calls[_currentCallNumber]` from storage and, for each non-revert-span call, derives the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creates the proxy if it doesn't exist, and routes the call through `CrossChainProxy.executeOnBehalf(targetAddress, data){value: value}`. If the destination call itself reverts, `_processNCalls` captures `(success=false, retData=revertReason)` from the proxy's `.call` and hashes that into `CALL_END` — natural reverts need no special wrapping.
 
-### `revertSpan`: isolated revert context
+### `revertSpan`: forced-revert context
 
-`revertSpan > 0` means the next `revertSpan` calls (including this one) execute inside an isolated context. The processor:
+`revertSpan > 0` is the **forced-revert** mechanism: the next `revertSpan` calls (including this one) execute, succeed, and have their state effects rolled back at the protocol layer. The rolling hash still commits to the calls' real outcomes (typically `success=true` with the captured `returnData`); only the EVM state changes disappear. The processor:
 
 1. Saves `_currentCallNumber`.
 2. Zeros `entry.calls[savedCallNumber].revertSpan` in storage so the inner self-call sees `revertSpan == 0` at the same index and runs the call normally.
 3. Self-calls `this.executeInContext(revertSpan)` — that function processes the next `revertSpan` calls and **always reverts** with `error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber)`.
-4. The revert rolls back **all** transient storage modifications inside the self-call (including the `tstore` writes for `_rollingHash`, `_currentCallNumber`, `_lastNestedActionConsumed`).
-5. The processor decodes `ContextResult` and restores `_rollingHash`, `_lastNestedActionConsumed`, `_currentCallNumber` to the values **observed at the end of the reverted span**, bridging the data across the revert boundary.
+4. The revert rolls back **all** transient storage modifications inside the self-call (including the `tstore` writes for `_rollingHash`, `_currentCallNumber`, `_lastNestedActionConsumed`) **and** all destination state changes the inner calls produced.
+5. The processor decodes `ContextResult` and restores `_rollingHash`, `_lastNestedActionConsumed`, `_currentCallNumber` to the values **observed at the end of the reverted span**, bridging the rolling hash and counters across the revert boundary.
 6. Restores `entry.calls[savedCallNumber].revertSpan = revertSpan` so the storage layout matches what the proof committed to.
 
-This is how the flat model expresses "scope-level atomicity": a destination contract that reverts (or a sequence of calls that ends with `revert`) is replayed as a span, and the inner state changes are rolled back while the rolling hash and counters keep advancing as if the span had executed.
-
 `revertSpan` covers a contiguous run of calls. The first call inside the span has its `revertSpan` field cleared so it executes as a normal call; subsequent calls inside the span have `revertSpan == 0` to begin with. Spans cannot be nested.
+
+#### When `revertSpan` is the right tool
+
+The canonical use is a cross-chain call from rollup A to rollup B where B's destination call **succeeded**, but the prover output marks the call as reverted in A's view of the world (for example, because the higher-level transaction containing the call was rolled back on A). When B replays the entry, `revertSpan = 1` ensures B's state does not retain effects that A no longer commits to.
+
+For natural failures — a destination contract that simply `revert`s — `revertSpan = 0` is correct and simpler:
+
+- The proxy `.call` returns `success=false` with the destination's revert payload as `retData`.
+- `CALL_END(false, retData)` is hashed into the rolling hash.
+- The destination's own revert rolls back the destination's state.
+
+Wrapping a single naturally-reverting call in `revertSpan = 1` is purely ceremonial — it produces the same rolling hash and the same on-chain state as `revertSpan = 0`, with an extra self-call frame for nothing. The mechanism only earns its cost when state would otherwise survive.
+
+**Reentrant reverted calls take a different path entirely.** When the destination contract called from `_processNCalls` re-enters the manager via a proxy (a try/catch'd cross-chain call to another rollup), reverts of that nested call are expressed as `StaticCall` with `failed = true` — not `revertSpan`, not `NestedAction`. `_consumeNestedAction` falls back to the matching `StaticCall` at `(actionHash, callNumber, lastNestedActionConsumed)` and reverts with the cached `returnData`; the destination's `try/catch` catches it, no cursor is advanced, and the EVM revert has nothing to roll back. See [`StaticCall`](#staticcall) below for the full lookup mechanics.
+
+Three distinct revert paths, one decision tree:
+
+- Top-level call that naturally reverts → `entry.failed = true` (immediate entries) or just place it in `calls[]` with `revertSpan = 0`.
+- Reentrant (re-entered via proxy) call that reverts → `StaticCall` with `failed = true`.
+- Successful call(s) whose state must be force-reverted at the protocol layer → `revertSpan > 0`.
 
 ---
 
@@ -181,7 +199,8 @@ Together they form a coordinate that advances monotonically and never repeats. T
 | Reentrant cross-chain call that **succeeds** | `NestedAction` |
 | Reentrant cross-chain call that **reverts** (caller catches with try/catch) | `StaticCall` with `failed = true` |
 | Reentrant cross-chain `STATICCALL` (read-only) | `StaticCall` with `failed = false` |
-| Top-level cross-chain call that reverts | Top-level `ExecutionEntry` with `failed = true` (immediate entry only) — or model the reverting call as a span via `revertSpan` |
+| Top-level cross-chain call that naturally reverts | Top-level `ExecutionEntry` with `failed = true` (immediate entry only) — or place it as `revertSpan = 0` in `calls[]`, where its revert is captured into `CALL_END(false, retData)` automatically |
+| Successful call(s) whose state must be force-reverted | `revertSpan > 0` on the first call of the span (e.g. cross-chain forced revert) |
 
 **How the manager picks between `NestedAction` and `StaticCall`** (for a reentrant call that hits `executeCrossChainCall`):
 
@@ -437,11 +456,11 @@ Alice on L2 calls A's proxy on L2 (A lives on L1). A, while executing on L1, cal
 - **L2**: Alice's L2 tx → A's proxy → `executeCrossChainCall(Alice, callBProxy)` → consumes entry [0]. The manager routes calls[0] through Alice's proxy (A's L2 stub executes), and when the L2 stub calls B's proxy → `executeCrossChainCall(A, increment)` → `_insideExecution() == true` → consumes nestedActions[0] → processes calls[1] (B executes on L2).
 - **L1**: `postBatch` runs entry [0] as the immediate entry (or via meta hook). Same call flow, but real A executes on L1 and B's call goes through the same nested-action path.
 
-### Revert via `revertSpan`
+### Forced revert via `revertSpan`
 
-When a contract on chain X reverts after committing cross-chain state, the protocol uses `revertSpan` to delineate the contiguous run of calls that should be rolled back atomically.
+When a chain's prover output marks a cross-chain call as reverted even though the destination call would succeed, the protocol uses `revertSpan` to delineate the contiguous run of calls whose **state effects** must be rolled back. The rolling hash still records the calls' real outcomes (typically `success=true`); only the EVM state changes are discarded.
 
-Example: SCA on L2 calls SCB which makes a successful cross-chain call to Counter on L1, then SCA reverts.
+Example: SCA on L2 calls SCB which makes a successful cross-chain call to Counter on L1, then SCA reverts. From L1's perspective Counter.increment() ran cleanly, but L2's prover output says the higher-level transaction was rolled back, so L1 must not retain the state change.
 
 **L1 execution table** (`postBatch`):
 ```

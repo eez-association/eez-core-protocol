@@ -85,9 +85,6 @@ contract CrossChainManagerL2 is ICrossChainManager {
     /// @notice Error when not all calls were consumed after execution
     error UnconsumedCalls();
 
-    /// @notice Error when executeCrossChainCall is called during execution with no matching nested action
-    error NoNestedActionAvailable();
-
     /// @notice Emitted when a new CrossChainProxy is deployed and registered
     event CrossChainProxyCreated(address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId);
 

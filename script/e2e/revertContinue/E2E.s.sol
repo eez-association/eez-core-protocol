@@ -19,12 +19,24 @@ import {actionHash, noStaticCalls, noNestedActions, noCalls, RollingHashBuilder}
 //  RevertContinue scenario — revert inside try/catch then continue
 //
 //  SelfCallerWithRevert.execute():
-//    a. try this.innerCall() {} catch {} — innerCall calls counterProxy, then reverts
-//    b. lastResult = target.increment()  — second call succeeds
+//    a. try this.innerCall() {} catch {}
+//         — innerCall does target.increment() (the reentrant proxy call SUCCEEDS,
+//           consuming nestedActions[0] and bumping the cursor), then innerCall()
+//           wraps up with `revert("inner scope revert")`. The revert rolls back
+//           innerCall()'s frame, including the NestedAction-cursor bump (which
+//           is a transient-store write).
+//    b. lastResult = target.increment()
+//         — second reentrant call re-consumes nestedActions[0] from the same
+//           cursor (since the bump was rolled back) and succeeds for real.
 //
-//  The first nested action consumption (inside innerCall) is rolled back by the
-//  revert. The second call re-consumes nestedActions[0]. The rolling hash only
-//  records the surviving changes — identical to a single nested call.
+//  Net effect: exactly ONE nested action consumption survives. The rolling
+//  hash only records that single surviving consumption — identical to a
+//  scenario where innerCall() never ran.
+//
+//  Why NestedAction (not StaticCall failed=true): the reentrant call itself
+//  succeeds; only the Solidity wrapper around it reverts. This is the textbook
+//  pattern that makes "successful reentrant + EVM rollback" work, because the
+//  cursor bump is a transient-store write that the EVM revert undoes.
 //
 //  This replaces the old REVERT_CONTINUE action type from the scope-tree model.
 // ═══════════════════════════════════════════════════════════════════════
@@ -60,8 +72,10 @@ abstract contract RevertContinueActions {
     }
 
     /// @dev Rolling hash: CALL_BEGIN(1) → NESTED_BEGIN(1) → NESTED_END(1) → CALL_END(1, true, "")
-    ///      The reverted inner call's hash changes are rolled back. Only the
-    ///      second (successful) nested action consumption survives.
+    ///      innerCall()'s revert rolls back the rolling-hash and cursor writes
+    ///      from its successful reentrant consumption. The second target.increment()
+    ///      call re-consumes nestedActions[0] from the rolled-back cursor — that
+    ///      is the only consumption recorded in the surviving rolling hash.
     function _expectedRollingHash() internal pure returns (bytes32 h) {
         h = bytes32(0);
         h = h.appendCallBegin(1);
@@ -88,7 +102,7 @@ abstract contract RevertContinueActions {
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
             sourceAddress: batcher,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 

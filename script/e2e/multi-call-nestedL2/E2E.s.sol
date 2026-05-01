@@ -84,7 +84,7 @@ abstract contract MultiCallNestedL2Actions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = CrossChainCall({
@@ -92,7 +92,7 @@ abstract contract MultiCallNestedL2Actions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 

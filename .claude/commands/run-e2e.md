@@ -52,7 +52,6 @@ Common flatten-model errors (selectors via `cast 4byte <selector>`):
 | `0xed6bc750` | `ExecutionNotFound` | Next sequential entry doesn't match the expected `actionHash`, or the action hash fields differ (wrong `sourceAddress`, missing `sourceRollup`, wrong `destination`). Recompute with `actionHash(Action{...})`. |
 | `0xf9d330ad` | `ExecutionNotInCurrentBlock` | `lastStateUpdateBlock` (L1) or `lastLoadBlock` (L2) ≠ current block. Use the `execute_l2_same_block` wrapper or ensure `postBatch` + user tx land in the same block. |
 | `0x3a2df6d3` | `NotSelf` | `executeInContext` invoked by someone other than the manager itself (must be `address(this)` self-call). |
-| `0x77d7d6c1` | `NoNestedActionAvailable` | Reentrant proxy call happened but entry has no more nested actions. Off-chain proof misalignment — the actual execution path has more reentrancy than precomputed. |
 
 On failure, `bash script/e2e/shared/decode-block.sh --l1-block <N> ...` dumps the actual execution table for comparison with `forge script <SOL>:ComputeExpected`.
 

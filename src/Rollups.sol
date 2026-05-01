@@ -198,9 +198,6 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when not all calls were consumed after execution
     error UnconsumedCalls();
 
-    /// @notice Error when executeCrossChainCall is called during execution with no matching nested action
-    error NoNestedActionAvailable();
-
     /// @notice Error when executeL2TX is called while already inside a cross-chain execution
     error L2TXNotAllowedDuringExecution();
 
@@ -351,6 +348,7 @@ contract Rollups is ICrossChainManager {
         for (uint256 i = 0; i < transientStaticCallCount; i++) {
             _transientStaticCalls.push(_staticCalls[i]);
         }
+
         for (uint256 i = 0; i < transientCount; i++) {
             _transientExecutions.push(entries[i]);
         }
@@ -362,6 +360,7 @@ contract Rollups is ICrossChainManager {
         // into `_transientExecutions` because its length is non-zero.
         if (transientCount > 0 && entries[0].actionHash == bytes32(0)) {
             _currentEntryIndex = 0;
+            // Eecute first N ( para salvaguardar en caso que la del meido pete)
             _applyAndExecute(entries[0].stateDeltas, entries[0].callCount, entries[0].rollingHash, 0);
             _transientExecutionIndex = 1;
         }

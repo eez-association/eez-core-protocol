@@ -65,7 +65,7 @@ struct CrossChainCall {
     bytes   data;
     address sourceAddress;
     uint256 sourceRollupId;
-    uint256 revertSpan;   // 0 = normal call; N>0 = open isolated revert context for next N calls (this one inclusive)
+    uint256 revertSpan;   // 0 = normal call; N>0 = force-revert state effects of next N calls (this one inclusive); see §D.4.1
 }
 ```
 
@@ -260,8 +260,8 @@ The verifier is invoked as `ZK_VERIFIER.verify(proof, publicInputsHash)` and mus
 2. **Mark block**: `lastStateUpdateBlock = block.number`. This happens **before** any external call so (a) `executeCrossChainCall` / `executeL2TX` work during the meta hook, and (b) re-entrant `postBatch` is blocked by the same-block guard.
 3. **Wipe persistent**: `delete executions; delete staticCalls; executionIndex = 0`.
 4. **Populate transient tables**: push leading entries into `_transientExecutions` and leading static calls into `_transientStaticCalls`.
-5. **Immediate entry**: if `transientCount > 0 && entries[0].actionHash == bytes32(0)`, set `_currentEntryIndex = 0` and call `_applyAndExecute(entries[0].stateDeltas, entries[0].callCount, entries[0].rollingHash, 0)`. Then set `_transientExecutionIndex = 1`.
-6. **Meta hook**: if `msg.sender.code.length > 0`, call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2TX` to consume the rest of `_transientExecutions`.
+5. **Immediate entry**: if `transientCount > 0 && entries[0].actionHash == bytes32(0)`, set `_currentEntryIndex = 0` and call `_applyAndExecute(entries[0].stateDeltas, entries[0].callCount, entries[0].rollingHash, 0)`. Then set `_transientExecutionIndex = 1`. If `transientCount == 0` there is no transient table and no immediate execution: all entries flow straight to persistent storage in step 7 and are consumed later through the normal proxy / `executeL2TX` paths.
+6. **Meta hook**: if there are remaining transient entries (`_transientExecutionIndex < _transientExecutions.length`) and `msg.sender.code.length > 0`, call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2TX` to consume the rest of `_transientExecutions`. The hook is skipped when there is nothing left to drive — either because the immediate entry already drained the table, or because `transientCount == 0` and no transient entries were ever loaded.
 7. **Deferred publish**: if `_transientExecutionIndex == _transientExecutions.length` (transient table fully drained), push `entries[transientCount..]` to `executions` and `_staticCalls[transientStaticCallCount..]` to `staticCalls`. Otherwise drop the remainder.
 8. **Cleanup**: `delete _transientExecutions; delete _transientStaticCalls; _transientExecutionIndex = 0`.
 9. Emit `BatchPosted(entries, publicInputsHash)`.
@@ -299,7 +299,7 @@ if (_insideExecution()) {
 return _consumeAndExecute(actionHash, int256(msg.value));
 ```
 
-**Revert conditions**: `UnauthorizedProxy`, `ExecutionNotInCurrentBlock`, `ExecutionNotFound`, `RollingHashMismatch`, `UnconsumedCalls`, `UnconsumedNestedActions`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `NoNestedActionAvailable`, plus any revert from the destination call (which is captured into `_rollingHash` via `CALL_END`).
+**Revert conditions**: `UnauthorizedProxy`, `ExecutionNotInCurrentBlock`, `ExecutionNotFound`, `RollingHashMismatch`, `UnconsumedCalls`, `UnconsumedNestedActions`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, plus any revert from the destination call (which is captured into `_rollingHash` via `CALL_END`).
 
 #### `executeL2TX`
 
@@ -420,18 +420,31 @@ Inside an active `postBatch`, `_transientExecutions.length != 0` routes **all** 
 
 ```
 entry = _currentEntryStorage()
-idx   = _lastNestedActionConsumed++
-if (idx >= entry.nestedActions.length): revert NoNestedActionAvailable
-nested = entry.nestedActions[idx]
-if (nested.actionHash != actionHash): revert ExecutionNotFound
+idx   = _lastNestedActionConsumed++           // speculative bump (rolls back on revert)
 
-nestedNumber = idx + 1
-_rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber))
-_processNCalls(nested.callCount)
-_rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber))
+// 1. NestedAction priority. The bump above is the commit; if we fall through,
+//    every fallback path reverts and the EVM rolls the bump back.
+if (idx < entry.nestedActions.length && entry.nestedActions[idx].actionHash == actionHash):
+    nested        = entry.nestedActions[idx]
+    nestedNumber  = idx + 1
+    _rollingHash  = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber))
+    _processNCalls(nested.callCount)
+    _rollingHash  = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber))
+    return nested.returnData
 
-return nested.returnData
+// 2. Fallback: failed=true StaticCall keyed by the pre-bump cursor. This handles
+//    the try/catch case (a reentrant call the caller expects to revert) — it
+//    cannot be expressed as a NestedAction because the failure would roll back
+//    the consumption-cursor bump and make consumption silent.
+//    Lookup key uses `idx` (pre-bump) and the current `_currentCallNumber`.
+//    Scan _transientStaticCalls first, then persistent staticCalls.
+//    A match calls _resolveStaticCall(sc), which always reverts when sc.failed.
+
+// 3. No match anywhere.
+revert ExecutionNotFound
 ```
+
+The fallback's safety comes from the speculative-bump pattern: the cursor advance at line 2 is the only state change before the routing decision. NestedAction success persists the bump; every other path (StaticCall fallback hit, no-match) reverts and the EVM rolls the bump back, so the cursor only advances on a clean NestedAction consumption.
 
 `_currentEntryStorage()` returns `_transientExecutions[_currentEntryIndex]` if `_transientExecutions.length != 0`, else `executions[_currentEntryIndex]`.
 
@@ -703,9 +716,25 @@ When the destination contract called by `_processNCalls` calls back into a proxy
 
 A single mechanism handles atomic rollback: there are no continuation entries, no per-rollup state-root restoration, no scope tree to navigate. The "what happened" is encoded by the calls in the span; the "what state survives" is whatever the EVM rolled back.
 
+#### D.4.1 When to use `revertSpan` (and when not to)
+
+**Use `revertSpan > 0` only for forced reverts** — calls (or sequences of calls) that *would* succeed against the destination but whose state effects must not survive. The canonical scenario is a cross-chain call from rollup A to rollup B where the destination on B succeeds, but the prover output for the replaying side records that the call must be rolled back (for example, because the higher-level transaction that contained the call was reverted on A). The rolling hash still commits to a `CALL_END(success=true, retData=…)` outcome — what was promised — while the EVM rolls the state back.
+
+**Do not use `revertSpan` to model a destination that naturally reverts.** With `revertSpan = 0`, `_processNCalls` already invokes the destination via the proxy's `.call`, captures `(success=false, retData=revertReason)`, and hashes that into `CALL_END`. The destination's own revert rolls back its own state. Wrapping a single naturally-reverting call in `revertSpan = 1` produces the same observable rolling hash and the same on-chain state as `revertSpan = 0` — it adds a self-call frame for no benefit. The mechanism only earns its keep when state would otherwise survive.
+
+The three revert paths in the protocol are distinct — pick the one that matches the situation:
+
+| Situation | Path |
+|---|---|
+| Top-level cross-chain call that naturally reverts | `entry.failed = true` (immediate entry only); otherwise place the call in `calls[]` with `revertSpan = 0` and let `CALL_END(false, retData)` capture it |
+| **Reentrant** cross-chain call that reverts (caller wraps it in `try/catch`) | `StaticCall` with `failed = true` — *not* `revertSpan`, *not* `NestedAction`. See §D.3 / §F.4 |
+| Successful call(s) whose state must be force-reverted | `revertSpan > 0` on the first call of the span |
+
+The reentrant-revert case **must not** use `revertSpan`: the destination's `try/catch` already provides the isolation boundary, the `StaticCall` fallback in `_consumeNestedAction` replays the cached revert without advancing the consumption cursor, and the EVM revert from the caught failure has nothing to roll back. Wrapping it in `revertSpan` would consume an entry-level call slot the prover did not allocate.
+
 ### D.5 Flat Call Model
 
-The off-chain prover emits a flat `calls[]` array plus a parallel `NestedAction[]` table — it does not thread scope arrays through nested calls. Return data from a call is captured directly into the rolling hash via `CALL_END`; reverts are captured via `success=false` in the same `CALL_END` tag (or via `revertSpan` when an entire span must be replayed).
+The off-chain prover emits a flat `calls[]` array plus a parallel `NestedAction[]` table — it does not thread scope arrays through nested calls. Return data from a call is captured directly into the rolling hash via `CALL_END`; reverts of natural failures are captured via `success=false` in the same `CALL_END` tag. `revertSpan` is reserved for forced-revert spans where state must be rolled back even though the call(s) succeeded.
 
 ---
 
@@ -940,7 +969,8 @@ This lets a static lookup model a contract that performs read-only sub-calls: th
 | Reentrant call that **succeeds** | `NestedAction` | `_consumeNestedAction` (priority branch) |
 | Reentrant call that **reverts** (caller catches with try/catch) | `StaticCall` with `failed = true` | `_consumeNestedAction` fallback |
 | Reentrant cross-chain `STATICCALL` (read-only, success or revert) | `StaticCall` with `failed` set as appropriate | `staticCallLookup` (real STATICCALL frame) |
-| Top-level call that should fail | Set `entry.failed = true` (immediate entry only) — or wrap in `revertSpan` | — |
+| Top-level call that should fail (natural revert) | Set `entry.failed = true` (immediate entry only) | — |
+| Successful call(s) whose state must be force-reverted | `revertSpan > 0` on the first call of the span (see §D.4.1) | `executeInContext` self-call |
 
 ---
 

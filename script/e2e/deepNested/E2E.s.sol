@@ -107,17 +107,19 @@ abstract contract DeepNestedActions {
             etherDelta: 0
         });
 
-        // calls[0]: outer — manager calls NestedCaller.callNested() via sourceProxy(alice, L2)
+        // calls[0]: outer — manager calls NestedCaller.callNested() via sourceProxy(alice, MAINNET).
+        //           Source rollup mirrors _outerActionHash (Alice on Mainnet).
         // calls[1]: inner — inside nestedActions[0]'s _processNCalls(1), manager calls
-        //           CAP.incrementProxy() via sourceProxy(nestedCaller, L2). During this call,
-        //           CAP calls counterProxy → triggers _consumeNestedAction(nestedActions[1]).
+        //           CAP.incrementProxy() via sourceProxy(nestedCaller, MAINNET) — mirrors
+        //           _capActionHash (NestedCaller on Mainnet). During this call, CAP calls
+        //           counterProxy → triggers _consumeNestedAction(nestedActions[1]).
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = CrossChainCall({
             targetAddress: nestedCaller,
             value: 0,
             data: abi.encodeWithSelector(NestedCaller.callNested.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = CrossChainCall({
@@ -125,7 +127,7 @@ abstract contract DeepNestedActions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: nestedCaller,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 

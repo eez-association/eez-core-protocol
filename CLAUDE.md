@@ -52,7 +52,7 @@ struct CrossChainCall {
     bytes   data;
     address sourceAddress;
     uint256 sourceRollupId;
-    uint256 revertSpan;     // 0 = normal call; N>0 = isolated revert context spanning next N calls
+    uint256 revertSpan;     // 0 = normal call; N>0 = force-revert state effects of next N calls (calls succeed; rolling hash records success; EVM state is rolled back)
 }
 
 struct NestedAction {
@@ -149,7 +149,14 @@ A single mismatch anywhere — wrong return data, wrong success/failure flag, mi
 
 ### `revertSpan`
 
-`revertSpan > 0` opens an isolated EVM context for the next `revertSpan` calls. The processor self-calls `executeInContext(revertSpan)` which always reverts with `error ContextResult(rollingHash, lastNestedActionConsumed, currentCallNumber)`. The EVM rolls back state inside the span, but the three values escape via the revert payload — the outer flow restores them so the rolling hash and counters reflect what happened inside the span.
+`revertSpan > 0` is the **forced-revert** mechanism: the next `revertSpan` calls execute, succeed, and have their EVM state effects rolled back at the protocol layer. The processor self-calls `executeInContext(revertSpan)` which always reverts with `error ContextResult(rollingHash, lastNestedActionConsumed, currentCallNumber)`. The EVM rolls back state inside the span, but the three values escape via the revert payload — the outer flow restores them so the rolling hash and counters reflect what happened inside the span.
+
+**Use only for forced reverts.** The canonical scenario is a cross-chain call that succeeded on the destination but whose state must be discarded by the replaying side (e.g. an L2→L1 call that ran cleanly on L1 but was rolled back in L2's view). Naturally-reverting destinations need `revertSpan = 0`; the proxy `.call` already captures `(success=false, retData)` and hashes it into `CALL_END`. Wrapping a single naturally-reverting call in `revertSpan = 1` produces the same hash and the same state — the mechanism only earns its cost when state would otherwise survive.
+
+**Three revert paths, don't mix them up:**
+- Top-level natural revert → `revertSpan = 0` (or `entry.failed = true` for immediate entries).
+- **Reentrant** (re-entered via proxy) call that reverts → `StaticCall` with `failed = true`. `_consumeNestedAction` falls back to the matching cached entry and reverts with `returnData`; no cursor advances.
+- Forced revert of successful call(s) → `revertSpan > 0`.
 
 ### `NestedAction` vs `StaticCall`
 
@@ -158,7 +165,8 @@ A single mismatch anywhere — wrong return data, wrong success/failure flag, mi
 | Reentrant call that **succeeds** | `NestedAction` |
 | Reentrant call that **reverts** (caller catches with try/catch) | `StaticCall` with `failed = true` |
 | Reentrant cross-chain `STATICCALL` (read-only) | `StaticCall` with `failed = false` |
-| Top-level call that should fail | `entry.failed = true` (immediate entry only) — or wrap in `revertSpan` |
+| Top-level call that naturally reverts | `entry.failed = true` (immediate entry only); for non-immediate entries put it in `calls[]` with `revertSpan = 0` and let `CALL_END(false, retData)` capture it |
+| Successful call(s) whose state must be force-reverted | `revertSpan > 0` on the first call of the span |
 
 Reverting reentrant calls cannot be `NestedAction` — the failed call's revert rolls back the consumption index `tstore`, making consumption silent. `StaticCall` is content-addressed by `(actionHash, callNumber, lastNestedActionConsumed)` and replays the cached revert deterministically.
 

@@ -191,7 +191,8 @@ abstract contract ReentrantActions {
             calls: calls,
             nestedActions: nested,
             callCount: 1,
-            returnData: "",
+            // Top-level rcL1.deepCall(3) returns ++count == 2 after the chain.
+            returnData: abi.encode(uint256(2)),
             failed: false,
             rollingHash: _l1RollingHash()
         });
@@ -234,7 +235,8 @@ abstract contract ReentrantActions {
             calls: calls,
             nestedActions: nested,
             callCount: 1,
-            returnData: "",
+            // Top-level rcL2.deepCall(2) returns ++count == 2 after the chain.
+            returnData: abi.encode(uint256(2)),
             failed: false,
             rollingHash: _l2RollingHash()
         });

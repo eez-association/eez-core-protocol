@@ -79,7 +79,7 @@ abstract contract NestedL2Actions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID, // matches the entry's outer src — Alice on L2
             revertSpan: 0
         });
 

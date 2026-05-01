@@ -20,20 +20,27 @@ import {actionHash, noStaticCalls, noNestedActions, noCalls, RollingHashBuilder}
 //  RevertContinueL2 scenario — L2-side mirror of revertContinue
 //
 //  SelfCallerWithRevert.execute():
-//    a. try this.innerCall() {} catch {} — innerCall calls counterProxy, then reverts
-//    b. lastResult = target.increment()  — second call succeeds
+//    a. try this.innerCall() {} catch {}
+//         — innerCall does target.increment() (the reentrant proxy call SUCCEEDS,
+//           consuming nestedActions[0] and bumping the cursor), then innerCall()
+//           wraps up with `revert("inner scope revert")`. The revert rolls back
+//           innerCall()'s frame, including the NestedAction-cursor bump.
+//    b. lastResult = target.increment()
+//         — second reentrant call re-consumes nestedActions[0] from the same
+//           cursor (since the bump was rolled back) and succeeds for real.
 //
-//  The first nested action consumption (inside innerCall) is rolled back by the
-//  revert. The second call re-consumes nestedActions[0]. The rolling hash only
-//  records the surviving changes — identical to a single nested call.
+//  Net effect: exactly ONE nested action consumption survives. NestedAction
+//  is the correct primitive — the reentrant call itself succeeds; only the
+//  Solidity wrapper around it reverts.
 //
 //  Chain of events (entirely on L2):
 //    1. loadExecutionTable loads ONE entry with calls[] + nestedActions[]
 //    2. Alice calls selfCallerProxy (proxy for SelfCallerWithRevert@MAINNET on L2)
 //    3. _processNCalls: calls[0] routes via proxy → selfCaller.execute()
 //    4. execute() does try this.innerCall() catch {} then target.increment()
-//    5. innerCall() calls counterProxy (Counter@L1) → nested action consumed then reverted
-//    6. target.increment() calls counterProxy again → nested action re-consumed (succeeds)
+//    5. innerCall(): counterProxy reentrant call SUCCEEDS, then innerCall reverts
+//       — cursor bump rolled back by EVM
+//    6. target.increment(): counterProxy reentrant call re-consumes nestedActions[0]
 //    7. Nested action returns abi.encode(1) → lastResult=1
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -68,8 +75,10 @@ abstract contract RevertContinueL2Actions {
     }
 
     /// @dev Rolling hash: CALL_BEGIN(1) → NESTED_BEGIN(1) → NESTED_END(1) → CALL_END(1, true, "")
-    ///      The reverted inner call's hash changes are rolled back. Only the
-    ///      second (successful) nested action consumption survives.
+    ///      innerCall()'s revert rolls back the rolling-hash and cursor writes
+    ///      from its successful reentrant consumption. The second target.increment()
+    ///      call re-consumes nestedActions[0] from the rolled-back cursor — that
+    ///      is the only consumption recorded in the surviving rolling hash.
     function _expectedRollingHash() internal pure returns (bytes32 h) {
         h = bytes32(0);
         h = h.appendCallBegin(1);
@@ -89,7 +98,7 @@ abstract contract RevertContinueL2Actions {
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 

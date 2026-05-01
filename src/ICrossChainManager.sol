@@ -49,7 +49,7 @@ struct NestedAction {
 /// @dev `failed` must always be false for deferred entries.
 ///      A failed entry reverts in _consumeAndExecute, rolling back executionIndex++ and
 ///      permanently blocking the execution table. TODO remove failed
-struct ExecutionEntry {
+struct ExecutionEntry {  // rename transactionEntry
     StateDelta[] stateDeltas;
     bytes32 actionHash;
     CrossChainCall[] calls;         // ALL calls flat, in execution order

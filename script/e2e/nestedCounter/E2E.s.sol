@@ -86,7 +86,7 @@ abstract contract NestedActions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID, // proxy for (alice, L2) — will be auto-created
+            sourceRollupId: MAINNET_ROLLUP_ID, // matches the entry's outer src — Alice on Mainnet
             revertSpan: 0
         });
 
