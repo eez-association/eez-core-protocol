@@ -56,7 +56,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 | `src/Rollup.sol` | Reference per-rollup manager (PS membership, vkeys, threshold, owner) |
 | `src/IRollup.sol` | Interface registry calls back into per-rollup managers |
 | `src/IProofSystem.sol` | Interface for proof-verifying contracts |
-| `src/ICrossChainManager.sol` | Shared structs (`StateDelta`, `ExecutionEntry`, `StaticCall`, etc.) |
+| `src/ICrossChainManager.sol` | Shared structs (`StateDelta`, `ExecutionEntry`, `LookupCall`, etc.) |
 | `src/CrossChainProxy.sol` | CREATE2-deployed proxy per (originalAddress, originalRollupId) |
 | `src/CrossChainManagerL2.sol` | L2 manager (unchanged by this refactor) |
 
@@ -79,9 +79,9 @@ struct ProofSystemBatch {
     address[] proofSystems;        // sorted asc, no duplicates, no zero
     uint256[] rollupIds;           // sorted asc, disjoint across sub-batches
     ExecutionEntry[] entries;
-    StaticCall[] staticCalls;
+    LookupCall[] lookupCalls;
     uint256 transientCount;        // per-sub-batch transient prefix
-    uint256 transientStaticCallCount;
+    uint256 transientLookupCallCount;
     uint256[] blobIndices;         // selects which tx-level 4844 blobs this sub-batch consumes
     bytes callData;                // sub-batch-scoped (each PS's circuit gets its own region)
     bytes[] proof;                 // parallel to proofSystems — one proof per PS
@@ -110,7 +110,7 @@ registry just consumes the returned vkeys.
 ### Per-PS publicInputsHash (two-stage)
 
 ```
-sharedHash       = H(prevBlockhash, ts, rollupIds, entryHashes, staticCallHashes,
+sharedHash       = H(prevBlockhash, ts, rollupIds, entryHashes, lookupCallHashes,
                      blobHashes, H(callData), crossProofSystemInteractions)
 publicInputsHash = H(sharedHash, rollupVks)   // per-PS
 ```
@@ -119,7 +119,7 @@ publicInputsHash = H(sharedHash, rollupVks)   // per-PS
   struct (stateDeltas, actionHash, destinationRollupId, calls, nestedActions, callCount,
   returnData, failed, rollingHash). Prevents an orchestrator from swapping inputs at execution
   time without invalidating the proof.
-- `staticCallHashes[i] = keccak256(abi.encode(batch.staticCalls[i]))` — same rationale.
+- `lookupCallHashes[i] = keccak256(abi.encode(batch.lookupCalls[i]))` — same rationale.
 - `rollupVks[r] = vkMatrix[r][k]` — the vkey of `proofSystems[k]` for `rollupIds[r]`.
 
 The two-stage form was forced by EVM stack-too-deep when the publicInputsHash had too many
@@ -143,7 +143,7 @@ batch reverts. See `docs/hashedProofSystem.md` (port from source branch — TODO
 struct RollupVerification {
     uint256 lastVerifiedBlock;
     ExecutionEntry[] queue;
-    StaticCall[] staticQueue;
+    LookupCall[] lookupQueue;
     uint256 cursor;
 }
 mapping(uint256 rollupId => RollupVerification record) internal verificationByRollup;
@@ -152,7 +152,7 @@ mapping(uint256 rollupId => RollupVerification record) internal verificationByRo
 - `lastVerifiedBlock` doubles as: (a) once-per-block-per-rollup invariant, (b) reentrancy
   gate (read-after-write before any external call), (c) lazy-reset signal (stale values
   treated as empty queue).
-- `queue` and `staticQueue` are per-rollup deferred-consumption stores. Each entry's
+- `queue` and `lookupQueue` are per-rollup deferred-consumption stores. Each entry's
   `destinationRollupId` selects which queue receives it during `_publishRemainder`.
 
 ### Lazy reset
@@ -167,15 +167,15 @@ prior blocks are unreachable because consumers gate on `lastVerifiedBlock == blo
   Routes to `verificationByRollup[rid].queue[cursor]`.
 - `executeL2TX(rid)`: explicit `rid` arg. Same routing.
 - `staticCallLookup(...)`: consumer's destination rollupId = `proxyInfo.originalRollupId`.
-  Routes to `verificationByRollup[rid].staticQueue` (after scanning the global transient
-  static-call table first).
+  Routes to `verificationByRollup[rid].lookupQueue` (after scanning the global transient
+  lookup-call table first).
 - `_consumeNestedAction`: nested actions live within an entry, no per-rollup routing.
 
 ### Transient phase (intra-tx)
 
 During `postBatch`, the leading `batch.transientCount` entries from each sub-batch are
 concatenated (in sub-batch order) into a single global `_transientExecutions` array. Same
-for static calls. The transient stream is consumed via `_transientExecutionIndex` cursor.
+for lookup calls. The transient stream is consumed via `_transientExecutionIndex` cursor.
 
 After the transient stream drains (or doesn't), the persistent remainder is published to
 per-rollup queues unconditionally. Soundness backstop: each entry's `StateDelta.currentState`
@@ -230,7 +230,7 @@ step 6). Those are normal CALL → can reenter. Lockouts:
 - Disjoint-rollup re-entry into `postBatch` (e.g., the hook calls `postBatch` for a different
   rollup set) → blocked by an explicit transient flag `_inPostBatch` (`PostBatchReentry`).
   Without this flag, the nested call would corrupt the SHARED `_transientExecutions` /
-  `_transientStaticCalls` / `_transientExecutionIndex` storage (different rollupIds but the
+  `_transientLookupCalls` / `_transientExecutionIndex` storage (different rollupIds but the
   same physical slots). Flag is set on entry, cleared on exit.
 - `Rollups.setStateRoot` and `Rollups.setRollupContract` (called from the manager) → gated
   by `RollupBatchActiveThisBlock` (`lastVerifiedBlock == block.number`).
@@ -291,7 +291,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 | `_validateRelevance` (anti-griefing PS-relevance check) | Manager's threshold check covers it; unrelated PSes are wasted gas the orchestrator pays. |
 | "Drained cleanly" gate before `_publishRemainder` | Always publish — `StateDelta.currentState` is the soundness backstop. |
 | `Rollups.ThresholdNotMet` / `UnrelatedProofSystem` errors | No longer thrown by the registry. |
-| Single-prover `postBatch(entries[], staticCalls[], transientCount, transientStaticCallCount, blobCount, callData, proof)` | Replaced by `postBatch(ProofSystemBatch[] batches)` with sub-batch shape. |
+| Single-prover `postBatch(entries[], lookupCalls[], transientCount, transientLookupCallCount, blobCount, callData, proof)` | Replaced by `postBatch(ProofSystemBatch[] batches)` with sub-batch shape. |
 | Global `executions[]` / `executionIndex` / `lastStateUpdateBlock` | Replaced by per-rollup `verificationByRollup[rid].queue` / `cursor` / `lastVerifiedBlock`. |
 
 ---
@@ -331,8 +331,24 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **`_processNCalls` runs before `_applyStateDeltas`**: outer entry's state deltas applied
   at end. Reentrant entries from other rollups apply their own deltas during dispatch. By
   design, document.
-- **`_processNStaticCalls` rolling hash format differs** from the main rolling hash (no
+- **`_processNLookupCalls` rolling hash format differs** from the main rolling hash (no
   CALL_BEGIN/CALL_END tags). Pre-existing simplification; document or align.
+- **Possible "join" of `Action` and `CrossChainCall`**: the two structs have overlapping
+  shape (target, value, data, sourceAddress, sourceRollupId, plus a few extras each). The
+  `Action` struct is off-chain-only (used by tooling to compute `actionHash`) while
+  `CrossChainCall` is the on-chain in-entry call type. Worth investigating whether they
+  can be unified into a single struct with optional fields, or whether `CrossChainCall`
+  can subsume `Action` entirely. Trade-off: simpler mental model + one less struct vs. risk
+  of conflating "the inputs that hash to actionHash" with "what executes during a call."
+- **Per-(destination rollup) call ID counter**: introduce a monotonic `callId` per
+  destination rollup (or maybe globally per postBatch / per cross-PS-interaction set) baked
+  into each `CrossChainCall` / `Action`. Useful for: deterministic cross-PS message
+  ordering (replaces ad-hoc execution-order indexing in `crossProofSystemInteractions`),
+  off-chain indexing / debugging, deduplication of identical-looking calls. Open questions:
+  scope (per-rollup, per-tx, per-batch?), where the counter lives (registry storage vs.
+  prover-supplied + bound by hash?), how it interacts with `revertSpan` when a call's
+  state is rolled back. Worth investigating once the cross-PS interactions hash work
+  starts.
 
 ---
 
@@ -342,8 +358,8 @@ Two parallel reviews were run after the latest round of changes:
 
 - **Code-quality review**: flagged threshold-as-separate-call (now fixed by moving threshold
   inside `getVkeysFromProofSystems`), stale natspec referencing the removed reverse map,
-  `StateDeltaRollupNotInBatch` error reused for static call destination (renamed to
-  `RollupNotInBatch`), `_processNStaticCalls` rolling hash format divergence (pre-existing).
+  `StateDeltaRollupNotInBatch` error reused for lookup call destination (renamed to
+  `RollupNotInBatch`), `_processNLookupCalls` rolling hash format divergence (pre-existing).
 - **Security review**: HIGH on reentrancy via `_fetchVkMatrix` / `threshold()` BEFORE
   `_markVerifiedThisBlock` — fixed by hoisting the mark to step 2 before any external call.
   MEDIUM on `rollupContractRegistered` reentrancy in `createRollup` / `setRollupContract` — open.

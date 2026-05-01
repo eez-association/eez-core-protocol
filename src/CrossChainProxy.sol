@@ -89,14 +89,13 @@ contract CrossChainProxy {
 
         if (!success) {
             // Static context — look up pre-computed result via view function
-            (success, result) = MANAGER.staticcall(
-                abi.encodeCall(ICrossChainManager.staticCallLookup, (msg.sender, msg.data))
-            );
+            (success, result) =
+                MANAGER.staticcall(abi.encodeCall(ICrossChainManager.staticCallLookup, (msg.sender, msg.data)));
         } else {
             // Normal context — execute cross-chain call
-            (success, result) = MANAGER.call{value: msg.value}(
-                abi.encodeCall(ICrossChainManager.executeCrossChainCall, (msg.sender, msg.data))
-            );
+            (success, result) = MANAGER.call{
+                value: msg.value
+            }(abi.encodeCall(ICrossChainManager.executeCrossChainCall, (msg.sender, msg.data)));
         }
 
         if (success) {

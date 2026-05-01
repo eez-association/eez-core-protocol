@@ -41,7 +41,7 @@ struct CrossChainCall {
 /// @notice Pre-computed result for a successful reentrant cross-chain call triggered during execution
 /// @dev Consumed sequentially from the entry's nestedActions array. If a nested action itself
 ///      triggers a reentrant call, it consumes the next element in the same flat array.
-/// @dev All nested actions must succeed. Failed calls should use StaticCall instead.
+/// @dev All nested actions must succeed. Failed calls should use LookupCall instead.
 /// @dev Position in the execution tree (crossChainCall index, nested action index, parent context)
 ///      is folded into the entry-level rolling hash rather than stored as explicit fields.
 struct NestedAction {
@@ -107,23 +107,23 @@ struct ExecutionEntry {
     bytes32 rollingHash;
 }
 
-/// @notice Pre-computed result for a static call or a call that reverts
+/// @notice Pre-computed result for a lookup call or a call that reverts
 /// @dev Used for read-only calls and for calls whose revert needs to be replayed.
 ///      Loaded via postBatch (L1) or loadExecutionTable (L2).
 ///      All proxies referenced by `calls` must be deployed before staticCallLookup is called.
-struct StaticCall {
+struct LookupCall {
     bytes32 actionHash;
-    /// Rollup whose `staticQueue` this entry is routed to on L1 (per-rollup queue model).
+    /// Rollup whose `lookupQueue` this entry is routed to on L1 (per-rollup queue model).
     /// On L2 there's a single rollup, so the field is unused by the on-chain execution
     /// path — same semantic as `ExecutionEntry.destinationRollupId`.
     uint256 destinationRollupId;
     bytes returnData;
     bool failed;
     /// 1-indexed global call number — the value of `_currentCallNumber` at the moment
-    /// this static call was observed by the prover. Used as part of the lookup key in
-    /// `staticCallLookup` and the failed-static-call fallback in `_consumeNestedAction`.
+    /// this lookup call was observed by the prover. Used as part of the lookup key in
+    /// `staticCallLookup` and the failed-lookup-call fallback in `_consumeNestedAction`.
     uint64 callNumber;
-    /// Disambiguates multiple static calls fired during the same outer call (e.g., a
+    /// Disambiguates multiple lookup calls fired during the same outer call (e.g., a
     /// reentrant view query that triggers further static lookups). Matches
     /// `_lastNestedActionConsumed` at the moment of observation.
     uint64 lastNestedActionConsumed;
@@ -131,7 +131,7 @@ struct StaticCall {
     /// `calls[]` means the cached `returnData` / `failed` bypasses any sub-call replay.
     CrossChainCall[] calls;
     /// Expected hash of the sub-call results — checked at lookup time when `calls[]` is
-    /// non-empty. See `_processNStaticCalls` for the hashing scheme.
+    /// non-empty. See `_processNLookupCalls` for the hashing scheme.
     bytes32 rollingHash;
 }
 

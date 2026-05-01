@@ -1,60 +1,100 @@
 # Smart Contract TODOs
 
-## 1a. Failed entry (`entry.failed == true`) blocks the execution table
+Living list of in-code TODOs and open design issues.
+
+For multi-prover / per-rollup-manager specific items, see also
+[`docs/MULTI_PROVER_DESIGN.md`](../docs/MULTI_PROVER_DESIGN.md) — its
+"Open / pending design decisions" section is the source of truth for that
+refactor's open questions and is updated as the design evolves.
+
+---
+
+## 1. Failed entry (`entry.failed == true`) blocks the rollup queue
 
 ### Problem
 
-When `_consumeAndExecute` processes an entry with `failed == true`, it executes all calls (to verify the rolling hash), then reverts with `entry.returnData` via assembly. But the `executionIndex++` that happened at the start of `_consumeAndExecute` is **rolled back** by the revert — because the revert propagates through `executeCrossChainCall`, which was called via `.call` from the proxy. The entire call context is undone.
+When `_consumeAndExecute` processes a deferred entry with `failed == true`, it executes all calls (to verify the rolling hash), then reverts with `entry.returnData` via assembly. But the `cursor++` on `verificationByRollup[destRid].cursor` and the state-delta mutations applied just before the revert are **rolled back** — the revert propagates through `executeCrossChainCall`, which was called via `.call` from the proxy. The entire call frame is undone.
 
-Result: the failed entry is never consumed, `executionIndex` stays the same, and **every subsequent call hits the same failed entry forever**. The execution table is stuck.
+Result: the failed entry is never consumed, the per-rollup cursor stays the same, and **every subsequent call to that rollup hits the same failed entry forever** until a new `postBatch` lazy-resets the queue (next block, or different sub-batch group).
 
 ### Scenario
 
 ```
 User calls proxy → proxy calls executeCrossChainCall via .call
-  → _consumeAndExecute:
-    → executionIndex++ (0 → 1)
-    → processes calls, verifies rolling hash — all good
+  → _consumeAndExecute(destRid, ...):
+    → verificationByRollup[destRid].cursor++ (0 → 1)
+    → applies state deltas, processes calls, verifies rolling hash — all good
     → entry.failed == true
     → assembly { revert(returnData) }
-  → revert propagates: executionIndex rolled back to 0
+  → revert propagates: cursor rolled back to 0, state deltas reverted
 proxy catches revert, returns failure to user
 
-Next call: executionIndex is still 0, same failed entry, same revert → stuck forever
+Next call: cursor still 0, same failed entry, same revert → stuck for the rest of the block
 ```
 
 ### Possible solutions
 
-See `src/DISCUSS.md` for 3 approaches.
+1. **Drop `entry.failed` entirely.** Express top-level failures via `revertSpan = 0` and a naturally-reverting destination — `(success=false, retData)` is captured in `CALL_END`'s rolling-hash payload. The orchestrator never needs an explicit failed flag.
+2. **Two-phase consume**: do `cursor++` AND emit `ExecutionConsumed` in a frame that survives the revert (e.g., a trusted-self-call wrapper that catches `entry.failed`'s revert and bubbles it up after committing the cursor advance).
+3. **Cursor commit before content evaluation.** Restructure to bump the cursor + apply state deltas in an outer self-call, then evaluate `entry.failed` in an inner self-call whose revert is caught.
+
+Option 1 is cleanest if no use case requires the explicit failed flag. Worth auditing the off-chain spec.
 
 ---
 
-## 1b. Failed nested action (reentrant call reverts) — RESOLVED
+## 2. `LookupCall` lookup is O(n) linear scan
 
-### Resolution
+### Problem
 
-`_consumeNestedAction` now falls back to a `StaticCall` lookup when no `NestedAction` matches at the current cursor. The fallback only matches `failed=true` static calls keyed by `(actionHash, _currentCallNumber, _lastNestedActionConsumed)`, replays any sub-calls via STATICCALL for integrity, and reverts with the cached `returnData`. The destination's `try/catch` absorbs the revert, the outer `_processNCalls` continues, and `_lastNestedActionConsumed` is never bumped on this path — so the EVM revert has nothing to roll back.
+`staticCallLookup` iterates the destination rollup's `lookupQueue` (and the transient `_transientLookupCalls`) to find an entry matching `(actionHash, callNumber, lastNestedActionConsumed)`. Same shape in `_consumeNestedAction`'s failed-reentry fallback. For sub-batches with many lookup calls this is O(n) per lookup; nested-call-heavy entries can hit it many times.
 
-Routing summary:
+### Possible optimizations
 
-| Frame type | Routes to | Handles |
-|---|---|---|
-| Real STATICCALL (proxy `tstore` reverts) | `staticCallLookup` (external view) | Both `failed=true` and `failed=false` static entries |
-| Normal CALL, reentrant (`_insideExecution() == true`) | `_consumeNestedAction` | NestedAction first; on miss, only `failed=true` static entries (revert replay) |
+- **Sort by lookup-key hash.** Have the orchestrator sort `lookupCalls[]` by `keccak256(actionHash, callNumber, lastNestedActionConsumed)` (cast to `uint256`). On-chain, replace the linear scan with a binary search → O(log n). The proof would enforce sort order via a single `keys[i+1] > keys[i]` check, and `lookupCallHashes` already binds the array contents into the publicInputsHash so the prover can't reorder maliciously.
+- **Mapping from lookup-key hash to index.** O(1) but adds storage cost per entry (extra SSTORE on publish).
+- **Require strict execution-order ordering**, so sequential cursor lookup works (no key match needed).
 
-Implementation: `src/Rollups.sol` `_consumeNestedAction` (L1, scans `_transientStaticCalls` then `staticCalls`); `src/CrossChainManagerL2.sol` `_consumeNestedAction` (L2, persistent `staticCalls` only). Both share a `_resolveStaticCall` helper.
-
----
-
-## 3. `staticCalls` lookup is O(n) linear scan
-
-`staticCallLookup` iterates over the entire `staticCalls[]` array to find a match. For entries with many static calls this could be gas-expensive. Consider:
-- A mapping from `keccak256(actionHash, callNumber, lastNestedActionConsumed)` to index
-- Keeping the array sorted and using binary search
-- Requiring static calls to be ordered so sequential lookup works
+The TODO comment lives inline at `staticCallLookup` in `src/Rollups.sol`. Punted until profiling shows it matters.
 
 ---
 
-## 5. No mechanism to clear a stuck execution table
+## 3. `_publishRemainder` could skip persistent entries when the meta hook left transient unconsumed
 
-If entries are posted via `postBatch` but cannot be consumed in the same block (e.g., a bug in off-chain construction), the execution table is stuck until the next `postBatch` overwrites it. Non-issue in practice: tables are one-block-lived and `postBatch` deletes previous data on each call.
+### Problem
+
+`_publishRemainder` unconditionally pushes every sub-batch's persistent remainder into per-rollup queues, even if the meta hook didn't drain the transient stream. Persistent entries whose preconditions depended on a dropped transient sibling will fail their `StateRootMismatch` check at consumption time — wasted SSTOREs.
+
+### Optimization sketch
+
+Track per-sub-batch transient consumption (or walk `_transientExecutionIndex` back to sub-batch boundaries) and skip publishing the persistent tail of any sub-batch whose transient prefix wasn't fully drained. Only a win if hooks frequently leave entries unconsumed; in normal operation hooks should drain. TODO comment lives inline at `_publishRemainder` in `src/Rollups.sol`.
+
+---
+
+## 4. `_processNLookupCalls` rolling-hash format diverges from main
+
+### Issue
+
+The main rolling hash uses tagged events (`CALL_BEGIN` / `CALL_END` / `NESTED_BEGIN` / `NESTED_END`) with call numbers. `_processNLookupCalls` (the sub-call replay inside `_resolveLookupCall`) uses an untagged `keccak256(prev, success, retData)` — different schema.
+
+This is a pre-existing simplification (pre-multi-prover). It works because `LookupCall.rollingHash` is a separate per-LookupCall accumulator, not the entry-level `_rollingHash`. But the divergence is undocumented in the protocol spec.
+
+### Action
+
+Decide whether to:
+1. Document the divergence (lookup-call sub-hashes use a simpler formula because the surrounding lookup-key already pins context).
+2. Align with the tagged scheme for consistency.
+
+---
+
+## See also
+
+- [`docs/MULTI_PROVER_DESIGN.md`](../docs/MULTI_PROVER_DESIGN.md) — multi-prover refactor notes, including:
+  - `rollupContractRegistered` reentrancy in `setRollupContract` (callback fires after pointer update).
+  - `createRollup` initial-state overwrite via callback → `setStateRoot`.
+  - Double-registration of the same manager address for two rollupIds.
+  - Handoff back to a previously-used reference manager (`rollupIdSet` permanent latch).
+  - `rollupId == 0` (MAINNET) excluded from sub-batches by the strict-increasing check.
+  - Possible "join" of `Action` and `CrossChainCall`.
+  - Per-(destination rollup) call ID counter idea.
+- [`docs/CAVEATS.md`](../docs/CAVEATS.md) — operator-facing edge cases.
+- [`docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md`](../docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md) — formal protocol spec.

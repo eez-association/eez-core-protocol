@@ -2,14 +2,14 @@
 pragma solidity ^0.8.28;
 
 import {IProofSystem} from "./IProofSystem.sol";
-import {IRollup} from "./IRollup.sol";
+import {IRollup} from "./rollupContract/IRollup.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 import {
     ICrossChainManager,
     StateDelta,
     CrossChainCall,
     NestedAction,
-    StaticCall,
+    LookupCall,
     ExecutionEntry,
     ProxyInfo
 } from "./ICrossChainManager.sol";
@@ -28,7 +28,7 @@ struct RollupConfig {
 }
 
 /// @notice One sub-batch's payload — a group of proof systems jointly attesting to a set of
-///         rollups' state transitions, all sharing the same entries / static calls /
+///         rollups' state transitions, all sharing the same entries / lookup calls /
 ///         crossProofSystemInteractions binding.
 /// @dev `rollupIds` must be strictly increasing within a sub-batch (cross-batch disjointness
 ///      is enforced for free by `_markVerifiedThisBlock`'s once-per-block guard).
@@ -40,8 +40,8 @@ struct RollupConfig {
 ///      that's a subset of every participating rollup's allowed set.
 /// @dev `blobIndices` selects which of the tx-level EIP-4844 blobs this sub-batch consumes;
 ///      `callData` is sub-batch-scoped (each PS's circuit gets its own region).
-/// @dev `transientCount` and `transientStaticCallCount` are per-sub-batch: from each sub-batch
-///      we pull its first `transientCount` entries and first `transientStaticCallCount` static
+/// @dev `transientCount` and `transientLookupCallCount` are per-sub-batch: from each sub-batch
+///      we pull its first `transientCount` entries and first `transientLookupCallCount` static
 ///      calls into the shared transient tables (concatenated in sub-batch order). They are
 ///      pure on-chain dispatch parameters — not bound by the proof — so the orchestrator can
 ///      tune the transient/persistent split per sub-batch without re-proving.
@@ -49,9 +49,9 @@ struct ProofSystemBatch {
     address[] proofSystems;
     uint256[] rollupIds;
     ExecutionEntry[] entries;
-    StaticCall[] staticCalls;
+    LookupCall[] lookupCalls;
     uint256 transientCount;
-    uint256 transientStaticCallCount;
+    uint256 transientLookupCallCount;
     uint256[] blobIndices;
     bytes callData;
     bytes[] proof;
@@ -74,7 +74,7 @@ struct ProofSystemBatch {
 struct RollupVerification {
     uint256 lastVerifiedBlock;
     ExecutionEntry[] queue;
-    StaticCall[] staticQueue;
+    LookupCall[] lookupQueue;
     uint256 cursor;
 }
 
@@ -127,9 +127,9 @@ contract Rollups is ICrossChainManager {
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
 
-    // ── Transient-backed execution entries & static calls ──
+    // ── Transient-backed execution entries & lookup calls ──
     //
-    // First N entries / M static calls of the flattened sub-batch stream live here instead of
+    // First N entries / M lookup calls of the flattened sub-batch stream live here instead of
     // the per-rollup persistent queues to save storage gas during intra-tx (meta-hook)
     // consumption. Semantically transient (populated and cleared within a single postBatch
     // call) but declared as regular storage since Solidity 0.8.34 does not yet support
@@ -139,7 +139,7 @@ contract Rollups is ICrossChainManager {
     //       with nested dynamic arrays — until then, we rely on manual `delete` at the
     //       end of every postBatch plus SSTORE refunds from zeroing the slots.
     ExecutionEntry[] public _transientExecutions;
-    StaticCall[] public _transientStaticCalls;
+    LookupCall[] public _transientLookupCalls;
 
     /// @notice Cursor into `_transientExecutions` for the next entry to consume.
     /// @dev Only meaningful while `_transientExecutions.length != 0`. The table's length
@@ -177,7 +177,7 @@ contract Rollups is ICrossChainManager {
     uint256 transient _currentCallNumber;
 
     /// @notice Sequential nested action consumption counter
-    /// @dev Also used by staticCallLookup to disambiguate multiple static calls within the same call
+    /// @dev Also used by staticCallLookup to disambiguate multiple lookup calls within the same call
     uint256 transient _lastNestedActionConsumed;
 
     /// @notice Emitted when a new rollup is created
@@ -296,8 +296,8 @@ contract Rollups is ICrossChainManager {
     /// @notice Error when `transientCount` passed to postBatch exceeds the flattened entry count
     error TransientCountExceedsEntries();
 
-    /// @notice Error when `transientStaticCallCount` exceeds the flattened static call count
-    error TransientStaticCallCountExceedsStaticCalls();
+    /// @notice Error when `transientLookupCallCount` exceeds the flattened lookup call count
+    error TransientLookupCallCountExceedsLookupCalls();
 
     /// @notice Error when sub-batch validation fails for malformed inputs
     error InvalidProofSystemConfig();
@@ -306,7 +306,7 @@ contract Rollups is ICrossChainManager {
     error DuplicateProofSystem(address proofSystem);
 
     /// @notice Error when an entry's destinationRollupId, a state delta's rollupId, or a
-    ///         static call's destinationRollupId references a rollup not in the sub-batch
+    ///         lookup call's destinationRollupId references a rollup not in the sub-batch
     error RollupNotInBatch(uint256 rollupId);
 
     // ──────────────────────────────────────────────
@@ -355,9 +355,9 @@ contract Rollups is ICrossChainManager {
     ///         require `lastVerifiedBlock(rid) == block.number`). Done before the meta hook
     ///         (non-view CALL) so the hook + later proxy calls can read from the queues.
     ///      4. Build the transient stream by concatenating each sub-batch's leading
-    ///         `batch.transientCount` entries (and `batch.transientStaticCallCount` static
+    ///         `batch.transientCount` entries (and `batch.transientLookupCallCount` static
     ///         calls) in sub-batch order. The combined stream lives in `_transientExecutions`
-    ///         / `_transientStaticCalls` and is consumed via a single global cursor.
+    ///         / `_transientLookupCalls` and is consumed via a single global cursor.
     ///      5. Drain the leading run of transient entries whose `actionHash == 0` inline
     ///         (pure L2 transactions + L2 transactions that touch L1). These have no source
     ///         action to match so they cannot be driven by the meta hook — the only place
@@ -377,11 +377,11 @@ contract Rollups is ICrossChainManager {
     ///         contributes nothing to the transient stream and all its entries flow straight
     ///         into the per-rollup queues here.
     /// @param batches Array of proof-system groups (rollupIds disjoint across sub-batches);
-    ///                each carries its own `transientCount` / `transientStaticCallCount`
+    ///                each carries its own `transientCount` / `transientLookupCallCount`
     function postBatch(ProofSystemBatch[] calldata batches) external {
         // Reentrancy guard. Per-rollup `lastVerifiedBlock` blocks same-rollup re-entry, but a
         // disjoint-rollup nested `postBatch` (e.g., from the meta hook) would otherwise share
-        // the same `_transientExecutions` / `_transientStaticCalls` storage and corrupt them.
+        // the same `_transientExecutions` / `_transientLookupCalls` storage and corrupt them.
         // `_transientExecutions.length != 0` is true from `_loadTransient` through cleanup,
         // covering the entire window where a meta-hook callback could reach back here.
         // `_insideExecution()` is NOT sufficient — it's false during the meta hook window
@@ -456,7 +456,7 @@ contract Rollups is ICrossChainManager {
         //    BEFORE the deferred publish so that any subsequent reads during publish see a
         //    clean transient surface, and storage writes happen in a single committed phase.
         delete _transientExecutions;
-        delete _transientStaticCalls;
+        delete _transientLookupCalls;
         _transientExecutionIndex = 0;
 
         // 7. Deferred publish — push each sub-batch's remainder (entries past its own
@@ -477,7 +477,7 @@ contract Rollups is ICrossChainManager {
 
     /// @notice Structural validation of a sub-batch — no external calls, no vkey reads.
     /// @dev Verifies sorting, registration of rollups + PSes, transient bounds, and entry /
-    ///      static-call `destinationRollupId` membership. Cross-sub-batch disjointness is
+    ///      lookup-call `destinationRollupId` membership. Cross-sub-batch disjointness is
     ///      NOT checked here — it's enforced for free by `_markVerifiedThisBlock` at step 3.
     function _validateStructure(ProofSystemBatch calldata batch) internal view {
         if (batch.proofSystems.length == 0) revert InvalidProofSystemConfig();
@@ -514,7 +514,7 @@ contract Rollups is ICrossChainManager {
         // Every entry's destinationRollupId AND every entry's state delta rollupIds must
         // belong to this sub-batch's rollupIds. The destination check is what prevents an
         // adversarial prover from routing an entry into a different sub-batch's queue
-        // during `_publishRemainder`. Same constraint for static calls.
+        // during `_publishRemainder`. Same constraint for lookup calls.
         for (uint256 i = 0; i < batch.entries.length; i++) {
             ExecutionEntry calldata entry = batch.entries[i];
             if (!_containsRollup(batch.rollupIds, entry.destinationRollupId)) {
@@ -527,16 +527,16 @@ contract Rollups is ICrossChainManager {
                 }
             }
         }
-        for (uint256 i = 0; i < batch.staticCalls.length; i++) {
-            if (!_containsRollup(batch.rollupIds, batch.staticCalls[i].destinationRollupId)) {
-                revert RollupNotInBatch(batch.staticCalls[i].destinationRollupId);
+        for (uint256 i = 0; i < batch.lookupCalls.length; i++) {
+            if (!_containsRollup(batch.rollupIds, batch.lookupCalls[i].destinationRollupId)) {
+                revert RollupNotInBatch(batch.lookupCalls[i].destinationRollupId);
             }
         }
 
         // Per-sub-batch transient bounds.
         if (batch.transientCount > batch.entries.length) revert TransientCountExceedsEntries();
-        if (batch.transientStaticCallCount > batch.staticCalls.length) {
-            revert TransientStaticCallCountExceedsStaticCalls();
+        if (batch.transientLookupCallCount > batch.lookupCalls.length) {
+            revert TransientLookupCallCountExceedsLookupCalls();
         }
     }
 
@@ -577,19 +577,19 @@ contract Rollups is ICrossChainManager {
             entryHashes[i] = keccak256(abi.encode(batch.entries[i]));
         }
 
-        // Per-static-call hash, same rationale: a `StaticCall` with empty `calls[]` has only
+        // Per-lookup-call hash, same rationale: a `LookupCall` with empty `calls[]` has only
         // its `returnData` / `failed` validated by content equality at lookup time, so without
         // a hash binding here the orchestrator could swap returnData arbitrarily. Hashing the
         // whole struct (actionHash, destinationRollupId, returnData, failed, stateRoot,
         // callNumber, lastNestedActionConsumed, calls[], rollingHash) closes that gap.
-        bytes32[] memory staticCallHashes = new bytes32[](batch.staticCalls.length);
-        for (uint256 i = 0; i < batch.staticCalls.length; i++) {
-            staticCallHashes[i] = keccak256(abi.encode(batch.staticCalls[i]));
+        bytes32[] memory lookupCallHashes = new bytes32[](batch.lookupCalls.length);
+        for (uint256 i = 0; i < batch.lookupCalls.length; i++) {
+            lookupCallHashes[i] = keccak256(abi.encode(batch.lookupCalls[i]));
         }
 
         // Two-stage public inputs hash:
         //   sharedPublicInput = H(prevBlockhash, timestamp, rollupIds, entryHashes,
-        //                  staticCallHashes, blobHashes, H(callData), crossProofSystemInteractions)
+        //                  lookupCallHashes, blobHashes, H(callData), crossProofSystemInteractions)
         //   publicInputsHash[k] = H(sharedPublicInput, rollupVks[k])
         // Stage split keeps the per-PS hash shallow (only two args) so it fits in the EVM
         // stack under via-IR. Commitment is equivalent — every input is still bound, just
@@ -600,7 +600,7 @@ contract Rollups is ICrossChainManager {
                 block.timestamp,
                 abi.encode(batch.rollupIds),
                 abi.encode(entryHashes),
-                abi.encode(staticCallHashes),
+                abi.encode(lookupCallHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
                 batch.crossProofSystemInteractions
@@ -632,13 +632,13 @@ contract Rollups is ICrossChainManager {
         rec.lastVerifiedBlock = block.number;
         // Lazy queue reset — clear stale persistent state from prior blocks.
         if (rec.queue.length != 0) delete rec.queue;
-        if (rec.staticQueue.length != 0) delete rec.staticQueue;
+        if (rec.lookupQueue.length != 0) delete rec.lookupQueue;
         rec.cursor = 0;
     }
 
     /// @notice Builds the transient stream by concatenating each sub-batch's leading prefix
     /// @dev Each sub-batch contributes its first `batch.transientCount` entries and first
-    ///      `batch.transientStaticCallCount` static calls. The bounds are validated in
+    ///      `batch.transientLookupCallCount` lookup calls. The bounds are validated in
     ///      `_validateProofSystemBatch` so we don't need to re-check here.
     function _loadTransient(ProofSystemBatch[] calldata batches) internal {
         for (uint256 b = 0; b < batches.length; b++) {
@@ -646,8 +646,8 @@ contract Rollups is ICrossChainManager {
             for (uint256 i = 0; i < batch.transientCount; i++) {
                 _transientExecutions.push(batch.entries[i]);
             }
-            for (uint256 i = 0; i < batch.transientStaticCallCount; i++) {
-                _transientStaticCalls.push(batch.staticCalls[i]);
+            for (uint256 i = 0; i < batch.transientLookupCallCount; i++) {
+                _transientLookupCalls.push(batch.lookupCalls[i]);
             }
         }
     }
@@ -671,9 +671,9 @@ contract Rollups is ICrossChainManager {
                 uint256 destRid = batch.entries[i].destinationRollupId;
                 verificationByRollup[destRid].queue.push(batch.entries[i]);
             }
-            for (uint256 i = batch.transientStaticCallCount; i < batch.staticCalls.length; i++) {
-                uint256 destRid = batch.staticCalls[i].destinationRollupId;
-                verificationByRollup[destRid].staticQueue.push(batch.staticCalls[i]);
+            for (uint256 i = batch.transientLookupCallCount; i < batch.lookupCalls.length; i++) {
+                uint256 destRid = batch.lookupCalls[i].destinationRollupId;
+                verificationByRollup[destRid].lookupQueue.push(batch.lookupCalls[i]);
             }
         }
     }
@@ -750,13 +750,13 @@ contract Rollups is ICrossChainManager {
     }
 
     /// @notice Consumes the next nested action, or replays a pre-computed reverting
-    ///         static call when no NestedAction matches.
+    ///         lookup call when no NestedAction matches.
     /// @dev Routing rules:
     ///      1. NestedAction at `_lastNestedActionConsumed` matches `actionHash` → consume
     ///         (the speculative `++` bump is what commits, hash NESTED_BEGIN/END, return
     ///         cached returnData).
-    ///      2. Otherwise scan `_transientStaticCalls` then the destination rollup's
-    ///         `staticQueue` for a `failed=true` entry keyed by
+    ///      2. Otherwise scan `_transientLookupCalls` then the destination rollup's
+    ///         `lookupQueue` for a `failed=true` entry keyed by
     ///         (actionHash, _currentCallNumber, idx) where `idx` is the pre-bump cursor
     ///         value → revert with cached returnData. Every fallback path reverts, so the
     ///         speculative bump is rolled back by the EVM automatically.
@@ -764,7 +764,7 @@ contract Rollups is ICrossChainManager {
     ///
     ///      Why fall back only on `failed=true`: a successful reentrant call in a normal CALL
     ///      frame is expressed as a NestedAction; a successful read-only call is in a STATICCALL
-    ///      frame and routed to `staticCallLookup` instead. A static-call hit on this path only
+    ///      frame and routed to `staticCallLookup` instead. A lookup-call hit on this path only
     ///      makes sense when the caller has try/catch and expects a revert. The fallback
     ///      sidesteps the transient-rollback issue: a successful match's bump persists; every
     ///      other path reverts and the bump rolls back with it.
@@ -777,35 +777,35 @@ contract Rollups is ICrossChainManager {
             NestedAction storage nested = entry.nestedActions[idx];
             uint256 nestedNumber = idx + 1;
             emit NestedActionConsumed(_currentEntryIndex, nestedNumber, actionHash, nested.callCount);
-            _rollNestedBegin(nestedNumber);
+            _rollingHashNestedBegin(nestedNumber);
             _processNCalls(nested.callCount);
-            _rollNestedEnd(nestedNumber);
+            _rollingHashNestedEnd(nestedNumber);
             return nested.returnData;
         }
 
-        // 2. Fallback to a failed-static-call entry. Lookup key uses pre-bump cursor.
+        // 2. Fallback to a failed-lookup-call entry. Lookup key uses pre-bump cursor.
         uint64 callNum = uint64(_currentCallNumber);
         uint64 lastNA = uint64(idx);
-        for (uint256 i = 0; i < _transientStaticCalls.length; i++) {
-            StaticCall storage sc = _transientStaticCalls[i];
+        for (uint256 i = 0; i < _transientLookupCalls.length; i++) {
+            LookupCall storage sc = _transientLookupCalls[i];
             if (
                 sc.failed && sc.actionHash == actionHash && sc.callNumber == callNum
                     && sc.lastNestedActionConsumed == lastNA
             ) {
-                _resolveStaticCall(sc); // always reverts (sc.failed == true)
+                _resolveLookupCall(sc); // always reverts (sc.failed == true)
             }
         }
         // Per-rollup static queue: route by the action's target rollup (== entry.destinationRollupId
         // because nested actions are scoped to the containing entry).
         uint256 destRid = entry.destinationRollupId;
-        StaticCall[] storage staticQueue = verificationByRollup[destRid].staticQueue;
-        for (uint256 i = 0; i < staticQueue.length; i++) {
-            StaticCall storage sc = staticQueue[i];
+        LookupCall[] storage lookupQueue = verificationByRollup[destRid].lookupQueue;
+        for (uint256 i = 0; i < lookupQueue.length; i++) {
+            LookupCall storage sc = lookupQueue[i];
             if (
                 sc.failed && sc.actionHash == actionHash && sc.callNumber == callNum
                     && sc.lastNestedActionConsumed == lastNA
             ) {
-                _resolveStaticCall(sc);
+                _resolveLookupCall(sc);
             }
         }
 
@@ -902,7 +902,7 @@ contract Rollups is ICrossChainManager {
                 CrossChainCall memory cc = entry.calls[_currentCallNumber];
                 _currentCallNumber++;
 
-                _rollCallBegin(_currentCallNumber);
+                _rollingHashCallBegin(_currentCallNumber);
 
                 address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
                 if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
@@ -917,7 +917,7 @@ contract Rollups is ICrossChainManager {
                     etherOut += int256(cc.value);
                 }
 
-                _rollCallEnd(_currentCallNumber, success, retData);
+                _rollingHashCallEnd(_currentCallNumber, success, retData);
                 emit CallResult(_currentEntryIndex, _currentCallNumber, success, retData);
                 processed++;
             } else {
@@ -1046,17 +1046,25 @@ contract Rollups is ICrossChainManager {
     }
 
     // ──────────────────────────────────────────────
-    //  Static call lookup
+    //  Lookup call lookup
     // ──────────────────────────────────────────────
 
-    /// @notice Looks up a pre-computed static call result, scanning the transient table
+    /// @notice Looks up a pre-computed lookup call result, scanning the transient table
     ///         first then the destination rollup's static queue
     /// @dev Matches by actionHash + current call number + last nested action consumed.
-    ///      Consults `_transientStaticCalls` first (populated only while a postBatch is
+    ///      Consults `_transientLookupCalls` first (populated only while a postBatch is
     ///      executing its transient prefix) and falls through to the per-rollup
-    ///      `staticQueue` keyed by `proxyInfo.originalRollupId`. tload works in static
+    ///      `lookupQueue` keyed by `proxyInfo.originalRollupId`. tload works in static
     ///      context, so the transient tracking variables used to compute the match keys
     ///      are readable.
+    /// @dev TODO (perf): if a sub-batch has many lookup calls, the linear scan is O(n).
+    ///      Idea: have the orchestrator sort `lookupCalls[]` by a derived key (e.g., the
+    ///      lookup tuple `keccak256(actionHash, callNumber, lastNestedActionConsumed)`,
+    ///      treated as a `uint256`) so on-chain we can binary-search → O(log n). Same
+    ///      `_consumeNestedAction` fallback could use the same ordering. The proof would
+    ///      need to enforce sort order (cheap: `keys[i+1] > keys[i]`) and the publicInputsHash
+    ///      already binds the array via `lookupCallHashes`, so re-ordering by the prover
+    ///      can't sneak in. Punted until profiling shows it matters.
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
@@ -1071,27 +1079,27 @@ contract Rollups is ICrossChainManager {
         uint64 callNum = uint64(_currentCallNumber);
         uint64 lastNA = uint64(_lastNestedActionConsumed);
 
-        for (uint256 i = 0; i < _transientStaticCalls.length; i++) {
-            StaticCall storage sc = _transientStaticCalls[i];
+        for (uint256 i = 0; i < _transientLookupCalls.length; i++) {
+            LookupCall storage sc = _transientLookupCalls[i];
             if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
-                return _resolveStaticCall(sc);
+                return _resolveLookupCall(sc);
             }
         }
-        StaticCall[] storage staticQueue = verificationByRollup[destRid].staticQueue;
-        for (uint256 i = 0; i < staticQueue.length; i++) {
-            StaticCall storage sc = staticQueue[i];
+        LookupCall[] storage lookupQueue = verificationByRollup[destRid].lookupQueue;
+        for (uint256 i = 0; i < lookupQueue.length; i++) {
+            LookupCall storage sc = lookupQueue[i];
             if (sc.actionHash == actionHash && sc.callNumber == callNum && sc.lastNestedActionConsumed == lastNA) {
-                return _resolveStaticCall(sc);
+                return _resolveLookupCall(sc);
             }
         }
 
         revert ExecutionNotFound();
     }
 
-    /// @notice Verifies and unpacks a matched static call entry
-    function _resolveStaticCall(StaticCall storage sc) internal view returns (bytes memory) {
+    /// @notice Verifies and unpacks a matched lookup call entry
+    function _resolveLookupCall(LookupCall storage sc) internal view returns (bytes memory) {
         if (sc.calls.length > 0) {
-            bytes32 computedHash = _processNStaticCalls(sc.calls);
+            bytes32 computedHash = _processNLookupCalls(sc.calls);
             if (computedHash != sc.rollingHash) revert RollingHashMismatch();
         }
         if (sc.failed) {
@@ -1104,13 +1112,13 @@ contract Rollups is ICrossChainManager {
     }
 
     /// @notice Executes calls in static context and computes a rolling hash of results
-    function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
+    function _processNLookupCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             (bool success, bytes memory retData) =
                 sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
-            computedHash = _rollStaticResult(computedHash, success, retData);
+            computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
     }
 
@@ -1125,36 +1133,40 @@ contract Rollups is ICrossChainManager {
     // across event types. The final value is checked against `entry.rollingHash` in
     // `_applyAndExecute`. See CLAUDE.md §Rolling Hash for the full specification.
     //
-    // Static-call sub-hashes (`_processNStaticCalls`) use a simpler, untagged formula
-    // because they're verified against `StaticCall.rollingHash`, a separate accumulator.
+    // Static-call sub-hashes (`_processNLookupCalls`) use a simpler, untagged formula
+    // because they're verified against `LookupCall.rollingHash`, a separate accumulator.
 
     /// @notice Folds a CALL_BEGIN event into `_rollingHash` for the given call number.
-    function _rollCallBegin(uint256 callNumber) internal {
+    function _rollingHashCallBegin(uint256 callNumber) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN, callNumber));
     }
 
     /// @notice Folds a CALL_END event into `_rollingHash`, including the call's observed
     ///         outcome (success flag + raw return/revert data).
-    function _rollCallEnd(uint256 callNumber, bool success, bytes memory retData) internal {
+    function _rollingHashCallEnd(uint256 callNumber, bool success, bytes memory retData) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, callNumber, success, retData));
     }
 
     /// @notice Folds a NESTED_BEGIN event into `_rollingHash` for the given nested-action
     ///         index (1-indexed).
-    function _rollNestedBegin(uint256 nestedNumber) internal {
+    function _rollingHashNestedBegin(uint256 nestedNumber) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
     }
 
     /// @notice Folds a NESTED_END event into `_rollingHash` for the given nested-action
     ///         index (1-indexed).
-    function _rollNestedEnd(uint256 nestedNumber) internal {
+    function _rollingHashNestedEnd(uint256 nestedNumber) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
-    ///         `_rollingHash` because static calls are verified against
-    ///         `StaticCall.rollingHash`, a separate per-StaticCall accumulator.
-    function _rollStaticResult(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
+    ///         `_rollingHash` because lookup calls are verified against
+    ///         `LookupCall.rollingHash`, a separate per-LookupCall accumulator.
+    function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encodePacked(prev, success, retData));
     }
 
