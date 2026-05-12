@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
-import {IProofSystem} from "../../src/IProofSystem.sol";
+import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
 import {EEZL2} from "../../src/L2/EEZL2.sol";
 
 /// @notice Mock proof system that accepts all proofs.

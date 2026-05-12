@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
-import {IEEZ, ExecutionEntry, LookupCall, L2ToL1Call, ExpectedL1ToL2Call} from "../../../src/IEEZ.sol";
+import {IEEZ, ExecutionEntry, LookupCall, L2ToL1Call, ExpectedL1ToL2Call} from "../../../src/interfaces/IEEZ.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Rolling hash tag constants (must match EEZ.sol / EEZL2.sol)

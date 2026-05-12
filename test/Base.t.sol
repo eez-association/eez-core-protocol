@@ -10,10 +10,10 @@ import {
     RollupVerification
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
-import {IRollupContract} from "../src/rollupContract/IRollup.sol";
-import {IProofSystem} from "../src/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/IEEZ.sol";
-import {CrossChainProxy} from "../src/CrossChainProxy.sol";
+import {IRollupContract} from "../src/interfaces/IRollup.sol";
+import {IProofSystem} from "../src/interfaces/IProofSystem.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
+import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
 /// @notice Shared fixture for all `*.t.sol` tests touching the L1 `EEZ` registry.

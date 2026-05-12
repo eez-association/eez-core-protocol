@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ} from "./IEEZ.sol";
+import {IEEZ} from "../interfaces/IEEZ.sol";
 
 /// @title CrossChainProxy
 /// @notice Proxy contract for cross-chain addresses, deployed via CREATE2

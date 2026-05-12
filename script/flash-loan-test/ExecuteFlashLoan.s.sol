@@ -7,7 +7,7 @@ import {EEZL2} from "../../src/L2/EEZL2.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {FlashLoan} from "../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall} from "../../src/IEEZ.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall} from "../../src/interfaces/IEEZ.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 

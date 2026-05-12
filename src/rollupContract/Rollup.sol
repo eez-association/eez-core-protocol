@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IRollupContract} from "./IRollup.sol";
+import {IRollupContract} from "../interfaces/IRollup.sol";
 
 /// @notice Minimal interface against the central EEZ registry — only the calls this
 ///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)

@@ -3,8 +3,8 @@ pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {CrossChainProxy} from "../src/CrossChainProxy.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/IEEZ.sol";
+import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
 
 contract L2TestTarget {
     uint256 public value;

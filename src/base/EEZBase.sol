@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ} from "./IEEZ.sol";
+import {IEEZ} from "../interfaces/IEEZ.sol";
 
 /// @title EEZBase
 /// @notice Shared base for the L1 (`EEZ`) and L2 (`EEZL2`) cross-chain managers.

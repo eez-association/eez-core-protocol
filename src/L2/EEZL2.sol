@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {CrossChainProxy} from "../CrossChainProxy.sol";
-import {L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ExecutionEntry, ProxyInfo} from "../IEEZ.sol";
-import {EEZBase} from "../EEZBase.sol";
+import {CrossChainProxy} from "../base/CrossChainProxy.sol";
+import {L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ExecutionEntry, ProxyInfo} from "../interfaces/IEEZ.sol";
+import {EEZBase} from "../base/EEZBase.sol";
 
 /// @title EEZL2
 /// @notice L2-side contract for cross-chain execution via pre-computed execution tables

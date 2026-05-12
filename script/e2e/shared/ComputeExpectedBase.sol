@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/IEEZ.sol";
+import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
 
 /// @title ComputeExpectedBase — Shared formatting helpers for ComputeExpected contracts
 /// @dev Each test's ComputeExpected inherits this and overrides _name() and _funcName().

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IProofSystem} from "../../src/IProofSystem.sol";
+import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
 
 /// @notice Mock proof system that returns a configurable verify result. Default: always succeeds.
 contract MockProofSystem is IProofSystem {

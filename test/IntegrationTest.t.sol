@@ -5,8 +5,8 @@ import {Test, console} from "forge-std/Test.sol";
 import {EEZ, RollupConfig, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {CrossChainProxy} from "../src/CrossChainProxy.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/IEEZ.sol";
+import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 

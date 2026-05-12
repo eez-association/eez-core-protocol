@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IProofSystem} from "./IProofSystem.sol";
-import {IRollupContract} from "./rollupContract/IRollup.sol";
-import {CrossChainProxy} from "./CrossChainProxy.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ExecutionEntry, ProxyInfo} from "./IEEZ.sol";
-import {EEZBase} from "./EEZBase.sol";
+import {IProofSystem} from "./interfaces/IProofSystem.sol";
+import {IRollupContract} from "./interfaces/IRollup.sol";
+import {CrossChainProxy} from "./base/CrossChainProxy.sol";
+import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ExecutionEntry, ProxyInfo} from "./interfaces/IEEZ.sol";
+import {EEZBase} from "./base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol";
 
 /// @notice Rollup configuration held by the central registry.

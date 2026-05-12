@@ -4,9 +4,9 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {Rollups, ProofSystemBatch, RollupConfig} from "src/Rollups.sol";
 import {Rollup} from "src/rollupContract/Rollup.sol";
-import {IProofSystem} from "src/IProofSystem.sol";
+import {IProofSystem} from "src/interfaces/IProofSystem.sol";
 import {EEZL2} from "src/EEZL2.sol";
-import {ExecutionEntry, StateDelta, CrossChainCall, NestedAction, LookupCall} from "src/IEEZ.sol";
+import {ExecutionEntry, StateDelta, CrossChainCall, NestedAction, LookupCall} from "src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "test/mocks/CounterContracts.sol";
 
 contract MockProofSystem is IProofSystem {
