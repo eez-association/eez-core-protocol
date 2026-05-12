@@ -82,7 +82,7 @@ struct ExpectedL1ToL2Call {
 ///        and `_currentCallNumber == 5` at the end (the `UnconsumedCalls` guard checks this).
 struct ExecutionEntry {
     StateDelta[] stateDeltas; // initial state --> Final state
-    bytes32 proxyEntryHash; // hashed call (l1 -> L2) or L2 txs
+    bytes32 proxyEntryHash; // hashed call (l1 -> L2) itherwise bytes32(0) for L2 txs
     uint256 destinationRollupId;
     /// All calls executed by this entry, flat, in execution order. Partitioned between
     /// the entry's outermost frame and any reentrant (nested) frames — see the natspec

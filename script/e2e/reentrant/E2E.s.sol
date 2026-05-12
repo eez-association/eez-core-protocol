@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
-import {CrossChainManagerL2} from "../../../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../../../src/L2/CrossChainManagerL2.sol";
 import {
     StateDelta,
     L2ToL1Call,
@@ -13,7 +13,7 @@ import {
 } from "../../../src/ICrossChainManager.sol";
 import {ReentrantCounter} from "../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {Action, actionHash, noStaticCalls, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Reentrant — 4-hop cross-chain reentrant chain via deepCall(3)
@@ -53,71 +53,61 @@ abstract contract ReentrantActions {
 
     /// @dev L1 outer: batcher calls rcL1Proxy(rcL1@L2) on L1 with dC(3)
     function _l1OuterActionHash(address rcL1, address batcher) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: rcL1,
-                value: 0,
-                data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)),
-                sourceAddress: batcher,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            rcL1,
+            0,
+            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)),
+            batcher,
+            MAINNET_ROLLUP_ID
         );
     }
 
     /// @dev L1 nestedAction[0]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(2)
     function _l1NestedHash0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: rcL2,
-                value: 0,
-                data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
-                sourceAddress: rcL1,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            rcL2,
+            0,
+            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
+            rcL1,
+            MAINNET_ROLLUP_ID
         );
     }
 
     /// @dev L1 nestedAction[1]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(0)
     function _l1NestedHash1(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: rcL2,
-                value: 0,
-                data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(0)),
-                sourceAddress: rcL1,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            rcL2,
+            0,
+            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(0)),
+            rcL1,
+            MAINNET_ROLLUP_ID
         );
     }
 
     /// @dev L2 outer: alice calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(2)
     function _l2OuterActionHash(address rcL1, address alice) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: MAINNET_ROLLUP_ID,
-                targetAddress: rcL1,
-                value: 0,
-                data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
-                sourceAddress: alice,
-                sourceRollupId: L2_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            MAINNET_ROLLUP_ID,
+            rcL1,
+            0,
+            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
+            alice,
+            L2_ROLLUP_ID
         );
     }
 
     /// @dev L2 nestedAction[0]: rcL2 calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(1)
     function _l2NestedHash0(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: MAINNET_ROLLUP_ID,
-                targetAddress: rcL1,
-                value: 0,
-                data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(1)),
-                sourceAddress: rcL2,
-                sourceRollupId: L2_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            MAINNET_ROLLUP_ID,
+            rcL1,
+            0,
+            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(1)),
+            rcL2,
+            L2_ROLLUP_ID
         );
     }
 
@@ -333,7 +323,7 @@ contract ExecuteL2 is Script, ReentrantActions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        CrossChainManagerL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), noStaticCalls());
+        CrossChainManagerL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), noLookupCalls());
 
         // Trigger: alice calls rcL1ProxyOnL2.deepCall(2)
         (bool ok,) = rcL1ProxyOnL2.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)));

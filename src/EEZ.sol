@@ -575,14 +575,14 @@ contract EEZ is ICrossChainManager {
 
             // Resolve indices into the batch's global PS list to PS addresses. Indices were
             // validated as in-range and strictly increasing in `_validateStructure`, so the
-            // resolved subset is itself strictly increasing — same invariant the manager's
+            // resolved proofSystemUsed is itself strictly increasing — same invariant the manager's
             // `checkProofSystemsAndGetVkeys` relies on for its own membership / dedup logic.
-            address[] memory subset = new address[](indices.length);
+            address[] memory proofSystemUsed = new address[](indices.length);
             for (uint256 j = 0; j < indices.length; j++) {
-                subset[j] = batch.proofSystems[uint256(indices[j])];
+                proofSystemUsed[j] = batch.proofSystems[uint256(indices[j])];
             }
 
-            vkMatrix[r] = IRollupContract(rollups[rps.rollupId].rollupContract).checkProofSystemsAndGetVkeys(subset);
+            vkMatrix[r] = IRollupContract(rollups[rps.rollupId].rollupContract).checkProofSystemsAndGetVkeys(proofSystemUsed);
             // Manager must return exactly one vkey per resolved PS. Without this, a manager
             // returning a short array would OOB-panic when projected into per-PS vkey vectors;
             // a long array would silently ignore tail entries.

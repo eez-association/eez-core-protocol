@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {CrossChainManagerL2} from "../../../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../../../src/L2/CrossChainManagerL2.sol";
 import {
     StateDelta,
     L2ToL1Call,
@@ -13,9 +13,8 @@ import {
 import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
-    Action,
-    actionHash,
-    noStaticCalls,
+    crossChainCallHash,
+    noLookupCalls,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -57,15 +56,13 @@ abstract contract RevertL2Actions {
 
     /// @dev Outer action hash: alice calls counterProxy (Counter@L1) on L2.
     function _outerActionHash(address counterL1, address alice) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: MAINNET_ROLLUP_ID,
-                targetAddress: counterL1,
-                value: 0,
-                data: abi.encodeWithSelector(Counter.increment.selector),
-                sourceAddress: alice,
-                sourceRollupId: L2_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            MAINNET_ROLLUP_ID,
+            counterL1,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector),
+            alice,
+            L2_ROLLUP_ID
         );
     }
 
@@ -164,7 +161,7 @@ contract ExecuteL2 is Script, RevertL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s counterProxy=%s", alice, counterProxy);
 
-        CrossChainManagerL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), noStaticCalls());
+        CrossChainManagerL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), noLookupCalls());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls counterProxy.increment() — consumes the entry.

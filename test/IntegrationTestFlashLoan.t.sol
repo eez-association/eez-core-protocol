@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test, console} from "forge-std/Test.sol";
 import {EEZ, RollupConfig, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
-import {CrossChainManagerL2} from "../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../src/L2/CrossChainManagerL2.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
 import {
     ExecutionEntry,

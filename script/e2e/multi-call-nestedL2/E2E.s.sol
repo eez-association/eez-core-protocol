@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {CrossChainManagerL2} from "../../../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../../../src/L2/CrossChainManagerL2.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {
     StateDelta,

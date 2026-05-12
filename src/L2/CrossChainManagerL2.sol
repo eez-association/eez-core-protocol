@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {CrossChainProxy} from "./CrossChainProxy.sol";
+import {CrossChainProxy} from "../CrossChainProxy.sol";
 import {
     ICrossChainManager,
     L2ToL1Call,
@@ -9,7 +9,7 @@ import {
     LookupCall,
     ExecutionEntry,
     ProxyInfo
-} from "./ICrossChainManager.sol";
+} from "../ICrossChainManager.sol";
 
 /// @title CrossChainManagerL2
 /// @notice L2-side contract for cross-chain execution via pre-computed execution tables

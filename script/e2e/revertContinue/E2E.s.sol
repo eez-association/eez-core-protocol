@@ -13,8 +13,7 @@ import {
 import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
-    Action,
-    actionHash,
+    crossChainCallHash,
     noLookupCalls,
     noNestedActions,
     noCalls,
@@ -55,29 +54,25 @@ abstract contract RevertContinueActions {
 
     /// @dev Outer action hash: batcher calls selfCallerProxy.execute() on L1.
     function _outerActionHash(address selfCaller, address batcher) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: selfCaller,
-                value: 0,
-                data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
-                sourceAddress: batcher,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            selfCaller,
+            0,
+            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
+            batcher,
+            MAINNET_ROLLUP_ID
         );
     }
 
     /// @dev Inner action hash: SelfCallerWithRevert calls counterProxy.increment().
     function _innerActionHash(address counterL2, address selfCaller) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: counterL2,
-                value: 0,
-                data: abi.encodeWithSelector(Counter.increment.selector),
-                sourceAddress: selfCaller,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            counterL2,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector),
+            selfCaller,
+            MAINNET_ROLLUP_ID
         );
     }
 

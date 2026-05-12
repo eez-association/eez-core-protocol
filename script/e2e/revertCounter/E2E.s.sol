@@ -13,8 +13,7 @@ import {
 import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
-    Action,
-    actionHash,
+    crossChainCallHash,
     noLookupCalls,
     noNestedActions,
     noCalls,
@@ -71,15 +70,13 @@ abstract contract RevertActions {
     /// @dev Outer action hash: alice calls counterProxy (proxy for Counter@L2) on L1.
     ///      This is just the trigger — it selects which entry to consume.
     function _outerActionHash(address counterL2, address alice) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: counterL2,
-                value: 0,
-                data: abi.encodeWithSelector(Counter.increment.selector),
-                sourceAddress: alice,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            counterL2,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector),
+            alice,
+            MAINNET_ROLLUP_ID
         );
     }
 

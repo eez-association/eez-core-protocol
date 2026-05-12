@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
-import {CrossChainManagerL2} from "../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../src/L2/CrossChainManagerL2.sol";
 import {CrossChainProxy} from "../src/CrossChainProxy.sol";
 import {
     ExecutionEntry,

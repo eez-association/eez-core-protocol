@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
-import {CrossChainManagerL2} from "../../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../../src/L2/CrossChainManagerL2.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {FlashLoan} from "../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";

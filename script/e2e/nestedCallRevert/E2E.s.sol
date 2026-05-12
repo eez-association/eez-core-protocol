@@ -12,7 +12,7 @@ import {
 } from "../../../src/ICrossChainManager.sol";
 import {Counter, SafeCounterAndProxy} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {Action, actionHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  NestedCallRevert - nested reentrant call that fails; caller recovers
@@ -47,15 +47,13 @@ abstract contract NestedCallRevertActions {
     using RollingHashBuilder for bytes32;
 
     function _outerActionHash(address scap, address alice) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: scap,
-                value: 0,
-                data: abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
-                sourceAddress: alice,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            scap,
+            0,
+            abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
+            alice,
+            MAINNET_ROLLUP_ID
         );
     }
 
@@ -63,15 +61,13 @@ abstract contract NestedCallRevertActions {
     ///      `executeL1ToL2Call` hardcodes srcRollup=MAINNET on L1, so this
     ///      hash uses MAINNET as the source rollup.
     function _innerActionHash(address counterL2, address scap) internal pure returns (bytes32) {
-        return actionHash(
-            Action({
-                targetRollupId: L2_ROLLUP_ID,
-                targetAddress: counterL2,
-                value: 0,
-                data: abi.encodeWithSelector(Counter.increment.selector),
-                sourceAddress: scap,
-                sourceRollupId: MAINNET_ROLLUP_ID
-            })
+        return crossChainCallHash(
+            L2_ROLLUP_ID,
+            counterL2,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector),
+            scap,
+            MAINNET_ROLLUP_ID
         );
     }
 

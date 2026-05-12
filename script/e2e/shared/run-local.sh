@@ -14,8 +14,8 @@ source "$(dirname "$0")/E2EBase.sh"
 SOL="$1"; shift || { echo "Usage: run-local.sh <E2E.s.sol>"; exit 1; }
 [[ -f "$SOL" ]] || { echo "File not found: $SOL"; exit 1; }
 
-L1_PORT=8545
-L2_PORT=8546
+L1_PORT="${L1_PORT:-8545}"
+L2_PORT="${L2_PORT:-8546}"
 L1_RPC="http://localhost:$L1_PORT"
 L2_RPC="http://localhost:$L2_PORT"
 export L2_ROLLUP_ID=1

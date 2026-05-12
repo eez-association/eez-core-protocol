@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {Rollup} from "../../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../../src/IProofSystem.sol";
-import {CrossChainManagerL2} from "../../../src/CrossChainManagerL2.sol";
+import {CrossChainManagerL2} from "../../../src/L2/CrossChainManagerL2.sol";
 
 /// @notice Mock proof system that accepts all proofs. Used in e2e flows where the test
 ///         orchestrator drives execution and we don't want real proof verification.
