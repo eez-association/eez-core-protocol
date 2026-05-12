@@ -480,6 +480,24 @@ contract EEZ is ICrossChainManager {
     //  postVerifyAndExecuteOrSaveExecutionsFromBatch internals
     // ──────────────────────────────────────────────
 
+    /// @notice Self-call wrapper that runs `_applyAndExecute` for one immediate entry
+    ///         in an isolated frame. Used by `postVerifyAndExecuteOrSaveExecutionsFromBatch` step 4 to make immediate-entry
+    ///         execution revertible: if this frame reverts, the surrounding `try/catch`
+    ///         in postVerifyAndExecuteOrSaveExecutionsFromBatch catches and skips to the next entry instead of aborting the
+    ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner
+    ///         result — succeeds when `_applyAndExecute` succeeds, reverts when it reverts.
+    /// @dev Sets `_currentEntryIndex` / `_currentEntryRollupId` here so transient state for
+    ///      the entry being processed is set within the same frame as `_applyAndExecute`.
+    ///      On revert those writes roll back too, which is fine — the next iteration sets
+    ///      them fresh. The cursor advance in postVerifyAndExecuteOrSaveExecutionsFromBatch happens OUTSIDE this frame.
+    function attemptApplyImmediate(uint256 transientIdx) public {
+        if (msg.sender != address(this)) revert NotSelf();
+        ExecutionEntry storage entry = _transientExecutions[transientIdx];
+        _currentEntryIndex = transientIdx;
+        _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
+        _applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash, 0);
+    }
+
     /// @notice Structural validation — no external calls, no vkey reads.
     /// @dev Verifies sorting, registration of rollups + PSes, transient bounds, entry /
     ///      lookup-call `destinationRollupId` membership, and per-rollup PS-index ranges.
@@ -668,22 +686,6 @@ contract EEZ is ICrossChainManager {
                 revert InvalidProof();
             }
         }
-    }
-
-    /// @notice Returns the position of `target` in a strictly-increasing `uint64[]`, or
-    ///         `type(uint256).max` if not present. Strictly-increasing invariant is enforced
-    ///         in `_validateStructure`, so binary search is safe.
-    function _findIndexPosition(uint64[] calldata sortedIndices, uint256 target) internal pure returns (uint256) {
-        uint256 lo = 0;
-        uint256 hi = sortedIndices.length;
-        while (lo < hi) {
-            uint256 mid = (lo + hi) >> 1;
-            uint256 v = uint256(sortedIndices[mid]);
-            if (v == target) return mid;
-            if (v < target) lo = mid + 1;
-            else hi = mid;
-        }
-        return type(uint256).max;
     }
 
     /// @notice Marks `rid` as verified this block. Multiple verifications per rollup per
@@ -991,24 +993,6 @@ contract EEZ is ICrossChainManager {
         revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber);
     }
 
-    /// @notice Self-call wrapper that runs `_applyAndExecute` for one immediate entry
-    ///         in an isolated frame. Used by `postVerifyAndExecuteOrSaveExecutionsFromBatch` step 4 to make immediate-entry
-    ///         execution revertible: if this frame reverts, the surrounding `try/catch`
-    ///         in postVerifyAndExecuteOrSaveExecutionsFromBatch catches and skips to the next entry instead of aborting the
-    ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner
-    ///         result — succeeds when `_applyAndExecute` succeeds, reverts when it reverts.
-    /// @dev Sets `_currentEntryIndex` / `_currentEntryRollupId` here so transient state for
-    ///      the entry being processed is set within the same frame as `_applyAndExecute`.
-    ///      On revert those writes roll back too, which is fine — the next iteration sets
-    ///      them fresh. The cursor advance in postVerifyAndExecuteOrSaveExecutionsFromBatch happens OUTSIDE this frame.
-    function attemptApplyImmediate(uint256 transientIdx) public {
-        if (msg.sender != address(this)) revert NotSelf();
-        ExecutionEntry storage entry = _transientExecutions[transientIdx];
-        _currentEntryIndex = transientIdx;
-        _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
-        _applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash, 0);
-    }
-
     /// @notice Decodes a ContextResult revert payload
     function _decodeContextResult(bytes memory revertData)
         internal
@@ -1253,6 +1237,26 @@ contract EEZ is ICrossChainManager {
         returns (bytes32)
     {
         return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
+    }
+
+    // ──────────────────────────────────────────────
+    //  Internal helpers
+    // ──────────────────────────────────────────────
+
+    /// @notice Returns the position of `target` in a strictly-increasing `uint64[]`, or
+    ///         `type(uint256).max` if not present. Strictly-increasing invariant is enforced
+    ///         in `_validateStructure`, so binary search is safe.
+    function _findIndexPosition(uint64[] calldata sortedIndices, uint256 target) internal pure returns (uint256) {
+        uint256 lo = 0;
+        uint256 hi = sortedIndices.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) >> 1;
+            uint256 v = uint256(sortedIndices[mid]);
+            if (v == target) return mid;
+            if (v < target) lo = mid + 1;
+            else hi = mid;
+        }
+        return type(uint256).max;
     }
 
     /// @notice Binary-search membership check on the batch's `rollupIdsWithProofSystems[]`,
