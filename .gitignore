@@ -7,3 +7,6 @@ broadcast/
 
 # Dotenv file
 .env
+
+gh_issue
+node_modules
