@@ -264,7 +264,7 @@ Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proof
 
 **Revert conditions**: `PostBatchReentry`, `TransientCountExceedsEntries`, `TransientLookupCallCountExceedsLookupCalls`, `RollupNotInBatch(rid)`, `InvalidProofSystemConfig`, `DuplicateProofSystem`, threshold/vkey reverts from the manager, `InvalidProof`, plus whatever the immediate entry / meta hook revert with (`RollingHashMismatch`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `UnconsumedCalls`, `UnconsumedNestedActions`, `ExecutionNotFound`, `StateRootMismatch(rid)`, …).
 
-Note: `RollupAlreadyVerifiedThisBlock(rid)` is declared (`src/EEZ.sol:190`) but currently **NOT thrown** — `_markVerifiedThisBlock` short-circuits silently and the same rollup can be touched by multiple `postAndVerifyBatch` calls in the same block (entries append to the queue). Flag for product decision.
+Note: same-block re-touch of a rollup is **permitted** — `_markVerifiedThisBlock` short-circuits silently on a same-block re-touch and entries from the second batch append to the existing queue. Orchestrators that need once-per-block-per-rollup exclusivity must coordinate at the social layer.
 
 #### `executeCrossChainCall`
 
@@ -1175,7 +1175,7 @@ The deferred remainder of a `postAndVerifyBatch` is published unconditionally to
 
 `postAndVerifyBatch` re-entered from any path (e.g., by the meta hook) reverts `PostBatchReentry` — the guard is `_transientExecutions.length != 0` at the top of the function (there is no separate `_inPostBatch` flag). This prevents corruption of the shared `_transientExecutions` / `_transientLookupCalls` storage by a nested call.
 
-Note: `RollupAlreadyVerifiedThisBlock(rid)` is declared (`src/EEZ.sol:190`) but currently NOT thrown. `_markVerifiedThisBlock` short-circuits silently on a same-block re-touch, and entries from the second batch append to the existing per-rollup queue. Multiple `postAndVerifyBatch` calls in the same block targeting the same rollup are therefore permitted by the current code. (Flag for product decision — either add the check or remove the error declaration.)
+Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch` calls is **permitted**: `_markVerifiedThisBlock` short-circuits silently on a same-block re-touch and entries from the second batch append to the existing per-rollup queue. Orchestrators that need once-per-block-per-rollup exclusivity must enforce it at the social layer.
 
 ---
 
@@ -1201,7 +1201,7 @@ A malicious caller producing a forged batch would have to forge proofs from ever
 
 The protocol is intentionally reentrant. `_processNCalls` calls into proxies, which forward to destination contracts, which may call back into proxies. Reentrant calls are routed to `_consumeNestedAction` via the `_insideExecution()` check. The transient `_currentCallNumber` cursor naturally serializes everything within one entry.
 
-`postAndVerifyBatch` re-entry from the meta hook is blocked by a single guard: `if (_transientExecutions.length != 0) revert PostBatchReentry()` at the top of the function. The transient-stream length doubles as the reentry flag — it is non-zero whenever a `postAndVerifyBatch` call is mid-flight and zero in between calls. (Note: `RollupAlreadyVerifiedThisBlock` is declared but currently NOT thrown — see H.9.)
+`postAndVerifyBatch` re-entry from the meta hook is blocked by a single guard: `if (_transientExecutions.length != 0) revert PostBatchReentry()` at the top of the function. The transient-stream length doubles as the reentry flag — it is non-zero whenever a `postAndVerifyBatch` call is mid-flight and zero in between calls. Same-block re-touch across separate (non-nested) calls is permitted — see H.9.
 
 The two view-only external calls during proof verification (`IRollupContract.checkProofSystemsAndGetVkeys` and `IProofSystem.verify`) are made inside `STATICCALL` frames, so a malicious manager / verifier cannot mutate state during step 3 of `postAndVerifyBatch`.
 
@@ -1235,7 +1235,7 @@ Per-rollup ownership operations (`addProofSystem`, `removeProofSystem`, `setVeri
 
 `postAndVerifyBatch` reentry from anywhere (meta hook, manager callback, etc.) is blocked by `PostBatchReentry` via the `_transientExecutions.length != 0` check at the top of the function.
 
-A separate concern is multiple top-level `postAndVerifyBatch` calls hitting the same rollup in the same block. The `RollupAlreadyVerifiedThisBlock(rid)` error is declared (`src/EEZ.sol:190`) but currently NOT thrown — `_markVerifiedThisBlock` short-circuits silently on a same-block re-touch and entries from the second batch append to the existing queue. Builders cannot rely on once-per-block exclusivity; if exclusivity is required, the orchestrator must enforce it at the social layer or the missing check should be added. (Flag for product decision.)
+Multiple top-level `postAndVerifyBatch` calls hitting the same rollup in the same block are permitted by design: `_markVerifiedThisBlock` short-circuits silently on a same-block re-touch and entries from the second batch append to the existing queue. Builders cannot rely on once-per-block-per-rollup exclusivity; if exclusivity is required, the orchestrator must enforce it at the social layer.
 
 ### I.6 Cross-Chain Proxy Identity
 

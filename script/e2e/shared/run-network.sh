@@ -121,8 +121,8 @@ echo "====== Compute Expected Entries ======"
 _SENDER=$(cast wallet address --private-key "$PK")
 COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
 
-EXPECTED_L1_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_HASHES")
-echo "L1 expected: $EXPECTED_L1_CALL_HASHES"
+EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
+echo "L1 expected calls: $EXPECTED_L1_CALL_HASHES"
 
 EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
 if [[ -n "$EXPECTED_L2_HASHES" ]]; then
