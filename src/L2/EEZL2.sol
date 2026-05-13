@@ -8,7 +8,7 @@ import {EEZBase} from "../base/EEZBase.sol";
 /// @title EEZL2
 /// @notice L2-side contract for cross-chain execution via pre-computed execution tables
 /// @dev No rollups, no state deltas, no ZK proofs. System address loads execution tables,
-///      which are consumed sequentially via proxy calls (executeCrossChainCall).
+///      which are consumed sequentially via proxy calls (`executeCrossChainCall`).
 contract EEZL2 is EEZBase {
     /// @notice The rollup ID this L2 belongs to
     uint256 public immutable ROLLUP_ID;
@@ -22,85 +22,32 @@ contract EEZL2 is EEZBase {
     /// @notice Array of pre-computed lookup call results
     LookupCall[] public lookupCalls;
 
-    /// @notice Mapping of authorized CrossChainProxy contracts to their identity
-    mapping(address proxy => ProxyInfo info) public authorizedProxies;
-
     /// @notice Last block number when execution table was loaded
     uint256 public lastLoadBlock;
 
     /// @notice Index of the next execution entry to consume
     uint256 public executionIndex;
 
-    // Rolling-hash tag constants and the `_rollingHash` transient accumulator live on
-    // `EEZBase` (shared with the L1 `EEZ` contract).
-
-    // ── Transient execution state (3 variables) ──
-
-    /// @notice The current execution entry being processed
-    uint256 transient _currentEntryIndex;
-
-    /// @notice 1-indexed global call counter and cursor into entry.L2ToL1Calls[]
-    /// @dev Also replaces _insideExecution: _currentCallNumber != 0 means inside execution
-    uint256 transient _currentCallNumber;
-
-    /// @notice Sequential nested action consumption counter
-    /// @dev Also used by staticCallLookup to disambiguate multiple lookup calls within the same call
-    uint256 transient _lastNestedActionConsumed;
-
     /// @notice Error when caller is not the system address
     error Unauthorized();
-
-    /// @notice Error when caller is not a registered CrossChainProxy
-    error UnauthorizedProxy();
-
-    /// @notice Error when no matching execution entry exists for the action hash
-    error ExecutionNotFound();
 
     /// @notice Error when execution is attempted in a different block than the last load
     error ExecutionNotInCurrentBlock();
 
-    /// @notice Error when the computed rolling hash doesn't match the entry's rollingHash
-    error RollingHashMismatch();
-
-    /// @notice Carries execution results out of a reverted context
-    error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber);
-
-    /// @notice Error when executeInContextAndRevert is called by an external address
-    error NotSelf();
-
     /// @notice Error when ETH transfer to system address fails
     error EtherTransferFailed();
 
-    /// @notice Error when executeInContextAndRevert reverts with an unexpected error
-    error UnexpectedContextRevert(bytes revertData);
-
-    /// @notice Error when not all nested actions were consumed after execution
-    error UnconsumedNestedActions();
-
-    /// @notice Error when not all calls were consumed after execution
-    error UnconsumedCalls();
-
-    /// @notice Error when executeIncomingCrossChainCall is called with no entries
+    /// @notice Error when `executeIncomingCrossChainCall` is called with no entries
     error EmptyEntries();
 
-    /// @notice Error when msg.value attached to executeIncomingCrossChainCall doesn't match `value`
+    /// @notice Error when `msg.value` attached to `executeIncomingCrossChainCall` doesn't match `value`
     error ValueMismatch();
-
-    /// @notice Emitted when a new CrossChainProxy is deployed and registered
-    event CrossChainProxyCreated(
-        address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId
-    );
 
     /// @notice Emitted when execution entries are loaded into the execution table
     event ExecutionTableLoaded(ExecutionEntry[] entries);
 
     /// @notice Emitted when an execution entry is consumed
-    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryIndex);
-
-    /// @notice Emitted when a cross-chain call is executed via proxy
-    event CrossChainCallExecuted(
-        bytes32 indexed crossChainCallHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value
-    );
+    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed cursor);
 
     /// @notice Emitted when the system address initiates an incoming cross-chain call from another rollup
     event IncomingCrossChainCallExecuted(
@@ -111,23 +58,6 @@ contract EEZL2 is EEZBase {
         address sourceAddress,
         uint256 sourceRollup
     );
-
-    /// @notice Emitted after each call completes in _processNCalls
-    /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert)
-    event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
-
-    /// @notice Emitted when a nested action is consumed during reentrant execution
-    event NestedActionConsumed(
-        uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 crossChainCallHash, uint256 callCount
-    );
-
-    /// @notice Emitted after an entry's execution completes and all verifications pass
-    event EntryExecuted(
-        uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActionsConsumed
-    );
-
-    /// @notice Emitted after a revert span is processed via executeInContextAndRevert
-    event RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span);
 
     /// @param _rollupId The rollup ID this L2 instance belongs to
     /// @param _systemAddress The privileged address allowed to load execution tables
@@ -176,11 +106,6 @@ contract EEZL2 is EEZBase {
     // ──────────────────────────────────────────────
     //  Execution entry points
     // ──────────────────────────────────────────────
-
-    /// @notice Returns true if currently inside a cross-chain call execution
-    function _insideExecution() internal view returns (bool) {
-        return _currentCallNumber != 0;
-    }
 
     /// @notice Executes a cross-chain call initiated by an authorized proxy
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
@@ -286,28 +211,8 @@ contract EEZL2 is EEZBase {
     }
 
     // ──────────────────────────────────────────────
-    //  Proxy creation
+    //  Internal execution
     // ──────────────────────────────────────────────
-
-    /// @notice Creates a new CrossChainProxy for an address on another rollup
-    /// @param originalAddress The address this proxy represents on the source rollup
-    /// @param originalRollupId The source rollup ID
-    /// @return proxy The deployed proxy address
-    function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address proxy) {
-        return _createProxyInternal(originalAddress, originalRollupId);
-    }
-
-    // ──────────────────────────────────────────────
-    //  Internal helpers
-    // ──────────────────────────────────────────────
-
-    /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createProxyInternal(address originalAddress, uint256 originalRollupId) internal returns (address proxy) {
-        bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-        authorizedProxies[proxy] = ProxyInfo(originalAddress, uint64(originalRollupId));
-        emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
-    }
 
     /// @notice Consumes the next nested action, or replays a pre-computed reverting
     ///         lookup call when no ExpectedL1ToL2Call matches.
@@ -347,22 +252,6 @@ contract EEZL2 is EEZBase {
 
         // 3. No match anywhere.
         revert ExecutionNotFound();
-    }
-
-    /// @notice Verifies a matched lookup call entry and returns or reverts with cached data.
-    /// @dev Shared between `staticCallLookup` and `_consumeNestedAction`'s fallback path.
-    function _resolveLookupCall(LookupCall storage sc) internal view returns (bytes memory) {
-        if (sc.calls.length > 0) {
-            bytes32 computedHash = _processNLookupCalls(sc.calls);
-            if (computedHash != sc.rollingHash) revert RollingHashMismatch();
-        }
-        if (sc.failed) {
-            bytes memory returnData = sc.returnData;
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
-        return sc.returnData;
     }
 
     /// @notice Top-level fallback: scan persistent `lookupCalls` for a `LookupCall` with
@@ -443,7 +332,7 @@ contract EEZL2 is EEZBase {
 
                 address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
                 if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
-                    _createProxyInternal(cc.sourceAddress, cc.sourceRollupId);
+                    _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollupId);
                 }
 
                 (bool success, bytes memory retData) = sourceProxy.call{
@@ -466,23 +355,6 @@ contract EEZL2 is EEZBase {
                 emit RevertSpanExecuted(_currentEntryIndex, savedCallNumber, revertSpan);
                 processed += revertSpan;
             }
-        }
-    }
-
-    /// @notice Decodes a ContextResult revert payload
-    function _decodeContextResult(bytes memory revertData)
-        internal
-        pure
-        returns (bytes32 rollingHash, uint256 naConsumed, uint256 callNumber)
-    {
-        if (bytes4(revertData) != ContextResult.selector) {
-            revert UnexpectedContextRevert(revertData);
-        }
-        assembly {
-            let ptr := add(revertData, 36)
-            rollingHash := mload(ptr)
-            naConsumed := mload(add(ptr, 32))
-            callNumber := mload(add(ptr, 64))
         }
     }
 
@@ -523,64 +395,5 @@ contract EEZL2 is EEZBase {
         }
 
         revert ExecutionNotFound();
-    }
-
-    /// @notice Executes calls in static context and computes a rolling hash of results
-    /// @dev All proxies referenced by the calls must already be deployed — cannot CREATE2 in static context.
-    ///      No revertSpan handling — all calls execute as-is (revertSpan correctness is verified by the proof).
-    ///      Does not use storage or transient variables — only a local rolling hash.
-    function _processNLookupCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
-        for (uint256 i = 0; i < calls.length; i++) {
-            L2ToL1Call memory cc = calls[i];
-            address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
-            (bool success, bytes memory retData) =
-                sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
-            computedHash = _rollingHashStaticResult(computedHash, success, retData);
-        }
-    }
-
-    // ──────────────────────────────────────────────
-    //  Cross-chain call hash helper
-    // ──────────────────────────────────────────────
-
-    /// @notice Computes the cross-chain call hash from individual fields. Public so off-chain
-    ///         tooling can derive the hash for a planned cross-chain call. Same formula as
-    ///         the L1 `EEZ.computeCrossChainCallHash` so a tool that calls one can use
-    ///         the result against either chain.
-    function computeCrossChainCallHash(
-        uint256 targetRollupId,
-        address targetAddress,
-        uint256 value,
-        bytes memory data,
-        address sourceAddress,
-        uint256 sourceRollupId
-    )
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
-    }
-
-    // ──────────────────────────────────────────────
-    //  Views
-    // ──────────────────────────────────────────────
-
-    /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
-    /// @param originalAddress The address this proxy represents on the source rollup
-    /// @param originalRollupId The source rollup ID
-    /// @return The computed proxy address
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId)
-        public
-        view
-        returns (address)
-    {
-        bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash = keccak256(
-            abi.encodePacked(
-                type(CrossChainProxy).creationCode, abi.encode(address(this), originalAddress, originalRollupId)
-            )
-        );
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
     }
 }

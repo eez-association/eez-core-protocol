@@ -26,15 +26,14 @@ import {
 //    consumed sequentially. Each entry's cached returnData = uint256(1).
 //
 //  Destination side (ExecuteL2 on L2):
-//    Each L2 Counter (A and B) is incremented once. Because
-//    `executeIncomingCrossChainCall` only consumes `entries[0]` and resets
-//    the L2 execution table on each call, we invoke it twice — once for
-//    counterA, once for counterB. Each counter goes 0->1, returning
-//    abi.encode(1).
+//    A CallTwoDifferentL2 trigger contract on L2 invokes increment() on two
+//    trigger proxies (originalRollupId=MAINNET, one per counter). SYSTEM loads
+//    both entries once; the trigger calls consume them sequentially via
+//    managerL2.executeL1ToL2Call. Each counter goes 0->1.
 //
-//  The two halves are tied by per-entry `proxyEntryHash`: the L1 entry for
-//  counterA shares its hash with the L2 entry for counterA, and likewise
-//  for counterB.
+//  L1 and L2 proxyEntryHashes DIFFER (the L2 side's sourceAddress is the L2
+//  trigger contract, not the L1 CallTwoDifferent) — see TWO_SIDED_MIGRATION.md
+//  Pattern C.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint256 constant L2_ROLLUP_ID = 1;
@@ -47,6 +46,11 @@ abstract contract TwoDiffActions {
 
     function _callHash(address target, address caller) internal pure returns (bytes32) {
         return crossChainCallHash(L2_ROLLUP_ID, target, 0, _incrementCallData(), caller, MAINNET_ROLLUP_ID);
+    }
+
+    /// @dev L2-side hash: trigger proxy on L2 has originalRollupId=MAINNET.
+    function _l2CallHash(address target, address l2Caller) internal pure returns (bytes32) {
+        return crossChainCallHash(MAINNET_ROLLUP_ID, target, 0, _incrementCallData(), l2Caller, L2_ROLLUP_ID);
     }
 
     function _l1Entries(address counterA, address counterB, address caller)
@@ -102,20 +106,20 @@ abstract contract TwoDiffActions {
     /// L1). Each entry's proxyEntryHash matches the L1 entry with the same
     /// target. Both entries return abi.encode(1) (each L2 counter starts at
     /// 0 and is incremented once).
-    function _l2Entries(address counterA, address counterB, address caller)
+    function _l2Entries(address counterA, address counterB, address l2Caller)
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        bytes32 hA = _callHash(counterA, caller);
-        bytes32 hB = _callHash(counterB, caller);
+        bytes32 hA = _l2CallHash(counterA, l2Caller);
+        bytes32 hB = _l2CallHash(counterB, l2Caller);
 
         entries = new ExecutionEntry[](2);
-        entries[0] = _buildL2Entry(counterA, caller, hA);
-        entries[1] = _buildL2Entry(counterB, caller, hB);
+        entries[0] = _buildL2Entry(counterA, l2Caller, hA);
+        entries[1] = _buildL2Entry(counterB, l2Caller, hB);
     }
 
-    function _buildL2Entry(address target, address caller, bytes32 entryHash)
+    function _buildL2Entry(address target, address l2Caller, bytes32 entryHash)
         private
         pure
         returns (ExecutionEntry memory)
@@ -125,8 +129,8 @@ abstract contract TwoDiffActions {
             targetAddress: target,
             value: 0,
             data: _incrementCallData(),
-            sourceAddress: caller,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceAddress: l2Caller,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -150,12 +154,32 @@ abstract contract TwoDiffActions {
 
 contract DeployL2 is Script {
     function run() external {
+        address managerAddr = vm.envAddress("MANAGER_L2");
+
         vm.startBroadcast();
         Counter counterA = new Counter();
         Counter counterB = new Counter();
+
+        EEZL2 manager = EEZL2(managerAddr);
+        address triggerProxyA = _proxy(manager, address(counterA));
+        address triggerProxyB = _proxy(manager, address(counterB));
+
+        CallTwoDifferent callTwoDiffL2 = new CallTwoDifferent();
+
         console.log("COUNTER_A_L2=%s", address(counterA));
         console.log("COUNTER_B_L2=%s", address(counterB));
+        console.log("TRIGGER_PROXY_A_L2=%s", triggerProxyA);
+        console.log("TRIGGER_PROXY_B_L2=%s", triggerProxyB);
+        console.log("CALL_TWO_DIFF_L2=%s", address(callTwoDiffL2));
         vm.stopBroadcast();
+    }
+
+    function _proxy(EEZL2 manager, address target) internal returns (address) {
+        try manager.createCrossChainProxy(target, MAINNET_ROLLUP_ID) returns (address p) {
+            return p;
+        } catch {
+            return manager.computeCrossChainProxyAddress(target, MAINNET_ROLLUP_ID);
+        }
     }
 }
 
@@ -235,36 +259,21 @@ contract Batcher {
     }
 }
 
-/// @title ExecuteL2 — local mode: drive Counter.increment() once on each of
-///        the two L2 counters.
-/// @dev `executeIncomingCrossChainCall` only consumes `entries[0]` and resets
-///      the L2 execution table on each call. To exercise the two sequential
-///      L2 executions matching the L1 entries (one per counter), invoke it
-///      twice — once for counterA, once for counterB.
-/// Env: MANAGER_L2, COUNTER_A_L2, COUNTER_B_L2, CALL_TWO_DIFF
+/// @title ExecuteL2 — local mode: drive Counter.increment() once on each of the two L2 counters
+///        via a CallTwoDifferent trigger on L2.
+/// Env: MANAGER_L2, COUNTER_A_L2, COUNTER_B_L2, TRIGGER_PROXY_A_L2, TRIGGER_PROXY_B_L2, CALL_TWO_DIFF_L2
 contract ExecuteL2 is Script, TwoDiffActions {
     function run() external {
         address managerAddr = vm.envAddress("MANAGER_L2");
         address counterA = vm.envAddress("COUNTER_A_L2");
         address counterB = vm.envAddress("COUNTER_B_L2");
-        address callerAddr = vm.envAddress("CALL_TWO_DIFF");
+        address triggerA = vm.envAddress("TRIGGER_PROXY_A_L2");
+        address triggerB = vm.envAddress("TRIGGER_PROXY_B_L2");
+        address callerL2 = vm.envAddress("CALL_TWO_DIFF_L2");
 
         vm.startBroadcast();
-        EEZL2 m = EEZL2(managerAddr);
-
-        ExecutionEntry[] memory all = _l2Entries(counterA, counterB, callerAddr);
-
-        ExecutionEntry[] memory e1 = new ExecutionEntry[](1);
-        e1[0] = all[0];
-        m.executeIncomingCrossChainCall(
-            counterA, 0, _incrementCallData(), callerAddr, MAINNET_ROLLUP_ID, e1, noLookupCalls()
-        );
-
-        ExecutionEntry[] memory e2 = new ExecutionEntry[](1);
-        e2[0] = all[1];
-        m.executeIncomingCrossChainCall(
-            counterB, 0, _incrementCallData(), callerAddr, MAINNET_ROLLUP_ID, e2, noLookupCalls()
-        );
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterA, counterB, callerL2), noLookupCalls());
+        CallTwoDifferent(callerL2).callBothCounters(triggerA, triggerB);
 
         console.log("done");
         console.log("L2 counterA=%s", Counter(counterA).counter());
@@ -331,9 +340,10 @@ contract ComputeExpected is ComputeExpectedBase, TwoDiffActions {
         address counterA = vm.envAddress("COUNTER_A_L2");
         address counterB = vm.envAddress("COUNTER_B_L2");
         address callerAddr = vm.envAddress("CALL_TWO_DIFF");
+        address callerL2 = vm.envAddress("CALL_TWO_DIFF_L2");
 
         ExecutionEntry[] memory l1 = _l1Entries(counterA, counterB, callerAddr);
-        ExecutionEntry[] memory l2 = _l2Entries(counterA, counterB, callerAddr);
+        ExecutionEntry[] memory l2 = _l2Entries(counterA, counterB, callerL2);
         bytes32 h0 = _entryHash(l1[0]);
         bytes32 h1 = _entryHash(l1[1]);
         bytes32 l2h0 = _entryHash(l2[0]);

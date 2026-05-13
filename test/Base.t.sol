@@ -12,7 +12,14 @@ import {
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {IRollupContract} from "../src/interfaces/IRollup.sol";
 import {IProofSystem} from "../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ProxyInfo
+} from "../src/interfaces/IEEZ.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
@@ -126,13 +133,14 @@ abstract contract Base is Test {
     }
 
     /// @notice Direct write to the `etherBalance` slot of `rollups[rid]`.
-    /// @dev Storage layout: `mapping(rid => RollupConfig)` is at slot 1 of `EEZ` (slot 0 =
-    ///      `rollupCounter`). Mapping value slot = `keccak256(abi.encode(rid, 1))`.
-    ///      `RollupConfig` is `{rollupContract, stateRoot, etherBalance}` at slot offsets 0, 1, 2,
-    ///      so `etherBalance` lives at `keccak256(abi.encode(rid, 1)) + 2`. Also funds the
+    /// @dev Storage layout: EEZBase owns slot 0 (`authorizedProxies`). EEZ then has
+    ///      `rollupCounter` at slot 1 and `mapping(rid => RollupConfig) rollups` at slot 2.
+    ///      Mapping value slot = `keccak256(abi.encode(rid, 2))`. `RollupConfig` is
+    ///      `{rollupContract, stateRoot, etherBalance}` at slot offsets 0, 1, 2, so
+    ///      `etherBalance` lives at `keccak256(abi.encode(rid, 2)) + 2`. Also funds the
     ///      contract's actual ETH balance to keep accounting consistent.
     function _fundRollup(uint256 rid, uint256 amount) internal {
-        bytes32 baseSlot = keccak256(abi.encode(rid, uint256(1)));
+        bytes32 baseSlot = keccak256(abi.encode(rid, uint256(2)));
         bytes32 etherBalanceSlot = bytes32(uint256(baseSlot) + 2);
         vm.store(address(rollups), etherBalanceSlot, bytes32(amount));
         vm.deal(address(rollups), address(rollups).balance + amount);
