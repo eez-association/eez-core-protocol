@@ -261,6 +261,9 @@ contract Execute is Script, RevertActions {
 
         vm.startBroadcast();
         Batcher batcher = new Batcher();
+        // Export the Batcher's address so run-local.sh re-exports it as BATCHER_L1 env;
+        // ComputeExpected then uses the same address as alice (msg.sender into the proxy).
+        console.log("BATCHER_L1=%s", address(batcher));
 
         // alice = batcher (msg.sender into the proxy)
         batcher.execute(
@@ -346,17 +349,22 @@ contract ComputeExpected is ComputeExpectedBase, RevertActions {
     function run() external view {
         address counterL2 = vm.envAddress("COUNTER_L2");
         address counterL1 = vm.envAddress("COUNTER_L1");
-        address alice = msg.sender;
+        // The L1 trigger goes batcher → counterProxy directly; the on-chain consumed
+        // hash uses Batcher as sourceAddress. If run-local.sh has exported BATCHER_L1
+        // (set by Execute), use it; otherwise fall back to msg.sender (network mode).
+        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
+        address aliceL2 = msg.sender; // L2 path uses SYSTEM (broadcaster) as source
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, alice);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, aliceL1);
         bytes32 l1Hash = _entryHash(l1[0]);
 
-        ExecutionEntry[] memory l2 = _l2Entries(counterL2, alice);
+        ExecutionEntry[] memory l2 = _l2Entries(counterL2, aliceL2);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
         console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1[0].proxyEntryHash));
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
         console.log("");
         console.log("=== EXPECTED L1 TABLE (1 entry, 1 call w/ revertSpan=1, force-reverted success) ===");
         _logEntry(0, l1[0]);

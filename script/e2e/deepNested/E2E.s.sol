@@ -397,6 +397,7 @@ contract Execute is Script, DeepNestedActions {
 
         vm.startBroadcast();
         Batcher batcher = new Batcher();
+        console.log("BATCHER_L1=%s", address(batcher));
 
         batcher.execute(
             EEZ(rollupsAddr),
@@ -485,12 +486,15 @@ contract ComputeExpected is ComputeExpectedBase, DeepNestedActions {
         address ncAddr = vm.envAddress("NESTED_CALLER");
         address capL2 = vm.envAddress("CAP_L2");
         address ncL2 = vm.envAddress("NESTED_CALLER_L2");
-        address alice = msg.sender;
+        // L1 source is the Batcher contract Execute deploys. L2 source is the script broadcaster
+        // (SYSTEM) acting as alice. BATCHER_L1 is exported by run-local.sh from Execute output.
+        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
+        address aliceL2 = msg.sender;
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL2, capAddr, ncAddr, alice);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL2, capAddr, ncAddr, aliceL1);
         bytes32 l1Hash = _entryHash(l1[0]);
 
-        ExecutionEntry[] memory l2 = _l2Entries(counterL2, capL2, ncL2, alice);
+        ExecutionEntry[] memory l2 = _l2Entries(counterL2, capL2, ncL2, aliceL2);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));

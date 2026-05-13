@@ -102,6 +102,8 @@ if grep -q 'contract Execute ' "$SOL"; then
     if [[ $L1_EXIT -eq 0 ]]; then
         echo "L1 execution succeeded"
         echo "$EXEC_L1" | grep -E "complete|done|counter" || true
+        # Auto-export any KEY=VALUE lines (e.g. BATCHER_L1=<addr>) so ComputeExpected can read them.
+        _export_outputs "$EXEC_L1"
     else
         echo "L1 execution FAILED (exit=$L1_EXIT) — full output below:"
         echo "$EXEC_L1"

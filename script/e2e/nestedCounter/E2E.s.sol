@@ -358,6 +358,7 @@ contract Execute is Script, NestedActions {
 
         vm.startBroadcast();
         Batcher batcher = new Batcher();
+        console.log("BATCHER_L1=%s", address(batcher));
 
         // Alice = the Batcher contract itself (msg.sender into capL2Proxy).
         // The outer entry's crossChainCallHash must use alice = address(batcher).
@@ -409,10 +410,14 @@ contract ComputeExpected is ComputeExpectedBase, NestedActions {
         address counterL1Addr = vm.envAddress("COUNTER_L1");
         address capAddr = vm.envAddress("COUNTER_AND_PROXY");
         address capL2Addr = vm.envAddress("COUNTER_AND_PROXY_L2");
-        address alice = msg.sender; // placeholder for network mode
+        // L1 source is the Batcher contract Execute deploys; L2 source is the script
+        // broadcaster (SYSTEM) acting as alice. BATCHER_L1 is exported by run-local.sh
+        // from Execute's output.
+        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
+        address aliceL2 = msg.sender;
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, capAddr, alice);
-        ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capL2Addr, alice);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, capAddr, aliceL1);
+        ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capL2Addr, aliceL2);
 
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
