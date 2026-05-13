@@ -314,7 +314,8 @@ contract EEZL2 is EEZBase {
     function executeInContextAndRevert(uint256 callCount) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(callCount);
-        revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber);
+        // L2 has no deferred no-match flag — always `false`.
+        revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber, false);
     }
 
     /// @notice Processes N calls from the flat entry.L2ToL1Calls[] array
@@ -348,7 +349,8 @@ contract EEZL2 is EEZBase {
 
                 try this.executeInContextAndRevert(revertSpan) {}
                 catch (bytes memory revertData) {
-                    (_rollingHash, _lastNestedActionConsumed, _currentCallNumber) = _decodeContextResult(revertData);
+                    // L2 has no deferred no-match flag — ignore the 4th tuple element.
+                    (_rollingHash, _lastNestedActionConsumed, _currentCallNumber,) = _decodeContextResult(revertData);
                 }
 
                 entry.L2ToL1Calls[savedCallNumber].revertSpan = revertSpan;
