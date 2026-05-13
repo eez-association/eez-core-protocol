@@ -111,6 +111,38 @@ contract ExecuteL2 is Script, <Scenario>Actions {
 
 `msg.value` must equal `<value>` strictly (`ValueMismatch` revert otherwise — `src/L2/EEZL2.sol:268`).
 
+**Single-entry only.** `executeIncomingCrossChainCall` is designed for one entry per transaction (`_currentEntryIndex`/`_rollingHash` aren't reset between back-to-back invocations in the same tx — the natspec at line 278 explicitly says "once per tx"). For multi-entry L2 destinations (multi-call-twice, multi-call-two-diff, multi-call-nested), use Pattern C below.
+
+## Pattern C — Multi-entry destination (multi-call-twice, multi-call-two-diff, multi-call-nested)
+
+When the L2 destination needs to consume N entries in sequence — e.g. a `CallTwice` style trigger that loops over multiple proxy calls — `executeIncomingCrossChainCall` doesn't fit. Use `loadExecutionTable` + an L2-side trigger contract that calls trigger proxies:
+
+1. **Deploy on L2 (extend `DeployL2`)**:
+   - The destination contracts (real Counter, etc.).
+   - **Trigger proxies** on L2 for each destination, tagged `originalRollupId=MAINNET`. The proxy address is what the L2 trigger contract will call.
+   - **An L2 trigger contract** (e.g. another `CallTwice`) — its address is the `sourceAddress` baked into the L2 entries' `proxyEntryHash`. Since this address lives on L2, the L2 entries' hash inevitably differs from the L1 entries' hash (different sourceAddress, different sourceRollupId). That's expected — full cross-chain symmetry isn't possible for multi-entry sequential consumption.
+
+2. **L2 entry shape**:
+   ```solidity
+   proxyEntryHash:      crossChainCallHash(MAINNET_ROLLUP_ID, dest, value, data, l2Trigger, L2_ROLLUP_ID)
+   L2ToL1Calls:         [ L2ToL1Call(dest, value, data, l2Trigger, L2_ROLLUP_ID, 0) ]
+   callCount:           1
+   rollingHash:         CB(1) → CE(1, true, <cached>)   // starts from 0; _consumeAndExecute
+                                                          // (src/L2/EEZL2.sol:408) resets _rollingHash
+                                                          // at the start of each entry consumption.
+   ```
+
+3. **ExecuteL2 contract**:
+   ```solidity
+   vm.startBroadcast();
+   EEZL2(managerAddr).loadExecutionTable(_l2Entries(...), noLookupCalls());
+   CallTwice(l2Trigger).callCounterTwice(triggerProxy);   // or whatever shape the trigger has
+   vm.stopBroadcast();
+   ```
+   Each proxy call inside the trigger forwards to `managerL2.executeL1ToL2Call`, which calls `_consumeAndExecute` → resets `_rollingHash`/`_currentCallNumber` per entry, then `_processNCalls(entry.callCount)`. The trigger pattern matches `multi-call-nested/E2E.s.sol::ExecuteL2` — use it as the reference implementation.
+
+The trade-off: L1 and L2 `proxyEntryHash` values diverge for these scenarios. The cross-chain tie is at the level of "the destination chain produced what the source-side cached `returnData` claimed it would" — verified by asserting real counter state at the end of `ExecuteL2`.
+
 ## Pattern B — L2→L1 scenarios (counterL2, bridgeL2 if any, …)
 
 User triggers on L2, destination Counter lives on L1. L2 entry shape is the same as Pattern A's L1 entry (zero calls, just cached returnData). The L1-side simulation looks different:
