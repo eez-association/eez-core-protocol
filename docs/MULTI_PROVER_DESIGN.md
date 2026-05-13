@@ -224,8 +224,9 @@ consumers — they just fail their own state-root check if they depended on it.
    atomically (one revert reverts the whole call).
 4. **Mark verified-this-block** (`_markVerifiedThisBlock(rid)` for each rollup): lazy-resets
    the queue on first touch in this block (subsequent touches in the same block append to
-   the existing queue — `RollupAlreadyVerifiedThisBlock` is declared but currently NOT
-   thrown). Sets the read gate for `executeCrossChainCall` / `executeL2TX`.
+   the existing queue — same-block re-touch of a rollup is permitted; the orchestrator must
+   coordinate exclusivity if it needs it). Sets the read gate for `executeCrossChainCall`
+   / `executeL2TX`.
 5. **Load transient stream** via `_loadTransient(batch)`: copy `entries[0..transientExecutionEntryCount)`
    into `_transientExecutions` and `l1ToL2lookupCalls[0..transientLookupCallCount)` into
    `_transientLookupCalls`.
@@ -340,10 +341,6 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **Double-registration of same manager address**: a custom manager without `rollupIdSet`
   guard could be registered for two rollupIds, controlling both via shared `msg.sender`.
   Acceptable per the per-rollup trust model but worth documenting.
-- **`RollupAlreadyVerifiedThisBlock` declared but unthrown**: `error RollupAlreadyVerifiedThisBlock(rollupId)`
-  exists at `src/EEZ.sol:190` but is never thrown — `_markVerifiedThisBlock` short-circuits
-  silently and the same rollup can be touched by multiple batches in the same block
-  (entries append to the queue). Either remove the error or add the check; product decision.
 - **`rollupId == 0` (MAINNET) excluded from batches**: the strict-increasing check
   starting at `MAINNET_ROLLUP_ID = 0` makes `rollupId == 0` unpostable. Pre-existing pattern;
   document the deployer-passes `startingRollupId >= 1` invariant.

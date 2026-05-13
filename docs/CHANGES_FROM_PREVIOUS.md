@@ -155,7 +155,6 @@ A second migration layered on top of the flat-sequential model. Full design note
 | `StateUpdated`, `VerificationKeyUpdated`, `OwnershipTransferred`, `L2ExecutionPerformed` | Dropped (the corresponding owner-only entry points moved to `Rollup.sol`) |
 | `RollupContractChanged` / `setRollupContract` | **Dropped** — manager binding is immutable after registration. |
 | `RollupBatchActiveThisBlock(rollupId)`, `RollupNotInBatch(rollupId)`, `StateRootMismatch(rollupId)`, `ExecutionNotInCurrentBlock(rollupId)` (L1; L2 variant takes no arg), `PostBatchReentry`, `InvalidProofSystemConfig`, `DuplicateProofSystem`, `SetStateRootNotAllowedDuringExecution` | New errors covering the per-rollup / multi-prover invariants |
-| `RollupAlreadyVerifiedThisBlock(rollupId)` | Declared (`src/EEZ.sol:190`) but currently NOT thrown — `_markVerifiedThisBlock` short-circuits silently and the same rollup can be touched by multiple batches in the same block (entries append to the queue). Flag for product decision. |
 | `EmptyEntries`, `ValueMismatch` (L2 only) | New — thrown by `executeIncomingCrossChainCall` |
 
 ### Owner-only operations
