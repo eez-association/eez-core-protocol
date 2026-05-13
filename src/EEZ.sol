@@ -118,12 +118,6 @@ contract EEZ is EEZBase {
     /// @notice Per-rollup deferred queue + once-per-block guard
     mapping(uint256 rollupId => RollupVerification record) internal verificationByRollup;
 
-    /// @notice Mapping of authorized CrossChainProxy contracts to their identity
-    mapping(address proxy => ProxyInfo info) public authorizedProxies;
-
-    // Rolling-hash tag constants and the `_rollingHash` transient accumulator live on
-    // `EEZBase` (shared with `EEZL2`).
-
     // ── Transient-backed execution entries & lookup calls ──
     //
     // First N entries / M lookup calls of the batch's leading prefix live here instead of
@@ -152,27 +146,10 @@ contract EEZ is EEZBase {
     // external calls, and step 7 (publish) has no external calls either, so neither
     // needs guarding.
 
-    // ── Transient execution state ──
-
-    /// @notice The current execution entry being processed
-    /// @dev When inside the transient phase (`_transientExecutions.length != 0`), this
-    ///      indexes `_transientExecutions`. In the persistent phase, it's the per-rollup
-    ///      queue cursor `(cursor - 1)` of whichever rollup queue is currently being
-    ///      consumed; the rollup itself is held in `_currentEntryRollupId`.
-    uint256 transient _currentEntryIndex;
-
     /// @notice The rollup ID whose queue is supplying the entry currently being processed.
     /// @dev `0` outside execution. Used by `_currentEntryStorage()` to disambiguate which
     ///      persistent queue to route into when `_transientExecutions.length == 0`.
     uint256 transient _currentEntryRollupId;
-
-    /// @notice 1-indexed global call counter and cursor into entry.L2ToL1Calls[]
-    /// @dev Also replaces _insideExecution: _currentCallNumber != 0 means inside execution
-    uint256 transient _currentCallNumber;
-
-    /// @notice Sequential nested action consumption counter
-    /// @dev Also used by staticCallLookup to disambiguate multiple lookup calls within the same call
-    uint256 transient _lastNestedActionConsumed;
 
     /// @notice Emitted when a new rollup is created
     event RollupCreated(uint256 indexed rollupId, address indexed rollupContract, bytes32 initialState);
@@ -180,44 +157,17 @@ contract EEZ is EEZBase {
     /// @notice Emitted when a rollup state is updated (only via the registered rollupContract)
     event StateUpdated(uint256 indexed rollupId, bytes32 newStateRoot);
 
-    /// @notice Emitted when a new CrossChainProxy is created
-    event CrossChainProxyCreated(
-        address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId
-    );
-
     /// @notice Emitted when an L2 execution is performed
     event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 newState);
 
     /// @notice Emitted when an execution entry is consumed
     event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed cursor);
 
-    /// @notice Emitted when a cross-chain call is executed via proxy
-    event CrossChainCallExecuted(
-        bytes32 indexed crossChainCallHash, address indexed proxy, address sourceAddress, bytes callData, uint256 value
-    );
-
     /// @notice Emitted when a precomputed L2 transaction is executed
     event L2TXExecuted(uint256 indexed rollupId, uint256 indexed cursor);
 
     /// @notice Emitted when a batch is posted, carrying the number of rollups verified
     event BatchPosted(uint256 indexed rollupCount);
-
-    /// @notice Emitted after each call completes in _processNCalls
-    /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert)
-    event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
-
-    /// @notice Emitted when a nested action is consumed during reentrant execution
-    event NestedActionConsumed(
-        uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 crossChainCallHash, uint256 callCount
-    );
-
-    /// @notice Emitted after an entry's execution completes and all verifications pass
-    event EntryExecuted(
-        uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActionsConsumed
-    );
-
-    /// @notice Emitted after a revert span is processed via executeInContextAndRevert
-    event RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span);
 
     /// @notice Emitted when an immediate entry's `_applyAndExecute` reverts during postAndVerifyBatch
     ///         step 4. The entry's state changes are rolled back; the cursor advances and the
@@ -233,17 +183,8 @@ contract EEZ is EEZBase {
     ///         shared transient tables)
     error PostBatchReentry();
 
-    /// @notice Error when caller is not an authorized proxy
-    error UnauthorizedProxy();
-
     /// @notice Error when caller is not the rollup's registered manager contract
     error NotRollupContract();
-
-    /// @notice Error when executeInContextAndRevert is called by an external address
-    error NotSelf();
-
-    /// @notice Error when execution is not found or crossChainCallHash doesn't match next entry
-    error ExecutionNotFound();
 
     /// @notice Error when a second `postAndVerifyBatch` tries to verify a rollup already verified this block
     error RollupAlreadyVerifiedThisBlock(uint256 rollupId);
@@ -269,21 +210,6 @@ contract EEZ is EEZBase {
 
     /// @notice Error when execution is attempted in a different block than the last state update for that rollup
     error ExecutionNotInCurrentBlock(uint256 rollupId);
-
-    /// @notice Error when the computed rolling hash doesn't match the entry's rollingHash
-    error RollingHashMismatch();
-
-    /// @notice Carries execution results out of a reverted context
-    error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber);
-
-    /// @notice Error when executeInContextAndRevert reverts with an unexpected error
-    error UnexpectedContextRevert(bytes revertData);
-
-    /// @notice Error when not all nested actions were consumed after execution
-    error UnconsumedNestedActions();
-
-    /// @notice Error when not all calls were consumed after execution
-    error UnconsumedCalls();
 
     /// @notice Error when executeL2TX is called while already inside a cross-chain execution
     error L2TXNotAllowedDuringExecution();
@@ -997,21 +923,6 @@ contract EEZ is EEZBase {
         revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber);
     }
 
-    /// @notice Decodes a ContextResult revert payload
-    function _decodeContextResult(bytes memory revertData)
-        internal
-        pure
-        returns (bytes32 rollingHash, uint256 naConsumed, uint256 callNumber)
-    {
-        if (bytes4(revertData) != ContextResult.selector) revert UnexpectedContextRevert(revertData);
-        assembly {
-            let ptr := add(revertData, 36)
-            rollingHash := mload(ptr)
-            naConsumed := mload(add(ptr, 32))
-            callNumber := mload(add(ptr, 64))
-        }
-    }
-
     /// @notice Validates and applies state deltas; sums ether deltas across rollups
     function _applyStateDeltas(StateDelta[] memory deltas) internal returns (int256 totalEtherDelta) {
         for (uint256 i = 0; i < deltas.length; i++) {
@@ -1031,31 +942,6 @@ contract EEZ is EEZBase {
 
             emit L2ExecutionPerformed(delta.rollupId, delta.newState);
         }
-    }
-
-    /// @notice Returns true if currently inside a cross-chain call execution
-    function _insideExecution() internal view returns (bool) {
-        return _currentCallNumber != 0;
-    }
-
-    // ──────────────────────────────────────────────
-    //  CrossChainProxy creation
-    // ──────────────────────────────────────────────
-
-    /// @notice Creates a new CrossChainProxy contract for an original address
-    function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address proxy) {
-        return _createCrossChainProxyInternal(originalAddress, originalRollupId);
-    }
-
-    /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint256 originalRollupId)
-        internal
-        returns (address proxy)
-    {
-        bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-        authorizedProxies[proxy] = ProxyInfo(originalAddress, uint64(originalRollupId));
-        emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
     // ──────────────────────────────────────────────
@@ -1141,21 +1027,6 @@ contract EEZ is EEZBase {
         revert ExecutionNotFound();
     }
 
-    /// @notice Verifies and unpacks a matched lookup call entry
-    function _resolveLookupCall(LookupCall storage sc) internal view returns (bytes memory) {
-        if (sc.calls.length > 0) {
-            bytes32 computedHash = _processNLookupCalls(sc.calls);
-            if (computedHash != sc.rollingHash) revert RollingHashMismatch();
-        }
-        if (sc.failed) {
-            bytes memory returnData = sc.returnData;
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
-        return sc.returnData;
-    }
-
     /// @notice Top-level fallback: scan transient table then the routed rollup's persistent
     ///         `lookupQueue` for a `LookupCall` with `failed=true` matching
     ///         `(crossChainCallHash, callNumber=0, lastNestedActionConsumed=0)`. The (0,0)
@@ -1183,48 +1054,6 @@ contract EEZ is EEZBase {
                 _resolveLookupCall(sc);
             }
         }
-    }
-
-    /// @notice Executes calls in static context and computes a rolling hash of results
-    function _processNLookupCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
-        for (uint256 i = 0; i < calls.length; i++) {
-            L2ToL1Call memory cc = calls[i];
-            address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
-            (bool success, bytes memory retData) =
-                sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
-            computedHash = _rollingHashStaticResult(computedHash, success, retData);
-        }
-    }
-
-    // Rolling-hash helpers (`_rollingHashCallBegin/End/NestedBegin/NestedEnd/StaticResult`)
-    // and the `_rollingHash` accumulator live on `EEZBase`.
-
-    // ──────────────────────────────────────────────
-    //  Helpers
-    // ──────────────────────────────────────────────
-
-    /// @notice Computes the cross-chain call hash from individual fields. Same shape used
-    ///         both when building the hash for a proxy-driven CALL (`executeCrossChainCall`)
-    ///         and for a static lookup (`staticCallLookup`). Public so off-chain tooling can
-    ///         call it directly to derive the hash for a planned cross-chain call without
-    ///         redoing the abi.encode + keccak off-chain.
-    /// @dev Formula: `keccak256(abi.encode(targetRollupId, targetAddress, value, data,
-    ///      sourceAddress, sourceRollupId))`. Field order MUST match `L2ToL1Call` field
-    ///      order plus the source pair appended; reordering would break every on-chain
-    ///      hash check and every off-chain tool that pre-computes the hash.
-    function computeCrossChainCallHash(
-        uint256 targetRollupId,
-        address targetAddress,
-        uint256 value,
-        bytes memory data,
-        address sourceAddress,
-        uint256 sourceRollupId
-    )
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
     }
 
     // ──────────────────────────────────────────────
@@ -1284,20 +1113,5 @@ contract EEZ is EEZBase {
     /// @notice Cursor (next-to-consume) for the deferred queue of `_rollupId`
     function queueCursor(uint256 _rollupId) external view returns (uint256) {
         return verificationByRollup[_rollupId].cursor;
-    }
-
-    /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId)
-        public
-        view
-        returns (address)
-    {
-        bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash = keccak256(
-            abi.encodePacked(
-                type(CrossChainProxy).creationCode, abi.encode(address(this), originalAddress, originalRollupId)
-            )
-        );
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
     }
 }

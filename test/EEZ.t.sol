@@ -13,7 +13,15 @@ import {
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {IRollupContract} from "../src/interfaces/IRollup.sol";
 import {IProofSystem} from "../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ProxyInfo
+} from "../src/interfaces/IEEZ.sol";
+import {EEZBase} from "../src/base/EEZBase.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
@@ -482,7 +490,7 @@ contract EEZTest is Base {
 
     function test_ExecuteCrossChainCall_UnauthorizedProxyReverts() public {
         _makeRollupLocal(bytes32(0), alice);
-        vm.expectRevert(EEZ.UnauthorizedProxy.selector);
+        vm.expectRevert(EEZBase.UnauthorizedProxy.selector);
         rollups.executeCrossChainCall(alice, "");
     }
 
@@ -521,7 +529,7 @@ contract EEZTest is Base {
     }
 
     function test_ExecuteInContext_NotSelfReverts() public {
-        vm.expectRevert(EEZ.NotSelf.selector);
+        vm.expectRevert(EEZBase.NotSelf.selector);
         rollups.executeInContextAndRevert(1);
     }
 
@@ -688,7 +696,7 @@ contract EEZTest is Base {
         entries[0].callCount = 1;
         entries[0].rollingHash = bytes32(uint256(0xdead)); // wrong!
         _postBatchSingle(rid, entries, 0);
-        vm.expectRevert(EEZ.RollingHashMismatch.selector);
+        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
         proxyAddr.call(cd);
     }
 
@@ -718,7 +726,7 @@ contract EEZTest is Base {
         entries[0].callCount = 1; // promise only one call but provide two
         entries[0].rollingHash = _rollingHashSingleCall("");
         _postBatchSingle(rid, entries, 0);
-        vm.expectRevert(EEZ.UnconsumedCalls.selector);
+        vm.expectRevert(EEZBase.UnconsumedCalls.selector);
         proxyAddr.call(cd);
     }
 

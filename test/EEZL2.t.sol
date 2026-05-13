@@ -3,8 +3,16 @@ pragma solidity ^0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
+import {EEZBase} from "../src/base/EEZBase.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ProxyInfo} from "../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ProxyInfo
+} from "../src/interfaces/IEEZ.sol";
 
 contract L2TestTarget {
     uint256 public value;
@@ -222,7 +230,7 @@ contract EEZL2Test is Test {
             (bool success,) = proxy.call(callData);
             assertTrue(success);
         }
-        vm.expectRevert(EEZL2.ExecutionNotFound.selector);
+        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
         (bool s,) = proxy.call(callData);
         s;
     }
@@ -241,7 +249,7 @@ contract EEZL2Test is Test {
 
     function test_CreateCrossChainProxy_EmitsEvent() public {
         vm.expectEmit(true, true, true, true);
-        emit EEZL2.CrossChainProxyCreated(
+        emit EEZBase.CrossChainProxyCreated(
             manager.computeCrossChainProxyAddress(address(target), TEST_ROLLUP_ID), address(target), TEST_ROLLUP_ID
         );
         manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
@@ -269,7 +277,7 @@ contract EEZL2Test is Test {
     // ── executeCrossChainCall ──
 
     function test_ExecuteCrossChainCall_RevertsUnauthorizedProxy() public {
-        vm.expectRevert(EEZL2.UnauthorizedProxy.selector);
+        vm.expectRevert(EEZBase.UnauthorizedProxy.selector);
         manager.executeCrossChainCall(address(this), "");
     }
 
@@ -290,7 +298,7 @@ contract EEZL2Test is Test {
         manager.loadExecutionTable(entries, noStatic);
 
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
-        vm.expectRevert(EEZL2.ExecutionNotFound.selector);
+        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
         (bool s,) = proxy.call(callData);
         s;
     }
@@ -389,7 +397,7 @@ contract EEZL2Test is Test {
         (bool s2, bytes memory r2) = proxy.call(callData);
         assertTrue(s2);
         assertEq(abi.decode(r2, (uint256)), 222);
-        vm.expectRevert(EEZL2.ExecutionNotFound.selector);
+        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
         (bool s3,) = proxy.call(callData);
         s3;
     }
@@ -425,7 +433,7 @@ contract EEZL2Test is Test {
         ExecutionEntry memory entry = _buildSimpleEntry(crossChainCallHash, cc, "", bytes32(uint256(0xDEAD)));
         _loadSingleEntry(entry);
 
-        vm.expectRevert(EEZL2.RollingHashMismatch.selector);
+        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
         (bool s,) = proxy.call(callData);
         s;
     }
@@ -471,7 +479,7 @@ contract EEZL2Test is Test {
 
         _loadSingleEntry(entry);
 
-        vm.expectRevert(EEZL2.UnconsumedCalls.selector);
+        vm.expectRevert(EEZBase.UnconsumedCalls.selector);
         (bool s,) = proxy.call(callData);
         s;
     }
@@ -530,7 +538,7 @@ contract EEZL2Test is Test {
     // ── executeInContextAndRevert: NotSelf ──
 
     function test_ExecuteInContext_NotSelf() public {
-        vm.expectRevert(EEZL2.NotSelf.selector);
+        vm.expectRevert(EEZBase.NotSelf.selector);
         manager.executeInContextAndRevert(1);
     }
 
@@ -735,7 +743,7 @@ contract EEZL2Test is Test {
         assertTrue(success);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 sel = EEZL2.CrossChainCallExecuted.selector;
+        bytes32 sel = EEZBase.CrossChainCallExecuted.selector;
         bool found = false;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == sel) {
