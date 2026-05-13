@@ -186,9 +186,6 @@ contract EEZ is EEZBase {
     /// @notice Error when caller is not the rollup's registered manager contract
     error NotRollupContract();
 
-    /// @notice Error when a second `postAndVerifyBatch` tries to verify a rollup already verified this block
-    error RollupAlreadyVerifiedThisBlock(uint256 rollupId);
-
     /// @notice Error when the manager's `setStateRoot` escape hatch is invoked in the same
     ///         block a `postAndVerifyBatch` already touched the rollup
     /// @dev Conservative gate: once a verified state transition lands in block N, the manager

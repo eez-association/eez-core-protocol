@@ -16,6 +16,13 @@ abstract contract VerifyHelpers is Script {
     // entries should subscribe to ExecutionConsumed / EntryExecuted instead.
     bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
 
+    // ExecutionConsumed on L1: (bytes32 crossChainCallHash, uint256 rollupId, uint256 cursor)
+    bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint256,uint256)");
+
+    // IncomingCrossChainCallExecuted on L2: emitted by `executeIncomingCrossChainCall`.
+    bytes32 constant SIG_INCOMING_CROSSCHAIN_CALL =
+        keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint256)");
+
     // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only.
     //   ExecutionEntry = (StateDelta[], bytes32, uint256, L2ToL1Call[], ExpectedL1ToL2Call[], uint256, bytes, bytes32)
     //                       deltas        cchHash  destRid  calls            nested            cnt   ret    rollingHash
@@ -202,33 +209,44 @@ abstract contract VerifyHelpers is Script {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1Batch is VerifyHelpers {
-    function run(uint256 blockNumber, address rollups, bytes32[] calldata expectedEntryHashes) external view {
+    /// @dev Input is the LIST OF EXPECTED CROSS-CHAIN-CALL HASHES (`proxyEntryHash` values)
+    /// that should have been consumed in the L1 block. The current branch's `BatchPosted`
+    /// event no longer carries entries; consumption is signalled via `ExecutionConsumed`
+    /// whose first topic is the consumed entry's `crossChainCallHash`. This verifier
+    /// extracts those hashes and checks every expected hash is present.
+    function run(uint256 blockNumber, address rollups, bytes32[] calldata expectedCallHashes) external view {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blockNumber, blockNumber, rollups, topics);
 
-        ExecutionEntry[] memory actual = _collectBatchEntries(logs);
-
-        bytes32[] memory actualHashes = new bytes32[](actual.length);
-        for (uint256 i = 0; i < actual.length; i++) {
-            actualHashes[i] = _entryHash(actual[i]);
+        // Collect every consumed call hash from ExecutionConsumed events in this block.
+        uint256 count;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) count++;
+        }
+        bytes32[] memory actualHashes = new bytes32[](count);
+        uint256 idx;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) {
+                actualHashes[idx++] = logs[i].topics[1]; // indexed crossChainCallHash
+            }
         }
 
-        bytes32[] memory missing = _findMissingHashes(actualHashes, expectedEntryHashes);
+        bytes32[] memory missing = _findMissingHashes(actualHashes, expectedCallHashes);
 
         if (missing.length > 0) {
             console.log(
-                "FAIL: %s/%s expected entries missing in block %s",
+                "FAIL: %s/%s expected call hashes missing in L1 block %s",
                 missing.length,
-                expectedEntryHashes.length,
+                expectedCallHashes.length,
                 blockNumber
             );
             console.log("");
-            console.log("=== ACTUAL EXECUTION TABLE (L1 block %s, %s entries) ===", blockNumber, actual.length);
-            for (uint256 i = 0; i < actual.length; i++) {
-                _printEntryDetailed(i, actual[i]);
+            console.log("=== ACTUAL CONSUMED HASHES (L1 block %s, %s) ===", blockNumber, actualHashes.length);
+            for (uint256 i = 0; i < actualHashes.length; i++) {
+                console.log("  %s", vm.toString(actualHashes[i]));
             }
             console.log("");
-            console.log("=== MISSING ENTRY HASHES ===");
+            console.log("=== MISSING CALL HASHES ===");
             for (uint256 i = 0; i < missing.length; i++) {
                 console.log("  %s", vm.toString(missing[i]));
             }
@@ -236,9 +254,9 @@ contract VerifyL1Batch is VerifyHelpers {
         }
 
         console.log(
-            "PASS: %s/%s expected entries found in block %s",
-            expectedEntryHashes.length,
-            expectedEntryHashes.length,
+            "PASS: %s/%s expected call hashes consumed in L1 block %s",
+            expectedCallHashes.length,
+            expectedCallHashes.length,
             blockNumber
         );
         for (uint256 i = 0; i < logs.length; i++) {
@@ -373,12 +391,17 @@ contract VerifyL2Calls is VerifyHelpers {
         view
         returns (bytes32[] memory)
     {
+        // Accept BOTH event signatures: CrossChainCallExecuted (emitted when a proxy on L2
+        // calls into the manager via executeL1ToL2Call) AND IncomingCrossChainCallExecuted
+        // (emitted when SYSTEM drives executeIncomingCrossChainCall). The crossChainCallHash
+        // is the first indexed param of both, so topics[1] extracts it uniformly.
         uint256 count;
         for (uint256 i = 0; i < blocks.length; i++) {
             bytes32[] memory topics = new bytes32[](0);
             Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
             for (uint256 j = 0; j < logs.length; j++) {
-                if (logs[j].topics[0] == SIG_CROSSCHAIN_CALL) count++;
+                bytes32 sig = logs[j].topics[0];
+                if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) count++;
             }
         }
         bytes32[] memory result = new bytes32[](count);
@@ -387,8 +410,8 @@ contract VerifyL2Calls is VerifyHelpers {
             bytes32[] memory topics = new bytes32[](0);
             Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
             for (uint256 j = 0; j < logs.length; j++) {
-                if (logs[j].topics[0] == SIG_CROSSCHAIN_CALL) {
-                    // crossChainCallHash is topics[1] (first indexed parameter)
+                bytes32 sig = logs[j].topics[0];
+                if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) {
                     result[idx++] = logs[j].topics[1];
                 }
             }

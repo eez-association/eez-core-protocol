@@ -119,6 +119,92 @@ fi
 [[ -n "$L2_BLOCK" ]] && decode_block "$L2_RPC" "$L2_BLOCK" "$MANAGER_L2" "L2 "
 [[ -n "$L1_BLOCK" ]] && decode_block "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "L1 "
 
+# 8. Verify on-chain events match expected hashes from ComputeExpected.
+#    Asserts the cryptographic tie between off-chain prediction and on-chain reality.
+#    Skipped (with a notice) if the scenario has no ComputeExpected contract.
+if grep -q 'contract ComputeExpected ' "$SOL"; then
+    echo ""
+    echo "====== Compute Expected Entries ======"
+    _SENDER=$(cast wallet address --private-key "$PK")
+    COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$L1_RPC" --sender "$_SENDER" 2>&1)
+
+    EXPECTED_L1_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_HASHES")
+    EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
+    EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
+    EXPECTED_L2_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_CALL_HASHES")
+    [[ -n "$EXPECTED_L1_HASHES"      ]] && echo "EXPECTED_L1_HASHES=$EXPECTED_L1_HASHES"
+    [[ -n "$EXPECTED_L2_HASHES"      ]] && echo "EXPECTED_L2_HASHES=$EXPECTED_L2_HASHES"
+    [[ -n "$EXPECTED_L1_CALL_HASHES" ]] && echo "EXPECTED_L1_CALL_HASHES=$EXPECTED_L1_CALL_HASHES"
+    [[ -n "$EXPECTED_L2_CALL_HASHES" ]] && echo "EXPECTED_L2_CALL_HASHES=$EXPECTED_L2_CALL_HASHES"
+
+    # ── Verify L1 batch consumption ──
+    # VerifyL1Batch takes the list of crossChainCallHashes that should have been consumed
+    # (BatchPosted no longer carries entries on this branch; ExecutionConsumed is the
+    # primary signal). For scenarios with proxyEntryHash==0 (executeL2TX path) there's no
+    # L1-side call hash to check — skip in that case.
+    if [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
+        echo ""
+        echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
+        set +e
+        L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1Batch \
+            --rpc-url "$L1_RPC" \
+            --sig "run(uint256,address,bytes32[])" \
+            "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" 2>&1)
+        L1_VERIFY_EXIT=$?
+        set -e
+        if [[ $L1_VERIFY_EXIT -eq 0 ]]; then
+            echo "$L1_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        else
+            echo "L1 VERIFICATION FAILED"
+            echo "$L1_VERIFY" | strip_traces 2>/dev/null || echo "$L1_VERIFY"
+            FAILED=true
+        fi
+    fi
+
+    # ── Verify L2 ExecutionTableLoaded entries ──
+    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
+        echo ""
+        echo "====== Verify L2 Table (block $L2_BLOCK) ======"
+        set +e
+        L2_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Blocks \
+            --rpc-url "$L2_RPC" \
+            --sig "run(uint256[],address,bytes32[])" \
+            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" 2>&1)
+        L2_VERIFY_EXIT=$?
+        set -e
+        if [[ $L2_VERIFY_EXIT -eq 0 ]]; then
+            echo "$L2_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        else
+            echo "L2 TABLE VERIFICATION FAILED"
+            echo "$L2_VERIFY" | strip_traces 2>/dev/null || echo "$L2_VERIFY"
+            FAILED=true
+        fi
+    fi
+
+    # ── Verify L2 CrossChainCallExecuted events ──
+    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_CALL_HASHES" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]; then
+        echo ""
+        echo "====== Verify L2 Calls (block $L2_BLOCK) ======"
+        set +e
+        L2_CALL_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
+            --rpc-url "$L2_RPC" \
+            --sig "run(uint256[],address,bytes32[])" \
+            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1)
+        L2_CALL_VERIFY_EXIT=$?
+        set -e
+        if [[ $L2_CALL_VERIFY_EXIT -eq 0 ]]; then
+            echo "$L2_CALL_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        else
+            echo "L2 CALL VERIFICATION FAILED"
+            echo "$L2_CALL_VERIFY" | strip_traces 2>/dev/null || echo "$L2_CALL_VERIFY"
+            FAILED=true
+        fi
+    fi
+else
+    echo ""
+    echo "====== Verify (skipped — no contract ComputeExpected) ======"
+fi
+
 if $FAILED; then
     echo ""
     echo "====== FAILED ======"

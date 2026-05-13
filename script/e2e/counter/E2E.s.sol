@@ -294,11 +294,13 @@ contract ComputeExpected is ComputeExpectedBase, CounterActions {
 
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
-        bytes32 callHash = l1[0].proxyEntryHash;
+        bytes32 l1CallHash = l1[0].proxyEntryHash;
+        bytes32 l2CallHash = l2[0].proxyEntryHash;
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
-        console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(callHash));
+        console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1CallHash));
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2CallHash));
 
         console.log("");
         console.log("=== EXPECTED L1 EXECUTION TABLE (1 entry) ===");
