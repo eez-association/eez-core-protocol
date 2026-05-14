@@ -3,13 +3,13 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
-import {tmpECDSAVerifier} from "../src/verifier/tmpECDSAVerifier.sol";
+import {ECDSAProofSystem} from "../src/proofSystems/ECDSAProofSystem.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {ExecutionEntry, LookupCall} from "../src/interfaces/IEEZ.sol";
 
-contract tmpECDSAVerifierTest is Test {
-    tmpECDSAVerifier verifier;
+contract ECDSAProofSystemTest is Test {
+    ECDSAProofSystem verifier;
 
     uint256 constant SIGNER_PK = 0xA11CE;
     address signerAddr;
@@ -17,7 +17,7 @@ contract tmpECDSAVerifierTest is Test {
 
     function setUp() public {
         signerAddr = vm.addr(SIGNER_PK);
-        verifier = new tmpECDSAVerifier(owner, signerAddr);
+        verifier = new ECDSAProofSystem(owner, signerAddr);
     }
 
     function _sign(uint256 pk, bytes32 publicInputsHash) internal pure returns (bytes memory) {
@@ -54,9 +54,9 @@ contract tmpECDSAVerifierTest is Test {
 }
 
 /// @notice End-to-end test driving `postAndVerifyBatch` with a real ECDSA-signed proof on
-///         a rollup whose manager allows `tmpECDSAVerifier` as its proof system.
-contract tmpECDSAVerifierIntegrationTest is Base {
-    tmpECDSAVerifier verifier;
+///         a rollup whose manager allows `ECDSAProofSystem` as its proof system.
+contract ECDSAProofSystemIntegrationTest is Base {
+    ECDSAProofSystem verifier;
     uint256 constant SIGNER_PK = 0xA11CE;
     address signerAddr;
     address ownerAddr = address(0xBEEF);
@@ -64,7 +64,7 @@ contract tmpECDSAVerifierIntegrationTest is Base {
     function setUp() public {
         setUpBase();
         signerAddr = vm.addr(SIGNER_PK);
-        verifier = new tmpECDSAVerifier(ownerAddr, signerAddr);
+        verifier = new ECDSAProofSystem(ownerAddr, signerAddr);
     }
 
     function _sign(uint256 pk, bytes32 publicInputsHash) internal pure returns (bytes memory) {

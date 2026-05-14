@@ -80,6 +80,12 @@ struct RollupVerification {
 
 /// @title EEZ
 /// @notice L1 contract managing rollup state roots, multi-prover batch posting, and cross-chain call execution
+/// @dev EARLY-STAGE IMPLEMENTATION — NOT PRODUCTION READY.
+///      This is a first implementation of the sync-rollups protocol. It has NOT undergone an
+///      external security audit. Interfaces, storage layout, error semantics, and execution
+///      flow are expected to change in the near term as design issues are fixed and the
+///      protocol is iterated on. Do not rely on this code for value-bearing deployments,
+///      and do not treat its current behavior as the canonical specification.
 /// @dev Execution entries are posted via `postAndVerifyBatch(batch)`,
 ///      attested by ≥ threshold proof systems per rollup. Atomic verification: if any single
 ///      proof fails, the whole batch reverts.
@@ -150,6 +156,14 @@ contract EEZ is EEZBase {
     /// @dev `0` outside execution. Used by `_currentEntryStorage()` to disambiguate which
     ///      persistent queue to route into when `_transientExecutions.length == 0`.
     uint256 transient _currentEntryRollupId;
+
+    /// @notice Deferred-revert flag for `_consumeNestedAction` no-match path.
+    /// @dev When `_consumeNestedAction` finds no matching ExpectedL1ToL2Call, transient
+    ///      failed-lookup, or persistent failed-lookup, it sets this flag and returns empty
+    ///      bytes instead of reverting immediately. `_applyAndExecute` checks the flag at
+    ///      end-of-entry and reverts `ExecutionNotFound` then. Transient — rolls back with
+    ///      the surrounding frame on revert, so no manual reset needed.
+    bool transient _nestedActionNotFound;
 
     /// @notice Emitted when a new rollup is created
     event RollupCreated(uint256 indexed rollupId, address indexed rollupContract, bytes32 initialState);
@@ -724,31 +738,32 @@ contract EEZ is EEZBase {
     ///         reverting lookup call when no entry matches.
     /// @dev Routing rules:
     ///      1. ExpectedL1ToL2Call at `_lastNestedActionConsumed` matches `crossChainCallHash`
-    ///         → consume (the speculative `++` bump is what commits, hash NESTED_BEGIN/END,
-    ///         return cached returnData).
+    ///         → advance the cursor by 1, hash NESTED_BEGIN/END, return cached returnData.
+    ///         This is the only path that advances the cursor.
     ///      2. Otherwise scan `_transientLookupCalls` then the destination rollup's
     ///         `lookupQueue` for a `failed=true` entry keyed by
-    ///         (crossChainCallHash, _currentCallNumber, idx) where `idx` is the pre-bump cursor
-    ///         value → revert with cached returnData. Every fallback path reverts, so the
-    ///         speculative bump is rolled back by the EVM automatically.
-    ///      3. No match → revert `ExecutionNotFound`.
+    ///         (crossChainCallHash, _currentCallNumber, idx) where `idx` is the current cursor
+    ///         value → revert with cached returnData.
+    ///      3. No match → set the deferred-revert flag `_nestedActionNotFound` and return
+    ///         empty bytes. The end-of-entry check in `_applyAndExecute` reverts
+    ///         `ExecutionNotFound`. The cursor stays at `idx` so further reentrant calls in
+    ///         the same entry observe the same key the prover saw.
     ///
     ///      Why fall back only on `failed=true`: a successful reentrant call in a normal CALL
     ///      frame is expressed as an ExpectedL1ToL2Call entry; a successful read-only call
     ///      is in a STATICCALL frame and routed to `staticCallLookup` instead. A lookup-call
-    ///      hit on this path only
-    ///      makes sense when the caller has try/catch and expects a revert. The fallback
-    ///      sidesteps the transient-rollback issue: a successful match's bump persists; every
-    ///      other path reverts and the bump rolls back with it.
+    ///      hit on this path only makes sense when the caller has try/catch and expects a
+    ///      revert.
     function _consumeNestedAction(bytes32 crossChainCallHash) internal returns (bytes memory) {
         ExecutionEntry storage entry = _currentEntryStorage();
-        uint256 idx = _lastNestedActionConsumed++;
+        uint256 idx = _lastNestedActionConsumed; // pre-commit read; advance only on match
 
-        // 1. ExpectedL1ToL2Call priority
+        // 1. ExpectedL1ToL2Call priority — the ONLY path that advances the cursor.
         if (
             idx < entry.expectedL1ToL2Calls.length
                 && entry.expectedL1ToL2Calls[idx].crossChainCallHash == crossChainCallHash
         ) {
+            _lastNestedActionConsumed = idx + 1;
             ExpectedL1ToL2Call storage nested = entry.expectedL1ToL2Calls[idx];
             uint256 nestedNumber = idx + 1;
             emit NestedActionConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, nested.callCount);
@@ -770,6 +785,7 @@ contract EEZ is EEZBase {
                 _resolveLookupCall(sc); // always reverts (sc.failed == true)
             }
         }
+        
         // Per-rollup static queue: route by the action's target rollup (== entry.destinationRollupId
         // because nested actions are scoped to the containing entry).
         uint256 destRid = entry.destinationRollupId;
@@ -784,8 +800,17 @@ contract EEZ is EEZBase {
             }
         }
 
-        // 3. No match anywhere
-        revert ExecutionNotFound();
+        // 3. No match anywhere — defer the revert. Set flag, return empty bytes; the
+        //    end-of-entry check in `_applyAndExecute` reverts `ExecutionNotFound`.
+        //    NOTE: returning empty bytes may still revert this call sooner than the
+        //    end-of-entry check — the proxy `.call` will return `(success=true, "")`, but
+        //    the calling contract typically ABI-decodes the return value into a typed
+        //    result. If it expects a non-empty payload (e.g. `abi.decode(retData, (uint256))`)
+        //    the decode itself reverts the calling frame, which in turn propagates up. The
+        //    deferred-revert flag only guarantees the *entry* eventually reverts; it does
+        //    NOT guarantee execution reaches the end-of-entry check intact.
+        _nestedActionNotFound = true;
+        return "";
     }
 
     /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies rolling hash
@@ -859,6 +884,10 @@ contract EEZ is EEZBase {
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
         ExecutionEntry storage entry = _currentEntryStorage();
+        // Check the deferred no-match flag from `_consumeNestedAction` first so the failure
+        // surfaces as `ExecutionNotFound` rather than the downstream `RollingHashMismatch` it
+        // would otherwise cause (returning empty bytes diverges the entry's rolling hash).
+        if (_nestedActionNotFound) revert ExecutionNotFound();
         if (_rollingHash != rollingHash) revert RollingHashMismatch();
         if (_currentCallNumber != entry.L2ToL1Calls.length) revert UnconsumedCalls();
         if (_lastNestedActionConsumed != entry.expectedL1ToL2Calls.length) revert UnconsumedNestedActions();
@@ -908,7 +937,12 @@ contract EEZ is EEZBase {
 
                 try this.executeInContextAndRevert(revertSpan) {}
                 catch (bytes memory revertData) {
-                    (_rollingHash, _lastNestedActionConsumed, _currentCallNumber) = _decodeContextResult(revertData);
+                    bool innerNotFound;
+                    (_rollingHash, _lastNestedActionConsumed, _currentCallNumber, innerNotFound) =
+                        _decodeContextResult(revertData);
+                    // OR-merge: a no-match observed inside the span must survive the forced
+                    // revert so the end-of-entry check still fires `ExecutionNotFound`.
+                    if (innerNotFound) _nestedActionNotFound = true;
                 }
 
                 entry.L2ToL1Calls[savedCallNumber].revertSpan = revertSpan;
@@ -922,7 +956,7 @@ contract EEZ is EEZBase {
     function executeInContextAndRevert(uint256 callCount) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(callCount);
-        revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber);
+        revert ContextResult(_rollingHash, _lastNestedActionConsumed, _currentCallNumber, _nestedActionNotFound);
     }
 
     /// @notice Validates and applies state deltas; sums ether deltas across rollups

@@ -111,7 +111,16 @@ abstract contract EEZBase is IEEZ {
     error RollingHashMismatch();
 
     /// @notice Carries execution results out of a reverted context
-    error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber);
+    /// @dev `nestedActionNotFound` is the deferred-revert flag forwarded from L1's
+    ///      `_consumeNestedAction` no-match path. The EVM rolls back the transient write on
+    ///      revert, so it has to ride out in the payload. L2 has no such flag and always
+    ///      sends `false`.
+    error ContextResult(
+        bytes32 rollingHash,
+        uint256 lastNestedActionConsumed,
+        uint256 currentCallNumber,
+        bool nestedActionNotFound
+    );
 
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
@@ -205,7 +214,7 @@ abstract contract EEZBase is IEEZ {
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
-        returns (bytes32 rollingHash, uint256 naConsumed, uint256 callNumber)
+        returns (bytes32 rollingHash, uint256 naConsumed, uint256 callNumber, bool nestedActionNotFound)
     {
         if (bytes4(revertData) != ContextResult.selector) {
             revert UnexpectedContextRevert(revertData);
@@ -215,6 +224,7 @@ abstract contract EEZBase is IEEZ {
             rollingHash := mload(ptr)
             naConsumed := mload(add(ptr, 32))
             callNumber := mload(add(ptr, 64))
+            nestedActionNotFound := mload(add(ptr, 96))
         }
     }
 

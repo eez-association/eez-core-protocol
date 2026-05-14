@@ -5,7 +5,7 @@ import {IProofSystem} from "../interfaces/IProofSystem.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/// @title tmpECDSAVerifier
+/// @title ECDSAProofSystem
 /// @notice Temporary proof system that uses ECDSA signature recovery instead of a ZK proof.
 /// @dev The `proof` parameter is a 65-byte ECDSA signature encoded as `abi.encodePacked(r, s, v)`:
 ///   - r: bytes32 — the R component of the signature
@@ -15,7 +15,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///     does NOT normalize these values — callers must ensure v is 27 or 28 before encoding the proof.
 ///
 /// The `publicInputsHash` is signed directly as a raw bytes32 digest (no EIP-191 prefix).
-contract tmpECDSAVerifier is IProofSystem, Ownable {
+contract ECDSAProofSystem is IProofSystem, Ownable {
     address public signer;
 
     constructor(address initialOwner, address initialSigner) Ownable(initialOwner) {
