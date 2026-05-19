@@ -263,7 +263,7 @@ contract EEZ is EEZBase {
     function registerRollup(address rollupContract, bytes32 initialState) external returns (uint256 rollupId) {
         if (rollupContract == address(0) || rollupContract == address(this)) revert InvalidRollupContract();
 
-        rollupId = rollupCounter++;
+        rollupId = ++rollupCounter;
         rollups[rollupId] = RollupConfig({rollupContract: rollupContract, stateRoot: initialState, etherBalance: 0});
 
         // One-shot callback informing the manager of its rollupId. Manager must accept this
