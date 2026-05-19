@@ -128,6 +128,10 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when not all nested actions were consumed after execution
     error UnconsumedNestedActions();
 
+    /// @notice Error when a lookup-call sub-call targets an un-deployed proxy
+    /// @dev STATICCALL to a codeless address returns `(true, "")`; prover could pre-hash that.
+    error LookupCallProxyNotDeployed(address sourceProxy);
+
     /// @notice Error when not all calls were consumed after execution
     error UnconsumedCalls();
 
@@ -211,6 +215,8 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Decodes a `ContextResult` revert payload returned by `executeInContextAndRevert`.
+    /// @dev Validates selector AND length (4 + 4*32 = 132) before the raw mloads — defense
+    ///      against a truncated revert that happens to share the selector.
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
@@ -219,6 +225,7 @@ abstract contract EEZBase is IEEZ {
         if (bytes4(revertData) != ContextResult.selector) {
             revert UnexpectedContextRevert(revertData);
         }
+        if (revertData.length < 132) revert UnexpectedContextRevert(revertData);
         assembly {
             let ptr := add(revertData, 36)
             rollingHash := mload(ptr)
@@ -269,6 +276,8 @@ abstract contract EEZBase is IEEZ {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory cc = calls[i];
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
+            // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
+            if (sourceProxy.code.length == 0) revert LookupCallProxyNotDeployed(sourceProxy);
             (bool success, bytes memory retData) =
                 sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
             computedHash = _rollingHashStaticResult(computedHash, success, retData);

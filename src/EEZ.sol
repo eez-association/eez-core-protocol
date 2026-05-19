@@ -189,17 +189,9 @@ contract EEZ is EEZBase {
     ///         revert payload (custom error or message) for off-chain debugging.
     event ImmediateEntrySkipped(uint256 indexed transientIdx, bytes revertData);
 
-    /// @notice Emitted the first time `_consumeNestedAction` falls through every routing arm
-    ///         without finding a match — neither an `ExpectedL1ToL2Call` at the current cursor
-    ///         nor a `failed=true` `LookupCall` in the transient table or destination rollup's
-    ///         `lookupQueue`. Surfaces the deferred-no-match path: this call returns empty
-    ///         bytes to the caller (so the caller's `try/catch` observes `success=true` with
-    ///         `""` rather than the expected lookup-call revert), but `_nestedActionNotFound`
-    ///         is latched, and the entry's end-of-entry check will revert `ExecutionNotFound`
-    ///         once `_applyAndExecute` regains control. Detection from off-chain tracing is
-    ///         non-trivial — there's no error frame at the failure site and the subsequent
-    ///         `ExecutionNotFound` revert points at the entry boundary, not the offending
-    ///         reentrant call. The event makes the divergence point legible.
+    /// @notice Emitted on `_consumeNestedAction`'s deferred no-match path. Returns empty
+    ///         bytes; the deferred-revert flag fires `ExecutionNotFound` at the entry boundary.
+    ///         Event exists because the no-match site has no error frame.
     event NestedActionNotFound(
         uint256 indexed entryIndex,
         bytes32 indexed crossChainCallHash,
@@ -827,12 +819,7 @@ contract EEZ is EEZBase {
         //    the decode itself reverts the calling frame, which in turn propagates up. The
         //    deferred-revert flag only guarantees the *entry* eventually reverts; it does
         //    NOT guarantee execution reaches the end-of-entry check intact.
-        //
-        //    OBSERVABILITY: this path is hard to detect from a trace alone — the failure point
-        //    here returns success, and the eventual `ExecutionNotFound` surfaces at the entry
-        //    boundary in `_applyAndExecute`, not here. Emit `NestedActionNotFound` so off-chain
-        //    consumers can identify the exact reentrant call whose key didn't match anything
-        //    (prover bug, stale lookup table, or wrong destRid scope).
+        // Emit so off-chain can locate the no-match site — the eventual revert points at the entry boundary.
         emit NestedActionNotFound(_currentEntryIndex, crossChainCallHash, _currentCallNumber, idx);
         _nestedActionNotFound = true;
         return "";

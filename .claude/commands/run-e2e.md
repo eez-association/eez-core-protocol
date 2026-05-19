@@ -1,10 +1,13 @@
 ---
-description: Sequentially run all e2e tests against the devnet and summarize results
+description: Run all e2e tests against the devnet and summarize results
 ---
 
 # /run-e2e — Daily e2e test runner (flatten model)
 
-Runs every e2e scenario in `script/e2e/` **sequentially** against the configured devnet and reports pass/fail. Sequential execution is mandatory — the shared deployer nonce makes parallel runs unsafe.
+Runs every e2e scenario in `script/e2e/` and reports pass/fail.
+
+- **Local mode runs in parallel by default** — each scenario gets its own anvil pair on unique ports + chain IDs (so forge `broadcast/<basename>/<chainId>/` dirs and deployer nonces don't collide).
+- **Network mode stays sequential** — the shared on-chain deployer nonce makes parallel runs against a real devnet unsafe.
 
 ## Preconditions
 
@@ -12,10 +15,15 @@ Runs every e2e scenario in `script/e2e/` **sequentially** against the configured
 - Both chains must be producing blocks (not stuck at block 0). A quick `cast block-number` sanity check catches dead RPCs.
 - CREATE2 factory deployed on both chains (use `script/e2e/shared/prepare-network.sh` if uncertain).
 
-## Local vs network mode
+## How to run
 
-- **Local** (default): `bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol` — spins up two anvils, runs full flow, decodes events.
-- **Network**: `bash script/e2e/shared/run-network.sh script/e2e/<scenario>/E2E.s.sol` — uses the configured devnet, goes through the user-tx-then-batch interception flow.
+- **Local — all scenarios in parallel (default):**
+  `bash script/e2e/shared/run-all-parallel.sh`
+  Forks one `run-local.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Run a subset with positional args: `bash script/e2e/shared/run-all-parallel.sh counter bridge`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
+- **Local — single scenario:**
+  `bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
+- **Network (sequential):**
+  `bash script/e2e/shared/run-network.sh script/e2e/<scenario>/E2E.s.sol` — uses the configured devnet, goes through the user-tx-then-batch interception flow. Do not parallelize against a real network — shared deployer nonce will collide.
 
 ## Ordered test list (simplest → most complex)
 

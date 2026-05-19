@@ -22,12 +22,20 @@ trap cleanup EXIT
 extract() { echo "$1" | grep "$2=" | sed "s/.*$2=//" | awk '{print $1}' || true; }
 
 # ── Start an anvil instance, return PID via variable name ──
-# Usage: start_anvil PORT PID_VAR
+# Usage: start_anvil PORT PID_VAR [CHAIN_ID]
+# If CHAIN_ID is omitted, anvil's default (31337) is used.
 start_anvil() {
     local port="$1"
     local pid_var="$2"
-    echo "Starting anvil (port $port)..."
-    anvil --port "$port" --silent &
+    local chain_id="${3:-}"
+    local chain_arg=()
+    if [[ -n "$chain_id" ]]; then
+        chain_arg=(--chain-id "$chain_id")
+        echo "Starting anvil (port $port, chain-id $chain_id)..."
+    else
+        echo "Starting anvil (port $port)..."
+    fi
+    anvil --port "$port" "${chain_arg[@]}" --silent &
     local pid=$!
     _E2E_PIDS+=("$pid")
     eval "$pid_var=$pid"

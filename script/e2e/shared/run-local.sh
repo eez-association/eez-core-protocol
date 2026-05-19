@@ -18,12 +18,16 @@ L1_PORT="${L1_PORT:-8545}"
 L2_PORT="${L2_PORT:-8546}"
 L1_RPC="http://localhost:$L1_PORT"
 L2_RPC="http://localhost:$L2_PORT"
+# Optional anvil --chain-id overrides. Use unique chain ids per parallel run
+# so forge's broadcast/<basename>/<chain_id>/ directories don't collide.
+L1_CHAIN_ID="${L1_CHAIN_ID:-}"
+L2_CHAIN_ID="${L2_CHAIN_ID:-}"
 export L2_ROLLUP_ID=1
 SYSTEM_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 # 1. Start anvils
-start_anvil "$L1_PORT" L1_PID
-start_anvil "$L2_PORT" L2_PID
+start_anvil "$L1_PORT" L1_PID "$L1_CHAIN_ID"
+start_anvil "$L2_PORT" L2_PID "$L2_CHAIN_ID"
 
 # 2. Deploy infrastructure
 deploy_infra "$L1_RPC" "$PK" "$L2_RPC" "$L2_ROLLUP_ID" "$SYSTEM_ADDRESS"
