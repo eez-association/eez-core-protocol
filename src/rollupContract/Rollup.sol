@@ -53,6 +53,7 @@ contract Rollup is IRollupContract {
     error NotOwner();
     error NotEEZRegistry();
     error InvalidConfig();
+    error AlreadyRegistered();
     error ProofSystemAlreadyAllowed(address proofSystem);
     error ProofSystemNotAllowed(address proofSystem);
 
@@ -140,11 +141,13 @@ contract Rollup is IRollupContract {
 
     /// @notice Notification fired by the central registry on first registration.
     /// @dev Auth: caller MUST be the central `ROLLUPS` registry, otherwise `NotEEZRegistry`.
-    ///      This impl does NOT enforce one-shot semantics — overwriting `rollupId` is allowed,
-    ///      though the registry no longer exposes a manager-handoff path so this should fire
-    ///      exactly once in normal operation.
+    ///      One-shot: rejects subsequent calls with `AlreadyRegistered`. Since `EEZ.registerRollup`
+    ///      assigns rollupIds starting at 1, `rollupId == 0` is the canonical "not yet registered"
+    ///      sentinel. Without this, a permissionless second `registerRollup(thisManager, ...)`
+    ///      would clobber `rollupId` and brick the original rollup's setStateRoot escape hatch.
     function rollupContractRegistered(uint256 _rollupId) external {
         if (msg.sender != ROLLUPS) revert NotEEZRegistry();
+        if (rollupId != 0) revert AlreadyRegistered();
         rollupId = _rollupId;
     }
 

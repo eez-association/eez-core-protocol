@@ -31,6 +31,12 @@ contract EEZL2 is EEZBase {
     /// @notice Error when caller is not the system address
     error Unauthorized();
 
+    /// @notice Error when constructor is given the reserved mainnet rollup id (0)
+    error InvalidRollupId();
+
+    /// @notice Error when constructor is given the zero address for the system address
+    error InvalidSystemAddress();
+
     /// @notice Error when execution is attempted in a different block than the last load
     error ExecutionNotInCurrentBlock();
 
@@ -42,6 +48,11 @@ contract EEZL2 is EEZBase {
 
     /// @notice Error when `msg.value` attached to `executeIncomingCrossChainCall` doesn't match `value`
     error ValueMismatch();
+
+    /// @notice Error when the first entry's `proxyEntryHash` doesn't match the cross-chain
+    ///         call hash computed from the explicit (destination, value, data, sourceAddress,
+    ///         sourceRollup) params passed to `executeIncomingCrossChainCall`
+    error EntryHashMismatch();
 
     /// @notice Emitted when execution entries are loaded into the execution table
     event ExecutionTableLoaded(ExecutionEntry[] entries);
@@ -59,9 +70,14 @@ contract EEZL2 is EEZBase {
         uint256 sourceRollup
     );
 
-    /// @param _rollupId The rollup ID this L2 instance belongs to
+    /// @param _rollupId The rollup ID this L2 instance belongs to. MUST be non-zero — 0 is
+    ///        reserved as `MAINNET_ROLLUP_ID` on the L1 registry and is used as the
+    ///        `sourceRollupId` sentinel for L1-originated calls in the cross-chain call hash.
+    ///        An L2 deployed with id 0 would produce call hashes indistinguishable from
+    ///        mainnet-originated calls.
     /// @param _systemAddress The privileged address allowed to load execution tables
     constructor(uint256 _rollupId, address _systemAddress) {
+        if (_rollupId == 0) revert InvalidRollupId();
         ROLLUP_ID = _rollupId;
         SYSTEM_ADDRESS = _systemAddress;
     }
@@ -195,7 +211,15 @@ contract EEZL2 is EEZBase {
         //    expects (entry index 0, fresh rolling hash, call cursor at 0, nested cursor at 0).
         ExecutionEntry storage entry = executions[0];
 
-        // 4. Drive the flat call processor — `entry.L2ToL1Calls[0]` is the inbound call,
+        // 4. Bind the inbound call hash to the entry. The (destination, value, data,
+        //    sourceAddress, sourceRollup) tuple was emitted in the event above and folded
+        //    into `crossChainCallHash`; the entry's calls are baked into storage. Without
+        //    this check, SYSTEM_ADDRESS could emit one tuple while `_processNCalls` runs an
+        //    entirely different call sequence, leaving the emitted hash and the actual
+        //    execution divergent. Matches the equivalent check on L1's `_consumeAndExecute`.
+        if (entry.proxyEntryHash != crossChainCallHash) revert EntryHashMismatch();
+
+        // 5. Drive the flat call processor — `entry.L2ToL1Calls[0]` is the inbound call,
         //    delivered via the source proxy by `_processNCalls`
         _processNCalls(entry.callCount);
 
@@ -218,6 +242,18 @@ contract EEZL2 is EEZBase {
     ///         lookup call when no ExpectedL1ToL2Call matches.
     /// @dev See L1 EEZ._consumeNestedAction for the full routing rules. L2 has no
     ///      transient lookup-call table, so the fallback only scans persistent `lookupCalls`.
+    ///
+    ///      INTENTIONAL PARITY GAP with L1: L1's no-match arm sets a deferred-revert flag and
+    ///      returns empty bytes, so a caller's `try/catch` observes `(success=true, "")`. L2
+    ///      reverts immediately with `ExecutionNotFound`. The deferred path on L1 exists
+    ///      because L1 entries are prover-supplied via `postAndVerifyBatch` and the protocol
+    ///      wants the caller to observe a specific revert payload (via cached `LookupCall`)
+    ///      whose absence is a prover defect surfaced at the entry boundary. On L2 the
+    ///      execution table is loaded by `SYSTEM_ADDRESS` from already-finalized state — a
+    ///      no-match here means the system loaded a malformed table, which is not a recoverable
+    ///      case and SHOULD halt the entry immediately. Hence: post-increment commit (`++`
+    ///      above) is fine because every fall-through path reverts and the EVM rolls back the
+    ///      bump; no deferred flag and no `NestedActionNotFound` event are needed.
     function _consumeNestedAction(bytes32 crossChainCallHash) internal returns (bytes memory) {
         ExecutionEntry storage entry = executions[_currentEntryIndex];
         uint256 idx = _lastNestedActionConsumed++;

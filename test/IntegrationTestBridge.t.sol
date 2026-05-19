@@ -80,15 +80,8 @@ contract IntegrationTestBridge is Test {
         rollups = new EEZ();
         ps = new MockProofSystem();
 
-        // Burn rollupId 0 = MAINNET so the L2 rollup gets id 1.
-        {
-            address[] memory psList = new address[](1);
-            psList[0] = address(ps);
-            bytes32[] memory vks = new bytes32[](1);
-            vks[0] = DEFAULT_VK;
-            Rollup burnRollup = new Rollup(address(rollups), address(this), 1, psList, vks);
-            rollups.registerRollup(address(burnRollup), bytes32(0));
-        }
+        // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so the first registered rollup
+        // lands at id 1 = L2_ROLLUP_ID.
         {
             address[] memory psList = new address[](1);
             psList[0] = address(ps);

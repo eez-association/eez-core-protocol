@@ -66,16 +66,6 @@ abstract contract Base is Test {
     function setUpBase() internal {
         rollups = new EEZ();
         ps = new MockProofSystem();
-
-        // Burn rollupId 0 (MAINNET_ROLLUP_ID): the strict-increasing rollupIds check in
-        // postAndVerifyBatch rejects rid <= prevRid where prevRid starts at MAINNET_ROLLUP_ID (0).
-        // So id 0 is unpostable. Register a throwaway rollup first so user rollups land at id >= 1.
-        address[] memory psList = new address[](1);
-        psList[0] = address(ps);
-        bytes32[] memory vks = new bytes32[](1);
-        vks[0] = DEFAULT_VK;
-        Rollup burn = new Rollup(address(rollups), defaultOwner, 1, psList, vks);
-        rollups.registerRollup(address(burn), bytes32(0));
     }
 
     // ──────────────────────────────────────────────

@@ -170,8 +170,8 @@ contract EEZTest is Base {
     function test_CreateRollup() public {
         bytes32 initialState = keccak256("initial");
         (uint256 rid, Rollup r) = _makeRollupLocal(initialState, alice);
-        // rid 0 is burned by setUpBase (MAINNET_ROLLUP_ID is unpostable), so the first
-        // user-registered rollup lands at id 1.
+        // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
+        // skipped and the first user-registered rollup lands at id 1.
         assertEq(rid, 1);
         assertEq(_getRollupState(rid), initialState);
         assertEq(_getRollupContract(rid), address(r));
@@ -741,7 +741,7 @@ contract EEZTest is Base {
         vks[0] = DEFAULT_VK;
         Rollup r = new Rollup(address(rollups), alice, 1, psList, vks);
         vm.expectEmit(true, true, true, true);
-        // rid 0 was burned in setUpBase, so this fresh rollup lands at id 1.
+        // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so this fresh rollup lands at id 1.
         emit EEZ.RollupCreated(1, address(r), keccak256("init"));
         rollups.registerRollup(address(r), keccak256("init"));
     }

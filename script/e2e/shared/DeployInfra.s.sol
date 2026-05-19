@@ -30,16 +30,8 @@ contract DeployEEZL1 is Script {
         AcceptAllProofSystem ps = new AcceptAllProofSystem();
         EEZ rollups = new EEZ();
 
-        // Burn rollupId 0 (MAINNET) so user rollups start at id 1.
-        {
-            address[] memory psList = new address[](1);
-            psList[0] = address(ps);
-            bytes32[] memory vks = new bytes32[](1);
-            vks[0] = DEFAULT_VK;
-            Rollup burnRollup = new Rollup(address(rollups), msg.sender, 1, psList, vks);
-            rollups.registerRollup(address(burnRollup), bytes32(0));
-        }
-
+        // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so the first registered rollup
+        // lands at id 1.
         // Create L2 manager + register at id 1.
         address[] memory psList2 = new address[](1);
         psList2[0] = address(ps);

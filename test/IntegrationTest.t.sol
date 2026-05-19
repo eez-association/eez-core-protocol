@@ -77,18 +77,8 @@ contract IntegrationTest is Test {
         rollups = new EEZ();
         ps = new MockProofSystem();
 
-        // The contract has no `startingRollupId` constructor arg, so `rollupCounter`
-        // starts at 0 and the FIRST registered rollup would receive id 0 = MAINNET.
-        // postAndVerifyBatch validation rejects id 0 (strict-increasing from MAINNET_ROLLUP_ID),
-        // so we burn id 0 with a throwaway rollup, then register L2 at id 1.
-        {
-            address[] memory psList = new address[](1);
-            psList[0] = address(ps);
-            bytes32[] memory vks = new bytes32[](1);
-            vks[0] = DEFAULT_VK;
-            Rollup burnRollup = new Rollup(address(rollups), address(this), 1, psList, vks);
-            rollups.registerRollup(address(burnRollup), bytes32(0));
-        }
+        // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
+        // skipped and the first registered rollup lands at id 1 = L2_ROLLUP_ID.
 
         // Create L2 rollup at id = 1 = L2_ROLLUP_ID
         {

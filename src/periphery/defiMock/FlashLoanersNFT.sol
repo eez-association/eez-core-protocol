@@ -21,6 +21,6 @@ contract FlashLoanersNFT is ERC721 {
         require(token.balanceOf(msg.sender) >= MIN_BALANCE, "Balance too low");
 
         hasClaimed[msg.sender] = true;
-        _mint(msg.sender, nextTokenId++);
+        _mint(msg.sender, ++nextTokenId);
     }
 }
