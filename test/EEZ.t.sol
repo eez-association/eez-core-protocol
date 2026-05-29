@@ -23,6 +23,7 @@ import {
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
+import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
 /// @notice Simple target contract for testing
@@ -46,6 +47,37 @@ contract RevertingTarget {
 
     fallback() external payable {
         revert TargetReverted();
+    }
+}
+
+/// @notice Posts a batch and, during the meta hook, fires one proxy call so the failed-lookup
+///         fallback can be exercised against the *transient* lookup table (which only exists
+///         inside `postAndVerifyBatch`). Swallows the proxy revert so the batch still completes;
+///         the captured `(success, returnData)` is asserted by the test.
+contract MetaLookupCaller is IMetaCrossChainReceiver {
+    EEZ public immutable eez;
+    address public proxyAddr;
+    bytes public proxyCallData;
+    bool public hookRan;
+    bool public callSuccess;
+    bytes public callReturnData;
+
+    constructor(EEZ _eez) {
+        eez = _eez;
+    }
+
+    function setProxyCall(address _proxy, bytes calldata _cd) external {
+        proxyAddr = _proxy;
+        proxyCallData = _cd;
+    }
+
+    function post(ProofSystemBatchPerVerificationEntries calldata batch) external {
+        eez.postAndVerifyBatch(batch);
+    }
+
+    function executeMetaCrossChainTransactions() external override {
+        hookRan = true;
+        (callSuccess, callReturnData) = proxyAddr.call(proxyCallData);
     }
 }
 
@@ -770,5 +802,111 @@ contract EEZTest is Base {
         vm.expectEmit(true, true, true, true);
         emit EEZ.StateUpdated(rid, keccak256("escape"));
         r.setStateRoot(keccak256("escape"));
+    }
+
+    // ──────────────────────────────────────────────
+    //  Top-level failed-LookupCall fallback
+    // ──────────────────────────────────────────────
+    //
+    // A reverting top-level cross-chain call isn't an `ExecutionEntry` — it's a
+    // `LookupCall { failed: true }`. When `_consumeAndExecute` finds no matching entry it
+    // delegates to `_tryRevertedTopLevelLookup`, which scans the transient table then the
+    // routed rollup's `lookupQueue` for a `failed` lookup keyed by `(hash, callNumber=0,
+    // lastNestedActionConsumed=0)` and reverts with the cached `returnData`. The entry cursor
+    // is never advanced — the lookup consumes no queue slot. See docs §D.3 / §F.4.
+
+    /// @notice Builds a top-level failed `LookupCall` (no sub-calls) keyed at (hash, 0, 0).
+    function _failedLookup(uint256 rid, bytes32 hash, bytes memory payload)
+        internal
+        pure
+        returns (LookupCall memory lc)
+    {
+        lc.crossChainCallHash = hash;
+        lc.destinationRollupId = rid;
+        lc.returnData = payload;
+        lc.failed = true;
+        lc.callNumber = 0;
+        lc.lastNestedActionConsumed = 0;
+        lc.calls = new L2ToL1Call[](0);
+        lc.rollingHash = bytes32(0);
+    }
+
+    /// @notice Deferred path: the failed lookup sits in `verificationByRollup[rid].lookupQueue`
+    ///         and a top-level proxy call replays its cached revert without advancing the cursor.
+    function test_FailedLookupCall_TopLevel_Deferred() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        bytes memory payload = hex"deadbeef";
+        // Hash exactly as `executeCrossChainCall` computes it: source = this test (it calls the proxy).
+        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0] = _failedLookup(rid, h, payload);
+        // transientLookupCallCount = 0 → published to the per-rollup lookupQueue.
+        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+
+        uint256 cursorBefore = rollups.queueCursor(rid);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        assertEq(ret, payload);
+        assertEq(rollups.queueCursor(rid), cursorBefore, "failed lookup must not advance the cursor");
+
+        // Content-addressed + replayable: a second identical call reverts identically, still no advance.
+        (ok, ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        assertEq(ret, payload);
+        assertEq(rollups.queueCursor(rid), cursorBefore);
+    }
+
+    /// @notice Transient path: the failed lookup lives in `_transientLookupCalls` and is hit by a
+    ///         proxy call fired from inside the meta hook (the only window the transient table exists).
+    function test_FailedLookupCall_TopLevel_Transient() public {
+        (uint256 rid, Rollup rollup) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+
+        MetaLookupCaller caller = new MetaLookupCaller(rollups);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        bytes memory payload = hex"c0ffee";
+        // The meta-hook caller is what calls through the proxy, so it's the hash's sourceAddress.
+        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(caller), MAINNET_ROLLUP_ID);
+        caller.setProxyCall(proxyAddr, cd);
+
+        // One undrained transient entry (proxyEntryHash != 0 and != h) so the meta hook fires.
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _emptyImmediateEntry(rid);
+        entries[0].proxyEntryHash = keccak256("dummy-undrained");
+
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0] = _failedLookup(rid, h, payload);
+
+        // transientExecutionEntryCount = 1, transientLookupCallCount = 1 → both stay in transient tables.
+        RollupHandle memory handle = RollupHandle({id: rid, manager: rollup});
+        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(handle, entries, lookups, 1, 1);
+        caller.post(batch);
+
+        assertTrue(caller.hookRan(), "meta hook did not run");
+        assertFalse(caller.callSuccess(), "proxy call should have reverted");
+        assertEq(caller.callReturnData(), payload);
+    }
+
+    /// @notice Negative path: rollup verified this block but no entry and no lookup match → ExecutionNotFound.
+    function test_FailedLookupCall_TopLevel_NoMatchReverts() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+        // Verify the rollup this block, but post nothing to consume or look up.
+        _postBatchSingle(rid, _emptyEntries(), _emptyLookupCalls(), 0, 0);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        bytes4 sel;
+        assembly {
+            sel := mload(add(ret, 32))
+        }
+        assertEq(sel, EEZBase.ExecutionNotFound.selector);
     }
 }

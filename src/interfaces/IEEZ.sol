@@ -49,7 +49,6 @@ struct ExpectedL1ToL2Call {
 ///      Naturally-reverting INNER calls inside an entry are still expressible: the proxy
 ///      `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`;
 ///      the entry's outer `executeCrossChainCall` still returns success with `entry.returnData`.
-///      See `src/TODO.md` for the design discussion.
 /// @dev `destinationRollupId` is the rollup whose queue this entry is routed to on L1
 ///      (per-rollup queue model). Must match the rollupId derived from the consumer
 ///      (proxyInfo.originalRollupId for proxy calls; the explicit rollupId arg for
