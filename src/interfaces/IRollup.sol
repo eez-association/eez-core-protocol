@@ -27,11 +27,14 @@ interface IRollupContract {
     /// @notice Returns the (timestamp, blockHash) pair this rollup binds into its per-rollup
     ///         verification commit during proof verification. Folded one rollup at a time
     ///         into each PS's per-PS rolling accumulator inside `_verifyProofSystemBatch`.
-    /// @dev A pure-L1 rollup with no L1→L2 messaging window can simply return
-    ///      `(0, bytes32(0))`. A rollup that ingests L1 messages can return the L1 block
-    ///      context it has finality for, so the proof commits to "I attest a transition
-    ///      consistent with up to this L1 view."
-    function getTimestampAndBlockHash() external view returns (uint256 timestamp, bytes32 blockHash);
+    ///         `blockNumber` is the single L1 block the whole batch is bound to, passed in via
+    ///         `EEZ.postAndVerifyBatch`.
+    /// @dev `blockNumber == 0` keeps the legacy no-context behavior `(0, bytes32(0))`. A
+    ///      non-zero `blockNumber` binds `blockhash(blockNumber)`; implementations SHOULD
+    ///      reject a blockNumber whose `blockhash` is unavailable (returns 0 — i.e. ≥ the
+    ///      current block or older than the last 256), so a stale value can't silently bind a
+    ///      zero hash into the proof commit.
+    function getTimestampAndBlockHash(uint64 blockNumber) external view returns (uint256 timestamp, bytes32 blockHash);
 
     /// @notice Notification fired by `EEZ` when this contract becomes the registered manager
     ///         for a rollup via `EEZ.registerRollup`. The implementation MUST accept calls

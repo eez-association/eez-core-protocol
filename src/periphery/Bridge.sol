@@ -19,6 +19,10 @@ import {WrappedToken} from "./WrappedToken.sol";
 ///      Security model: the inbound function (receiveTokens) validates that
 ///      msg.sender is the expected CrossChainProxy for this bridge. The execution table
 ///      (ZK-proven entries) provides the primary security guarantee.
+///
+///      ILLUSTRATIVE EXAMPLE — not production-hardened. Known, intentional simplifications:
+///      no fee-on-transfer token accounting, single initialize() with no chain/deployment-context
+///      binding, and no re-deployment authorization. Harden before any production use.
 contract Bridge {
     using SafeERC20 for IERC20;
 

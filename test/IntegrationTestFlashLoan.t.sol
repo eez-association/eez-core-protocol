@@ -190,6 +190,7 @@ contract IntegrationTestFlashLoan is Test {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: _noLookupCalls(),
             transientExecutionEntryCount: transientCount,

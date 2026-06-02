@@ -34,7 +34,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 │  - threshold                                 │
 │  - verificationKey[ps] map                   │
 │  - addProofSystem / removeProofSystem        │
-│  - setVerificationKey / setThreshold         │
+│  - updateVerificationKey / setThreshold      │
 │  - transferOwnership / setStateRoot          │
 │  - getTimestampAndBlockHash                  │
 └──────────────────────────────────────────────┘
@@ -109,8 +109,9 @@ The registry never reads `threshold` separately — single external call per rol
 
 `IRollupContract.checkProofSystemsAndGetVkeys(address[] subset)` does TWO things atomically:
 1. Returns the vkey row (one vkey per PS in `subset`).
-2. Reverts (`InvalidThreshold` / `UnknownProofSystem` / `VkeyZero` — whichever applies first)
-   if `subset.length < threshold` or any PS isn't allowed for this rollup.
+2. Reverts `ThresholdNotMet` if `subset.length < threshold`, or `ProofSystemNotAllowed` if
+   any PS isn't allowed for this rollup (unknown / zero vkey). See
+   `src/rollupContract/Rollup.sol`.
 
 Single external call per rollup, no TOCTOU between two reads, no central threshold
 semantics. Custom managers can use any threshold model they like (fixed M-of-N,
@@ -236,8 +237,9 @@ consumers — they just fail their own state-root check if they depended on it.
 7. **Meta hook**: if `_transientExecutionIndex < _transientExecutions.length`
    AND `msg.sender.code.length > 0`, fire `IMetaCrossChainReceiver.executeMetaCrossChainTransactions()`
    so the caller can drive remaining transient entries via cross-chain proxy calls.
-8. **Cleanup transient tables**, then `_publishRemainder(batch)` (only if the transient
-   prefix fully drained), then `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
+8. **Cleanup transient tables**, then `_publishRemainder(batch)` (**unconditionally** — even
+   if the meta hook left transient entries unconsumed), then
+   `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
 
 ### Reentrancy reasoning
 
@@ -275,7 +277,8 @@ function registerRollup(address rollupContract, bytes32 initialState) external r
   (proofSystems, vkeys, threshold, ownership model) baked in, then registers it.
 - Registry assigns next `rollupId`, stores `(rollupContract, initialState, etherBalance=0)`.
 - Fires `IRollupContract(rollupContract).rollupContractRegistered(rollupId)` — one-shot
-  callback so the manager learns its id. The reference impl latches `rollupIdSet=true`.
+  callback so the manager learns its id. The reference impl stores the id and rejects a
+  second call (`rollupId != 0` ⇒ `AlreadyRegistered`).
 
 ### No manager handoff
 
@@ -311,7 +314,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 | `setRollupContract` / `RollupContractChanged` (manager handoff) | Removed. Manager binding is immutable after registration. |
 | `_inPostBatch` flag | Replaced by `_transientExecutions.length != 0` reentry check. |
 | `_validateRelevance` (anti-griefing PS-relevance check) | Manager's threshold check covers it; unrelated PSes are wasted gas the orchestrator pays. |
-| "Drained cleanly" gate before `_publishRemainder` | The drain-cleanly gate is now enforced — `_publishRemainder` only runs if the transient prefix fully drained. `StateDelta.currentState` remains the soundness backstop for the persistent path. |
+| "Drained cleanly" gate before `_publishRemainder` | Removed — `_publishRemainder` runs **unconditionally** (even if the transient prefix wasn't fully drained). `StateDelta.currentState` is the soundness backstop for the persistent path. |
 | `EEZ.ThresholdNotMet` / `UnrelatedProofSystem` errors | No longer thrown by the registry. |
 | Single-prover `postBatch(entries[], lookupCalls[], transientCount, transientLookupCallCount, blobCount, callData, proof)` | Replaced by `postAndVerifyBatch(ProofSystemBatchPerVerificationEntries batch)` — single struct, NOT an array. |
 | Multi-sub-batch `postBatch(ProofSystemBatch[] batches)` (intermediate shape) | Collapsed to a single batch per call with explicit per-rollup `proofSystemIndex[]`. |
@@ -338,8 +341,9 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **`registerRollup` initial state overwrite**: callback fires AFTER the pointer is set,
   so the new manager can call `setStateRoot` to overwrite `initialState`. Cosmetic (owner
   controls anyway) but the `RollupCreated` event's `initialState` field becomes unreliable.
-- **Double-registration of same manager address**: a custom manager without `rollupIdSet`
-  guard could be registered for two rollupIds, controlling both via shared `msg.sender`.
+- **Double-registration of same manager address**: a custom manager without the one-shot
+  `rollupContractRegistered` guard (the reference impl's `rollupId != 0` ⇒ `AlreadyRegistered`)
+  could be registered for two rollupIds, controlling both via shared `msg.sender`.
   Acceptable per the per-rollup trust model but worth documenting.
 - **`rollupId == 0` (MAINNET) excluded from batches**: the strict-increasing check
   starting at `MAINNET_ROLLUP_ID = 0` makes `rollupId == 0` unpostable. Pre-existing pattern;

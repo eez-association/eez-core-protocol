@@ -369,6 +369,7 @@ contract Batcher {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: lookupCalls,
             transientExecutionEntryCount: 0,

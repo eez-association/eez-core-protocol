@@ -163,6 +163,7 @@ abstract contract Base is Test {
         rps[0] = RollupIdWithProofSystems({rollupId: r.id, proofSystemIndex: psIdx});
 
         batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: lookupCalls,
             transientExecutionEntryCount: transientCount,

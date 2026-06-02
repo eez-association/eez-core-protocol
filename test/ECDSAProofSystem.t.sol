@@ -98,11 +98,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
 
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes),
-                abi.encode(lookupCallHashes),
-                abi.encode(blobHashes),
-                keccak256(""),
-                bytes32(0)
+                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256(""), bytes32(0)
             )
         );
 
@@ -120,11 +116,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         return _makeRollupCustom(initialState, psList, vks, 1, defaultOwner);
     }
 
-    function _buildECDSABatch(
-        RollupHandle memory r,
-        ExecutionEntry[] memory entries,
-        bytes memory proof
-    )
+    function _buildECDSABatch(RollupHandle memory r, ExecutionEntry[] memory entries, bytes memory proof)
         internal
         view
         returns (ProofSystemBatchPerVerificationEntries memory batch)
@@ -140,6 +132,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         rps[0] = RollupIdWithProofSystems({rollupId: r.id, proofSystemIndex: psIdx});
 
         batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: _emptyLookupCalls(),
             transientExecutionEntryCount: 1,

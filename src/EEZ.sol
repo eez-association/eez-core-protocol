@@ -11,9 +11,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 /// @notice Rollup configuration held by the central registry.
 /// @dev Owner, threshold, and per-PS vkeys live on the per-rollup `IRollupContract` contract pointed
 ///      to by `rollupContract`. The central registry holds only the *state* (state root,
-///      ether balance) and reads vkeys through `IRollupContract.checkProofSystemsAndGetVkeys` — which
-///      enforces the manager's threshold internally and reverts if not met. Threshold itself
-///      is never read by the registry.
+///      ether balance) and reads vkeys through `IRollupContract.checkProofSystemsAndGetVkeys`
 struct RollupConfig {
     address rollupContract;
     bytes32 stateRoot;
@@ -24,8 +22,7 @@ struct RollupConfig {
 ///         with the SUBSET of the batch's global `proofSystems[]` that this rollup accepts.
 /// @dev `proofSystemIndex[]` is a list of indices into the parent batch's `proofSystems[]`,
 ///      strictly increasing. The on-chain registry resolves them to PS addresses and hands
-///      that subset to this rollup's manager via `IRollupContract.checkProofSystemsAndGetVkeys`. The
-///      manager enforces its own threshold against `proofSystemIndex.length`.
+///      that subset to this rollup's contract via `IRollupContract.checkProofSystemsAndGetVkeys`
 struct RollupIdWithProofSystems {
     uint256 rollupId;
     uint64[] proofSystemIndex;
@@ -46,6 +43,9 @@ struct RollupIdWithProofSystems {
 /// @dev `transientExecutionEntryCount` and `transientLookupCallCount` are pure on-chain
 ///      dispatch parameters — not bound by the proof — so the orchestrator can tune the
 ///      transient/persistent split without re-proving.
+/// @dev `blockNumber` is the single L1 block the whole batch binds to. The registry forwards
+///      it to every rollup's `getTimestampAndBlockHash(blockNumber)`, whose result folds into
+///      each proof's public input. 0 = no block context, type(uint64).max = "latest context"
 struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries;
     LookupCall[] l1ToL2lookupCalls;
@@ -57,6 +57,7 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256[] blobIndices;
     bytes callData;
     bytes[] proofs;
+    uint64 blockNumber;
 }
 
 /// @notice Per-rollup deferred-consumption queue + once-per-block guard
@@ -323,7 +324,8 @@ contract EEZ is EEZBase {
     ///         so any entry whose preconditions were dropped with the transient leftover
     ///         simply fails at consumption.
     /// @param batch The proof-system batch carrying entries, lookup calls, per-rollup PS
-    ///        subsets, proofs, and transient prefix bounds
+    ///        subsets, proofs, transient prefix bounds, and the L1 `blockNumber` the batch
+    ///        binds to (see `ProofSystemBatchPerVerificationEntries.blockNumber`).
     function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external {
         // Reentrancy guard. Per-rollup `lastVerifiedBlock` blocks same-rollup re-entry, but a
         // disjoint-rollup nested call (e.g., from the meta hook) would otherwise share the
@@ -604,7 +606,7 @@ contract EEZ is EEZBase {
         for (uint256 r = 0; r < rollupCount; r++) {
             (timestamps[r], blockHashes[r]) = IRollupContract(
                     rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
-                ).getTimestampAndBlockHash();
+                ).getTimestampAndBlockHash(batch.blockNumber);
         }
 
         // Per-PS verification — for each PS k, walk attesting rollups in canonical order
@@ -773,8 +775,8 @@ contract EEZ is EEZBase {
             idx < entry.expectedL1ToL2Calls.length
                 && entry.expectedL1ToL2Calls[idx].crossChainCallHash == crossChainCallHash
         ) {
-            _lastNestedActionConsumed = idx + 1;
             ExpectedL1ToL2Call storage nested = entry.expectedL1ToL2Calls[idx];
+            _lastNestedActionConsumed = idx + 1;
             uint256 nestedNumber = idx + 1;
             emit NestedActionConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, nested.callCount);
             _rollingHashNestedBegin(nestedNumber);
@@ -795,7 +797,7 @@ contract EEZ is EEZBase {
                 _resolveLookupCall(sc); // always reverts (sc.failed == true)
             }
         }
-        
+
         // Per-rollup static queue: route by the action's target rollup (== entry.destinationRollupId
         // because nested actions are scoped to the containing entry).
         uint256 destRid = entry.destinationRollupId;
@@ -993,32 +995,6 @@ contract EEZ is EEZBase {
     }
 
     // ──────────────────────────────────────────────
-    //  Rollup management (only registered manager)
-    // ──────────────────────────────────────────────
-    //
-    // The two functions below are the only paths through which the registered manager
-    // contract for a rollup can mutate central state (state root, manager pointer). Both
-    // resolve `rollupId` by `msg.sender` against the reverse-lookup mapping — the manager
-    // never has to know its own id. Both gate on the registry's `lastVerifiedBlock(rid) ==
-    // block.number` predicate, which is the single source of truth for "this rollup is
-    // mid-flow this block — don't mutate". The per-rollup manager contract has no lockout
-    // modifier on its owner ops because (a) only `setStateRoot` reaches central state and
-    // (b) it's already gated here.
-
-    /// @notice Owner escape hatch for setting the state root directly. Callable only by the
-    ///         registered manager contract for `rollupId`. Locked out for the rest of the block
-    ///         once any postAndVerifyBatch has touched this rollup (see `RollupBatchActiveThisBlock`).
-    function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external {
-        if (msg.sender != rollups[rollupId].rollupContract) revert NotRollupContract();
-        if (_insideExecution()) revert SetStateRootNotAllowedDuringExecution();
-        if (verificationByRollup[rollupId].lastVerifiedBlock == block.number) {
-            revert RollupBatchActiveThisBlock(rollupId);
-        }
-        rollups[rollupId].stateRoot = newStateRoot;
-        emit StateUpdated(rollupId, newStateRoot);
-    }
-
-    // ──────────────────────────────────────────────
     //  Lookup call lookup
     // ──────────────────────────────────────────────
 
@@ -1104,6 +1080,34 @@ contract EEZ is EEZBase {
             }
         }
     }
+
+
+    // ──────────────────────────────────────────────
+    //  Rollup management (only registered manager)
+    // ──────────────────────────────────────────────
+    //
+    // The two functions below are the only paths through which the registered manager
+    // contract for a rollup can mutate central state (state root, manager pointer). Both
+    // resolve `rollupId` by `msg.sender` against the reverse-lookup mapping — the manager
+    // never has to know its own id. Both gate on the registry's `lastVerifiedBlock(rid) ==
+    // block.number` predicate, which is the single source of truth for "this rollup is
+    // mid-flow this block — don't mutate". The per-rollup manager contract has no lockout
+    // modifier on its owner ops because (a) only `setStateRoot` reaches central state and
+    // (b) it's already gated here.
+
+    /// @notice Owner escape hatch for setting the state root directly. Callable only by the
+    ///         registered manager contract for `rollupId`. Locked out for the rest of the block
+    ///         once any postAndVerifyBatch has touched this rollup (see `RollupBatchActiveThisBlock`).
+    function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external {
+        if (msg.sender != rollups[rollupId].rollupContract) revert NotRollupContract();
+        if (_insideExecution()) revert SetStateRootNotAllowedDuringExecution();
+        if (verificationByRollup[rollupId].lastVerifiedBlock == block.number) {
+            revert RollupBatchActiveThisBlock(rollupId);
+        }
+        rollups[rollupId].stateRoot = newStateRoot;
+        emit StateUpdated(rollupId, newStateRoot);
+    }
+
 
     // ──────────────────────────────────────────────
     //  Internal helpers

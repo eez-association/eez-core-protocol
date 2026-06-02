@@ -7,6 +7,7 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
 /// @title WrappedToken
 /// @notice ERC20 representation of a token bridged from another rollup
 /// @dev Deployed by the Bridge via CREATE2. Only the Bridge can mint and burn.
+///      ILLUSTRATIVE EXAMPLE (periphery) — not production-hardened.
 contract WrappedToken is ERC20, ERC20Permit {
     address public immutable BRIDGE;
     uint8 private immutable _tokenDecimals;

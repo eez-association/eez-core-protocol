@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IRollupContract} from "../interfaces/IRollup.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @notice Minimal interface against the central EEZ registry — only the calls this
 ///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)
@@ -19,15 +20,9 @@ interface IEEZRegistry {
 ///      (only callable by `ROLLUPS`). Stored internally and passed back when this contract
 ///      calls into the registry (`setStateRoot(rid, root)`), so the registry doesn't need a
 ///      reverse lookup from contract address to rollupId.
-contract Rollup is IRollupContract {
+contract Rollup is IRollupContract, Ownable {
     /// @notice The central EEZ registry this rollup is registered with
     address public immutable ROLLUPS;
-
-    /// @notice Current owner — controls PS membership, threshold, and the state-root escape hatch.
-    /// @dev Implementation detail of THIS reference manager. Not part of `IRollupContract`; the central
-    ///      registry makes no assumption about ownership. Custom managers may use a multisig,
-    ///      governance contract, or any other model.
-    address public owner;
 
     /// @notice The rollupId this contract manages. Written once on registration.
     uint256 public rollupId;
@@ -42,28 +37,28 @@ contract Rollup is IRollupContract {
     /// @notice Per-proof-system verification key. `bytes32(0)` = not allowed.
     mapping(address proofSystem => bytes32 vkey) public verificationKey;
 
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event ProofSystemAdded(address indexed proofSystem, bytes32 verificationKey);
     event ProofSystemRemoved(address indexed proofSystem);
     event VerificationKeyUpdated(address indexed proofSystem, bytes32 newVerificationKey);
     event ThresholdChanged(uint256 newThreshold);
     event StateRootEscape(bytes32 newStateRoot);
 
-    error NotOwner();
     error NotEEZRegistry();
     error InvalidConfig();
     error AlreadyRegistered();
     error ProofSystemAlreadyAllowed(address proofSystem);
     error ProofSystemNotAllowed(address proofSystem);
+    /// @notice A management op (`removeProofSystem` / `updateVerificationKey`) targeted a
+    ///         proof system that isn't currently added (zero vkey).
+    error ProofSystemNotAdded(address proofSystem);
 
     /// @notice Reverts during `checkProofSystemsAndGetVkeys` when fewer non-zero vkeys would
     ///         be returned than this manager's threshold requires
     error ThresholdNotMet(uint256 submitted, uint256 required);
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
+    /// @notice `getTimestampAndBlockHash` was asked to bind a blockNumber whose `blockhash`
+    ///         is unavailable (≥ current block or older than the last 256 blocks → 0).
+    error BlockHashUnavailable(uint64 blockNumber);
 
     /// @param rollupsRegistry The central EEZ contract
     /// @param _owner Initial owner
@@ -79,13 +74,11 @@ contract Rollup is IRollupContract {
         uint256 _threshold,
         address[] memory proofSystems,
         bytes32[] memory vkeys
-    ) {
+    ) Ownable(_owner) {
         if (rollupsRegistry == address(0)) revert InvalidConfig();
-        if (_owner == address(0)) revert InvalidConfig();
         if (proofSystems.length != vkeys.length) revert InvalidConfig();
 
         ROLLUPS = rollupsRegistry;
-        owner = _owner;
         threshold = _threshold;
 
         for (uint256 i = 0; i < proofSystems.length; i++) {
@@ -129,13 +122,31 @@ contract Rollup is IRollupContract {
         }
     }
 
-    /// @notice Returns the (timestamp, blockHash) pair this rollup is binding into its
-    ///         per-rollup commit during proof verification. Reference impl returns zeros —
-    ///         a stub for rollups that don't ingest L1 messaging context. Real rollups can
-    ///         override the value (e.g., the latest L1 block their ingestion has finality
-    ///         for) by replacing this contract via handoff.
-    function getTimestampAndBlockHash() external pure returns (uint256 timestamp, bytes32 blockHash) {
-        return (0, bytes32(0));
+    /// @notice (timestamp, blockHash) this rollup binds into its per-rollup verification commit
+    ///         for the L1 `blockNumber` the batch is bound to. The registry folds the result
+    ///         into every proof's public input, so the proof attests against this exact L1 view.
+    /// @dev Reference impl returns timestamp 0: a past block's timestamp can't be recovered
+    ///      on-chain (only `block.timestamp` of the current block is available), so it's read
+    ///      off-chain from the header instead. A real rollup can override this via handoff.
+    /// @param blockNumber L1 block to bind. 0 = no block context (legacy `(0, 0)`);
+    ///        type(uint64).max = latest context (current timestamp + last block header).
+    function getTimestampAndBlockHash(uint64 blockNumber) external view returns (uint256 timestamp, bytes32 blockHash) {
+        // 0 is the "no L1 context" sentinel — skip the blockhash bind entirely.
+        if (blockNumber == 0) return (0, bytes32(0));
+
+        // type(uint64).max is the "latest context" sentinel — bind the current block's
+        // timestamp and the most recent available block hash (the previous block).
+        if (blockNumber == type(uint64).max) return (block.timestamp, blockhash(block.number - 1));
+
+        // `blockhash` only resolves the most recent 256 blocks; the current/future block and
+        // anything older than 256 return 0. Reject that: a stale or out-of-range blockNumber
+        // must not silently bind a zero hash, which would let a proof built for a different
+        // (or absent) L1 view pass verification.
+        // If we think is necessary we can use the EIP-2935 for checking last 8k~ block headers
+        blockHash = blockhash(blockNumber);
+        if (blockHash == bytes32(0)) revert BlockHashUnavailable(blockNumber);
+        
+        return (0, blockHash);
     }
 
     /// @notice One-shot registration callback fired by the central registry.
@@ -172,15 +183,15 @@ contract Rollup is IRollupContract {
     ///         can still meet `threshold`; otherwise the rollup will be locked until more
     ///         PSes are added or `setThreshold` is lowered.
     function removeProofSystem(address proofSystem) external onlyOwner {
-        if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAllowed(proofSystem);
+        if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAdded(proofSystem);
         delete verificationKey[proofSystem];
         emit ProofSystemRemoved(proofSystem);
     }
 
     /// @notice Rotates the verification key for an already-allowed proof system
-    function setVerificationKey(address proofSystem, bytes32 newVkey) external onlyOwner {
+    function updateVerificationKey(address proofSystem, bytes32 newVkey) external onlyOwner {
         if (newVkey == bytes32(0)) revert InvalidConfig();
-        if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAllowed(proofSystem);
+        if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAdded(proofSystem);
         verificationKey[proofSystem] = newVkey;
         emit VerificationKeyUpdated(proofSystem, newVkey);
     }
@@ -191,14 +202,6 @@ contract Rollup is IRollupContract {
     function setThreshold(uint256 newThreshold) external onlyOwner {
         threshold = newThreshold;
         emit ThresholdChanged(newThreshold);
-    }
-
-    /// @notice Transfers ownership of this rollup
-    function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert InvalidConfig();
-        address previous = owner;
-        owner = newOwner;
-        emit OwnershipTransferred(previous, newOwner);
     }
 
     /// @notice Owner escape hatch — directly sets the rollup's state root via the central

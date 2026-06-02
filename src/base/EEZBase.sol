@@ -116,10 +116,7 @@ abstract contract EEZBase is IEEZ {
     ///      revert, so it has to ride out in the payload. L2 has no such flag and always
     ///      sends `false`.
     error ContextResult(
-        bytes32 rollingHash,
-        uint256 lastNestedActionConsumed,
-        uint256 currentCallNumber,
-        bool nestedActionNotFound
+        bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber, bool nestedActionNotFound
     );
 
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error

@@ -100,9 +100,9 @@ The processor reads `entry.L2ToL1Calls[_currentCallNumber]` from storage and, fo
 
 1. Saves `_currentCallNumber`.
 2. Zeros `entry.L2ToL1Calls[savedCallNumber].revertSpan` in storage so the inner self-call sees `revertSpan == 0` at the same index and runs the call normally.
-3. Self-calls `this.executeInContextAndRevert(revertSpan)` — that function processes the next `revertSpan` calls and **always reverts** with `error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber)`.
+3. Self-calls `this.executeInContextAndRevert(revertSpan)` — that function processes the next `revertSpan` calls and **always reverts** with `error ContextResult(bytes32 rollingHash, uint256 lastNestedActionConsumed, uint256 currentCallNumber, bool nestedActionNotFound)`. (The 4th field carries L1's deferred no-match flag out of the reverted span; L2 always sends `false`.)
 4. The revert rolls back **all** transient storage modifications inside the self-call (including the `tstore` writes for `_rollingHash`, `_currentCallNumber`, `_lastNestedActionConsumed`) **and** all destination state changes the inner calls produced.
-5. The processor decodes `ContextResult` and restores `_rollingHash`, `_lastNestedActionConsumed`, `_currentCallNumber` to the values **observed at the end of the reverted span**, bridging the rolling hash and counters across the revert boundary.
+5. The processor decodes `ContextResult` and restores `_rollingHash`, `_lastNestedActionConsumed`, `_currentCallNumber` to the values **observed at the end of the reverted span**, bridging the rolling hash and counters across the revert boundary. On L1 it also OR-merges the decoded `nestedActionNotFound` flag back in, so a no-match observed inside the span still reverts the entry at its boundary.
 6. Restores `entry.L2ToL1Calls[savedCallNumber].revertSpan = revertSpan` so the storage layout matches what the proof committed to.
 
 `revertSpan` covers a contiguous run of calls. The first call inside the span has its `revertSpan` field cleared so it executes as a normal call; subsequent calls inside the span have `revertSpan == 0` to begin with. Spans cannot be nested.
@@ -298,7 +298,7 @@ Flow:
 5. **Load transient stream** (`_loadTransient`): copy `entries[0..transientExecutionEntryCount)` into `_transientExecutions` and `l1ToL2lookupCalls[0..transientLookupCallCount)` into `_transientLookupCalls`.
 6. **Drain leading immediate entries inline**: while `_transientExecutions[idx].proxyEntryHash == 0`, self-call `try this.attemptApplyImmediate(idx) catch { emit ImmediateEntrySkipped(idx, revertData); }` and advance — not a hard error.
 7. **Meta hook**: if `_transientExecutionIndex < _transientExecutions.length` AND `msg.sender.code.length > 0`, call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook can invoke `executeCrossChainCall` / `executeL2TX(rollupId)` to consume the rest of the transient stream.
-8. **Cleanup transient tables**, then `_publishRemainder(batch)` (only if the transient prefix fully drained — pushes `entries[transientExecutionEntryCount..]` to `verificationByRollup[entry.destinationRollupId].queue` and `l1ToL2lookupCalls[transientLookupCallCount..]` to the corresponding `lookupQueue`), then `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`. Soundness backstop: each entry's `StateDelta.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers — they fail their own state-root check if they depended on it.
+8. **Cleanup transient tables**, then `_publishRemainder(batch)` (**unconditionally** — even if the meta hook left transient entries unconsumed — pushes `entries[transientExecutionEntryCount..]` to `verificationByRollup[entry.destinationRollupId].queue` and `l1ToL2lookupCalls[transientLookupCallCount..]` to the corresponding `lookupQueue`), then `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`. Soundness backstop: each entry's `StateDelta.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers — they fail their own state-root check if they depended on it.
 
 A batch with `transientExecutionEntryCount == 0` means no immediate execution and no meta-hook consumption — all entries flow straight to per-rollup queues.
 
@@ -319,7 +319,7 @@ In the diagrams below, "MAINNET" means rollupId 0 (L1) and "L2" means whichever 
 
 ### L1→L2 (simple)
 
-Alice on L1 calls a contract on L2. The proxy for B on L1 forwards Alice's call to L1's `Rollups.executeCrossChainCall` (consuming entry [0]). The L2 system later calls `executeL2TX` on L2 to commit the L2-side state changes.
+Alice on L1 calls a contract on L2. The proxy for B on L1 forwards Alice's call to L1's `EEZ.executeCrossChainCall` (consuming entry [0]). The L2 system later calls `executeL2TX` on L2 to commit the L2-side state changes.
 
 **L1 execution table** (`postAndVerifyBatch`):
 ```
@@ -334,7 +334,7 @@ Alice on L1 calls a contract on L2. The proxy for B on L1 forwards Alice's call 
     stateDeltas = [ { rollupId=L2, currentState=S0, newState=S1, etherDelta=v? } ]   // L2 state moved
 ```
 
-(An immediate entry for the initial state commitment can also live in the same batch as `entries[0]` with `crossChainCallHash == 0`.)
+(An immediate entry for the initial state commitment can also live in the same batch as `entries[0]` with `proxyEntryHash == 0`.)
 
 **L2 execution table** (`loadExecutionTable`):
 ```
@@ -488,7 +488,7 @@ A single mechanism handles atomic rollback: there are no continuation entries to
 
 ### Failed inner call via `LookupCall`
 
-When a reentrant cross-chain call **must revert** (e.g., the destination wraps the call in `try/catch`), it cannot be a `NestedAction`. Use a `LookupCall` with `failed = true` instead.
+When a reentrant cross-chain call **must revert** (e.g., the destination wraps the call in `try/catch`), it cannot be an `ExpectedL1ToL2Call`. Use a `LookupCall` with `failed = true` instead.
 
 **L1 `lookupCalls`** for the matching sub-batch (routed via `destinationRollupId` into the rollup's `lookupQueue`, with leading entries optionally going to `_transientLookupCalls`):
 ```
@@ -498,7 +498,7 @@ When a reentrant cross-chain call **must revert** (e.g., the destination wraps t
     returnData               = <revert reason>,
     failed                   = true,
     callNumber               = 1,    // the entry-level call that triggered B
-    lastNestedActionConsumed = 0,    // before any NestedAction was consumed
+    lastNestedActionConsumed = 0,    // before any nested action (ExpectedL1ToL2Call) was consumed
     calls                    = [],
     rollingHash              = bytes32(0),
 }
@@ -521,7 +521,7 @@ The destination rollup's `cursor` advances from 0 → 1 → 2; the second call t
 
 A single user action that performs multiple top-level cross-chain calls produces multiple entries. Each top-level entry-point call consumes one entry. There is no `nextAction` redirection — the user's contract makes each call explicitly, and the table has one entry per top-level call.
 
-For sub-calls **within** a single entry (e.g., a contract on the destination side that performs several proxy calls), all those sub-calls live in `entry.calls[]` and either count toward `entry.callCount` (entry-level) or toward a `NestedAction`'s `callCount`.
+For sub-calls **within** a single entry (e.g., a contract on the destination side that performs several proxy calls), all those sub-calls live in `entry.L2ToL1Calls[]` and either count toward `entry.callCount` (entry-level) or toward an `ExpectedL1ToL2Call`'s `callCount`.
 
 ---
 
@@ -535,7 +535,7 @@ For sub-calls **within** a single entry (e.g., a contract on the destination sid
 | **Top-level reverted-lookup fallback** | `_tryRevertedTopLevelLookup(crossChainCallHash, destRid)` scans transient table + persistent `lookupQueue` for a `failed && callNumber == 0 && lastNestedActionConsumed == 0` match | `_tryRevertedTopLevelLookup(crossChainCallHash)` scans persistent `lookupCalls` only (no transient on L2) |
 | **Ether accounting** | Per-entry `etherIn - etherOut == sum(etherDelta)` | None; `msg.value` is forwarded to `SYSTEM_ADDRESS` |
 | **Same action hash** | Each occurrence consumes the next entry on the destination rollup's queue; sequential ordering distinguishes them | Same |
-| **Transient/deferred split** | `_transientExecutions` + `_transientLookupCalls` populated from the batch's leading prefix; meta hook consumes them; remainder published to per-rollup queues only if transient prefix drained cleanly (soundness via `StateDelta.currentState` check) | No transient table — all entries go directly to `executions` |
+| **Transient/deferred split** | `_transientExecutions` + `_transientLookupCalls` populated from the batch's leading prefix; meta hook consumes them; remainder published to per-rollup queues **unconditionally** (soundness via `StateDelta.currentState` check) | No transient table — all entries go directly to `executions` |
 | **Meta hook** | `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` if transient stream not yet drained AND `msg.sender` has code | Not present |
 | **Immediate entry** | Leading transient entries with `proxyEntryHash == 0` run inline during `postAndVerifyBatch` via `attemptApplyImmediate` (try/catch); failed self-call emits `ImmediateEntrySkipped` and continues | `entries[0]` with `proxyEntryHash == 0` is consumed by `executeL2TX(rollupId)` (no inline execution) |
 | **`executeL2TX`** | `executeL2TX(uint256 rollupId)` — permissionless; consumes the next entry on `rollupId`'s queue, which must have `proxyEntryHash == 0` | Not present (L2 has no `executeL2TX` entry point) |

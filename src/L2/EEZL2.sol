@@ -13,7 +13,10 @@ contract EEZL2 is EEZBase {
     /// @notice The rollup ID this L2 belongs to
     uint256 public immutable ROLLUP_ID;
 
-    /// @notice The system address authorized for admin operations
+    /// @notice The system address authorized for admin operations (load/replace execution table).
+    /// @dev TRUST ASSUMPTION: node-controlled system address with no private key — never adversarial
+    ///      and not reentry-reachable, so table loads/replacements are trusted (no attacker can wipe
+    ///      or swap the table mid-execution).
     address public immutable SYSTEM_ADDRESS;
 
     /// @notice Array of pre-computed executions

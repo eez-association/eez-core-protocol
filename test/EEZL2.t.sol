@@ -303,6 +303,52 @@ contract EEZL2Test is Test {
         s;
     }
 
+    // ──────────────────────────────────────────────
+    //  Top-level failed-LookupCall fallback
+    // ──────────────────────────────────────────────
+    //
+    // L2 has no transient table: `_consumeAndExecute` misses on the (empty) `executions`,
+    // delegates to `_tryRevertedTopLevelLookup`, which scans the persistent `lookupCalls` for a
+    // `failed` entry keyed at (hash, callNumber=0, lastNestedActionConsumed=0) and reverts with
+    // the cached `returnData`. `executionIndex` is never advanced. The negative case (empty
+    // lookupCalls + no entry → ExecutionNotFound) is covered by
+    // `test_ExecuteCrossChainCall_RevertsExecutionNotFound` above. See docs §D.3.
+    function test_FailedLookupCall_TopLevel_Reverts() public {
+        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+
+        bytes memory cd = abi.encodeCall(L2TestTarget.setValue, (7));
+        bytes memory payload = hex"deadbeef";
+        // sourceRollupId in the L2 action hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
+        bytes32 h = _computeActionHash(TEST_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0].crossChainCallHash = h;
+        lookups[0].destinationRollupId = TEST_ROLLUP_ID;
+        lookups[0].returnData = payload;
+        lookups[0].failed = true;
+        lookups[0].callNumber = 0;
+        lookups[0].lastNestedActionConsumed = 0;
+        lookups[0].calls = new L2ToL1Call[](0);
+        lookups[0].rollingHash = bytes32(0);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](0);
+        vm.prank(SYSTEM_ADDRESS);
+        manager.loadExecutionTable(entries, lookups);
+
+        uint256 idxBefore = manager.executionIndex();
+
+        (bool ok, bytes memory ret) = proxy.call(cd);
+        assertFalse(ok);
+        assertEq(ret, payload);
+        assertEq(manager.executionIndex(), idxBefore, "failed lookup must not advance executionIndex");
+
+        // Content-addressed + replayable: a second identical call reverts identically, still no advance.
+        (ok, ret) = proxy.call(cd);
+        assertFalse(ok);
+        assertEq(ret, payload);
+        assertEq(manager.executionIndex(), idxBefore);
+    }
+
     function test_ExecuteCrossChainCall_SimpleResult() public {
         address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
@@ -362,7 +408,7 @@ contract EEZL2Test is Test {
     // NOTE: dropped after refactor — `ExecutionEntry.failed` no longer exists.
     // Reverting top-level cross-chain calls are now expressed via `LookupCall { failed: true }`
     // consumed through `staticCallLookup` (static-context entry point) or the failed-reentry
-    // fallback in `_consumeNestedAction`. See `src/TODO.md` for the design rationale.
+    // fallback in `_consumeNestedAction`. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §D.3 for the rationale.
     // function test_ExecuteCrossChainCall_FailedEntryReverts() — removed.
 
     function test_ExecuteCrossChainCall_ConsumesInFifoOrder() public {

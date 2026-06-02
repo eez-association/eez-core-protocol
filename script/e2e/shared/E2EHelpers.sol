@@ -136,6 +136,7 @@ contract L2TXBatcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: lookupCalls,
             transientExecutionEntryCount: tc,
