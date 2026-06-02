@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ, L2ToL1Call, LookupCall, ProxyInfo} from "../interfaces/IEEZ.sol";
+import {IEEZ, L2ToL1Call, LookupCall, ExecutionEntry, ExpectedL1ToL2Lookup, ProxyInfo} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
 /// @notice Shared base for the L1 (`EEZ`) and L2 (`EEZL2`) cross-chain managers.
 /// @dev Holds every concern that is currently identical between L1 and L2:
 ///        - Rolling-hash machinery (tag constants, `_rollingHash`, fold helpers).
-///        - The three transient execution cursors (`_currentEntryIndex`, `_currentCallNumber`,
-///          `_lastNestedActionConsumed`) and the `_insideExecution()` predicate that reads them.
+///        - The three transient execution cursors (`_currentEntryIndex`, `_currentL2toL1Call`,
+///          `_lastL1toL2CallConsumed`) and the `_insideExecution()` predicate that reads them.
 ///        - The `authorizedProxies` registry, the external `createCrossChainProxy` entry point,
 ///          and the internal CREATE2 deploy helper (`_createCrossChainProxyInternal`).
 ///        - Pure / view helpers (`computeCrossChainCallHash`, `computeCrossChainProxyAddress`,
@@ -55,13 +55,13 @@ abstract contract EEZBase is IEEZ {
     uint256 transient _currentEntryIndex;
 
     /// @notice 1-indexed global call counter and cursor into `entry.L2ToL1Calls[]`.
-    /// @dev `_currentCallNumber != 0` also doubles as the `_insideExecution()` predicate.
-    uint256 transient _currentCallNumber;
+    /// @dev `_currentL2toL1Call != 0` also doubles as the `_insideExecution()` predicate.
+    uint256 transient _currentL2toL1Call;
 
-    /// @notice Sequential nested action consumption counter.
-    /// @dev Also used by `staticCallLookup` to disambiguate multiple lookup calls within the
-    ///      same call.
-    uint256 transient _lastNestedActionConsumed;
+    /// @notice Sequential reentrant-success (`ExpectedL1ToL2Call`) consumption counter.
+    /// @dev Advanced only when a reentrant CALL consumes the next `expectedL1ToL2Calls` element.
+    ///      Reentrant lookups are content-addressed via the per-call slice, not this counter.
+    uint256 transient _lastL1toL2CallConsumed;
 
     // ──────────────────────────────────────────────
     //  Events
@@ -138,7 +138,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice Returns true if currently inside a cross-chain call execution
     function _insideExecution() internal view returns (bool) {
-        return _currentCallNumber != 0;
+        return _currentL2toL1Call != 0;
     }
 
     // ──────────────────────────────────────────────
@@ -236,11 +236,14 @@ abstract contract EEZBase is IEEZ {
     //  Lookup-call resolution
     // ──────────────────────────────────────────────
 
-    /// @notice Verifies a matched `LookupCall` entry and either returns or reverts with its
-    ///         cached data.
-    /// @dev Shared between `staticCallLookup` and the failed-reentry fallback in
-    ///      `_consumeNestedAction` on both L1 and L2.
+    /// @notice Verifies a matched directly-executed `LookupCall` and either returns or reverts
+    ///         with its cached data.
+    /// @dev Used by the top-level (outside-execution) `staticCallLookup` branch and the
+    ///      top-level revert fallback `_tryRevertedTopLevelLookup` on both L1 and L2. First
+    ///      enforces the lookup's `rollupStateRoots` binding (L1 only — see
+    ///      `_checkLookupStateRoots`), then replays any sub-calls, then returns / reverts.
     function _resolveLookupCall(LookupCall storage sc) internal view returns (bytes memory) {
+        _checkLookupStateRoots(sc);
         if (sc.calls.length > 0) {
             bytes32 computedHash = _processNLookupCalls(sc.calls);
             if (computedHash != sc.rollingHash) revert RollingHashMismatch();
@@ -254,6 +257,47 @@ abstract contract EEZBase is IEEZ {
         return sc.returnData;
     }
 
+    /// @notice Binds a directly-executed `LookupCall` to specific on-chain state roots.
+    /// @dev No-op default — used by L2 (`EEZL2`), which has no state-root registry. L1 (`EEZ`)
+    ///      overrides this to require `rollups[rid].stateRoot == stateRoot` for each entry,
+    ///      reverting on mismatch. Runs at the start of `_resolveLookupCall`.
+    function _checkLookupStateRoots(LookupCall storage sc) internal view virtual {}
+
+    /// @notice Resolves a matched reentrant `ExpectedL1ToL2Lookup`: reverts with its cached
+    ///         `returnData` when `failed`, otherwise returns it.
+    /// @dev No sub-call replay and no state-root binding — reentrant lookups run mid-entry, so
+    ///      the entry's main rolling hash already covers everything. Used by both the
+    ///      `_consumeNestedAction` failed-reentry path and the inside-execution
+    ///      `staticCallLookup` branch.
+    function _resolveExpectedLookup(ExpectedL1ToL2Lookup storage l) internal view returns (bytes memory) {
+        if (l.failed) {
+            bytes memory returnData = l.returnData;
+            assembly {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return l.returnData;
+    }
+
+    /// @notice Returns the half-open slice `[start, end)` of the current entry's
+    ///         `expectedLookupCalls[]` owned by the call currently executing.
+    /// @dev The currently-executing call is `entry.L2ToL1Calls[_currentL2toL1Call - 1]` (the
+    ///      cursor is bumped before the outbound `.call`, so its 0-indexed position is
+    ///      `_currentL2toL1Call - 1`). `end` is clamped to the array length so a malformed
+    ///      slice can't out-of-bounds a `view` lookup.
+    function _currentCallLookupSlice(ExecutionEntry storage entry)
+        internal
+        view
+        returns (uint256 start, uint256 end)
+    {
+        L2ToL1Call storage cur = entry.L2ToL1Calls[_currentL2toL1Call - 1];
+        start = cur.l2toL1LookupCallIndex;
+        end = start + cur.l2toL1LookupCallCount;
+        uint256 len = entry.expectedLookupCalls.length;
+        if (end > len) end = len;
+        if (start > len) start = len;
+    }
+
     /// @notice Executes the lookup call's optional `calls[]` in static context and computes
     ///         a rolling hash of the results. No `revertSpan` handling — every call is
     ///         executed as-is.
@@ -265,10 +309,9 @@ abstract contract EEZBase is IEEZ {
     ///      schema — `keccak256(prev, success, retData)` per sub-call — and **diverges**
     ///      from the entry-level rolling hash (which uses tagged events
     ///      `CALL_BEGIN`/`CALL_END`/`NESTED_BEGIN`/`NESTED_END` with `callNumber`).
-    ///      This is safe because the surrounding `LookupCall` is content-addressed by
-    ///      `(crossChainCallHash, destinationRollupId, callNumber, lastNestedActionConsumed)`,
-    ///      which already pins the entry/call/nesting context that the entry-level tags
-    ///      disambiguate. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E.2 for the rationale.
+    ///      This is safe because a directly-executed `LookupCall` is content-addressed by
+    ///      `crossChainCallHash` and additionally bound to `rollupStateRoots`, which pins the
+    ///      state it was computed against. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E.2.
     function _processNLookupCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory cc = calls[i];
@@ -309,9 +352,11 @@ abstract contract EEZBase is IEEZ {
     }
 
     /// @notice Folds a NESTED_BEGIN event into `_rollingHash` for the given nested-action
-    ///         index (1-indexed).
-    function _rollingHashNestedBegin(uint256 nestedNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
+    ///         index (1-indexed), binding the reentrant call's `crossChainCallHash`.
+    /// @dev The hash is folded HERE rather than stored on `ExpectedL1ToL2Call`, so a wrong
+    ///      reentrant call (consumed sequentially) still diverges the entry's final hash.
+    function _rollingHashNestedBegin(uint256 nestedNumber, bytes32 crossChainCallHash) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber, crossChainCallHash));
     }
 
     /// @notice Folds a NESTED_END event into `_rollingHash` for the given nested-action
