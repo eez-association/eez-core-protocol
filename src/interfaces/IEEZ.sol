@@ -31,7 +31,7 @@ struct L2ToL1Call {
 /// @dev Position in the execution tree (crossChainCall index, nested action index, parent context)
 ///      is folded into the rolling hash rather than stored as explicit fields.
 struct ExpectedL1ToL2Call {
-    bytes32 crossChainCallHash; // rolling hash=?¿
+    bytes32 crossChainCallHash;
     /// Iterations the nested frame's `_processNCalls` runs over the parent entry's `calls[]`.
     /// Continues advancing the same global `_currentCallNumber` cursor that the outer frame
     /// was using; outer resumes from `cursor + nested.callCount` after the nested returns.
@@ -97,32 +97,73 @@ struct ExecutionEntry {
     bytes32 rollingHash;
 }
 
-/// @notice Pre-computed result for a lookup call or a call that reverts
-/// @dev Used for read-only calls and for calls whose revert needs to be replayed.
-///      Loaded via postAndVerifyBatch (L1) or loadExecutionTable (L2).
-///      All proxies referenced by `calls` must be deployed before staticCallLookup is called.
+/// @notice A rollup's expected queue cursor at the moment a static lookup is observed.
+/// @dev Pins a static `LookupCall` to a specific multi-rollup consumption point: at resolve
+///      time the contract requires `verificationByRollup[rollupId].executionQueueIndex == executionQueueIndex`,
+///      so a cached read can't be replayed against a different interleaving of the per-rollup
+///      queues. L1-only — L2 has a single rollup and ignores this list.
+struct ExpectedQueueIndex {
+    uint256 rollupId;
+    uint256 executionQueueIndex;
+}
+
+/// @notice Pre-computed result for a lookup call or a call that reverts.
+/// @dev Two modes, split on `failed`:
+///      - **Static (`failed == false`)** — read-only reentry resolved via `staticCallLookup`.
+///        `calls[]` (if any) replay in STATICCALL context and are hashed into `rollingHash`
+///        with the untagged static schema; nested reentry is encoded as *separate*
+///        `LookupCall`s sharing the same `(callNumber, lastNestedActionConsumed)`.
+///        `expectedQueueIndices[]` pins the per-rollup queue positions (L1).
+///      - **Failed (`failed == true`)** — a reverting reentrant call resolved via the
+///        `_consumeNestedAction` fallback. When it carries a sub-execution (`callCount > 0`),
+///        it replays as a mini-entry: `calls[]` run as real calls and `expectedL1ToL2Calls[]`
+///        supply nested reentry, folded into `rollingHash` with the tagged `CALL_*/NESTED_*`
+///        schema and checked like an entry, then the call reverts with `returnData`.
+///      Loaded via postAndVerifyBatch (L1) or loadExecutionTable (L2). All proxies referenced
+///      by `calls` must be deployed before resolution.
 struct LookupCall {
     bytes32 crossChainCallHash;
-    /// Rollup whose `lookupQueue` this entry is routed to on L1 (per-rollup queue model).
-    /// On L2 there's a single rollup, so the field is unused by the on-chain execution
-    /// path — same semantic as `ExecutionEntry.destinationRollupId`.
+    /// Rollup whose `lookupQueue` this lookup is routed to on L1 (per-rollup queue model).
+    /// On L2 there's a single rollup, so the field is unused by the on-chain execution path.
+    /// INVARIANT: MUST equal the destRID the lookup is keyed to (the target rollup is already
+    /// bound into `crossChainCallHash`, so this field is redundant with it — "implicit"). It's
+    /// kept explicit because it's load-bearing for `failed` lookups: the queue this is published
+    /// under is `verificationByRollup[destinationRollupId].lookupQueue`, and `_replayFailedLookup`
+    /// re-derives that queue from this field mid-replay (`_currentFailedLookup`) — recovering the
+    /// rollup directly instead of re-deriving the hash preimage. Set it wrong and the replay reads
+    /// the wrong queue.
     uint256 destinationRollupId;
     bytes returnData;
     bool failed;
     /// 1-indexed global call number — the value of `_currentCallNumber` at the moment
     /// this lookup call was observed by the prover. Used as part of the lookup key in
     /// `staticCallLookup` and the failed-lookup-call fallback in `_consumeNestedAction`.
+    /// For a static read observed *inside* a failed lookup's sub-execution, this is the
+    /// failed lookup's fresh sub-cursor value (disambiguated by `_insideFailedLookup`).
     uint64 callNumber;
     /// Disambiguates multiple lookup calls fired during the same outer call (e.g., a
     /// reentrant view query that triggers further static lookups). Matches
     /// `_lastNestedActionConsumed` at the moment of observation.
     uint64 lastNestedActionConsumed;
-    /// Optional sub-calls to replay in static context (no `revertSpan` allowed). Empty
-    /// `calls[]` means the cached `returnData` / `failed` bypasses any sub-call replay.
+    /// Sub-calls replayed during resolution. Static mode: STATICCALL, no `revertSpan`.
+    /// Failed mode: real calls (may host nested reentry and `revertSpan`), partitioned
+    /// against `expectedL1ToL2Calls` exactly like `ExecutionEntry.L2ToL1Calls`.
     L2ToL1Call[] calls;
-    /// Expected hash of the sub-call results — checked at lookup time when `calls[]` is
-    /// non-empty. See `_processNLookupCalls` for the hashing scheme.
+    /// Failed-mode nested table — reentrant L1→L2 calls triggered while replaying `calls[]`.
+    /// Reuses the entry struct and is consumed sequentially by `_consumeNestedAction` while
+    /// `_insideFailedLookup` is set. Empty for static-mode lookups.
+    ExpectedL1ToL2Call[] expectedL1ToL2Calls;
+    /// Failed-mode top-level iterations over `calls[]` (the entry-style `callCount`
+    /// partition: `callCount + Σ expectedL1ToL2Calls[i].callCount == calls.length`). Zero
+    /// for static-mode lookups.
+    uint256 callCount;
+    /// Expected rolling hash of the replayed sub-calls — checked at resolution when `calls[]`
+    /// is non-empty. Static mode uses the untagged schema (`_processNLookupCalls`); failed
+    /// mode uses the tagged entry schema (`_replayFailedLookup`).
     bytes32 rollingHash;
+    /// Static-mode per-rollup queue-cursor pins (L1 only); see `ExpectedQueueIndex`.
+    /// if it's used alongisde callNumber and lastNestedActionConsumed, there should be only the unnafected rollups by that execution ( otherwise is redundant)
+    ExpectedQueueIndex[] expectedQueueIndices;
 }
 
 /// @notice Stores the identity of an authorized CrossChainProxy

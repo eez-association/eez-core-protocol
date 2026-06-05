@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ, L2ToL1Call, LookupCall, ProxyInfo} from "../interfaces/IEEZ.sol";
+import {IEEZ, L2ToL1Call, LookupCall, ProxyInfo, ExecutionEntry, ExpectedL1ToL2Call} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -34,6 +34,7 @@ abstract contract EEZBase is IEEZ {
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
 
+
     // ──────────────────────────────────────────────
     //  Storage shared with children
     // ──────────────────────────────────────────────
@@ -50,7 +51,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice The current execution entry being processed.
     /// @dev L1 uses this to index `_transientExecutions` while a batch is mid-flight, otherwise
-    ///      `verificationByRollup[_currentEntryRollupId].queue`. L2 always indexes `executions`.
+    ///      `verificationByRollup[_currentEntryRollupId].executionQueue`. L2 always indexes `executions`.
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
@@ -62,6 +63,30 @@ abstract contract EEZBase is IEEZ {
     /// @dev Also used by `staticCallLookup` to disambiguate multiple lookup calls within the
     ///      same call.
     uint256 transient _lastNestedActionConsumed;
+
+    /// @notice True while replaying a `failed` LookupCall's sub-execution (`_replayFailedLookup`).
+    /// @dev Scopes `_activeCalls()` / `_activeNested()` and the inner-static branch of
+    ///      `staticCallLookup` to the failed lookup instead of the containing entry. Always
+    ///      cleared by the terminal revert of the replay — and, for nested failed lookups,
+    ///      restored to the parent's value by that same revert unwind (transient).
+    /// @dev Could be derived instead of stored (saves this slot): if `_replayFailedLookup`
+    ///      always wrote the lookup's `destinationRollupId` into the pointer, this would be
+    ///      `_failedLookupRollupId != 0`. That's L1-safe (a lookup's `destinationRollupId >= 1`)
+    ///      but FRAGILE on L2, where `destinationRollupId` is a parity-only field not guaranteed
+    ///      nonzero — a 0 there would make `_insideFailedLookup` read `false` mid-replay and
+    ///      silently corrupt the sub-execution. A robust derivation would use an index sentinel
+    ///      (`_failedLookupIndex = index + 1`, "inside" = `!= 0`). Kept explicit on purpose for
+    ///      clarity; revisit if the transient slot ever matters.
+    bool transient _insideFailedLookup;
+
+    /// @notice Locates the failed LookupCall currently being replayed. Storage refs can't be
+    ///         transient, so the child encodes (index, rollupId) here and reconstructs the
+    ///         storage pointer in `_currentFailedLookup()`. The source table is NOT stored:
+    ///         L1 re-derives it from `_transientExecutions.length` (transient prefix vs
+    ///         persistent queue); L2 has a single table. `rollupId` is only used for the L1
+    ///         persistent `lookupQueue` (0 for a transient-table match and on L2).
+    uint256 transient _failedLookupIndex;
+    uint256 transient _failedLookupRollupId;
 
     // ──────────────────────────────────────────────
     //  Events
@@ -139,6 +164,49 @@ abstract contract EEZBase is IEEZ {
     /// @notice Returns true if currently inside a cross-chain call execution
     function _insideExecution() internal view returns (bool) {
         return _currentCallNumber != 0;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Virtual calls (implemented by L1 / L2)
+    // ──────────────────────────────────────────────
+
+    /// @notice The execution entry currently being processed (child-routed).
+    function _currentEntryStorage() internal view virtual returns (ExecutionEntry storage);
+
+    /// @notice The failed LookupCall currently being replayed (child-routed from the
+    ///         `_failedLookup*` transient pointer). Only valid while `_insideFailedLookup`.
+    function _currentFailedLookup() internal view virtual returns (LookupCall storage);
+
+    /// @notice Processes `count` calls from `_activeCalls()`, advancing the cursors and folding
+    ///         the rolling hash. Implemented per child (L1 also accounts ether and returns it as
+    ///         `etherOut`; L2 has no ether accounting and returns 0). Declared here so shared
+    ///         code (`_replayFailedLookup`) can drive it; callers that don't need the ether sum
+    ///         ignore the return.
+    function _processNCalls(uint256 count) internal virtual returns (int256 etherOut);
+
+    /// @notice Hook: verify a static lookup's `expectedQueueIndices[]` against live per-rollup queue
+    ///         cursors. No-op on base (and on L2, single rollup); L1 overrides.
+    function _checkExpectedRollupExecutionQueueIndex(LookupCall storage sc) internal view virtual {}
+
+    // ──────────────────────────────────────────────
+    //  Active-execution accessors
+    // ──────────────────────────────────────────────
+    //
+    // `_processNCalls` and `_consumeNestedAction` operate on whichever flat-call / nested
+    // table is currently active: the containing `ExecutionEntry` normally, or the `LookupCall`
+    // being replayed while `_insideFailedLookup`. The element types (`L2ToL1Call`,
+    // `ExpectedL1ToL2Call`) are identical across both parents, so a single storage-pointer
+    // accessor serves both. Solidity evaluates only the taken ternary branch, so
+    // `_currentFailedLookup()` is never read outside a failed-lookup replay.
+
+    /// @notice The flat call array driving the current execution.
+    function _activeCalls() internal view returns (L2ToL1Call[] storage) {
+        return _insideFailedLookup ? _currentFailedLookup().calls : _currentEntryStorage().L2ToL1Calls;
+    }
+
+    /// @notice The nested (reentrant L1→L2) table for the current execution.
+    function _activeNested() internal view returns (ExpectedL1ToL2Call[] storage) {
+        return _insideFailedLookup ? _currentFailedLookup().expectedL1ToL2Calls : _currentEntryStorage().expectedL1ToL2Calls;
     }
 
     // ──────────────────────────────────────────────
@@ -236,15 +304,16 @@ abstract contract EEZBase is IEEZ {
     //  Lookup-call resolution
     // ──────────────────────────────────────────────
 
-    /// @notice Verifies a matched `LookupCall` entry and either returns or reverts with its
-    ///         cached data.
-    /// @dev Shared between `staticCallLookup` and the failed-reentry fallback in
-    ///      `_consumeNestedAction` on both L1 and L2.
+    /// @notice Resolves a static-context `LookupCall`: returns its cached data, or reverts with
+    ///         it when `failed`. Checks the queue-index pins and the sub-calls' rolling hash.
+    /// @dev Static path only (`staticCallLookup`). Failed lookups consumed *during execution*
+    ///      go through `_replayFailedLookup` (real, tagged sub-execution).
     function _resolveLookupCall(LookupCall storage sc) internal view returns (bytes memory) {
-        if (sc.calls.length > 0) {
-            bytes32 computedHash = _processNLookupCalls(sc.calls);
-            if (computedHash != sc.rollingHash) revert RollingHashMismatch();
-        }
+        // Check that all rollups are on their expected queue index
+        _checkExpectedRollupExecutionQueueIndex(sc);
+        // Always compare: empty `calls[]` hashes to 0, which must match a sub-call-less lookup's
+        // `rollingHash` (0) — so malformed lookups are caught uniformly.
+        if (_processNLookupCalls(sc.calls) != sc.rollingHash) revert RollingHashMismatch();
         if (sc.failed) {
             bytes memory returnData = sc.returnData;
             assembly {
@@ -252,6 +321,42 @@ abstract contract EEZBase is IEEZ {
             }
         }
         return sc.returnData;
+    }
+
+    /// @notice Replays a `failed` LookupCall as a self-contained mini-entry, then reverts with
+    ///         its cached `returnData`. The single resolution path for failed lookups consumed
+    ///         during execution (reentrant or top-level); a plain failed lookup is just the
+    ///         `callCount == 0` case (no-op sub-execution).
+    /// @dev Runs INLINE in the consuming `executeCrossChainCall` frame; the terminal revert
+    ///      discards the sub-call state AND restores the outer cursors (the EVM rolls back every
+    ///      tstore write here), so the pre-revert hash/count checks need no `ContextResult`
+    ///      escape. Nested failed lookups compose for free via that same revert unwind.
+    function _replayFailedLookup(LookupCall storage sc, uint256 index) internal {
+        _checkExpectedRollupExecutionQueueIndex(sc); // content-addressing pin, same as the static path
+
+        // Pointer for deeper frames to re-derive this lookup (`_currentFailedLookup()`); storage
+        // refs can't be transient. The lookup's own `destinationRollupId` is the L1 persistent
+        // `lookupQueue` it lives in (ignored for a transient match, and on L2's single table).
+        _failedLookupIndex = index;
+        _failedLookupRollupId = sc.destinationRollupId;
+        _insideFailedLookup = true;
+
+        // Fresh sub-execution context (rolled back by the terminal revert).
+        _rollingHash = bytes32(0);
+        _currentCallNumber = 0;
+        _lastNestedActionConsumed = 0;
+
+        _processNCalls(sc.callCount);
+
+        // Entry-style end checks against the lookup's own expected values.
+        if (_rollingHash != sc.rollingHash) revert RollingHashMismatch();
+        if (_currentCallNumber != sc.calls.length) revert UnconsumedCalls();
+        if (_lastNestedActionConsumed != sc.expectedL1ToL2Calls.length) revert UnconsumedNestedActions();
+
+        bytes memory returnData = sc.returnData;
+        assembly {
+            revert(add(returnData, 0x20), mload(returnData))
+        }
     }
 
     /// @notice Executes the lookup call's optional `calls[]` in static context and computes
@@ -323,6 +428,7 @@ abstract contract EEZBase is IEEZ {
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
     ///         `_rollingHash` because lookup calls are verified against
     ///         `LookupCall.rollingHash`, a separate per-LookupCall accumulator.
+    ///          Is much less constrained since static calls does not have state race conditions
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal
         pure

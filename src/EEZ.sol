@@ -4,7 +4,15 @@ pragma solidity ^0.8.28;
 import {IProofSystem} from "./interfaces/IProofSystem.sol";
 import {IRollupContract} from "./interfaces/IRollup.sol";
 import {CrossChainProxy} from "./base/CrossChainProxy.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall, ExecutionEntry, ProxyInfo} from "./interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ExecutionEntry,
+    ProxyInfo,
+    ExpectedQueueIndex
+} from "./interfaces/IEEZ.sol";
 import {EEZBase} from "./base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol";
 
@@ -74,9 +82,9 @@ struct ProofSystemBatchPerVerificationEntries {
 ///            considered empty, no explicit cleanup pass needed.
 struct RollupVerification {
     uint256 lastVerifiedBlock;
-    ExecutionEntry[] queue;
+    ExecutionEntry[] executionQueue;
     LookupCall[] lookupQueue;
-    uint256 cursor;
+    uint256 executionQueueIndex;
 }
 
 /// @title EEZ
@@ -107,7 +115,7 @@ struct RollupVerification {
 ///      `StateRootMismatch` check.
 ///
 ///      Deferred consumption: `executeCrossChainCall` (proxy entry) and `executeL2TX(rid)` route
-///      to `verificationByRollup[rid].queue[cursor]` and advance the per-rollup cursor.
+///      to `verificationByRollup[rid].executionQueue[cursor]` and advance the per-rollup cursor.
 contract EEZ is EEZBase {
     /// @notice The rollup ID representing L1 mainnet
     uint256 public constant MAINNET_ROLLUP_ID = 0;
@@ -176,10 +184,10 @@ contract EEZ is EEZBase {
     event L2ExecutionPerformed(uint256 indexed rollupId, bytes32 newState);
 
     /// @notice Emitted when an execution entry is consumed
-    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed cursor);
+    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed executionQueueIndex);
 
     /// @notice Emitted when a precomputed L2 transaction is executed
-    event L2TXExecuted(uint256 indexed rollupId, uint256 indexed cursor);
+    event L2TXExecuted(uint256 indexed rollupId, uint256 indexed executionQueueIndex);
 
     /// @notice Emitted when a batch is posted, carrying the number of rollups verified
     event BatchPosted(uint256 indexed rollupCount);
@@ -256,6 +264,10 @@ contract EEZ is EEZBase {
     /// @notice Error when an entry's destinationRollupId, a state delta's rollupId, or a
     ///         lookup call's destinationRollupId references a rollup not in the batch
     error RollupNotInBatch(uint256 rollupId);
+
+    /// @notice Error when a static lookup's `expectedQueueIndices[]` pin doesn't match the live
+    ///         per-rollup queue cursor (`verificationByRollup[rollupId].executionQueueIndex`)
+    error ExecutionQueueIndexMismatch(uint256 rollupId);
 
     // ──────────────────────────────────────────────
     //  Rollup creation
@@ -643,9 +655,9 @@ contract EEZ is EEZBase {
         if (rec.lastVerifiedBlock != block.number) {
             rec.lastVerifiedBlock = block.number;
             // First touch this block — clear stale persistent state from prior blocks.
-            if (rec.queue.length != 0) delete rec.queue;
+            if (rec.executionQueue.length != 0) delete rec.executionQueue;
             if (rec.lookupQueue.length != 0) delete rec.lookupQueue;
-            rec.cursor = 0;
+            rec.executionQueueIndex = 0;
         }
     }
 
@@ -665,10 +677,15 @@ contract EEZ is EEZBase {
     function _publishRemainder(ProofSystemBatchPerVerificationEntries calldata batch) internal {
         for (uint256 i = batch.transientExecutionEntryCount; i < batch.entries.length; i++) {
             uint256 destRid = batch.entries[i].destinationRollupId;
-            verificationByRollup[destRid].queue.push(batch.entries[i]);
+            verificationByRollup[destRid].executionQueue.push(batch.entries[i]);
         }
         for (uint256 i = batch.transientLookupCallCount; i < batch.l1ToL2lookupCalls.length; i++) {
             uint256 destRid = batch.l1ToL2lookupCalls[i].destinationRollupId;
+            // INVARIANT: a lookup is queued under its own `destinationRollupId`. For a `failed`
+            // lookup this is load-bearing — `_replayFailedLookup` recovers this same rollup from
+            // `sc.destinationRollupId` to re-derive the queue mid-replay. So a failed lookup's
+            // `destinationRollupId` MUST equal the destRID it is keyed to (also bound into its
+            // `crossChainCallHash`). Keep them consistent or the replay reads the wrong queue.
             verificationByRollup[destRid].lookupQueue.push(batch.l1ToL2lookupCalls[i]);
         }
     }
@@ -716,7 +733,7 @@ contract EEZ is EEZBase {
     // ──────────────────────────────────────────────
 
     /// @notice Executes the next pure-L2 transaction queued for `rollupId`
-    /// @dev The next entry in `verificationByRollup[rollupId].queue` must have crossChainCallHash == 0.
+    /// @dev The next entry in `verificationByRollup[rollupId].executionQueue` must have crossChainCallHash == 0.
     ///      Cannot run while reentrantly inside another cross-chain execution.
     function executeL2TX(uint256 rollupId) external returns (bytes memory result) {
         if (verificationByRollup[rollupId].lastVerifiedBlock != block.number) {
@@ -725,7 +742,7 @@ contract EEZ is EEZBase {
 
         if (_insideExecution()) revert L2TXNotAllowedDuringExecution();
 
-        emit L2TXExecuted(rollupId, verificationByRollup[rollupId].cursor);
+        emit L2TXExecuted(rollupId, verificationByRollup[rollupId].executionQueueIndex);
         return _consumeAndExecute(rollupId, bytes32(0), 0);
     }
 
@@ -735,15 +752,24 @@ contract EEZ is EEZBase {
 
     /// @notice Resolves the entry currently being processed.
     /// @dev While the transient table is non-empty, `_currentEntryIndex` indexes into it.
-    ///      Otherwise we route into `verificationByRollup[_currentEntryRollupId].queue` —
+    ///      Otherwise we route into `verificationByRollup[_currentEntryRollupId].executionQueue` —
     ///      the rollup whose queue supplied the entry being executed (set by
     ///      `_consumeAndExecute` before entering the inner flow).
-    function _currentEntryStorage() internal view returns (ExecutionEntry storage entry) {
+    function _currentEntryStorage() internal view override returns (ExecutionEntry storage entry) {
         if (_transientExecutions.length != 0) {
             entry = _transientExecutions[_currentEntryIndex];
         } else {
-            entry = verificationByRollup[_currentEntryRollupId].queue[_currentEntryIndex];
+            entry = verificationByRollup[_currentEntryRollupId].executionQueue[_currentEntryIndex];
         }
+    }
+
+    /// @notice The failed LookupCall currently being replayed, reconstructed from the
+    ///         `_failedLookup*` transient pointer. Only valid while `_insideFailedLookup`.
+    function _currentFailedLookup() internal view override returns (LookupCall storage) {
+        if (_transientExecutions.length != 0) {
+            return _transientLookupCalls[_failedLookupIndex];
+        }
+        return verificationByRollup[_failedLookupRollupId].lookupQueue[_failedLookupIndex];
     }
 
     /// @notice Consumes the next ExpectedL1ToL2Call entry, or replays a pre-computed
@@ -767,15 +793,14 @@ contract EEZ is EEZBase {
     ///      hit on this path only makes sense when the caller has try/catch and expects a
     ///      revert.
     function _consumeNestedAction(bytes32 crossChainCallHash) internal returns (bytes memory) {
-        ExecutionEntry storage entry = _currentEntryStorage();
+        // Active nested table: the containing entry's, or — while replaying a failed lookup —
+        // that lookup's own `expectedL1ToL2Calls`.
+        ExpectedL1ToL2Call[] storage expectedCalls = _activeNested();
         uint256 idx = _lastNestedActionConsumed; // pre-commit read; advance only on match
 
         // 1. ExpectedL1ToL2Call priority — the ONLY path that advances the cursor.
-        if (
-            idx < entry.expectedL1ToL2Calls.length
-                && entry.expectedL1ToL2Calls[idx].crossChainCallHash == crossChainCallHash
-        ) {
-            ExpectedL1ToL2Call storage nested = entry.expectedL1ToL2Calls[idx];
+        if (idx < expectedCalls.length && expectedCalls[idx].crossChainCallHash == crossChainCallHash) {
+            ExpectedL1ToL2Call storage nested = expectedCalls[idx];
             _lastNestedActionConsumed = idx + 1;
             uint256 nestedNumber = idx + 1;
             emit NestedActionConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, nested.callCount);
@@ -785,7 +810,10 @@ contract EEZ is EEZBase {
             return nested.returnData;
         }
 
-        // 2. Fallback to a failed-lookup-call entry. Lookup key uses pre-bump cursor.
+        // 2. Fallback to a failed-lookup-call entry (key = pre-bump cursor). Any match — transient
+        //    table or persistent `lookupQueue` — is resolved by `_replayFailedLookup`, which always
+        //    reverts (a plain failed lookup is just its `callCount == 0` case). `_currentFailedLookup`
+        //    re-derives the source table from `_transientExecutions.length`, so transient passes `rollupId = 0`.
         uint64 callNum = uint64(_currentCallNumber);
         uint64 lastNA = uint64(idx);
         for (uint256 i = 0; i < _transientLookupCalls.length; i++) {
@@ -794,13 +822,13 @@ contract EEZ is EEZBase {
                 sc.failed && sc.crossChainCallHash == crossChainCallHash && sc.callNumber == callNum
                     && sc.lastNestedActionConsumed == lastNA
             ) {
-                _resolveLookupCall(sc); // always reverts (sc.failed == true)
+                _replayFailedLookup(sc, i); // always reverts
             }
         }
 
-        // Per-rollup static queue: route by the action's target rollup (== entry.destinationRollupId
-        // because nested actions are scoped to the containing entry).
-        uint256 destRid = entry.destinationRollupId;
+        // Per-rollup queue: route by the active context's destination rollup.
+        uint256 destRid =
+            _insideFailedLookup ? _currentFailedLookup().destinationRollupId : _currentEntryStorage().destinationRollupId;
         LookupCall[] storage lookupQueue = verificationByRollup[destRid].lookupQueue;
         for (uint256 i = 0; i < lookupQueue.length; i++) {
             LookupCall storage sc = lookupQueue[i];
@@ -808,7 +836,7 @@ contract EEZ is EEZBase {
                 sc.failed && sc.crossChainCallHash == crossChainCallHash && sc.callNumber == callNum
                     && sc.lastNestedActionConsumed == lastNA
             ) {
-                _resolveLookupCall(sc);
+                _replayFailedLookup(sc, i); // always reverts
             }
         }
 
@@ -832,7 +860,7 @@ contract EEZ is EEZBase {
     ///      While a postAndVerifyBatch call is running, `_transientExecutions` is non-empty and ALL consumption
     ///      is routed through it via a global cursor — entries are NOT popped, only `_transientExecutionIndex`
     ///      advances. Outside the transient batch, consumption is routed by the destination rollup to
-    ///      `verificationByRollup[destRid].queue` with that rollup's own cursor — `destinationRollupId`
+    ///      `verificationByRollup[destRid].executionQueue` with that rollup's own cursor — `destinationRollupId`
     ///      doesn't need a separate consistency check because (a) the proof bound it into the entry hash,
     ///      and (b) the crossChainCallHash preimage already commits to the target rollup.
     ///
@@ -866,14 +894,14 @@ contract EEZ is EEZBase {
             _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
         } else {
             RollupVerification storage rec = verificationByRollup[destRid];
-            idx = rec.cursor;
-            if (idx >= rec.queue.length || rec.queue[idx].proxyEntryHash != crossChainCallHash) {
+            idx = rec.executionQueueIndex;
+            if (idx >= rec.executionQueue.length || rec.executionQueue[idx].proxyEntryHash != crossChainCallHash) {
                 // Try reverted-lookup fallback (always reverts on match); otherwise ExecutionNotFound
                 _tryRevertedTopLevelLookup(crossChainCallHash, destRid);
                 revert ExecutionNotFound();
             }
-            rec.cursor = idx + 1;
-            entry = rec.queue[idx];
+            rec.executionQueueIndex = idx + 1;
+            entry = rec.executionQueue[idx];
             _currentEntryRollupId = destRid;
         }
 
@@ -917,14 +945,15 @@ contract EEZ is EEZBase {
     ///         transient) so revertSpan rollbacks don't affect the outer accumulator — the
     ///         inner `_processNCalls` invocation through `executeInContextAndRevert` keeps its own
     ///         local that is discarded with the revert frame, which is exactly what we want.
-    function _processNCalls(uint256 count) internal returns (int256 etherOut) {
-        ExecutionEntry storage entry = _currentEntryStorage();
+    function _processNCalls(uint256 count) internal override returns (int256 etherOut) {
+        // Active flat-call array: the entry's, or the failed lookup's while replaying one.
+        L2ToL1Call[] storage calls = _activeCalls();
         uint256 processed = 0;
         while (processed < count) {
-            uint256 revertSpan = entry.L2ToL1Calls[_currentCallNumber].revertSpan;
+            uint256 revertSpan = calls[_currentCallNumber].revertSpan;
 
             if (revertSpan == 0) {
-                L2ToL1Call memory cc = entry.L2ToL1Calls[_currentCallNumber];
+                L2ToL1Call memory cc = calls[_currentCallNumber];
                 _currentCallNumber++;
 
                 _rollingHashCallBegin(_currentCallNumber);
@@ -947,7 +976,7 @@ contract EEZ is EEZBase {
                 processed++;
             } else {
                 uint256 savedCallNumber = _currentCallNumber;
-                entry.L2ToL1Calls[_currentCallNumber].revertSpan = 0;
+                calls[_currentCallNumber].revertSpan = 0;
 
                 try this.executeInContextAndRevert(revertSpan) {}
                 catch (bytes memory revertData) {
@@ -959,7 +988,7 @@ contract EEZ is EEZBase {
                     if (innerNotFound) _nestedActionNotFound = true;
                 }
 
-                entry.L2ToL1Calls[savedCallNumber].revertSpan = revertSpan;
+                calls[savedCallNumber].revertSpan = revertSpan;
                 emit RevertSpanExecuted(_currentEntryIndex, savedCallNumber, revertSpan);
                 processed += revertSpan;
             }
@@ -994,6 +1023,17 @@ contract EEZ is EEZBase {
         }
     }
 
+    /// @notice Verifies a static lookup's per-rollup execution-queue-index pins against the
+    ///         live `executionQueueIndex` of each listed rollup.
+    function _checkExpectedRollupExecutionQueueIndex(LookupCall storage sc) internal view override {
+        ExpectedQueueIndex[] storage pins = sc.expectedQueueIndices;
+        for (uint256 i = 0; i < pins.length; i++) {
+            if (verificationByRollup[pins[i].rollupId].executionQueueIndex != pins[i].executionQueueIndex) {
+                revert ExecutionQueueIndexMismatch(pins[i].rollupId);
+            }
+        }
+    }
+    
     // ──────────────────────────────────────────────
     //  Lookup call lookup
     // ──────────────────────────────────────────────
@@ -1052,21 +1092,19 @@ contract EEZ is EEZBase {
         revert ExecutionNotFound();
     }
 
-    /// @notice Top-level fallback: scan transient table then the routed rollup's persistent
-    ///         `lookupQueue` for a `LookupCall` with `failed=true` matching
-    ///         `(crossChainCallHash, callNumber=0, lastNestedActionConsumed=0)`. The (0,0)
-    ///         lookup key denotes top-level context — disjoint from the nested fallback path
-    ///         which always observes `callNumber > 0`. On match, `_resolveLookupCall` reverts
-    ///         with the cached `returnData`; on no match, returns so the caller reverts
-    ///         `ExecutionNotFound`.
-    function _tryRevertedTopLevelLookup(bytes32 crossChainCallHash, uint256 destRid) internal view {
+    /// @notice Top-level fallback: scan the transient table then the routed rollup's persistent
+    ///         `lookupQueue` for a `failed` `LookupCall` keyed at the top-level context
+    ///         `(crossChainCallHash, 0, 0)` — disjoint from the nested path (`callNumber > 0`).
+    ///         A match is resolved by `_replayFailedLookup` (always reverts); no match returns so
+    ///         the caller reverts `ExecutionNotFound`.
+    function _tryRevertedTopLevelLookup(bytes32 crossChainCallHash, uint256 destRid) internal {
         for (uint256 i = 0; i < _transientLookupCalls.length; i++) {
             LookupCall storage sc = _transientLookupCalls[i];
             if (
                 sc.failed && sc.crossChainCallHash == crossChainCallHash && sc.callNumber == 0
                     && sc.lastNestedActionConsumed == 0
             ) {
-                _resolveLookupCall(sc); // always reverts (sc.failed == true)
+                _replayFailedLookup(sc, i); // always reverts
             }
         }
         LookupCall[] storage lookupQueue = verificationByRollup[destRid].lookupQueue;
@@ -1076,7 +1114,7 @@ contract EEZ is EEZBase {
                 sc.failed && sc.crossChainCallHash == crossChainCallHash && sc.callNumber == 0
                     && sc.lastNestedActionConsumed == 0
             ) {
-                _resolveLookupCall(sc);
+                _replayFailedLookup(sc, i); // always reverts
             }
         }
     }
@@ -1160,11 +1198,11 @@ contract EEZ is EEZBase {
     /// @notice Length of the deferred queue for `_rollupId` (only meaningful in the current
     ///         block; stale entries from prior blocks are treated as empty by readers)
     function queueLength(uint256 _rollupId) external view returns (uint256) {
-        return verificationByRollup[_rollupId].queue.length;
+        return verificationByRollup[_rollupId].executionQueue.length;
     }
 
     /// @notice Cursor (next-to-consume) for the deferred queue of `_rollupId`
-    function queueCursor(uint256 _rollupId) external view returns (uint256) {
-        return verificationByRollup[_rollupId].cursor;
+    function executionQueueIndex(uint256 _rollupId) external view returns (uint256) {
+        return verificationByRollup[_rollupId].executionQueueIndex;
     }
 }
