@@ -149,7 +149,7 @@ contract EEZ is EEZBase {
 
     /// @notice Cursor into `_transientExecutions` for the next entry to consume.
     /// @dev Only meaningful while `_transientExecutions.length != 0`. The table's length
-    ///      itself is what flags "inside a transient batch" for `_currentEntryStorage()`
+    ///      itself is what flags "inside a transient batch" for `_getCurrentEntryStoragePointer()`
     ///      and `_consumeAndExecute`; this variable just tracks progress. Transient so it
     ///      resets between transactions automatically, and explicitly reset at the end
     ///      of every postAndVerifyBatch.
@@ -162,7 +162,7 @@ contract EEZ is EEZBase {
     // needs guarding.
 
     /// @notice The rollup ID whose queue is supplying the entry currently being processed.
-    /// @dev `0` outside execution. Used by `_currentEntryStorage()` to disambiguate which
+    /// @dev `0` outside execution. Used by `_getCurrentEntryStoragePointer()` to disambiguate which
     ///      persistent queue to route into when `_transientExecutions.length == 0`.
     uint256 transient _currentEntryRollupId;
 
@@ -755,7 +755,7 @@ contract EEZ is EEZBase {
     ///      Otherwise we route into `verificationByRollup[_currentEntryRollupId].executionQueue` —
     ///      the rollup whose queue supplied the entry being executed (set by
     ///      `_consumeAndExecute` before entering the inner flow).
-    function _currentEntryStorage() internal view override returns (ExecutionEntry storage entry) {
+    function _getCurrentEntryStoragePointer() internal view override returns (ExecutionEntry storage entry) {
         if (_transientExecutions.length != 0) {
             entry = _transientExecutions[_currentEntryIndex];
         } else {
@@ -828,7 +828,7 @@ contract EEZ is EEZBase {
 
         // Per-rollup queue: route by the active context's destination rollup.
         uint256 destRid =
-            _insideFailedLookup ? _currentFailedLookup().destinationRollupId : _currentEntryStorage().destinationRollupId;
+            _insideFailedLookup ? _currentFailedLookup().destinationRollupId : _getCurrentEntryStoragePointer().destinationRollupId;
         LookupCall[] storage lookupQueue = verificationByRollup[destRid].lookupQueue;
         for (uint256 i = 0; i < lookupQueue.length; i++) {
             LookupCall storage sc = lookupQueue[i];
@@ -925,7 +925,7 @@ contract EEZ is EEZBase {
         int256 etherOut = _processNCalls(callCount);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
-        ExecutionEntry storage entry = _currentEntryStorage();
+        ExecutionEntry storage entry = _getCurrentEntryStoragePointer();
         // Check the deferred no-match flag from `_consumeNestedAction` first so the failure
         // surfaces as `ExecutionNotFound` rather than the downstream `RollingHashMismatch` it
         // would otherwise cause (returning empty bytes diverges the entry's rolling hash).

@@ -4,7 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedQueueIndex
+} from "../../../src/interfaces/IEEZ.sol";
 import {Counter, SafeCounterAndProxy} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
@@ -116,7 +123,10 @@ abstract contract NestedCallRevertActions {
             callNumber: 1,
             lastNestedActionConsumed: 0,
             calls: new L2ToL1Call[](0),
-            rollingHash: bytes32(0)
+            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            callCount: 0,
+            rollingHash: bytes32(0),
+            expectedQueueIndices: new ExpectedQueueIndex[](0)
         });
     }
 
@@ -184,7 +194,10 @@ abstract contract NestedCallRevertActions {
             callNumber: 1,
             lastNestedActionConsumed: 0,
             calls: new L2ToL1Call[](0),
-            rollingHash: bytes32(0)
+            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            callCount: 0,
+            rollingHash: bytes32(0),
+            expectedQueueIndices: new ExpectedQueueIndex[](0)
         });
     }
 }

@@ -171,7 +171,7 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice The execution entry currently being processed (child-routed).
-    function _currentEntryStorage() internal view virtual returns (ExecutionEntry storage);
+    function _getCurrentEntryStoragePointer() internal view virtual returns (ExecutionEntry storage);
 
     /// @notice The failed LookupCall currently being replayed (child-routed from the
     ///         `_failedLookup*` transient pointer). Only valid while `_insideFailedLookup`.
@@ -201,12 +201,12 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice The flat call array driving the current execution.
     function _activeCalls() internal view returns (L2ToL1Call[] storage) {
-        return _insideFailedLookup ? _currentFailedLookup().calls : _currentEntryStorage().L2ToL1Calls;
+        return _insideFailedLookup ? _currentFailedLookup().calls : _getCurrentEntryStoragePointer().L2ToL1Calls;
     }
 
     /// @notice The nested (reentrant L1→L2) table for the current execution.
     function _activeNested() internal view returns (ExpectedL1ToL2Call[] storage) {
-        return _insideFailedLookup ? _currentFailedLookup().expectedL1ToL2Calls : _currentEntryStorage().expectedL1ToL2Calls;
+        return _insideFailedLookup ? _currentFailedLookup().expectedL1ToL2Calls : _getCurrentEntryStoragePointer().expectedL1ToL2Calls;
     }
 
     // ──────────────────────────────────────────────

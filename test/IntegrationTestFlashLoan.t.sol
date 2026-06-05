@@ -552,7 +552,7 @@ contract IntegrationTestFlashLoan is Test {
         assertEq(_getRollupState(L2_ROLLUP_ID), s3, "L2 state should be updated to s3");
 
         // Execution entries consumed
-        assertEq(rollups.queueCursor(L2_ROLLUP_ID), 2, "Both L1 entries should be consumed");
+        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 2, "Both L1 entries should be consumed");
         assertEq(managerL2.executionIndex(), 1, "L2 entry should be consumed");
     }
 }

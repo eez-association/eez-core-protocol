@@ -20,7 +20,8 @@ import {
     L2ToL1Call,
     ExpectedL1ToL2Call,
     LookupCall,
-    ProxyInfo
+    ProxyInfo,
+    ExpectedQueueIndex
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
@@ -386,7 +387,7 @@ contract EEZTest is Base {
         _postBatch(rid, e2);
         assertEq(_getRollupState(rid), keccak256("s2"));
         assertEq(rollups.queueLength(rid), 0);
-        assertEq(rollups.queueCursor(rid), 0);
+        assertEq(rollups.executionQueueIndex(rid), 0);
     }
 
     function test_PostBatch_LastVerifiedBlock() public {
@@ -850,18 +851,18 @@ contract EEZTest is Base {
         // transientLookupCallCount = 0 → published to the per-rollup lookupQueue.
         _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
 
-        uint256 cursorBefore = rollups.queueCursor(rid);
+        uint256 cursorBefore = rollups.executionQueueIndex(rid);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.queueCursor(rid), cursorBefore, "failed lookup must not advance the cursor");
+        assertEq(rollups.executionQueueIndex(rid), cursorBefore, "failed lookup must not advance the cursor");
 
         // Content-addressed + replayable: a second identical call reverts identically, still no advance.
         (ok, ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.queueCursor(rid), cursorBefore);
+        assertEq(rollups.executionQueueIndex(rid), cursorBefore);
     }
 
     /// @notice Transient path: the failed lookup lives in `_transientLookupCalls` and is hit by a
@@ -911,5 +912,115 @@ contract EEZTest is Base {
             sel := mload(add(ret, 32))
         }
         assertEq(sel, EEZBase.ExecutionNotFound.selector);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Failed-LookupCall sub-execution replay (_replayFailedLookup)
+    // ──────────────────────────────────────────────
+    //
+    // A `failed` LookupCall can carry a real sub-execution: `calls[]` that run for real (with
+    // `callCount` top-level iterations) and then get discarded by the terminal revert. Exercised
+    // here via the TOP-LEVEL fallback (`_tryRevertedTopLevelLookup`), which now routes through
+    // `_replayFailedLookup` just like the reentrant fallback.
+
+    /// @notice Top-level failed LookupCall keyed at `(hash, 0, 0)` whose sub-execution replays one
+    ///         real sub-call `subTarget.setValue(subValue)` (callCount = 1) then reverts `payload`.
+    function _failedLookupWithSubcall(uint256 rid, bytes32 hash, bytes memory payload, address subTarget, uint256 subValue)
+        internal
+        view
+        returns (LookupCall memory lc)
+    {
+        L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
+        subCalls[0] = L2ToL1Call({
+            targetAddress: subTarget,
+            value: 0,
+            data: abi.encodeCall(TestTarget.setValue, (subValue)),
+            sourceAddress: address(this),
+            sourceRollupId: MAINNET_ROLLUP_ID,
+            revertSpan: 0
+        });
+        lc.crossChainCallHash = hash;
+        lc.destinationRollupId = rid;
+        lc.returnData = payload;
+        lc.failed = true;
+        lc.callNumber = 0;
+        lc.lastNestedActionConsumed = 0;
+        lc.calls = subCalls;
+        lc.expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
+        lc.callCount = 1;
+        lc.rollingHash = _rollingHashSingleCall(""); // CALL_BEGIN(1) → CALL_END(1, true, "")
+        lc.expectedQueueIndices = new ExpectedQueueIndex[](0);
+    }
+
+    /// @notice Happy path: the failed lookup replays its sub-execution, then reverts with the
+    ///         cached `returnData`; the sub-call's state change is discarded by the revert and the
+    ///         queue is not advanced.
+    function test_FailedLookup_SubExecution_ReplaysAndReverts() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes memory payload = hex"deadbeef";
+
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0] = _failedLookupWithSubcall(rid, h, payload, address(target), 99);
+        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        assertEq(ret, payload, "must revert with the lookup's returnData");
+        assertEq(target.value(), 0, "sub-execution state must be discarded by the terminal revert");
+        assertEq(rollups.executionQueueIndex(rid), 0, "failed lookup must not advance the queue");
+    }
+
+    /// @notice Proves the replay actually EXECUTES the sub-calls: a wrong `rollingHash` makes the
+    ///         post-replay check fire `RollingHashMismatch` (impossible if the calls were skipped).
+    function test_FailedLookup_SubExecution_WrongHashReverts() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+
+        LookupCall memory lc = _failedLookupWithSubcall(rid, h, hex"deadbeef", address(target), 99);
+        lc.rollingHash = keccak256("wrong"); // != the hash the real replay produces
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0] = lc;
+        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        bytes4 sel;
+        assembly {
+            sel := mload(add(ret, 32))
+        }
+        assertEq(sel, EEZBase.RollingHashMismatch.selector, "replay must execute the sub-calls and check the hash");
+    }
+
+    /// @notice The `expectedQueueIndices` pin gates resolution: a pin that doesn't match the live
+    ///         per-rollup `executionQueueIndex` reverts `ExecutionQueueIndexMismatch` before replay.
+    function test_FailedLookup_QueueIndexPin_Mismatch_Reverts() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+
+        bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
+        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+
+        LookupCall memory lc = _failedLookup(rid, h, hex"deadbeef"); // plain failed lookup
+        ExpectedQueueIndex[] memory pins = new ExpectedQueueIndex[](1);
+        pins[0] = ExpectedQueueIndex({rollupId: rid, executionQueueIndex: 5}); // live index is 0 → mismatch
+        lc.expectedQueueIndices = pins;
+        LookupCall[] memory lookups = new LookupCall[](1);
+        lookups[0] = lc;
+        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        bytes4 sel;
+        assembly {
+            sel := mload(add(ret, 32))
+        }
+        assertEq(sel, EEZ.ExecutionQueueIndexMismatch.selector, "queue-index pin must gate resolution");
     }
 }

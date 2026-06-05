@@ -236,7 +236,7 @@ contract EEZL2 is EEZBase {
 
     /// @notice The execution entry currently being processed. L2 has a single table, so the
     ///         transient `_currentEntryIndex` indexes `executions` directly.
-    function _currentEntryStorage() internal view override returns (ExecutionEntry storage) {
+    function _getCurrentEntryStoragePointer() internal view override returns (ExecutionEntry storage) {
         return executions[_currentEntryIndex];
     }
 

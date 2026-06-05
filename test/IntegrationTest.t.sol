@@ -417,7 +417,7 @@ contract IntegrationTest is Test {
         assertEq(counterAndProxy.counter(), 1, "A.counter should be 1");
         assertEq(counterAndProxy.targetCounter(), 1, "A.targetCounter should be 1");
         assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 state should be updated via L1 entry");
-        assertEq(rollups.queueCursor(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
+        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
         assertEq(managerL2.executionIndex(), 1, "L2 execution entry should be consumed");
     }
 
@@ -535,7 +535,7 @@ contract IntegrationTest is Test {
         assertEq(counterAndProxyL2.counter(), 1, "D.counter should be 1");
         assertEq(counterAndProxyL2.targetCounter(), 1, "D.targetCounter should be 1");
         assertEq(_getRollupState(L2_ROLLUP_ID), s1, "L2 state should be updated");
-        assertEq(rollups.queueCursor(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
+        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
         assertEq(managerL2.executionIndex(), 1, "L2 execution entry should be consumed");
     }
 }
