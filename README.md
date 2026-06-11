@@ -169,7 +169,7 @@ L2 has no ether accounting.
 
 ```bash
 # Clone the repository
-git clone https://github.com/jbaylina/sync-rollups.git
+git clone https://github.com/eez-association/sync-rollups.git
 cd sync-rollups
 
 # Install dependencies
