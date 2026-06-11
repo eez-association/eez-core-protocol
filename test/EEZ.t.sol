@@ -52,6 +52,22 @@ contract RevertingTarget {
     }
 }
 
+/// @notice Receives ETH from an entry call and forwards part of it into a proxy as a
+///         reentrant cross-chain call (exercises the `_entryEtherIn` accounting).
+contract ValueForwarder {
+    address public peer;
+
+    function setPeer(address _peer) external {
+        peer = _peer;
+    }
+
+    function forward(uint256 amount) external payable returns (uint256) {
+        (bool ok,) = peer.call{value: amount}(abi.encodeWithSignature("deposit()"));
+        require(ok, "forward failed");
+        return msg.value;
+    }
+}
+
 /// @notice Posts a batch and, during the meta hook, fires one proxy call so the failed-lookup
 ///         fallback can be exercised against the *transient* lookup table (which only exists
 ///         inside `postAndVerifyBatch`). Swallows the proxy revert so the batch still completes;
@@ -648,6 +664,85 @@ contract EEZTest is Base {
         _postBatch(rid, entries);
         assertEq(_getRollupState(rid), bytes32(0));
         assertEq(_getRollupEtherBalance(rid), 0);
+    }
+
+    /// @notice Builds the reentrant-value fixture: an entry call sends 2 ether to a
+    ///         ValueForwarder, which forwards 1.5 ether back into a proxy as a reentrant
+    ///         cross-chain call. Net for the rollup: -0.5 ether.
+    function _reentrantValueEntry(uint256 rid, int256 etherDelta)
+        internal
+        returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)
+    {
+        forwarder = new ValueForwarder();
+        address remote = address(0xBEEF);
+        forwarder.setPeer(rollups.createCrossChainProxy(remote, rid));
+
+        bytes memory depositData = abi.encodeWithSignature("deposit()");
+        bytes32 nestedHash = _hashCall(rid, remote, 1.5 ether, depositData, address(forwarder), 0);
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
+        calls[0] = L2ToL1Call({
+            targetAddress: address(forwarder),
+            value: 2 ether,
+            data: abi.encodeCall(ValueForwarder.forward, (1.5 ether)),
+            sourceAddress: address(0xD00D),
+            sourceRollupId: rid,
+            revertSpan: 0
+        });
+
+        ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
+        nested[0] = ExpectedL1ToL2Call({crossChainCallHash: nestedHash, callCount: 0, returnData: ""});
+
+        bytes32 h = bytes32(0);
+        h = _hCallBegin(h, 1);
+        h = _hNestedBegin(h, 1);
+        h = _hNestedEnd(h, 1);
+        h = _hCallEnd(h, 1, true, abi.encode(uint256(2 ether)));
+
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] =
+            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: etherDelta});
+
+        entries = new ExecutionEntry[](1);
+        entries[0].stateDeltas = deltas;
+        entries[0].proxyEntryHash = bytes32(0);
+        entries[0].destinationRollupId = rid;
+        entries[0].l2ToL1Calls = calls;
+        entries[0].expectedL1ToL2Calls = nested;
+        entries[0].callCount = 1;
+        entries[0].returnData = "";
+        entries[0].rollingHash = h;
+    }
+
+    function test_ReentrantValue_CountedInEtherAccounting() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        _fundRollup(rid, 2 ether);
+
+        // 2 ether out at the top level, 1.5 ether back in reentrantly → net -0.5 ether.
+        (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _reentrantValueEntry(rid, -0.5 ether);
+        _postBatch(rid, entries);
+
+        assertEq(_getRollupState(rid), keccak256("s1"));
+        assertEq(_getRollupEtherBalance(rid), 1.5 ether);
+        assertEq(address(forwarder).balance, 0.5 ether);
+        assertEq(address(rollups).balance, 1.5 ether);
+    }
+
+    function test_ReentrantValue_NotCredited_ImmediateSkipped() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        _fundRollup(rid, 2 ether);
+
+        // Delta pretends the reentrant 1.5 ether never came back → EtherDeltaMismatch
+        // inside attemptApplyImmediate → caught → ImmediateEntrySkipped, all rolled back.
+        (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _reentrantValueEntry(rid, -2 ether);
+        vm.expectEmit(true, false, false, false);
+        emit EEZ.ImmediateEntrySkipped(0, "");
+        _postBatch(rid, entries);
+
+        assertEq(_getRollupState(rid), bytes32(0));
+        assertEq(_getRollupEtherBalance(rid), 2 ether);
+        assertEq(address(forwarder).balance, 0);
+        assertEq(address(rollups).balance, 2 ether);
     }
 
     // ──────────────────────────────────────────────

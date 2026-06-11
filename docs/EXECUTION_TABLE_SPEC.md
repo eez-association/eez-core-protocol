@@ -120,7 +120,7 @@ The processor reads `entry.l2ToL1Calls[_currentL2ToL1Call]` (L2: `entry.incoming
 5. The processor decodes `ContextResult` and restores `_rollingHash` and the two cursors (L1: `_lastL1ToL2CallConsumed`, `_currentL2ToL1Call`; L2: `_lastOutgoingCallConsumed`, `_currentIncomingCall`) to the values **observed at the end of the reverted span**, bridging the rolling hash and counters across the revert boundary. On L1 it also OR-merges the decoded `callNotFound` flag back into `_l1ToL2CallNotFound`, so a no-match observed inside the span still reverts the entry at its boundary.
 6. Restores `entry.l2ToL1Calls[savedCallNumber].revertSpan = revertSpan` so the storage layout matches what the proof committed to.
 
-`revertSpan` covers a contiguous run of calls. The first call inside the span has its `revertSpan` field cleared so it executes as a normal call; subsequent calls inside the span have `revertSpan == 0` to begin with. Spans cannot be nested.
+`revertSpan` covers a contiguous run of calls. The first call inside the span has its `revertSpan` field cleared so it executes as a normal call; subsequent calls inside the span have `revertSpan == 0` to begin with. Nested spans are a prover convention violation rather than an on-chain check — the processor would mechanically recurse, but the outer span's rollback already discards the inner state, so the prover never emits one.
 
 #### When `revertSpan` is the right tool
 
@@ -197,7 +197,7 @@ struct LookupCall {
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;     // failed-mode reentrant table (empty for static mode)
     uint256              callCount;               // failed-mode top-level iterations (0 for static mode)
     bytes32              rollingHash;             // expected hash of the replayed sub-calls (verified)
-    ExpectedQueueIndexPerRollup[] expectedQueueIndices;  // L1 only — static-mode per-rollup queue-cursor pins
+    ExpectedQueueIndexPerRollup[] expectedQueueIndices;  // L1 only — per-rollup queue-cursor pins (checked on both static and failed paths)
 }
 ```
 
@@ -277,10 +277,10 @@ struct StateDelta {
 Per-entry on L1, the contract verifies:
 
 ```
-totalEtherDelta == etherIn - etherOut
+totalEtherDelta == entryEtherIn - etherOut
 ```
 
-where `etherIn` is `msg.value` received by `executeCrossChainCall` (or `0` for `executeL2TX` and immediate entries) and `etherOut` is the sum of `value` of every **successful** call processed (failed calls' ETH stays with the manager).
+where `entryEtherIn` (the transient `_entryEtherIn` accumulator) is ALL `msg.value` received via `executeCrossChainCall` during the entry — the entry-point call's value plus every reentrant call's (`0` for `executeL2TX` and immediate entries unless reentrant receipts occur) — and `etherOut` is the sum of `value` of every **successful** call processed (failed calls' ETH never leaves the manager). Calls inside a `revertSpan` count toward **neither** side: the span's revert rolls back their ETH transfers, and the span-local accumulators are discarded with the frame — even though the rolling hash still records the calls as successful.
 
 L2 has no ether accounting — `executeCrossChainCall` immediately forwards `msg.value` to `SYSTEM_ADDRESS`.
 
@@ -304,7 +304,7 @@ if (_l1ToL2CallNotFound) revert ExecutionNotFound();        // deferred no-match
 if (_rollingHash != rollingHash) revert RollingHashMismatch();
 if (_currentL2ToL1Call != entry.l2ToL1Calls.length) revert UnconsumedL2ToL1Calls();
 if (_lastL1ToL2CallConsumed != entry.expectedL1ToL2Calls.length) revert UnconsumedL1ToL2Calls();
-if (totalEtherDelta != etherIn - etherOut) revert EtherDeltaMismatch();  // L1 only
+if (totalEtherDelta != entryEtherIn - etherOut) revert EtherDeltaMismatch();  // L1 only
 ```
 
 L2 runs the same checks with its own names (`_currentIncomingCall` / `UnconsumedIncomingCalls`, `_lastOutgoingCallConsumed` / `UnconsumedOutgoingCalls`) and has no deferred flag or ether check.

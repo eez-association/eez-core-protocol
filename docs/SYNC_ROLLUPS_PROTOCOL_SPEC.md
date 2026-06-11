@@ -105,7 +105,7 @@ struct ExecutionEntry {
 ```solidity
 // L2 (IEEZL2.sol) — no stateDeltas, no destinationRollupId
 struct ExecutionEntry {
-    bytes32                              proxyEntryHash;        // hashed inbound call, bytes32(0) for L2 txs
+    bytes32                              proxyEntryHash;        // hash of the inbound call — never bytes32(0) on L2 (no zero-hash consumption path; executeL2TX is L1-only)
     CrossChainCall[]                     incomingCalls;         // flat array of ALL calls in execution order
     ExpectedOutgoingCrossChainCall[]     expectedOutgoingCalls; // sequentially consumed by reentrant calls
     uint256                              callCount;
@@ -120,7 +120,7 @@ Partition invariant: `entry.callCount + Σ expectedL1ToL2Calls[i].callCount == l
 
 #### ExpectedQueueIndexPerRollup (L1 only)
 
-Pins a static `LookupCall` to a specific multi-rollup consumption point: at resolve time the contract requires `verificationByRollup[rollupId].executionQueueIndex == executionQueueIndex` (else `ExecutionQueueIndexMismatch`), so a cached read can't be replayed against a different interleaving of the per-rollup queues.
+Pins a `LookupCall` to a specific multi-rollup consumption point: at resolve time the contract requires `verificationByRollup[rollupId].executionQueueIndex == executionQueueIndex` (else `ExecutionQueueIndexMismatch`), so a cached result can't be replayed against a different interleaving of the per-rollup queues. Checked on both resolution paths — static (`_resolveLookupCall`) and failed (`_replayFailedLookup`).
 
 ```solidity
 struct ExpectedQueueIndexPerRollup {
@@ -149,7 +149,7 @@ struct LookupCall {
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;// failed-mode reentrant table; empty for static mode
     uint256      callCount;                  // failed-mode top-level iterations; 0 for static mode
     bytes32      rollingHash;                // expected hash of the sub-calls (untagged schema in static mode, tagged in failed mode)
-    ExpectedQueueIndexPerRollup[] expectedQueueIndices; // static-mode per-rollup queue-cursor pins (L1 only)
+    ExpectedQueueIndexPerRollup[] expectedQueueIndices; // per-rollup queue-cursor pins (L1 only; checked on both static and failed paths)
 }
 ```
 
@@ -218,7 +218,8 @@ struct RollupVerification {
 | `_l1ToL2CallNotFound` | `bool transient` | Deferred no-match flag set by `_consumeNestedAction` when nothing matches; checked at the end of `_applyAndExecute` to revert `ExecutionNotFound`, and OR-merged out of a `revertSpan` via the 4th `ContextResult` field. **L1 only** (L2 reverts in place). |
 | `_currentL2ToL1Call` | `uint256 transient` | 1-indexed global L2→L1 call counter and cursor into `entry.l2ToL1Calls[]`; doubles as the `_insideExecution()` flag (`!= 0`) |
 | `_lastL1ToL2CallConsumed` | `uint256 transient` | Sequential reentrant (L1→L2) call consumption cursor |
-| `_failedLookupRollupId` | `uint256 transient` | Rollup whose persistent `lookupQueue` holds the failed LookupCall being replayed; `0` for a transient-table match. **L1 only** |
+| `_entryEtherIn` | `uint256 transient` | All ether received via `executeCrossChainCall` during the current entry (top-level + reentrant `msg.value`); the single in-side of the ether-delta invariant (§H.2). Top-level discipline: `executeCrossChainCall` SETS it to msg.value; `executeL2TX` and `attemptApplyImmediate` revert `ResidualEntryEtherIn` unless it is already 0; reentrant calls ADD; cleared again at the END of `_applyAndExecute`. **L1 only** |
+| `_failedLookupRollupId` | `uint256 transient` | Rollup whose persistent `lookupQueue` holds the failed LookupCall being replayed (always written as the lookup's `destinationRollupId`; unused for a transient-table match). **L1 only** |
 
 Inherited from `EEZBase`:
 
@@ -360,9 +361,11 @@ bytes32 crossChainCallHash = computeCrossChainCallHash(
 emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
 
 if (_insideExecution()) {
+    _entryEtherIn += msg.value;   // reentrant: ADD to the entry's inbound-ether accumulator — §H.2
     return _consumeNestedAction(crossChainCallHash);
 }
-return _consumeAndExecute(rollupId, crossChainCallHash, int256(msg.value));
+_entryEtherIn = msg.value;        // top-level: SET — a fresh entry can never inherit residue
+return _consumeAndExecute(rollupId, crossChainCallHash);
 ```
 
 `_consumeAndExecute` routes to the rollup's queue (`verificationByRollup[rollupId]`) — transient stream first if inside `postAndVerifyBatch`, otherwise the persistent per-rollup queue. On a miss (cursor out-of-bounds or `proxyEntryHash` mismatch), it falls back to `_tryRevertedTopLevelLookup(crossChainCallHash, destRid)` (`src/EEZ.sol:1237`) which scans the transient lookup table then the per-rollup `lookupQueue` for a `failed && l2ToL1CallNumber == 0 && lastL1ToL2CallConsumed == 0` match and resolves it via `_replayFailedLookup` (replays any sub-execution, then reverts with the cached `returnData`); only if that also misses does it revert `ExecutionNotFound`.
@@ -380,8 +383,11 @@ Permissionless. Consumes the next entry on `rollupId`'s queue, which **must** ha
 ```solidity
 if (verificationByRollup[rollupId].lastVerifiedBlock != block.number) revert ExecutionNotInCurrentBlock(rollupId);
 if (_insideExecution()) revert L2TXNotAllowedDuringExecution();
-emit L2TXExecuted(rollupId, verificationByRollup[rollupId].executionQueueIndex);
-return _consumeAndExecute(rollupId, bytes32(0), 0);
+if (_entryEtherIn != 0) revert ResidualEntryEtherIn();   // non-payable + never mid-entry — dirty accumulator = bug
+idx = _transientExecutions.length != 0 ? _transientExecutionIndex
+                                       : verificationByRollup[rollupId].executionQueueIndex;
+emit L2TXExecuted(rollupId, idx);   // transient phase emits the transient cursor
+return _consumeAndExecute(rollupId, bytes32(0));
 ```
 
 #### `staticCallLookup`
@@ -484,7 +490,7 @@ function executionQueueIndex(uint256 _rollupId) external view returns (uint256);
 
 #### Internal helpers
 
-##### `_consumeAndExecute(uint256 rollupId, bytes32 crossChainCallHash, int256 etherIn) → bytes`
+##### `_consumeAndExecute(uint256 rollupId, bytes32 crossChainCallHash) → bytes`
 
 ```
 if (_transientExecutions.length != 0):
@@ -514,7 +520,7 @@ else:
 emit ExecutionConsumed(crossChainCallHash, rollupId, idx)
 
 _currentEntryIndex = idx
-_applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash, etherIn)
+_applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash)
 
 return entry.returnData
 ```
@@ -588,7 +594,9 @@ The L2 variant is `_tryRevertedTopLevelLookup(bytes32 crossChainCallHash)` (no `
 
 `_getCurrentEntryStoragePointer()` returns `_transientExecutions[_currentEntryIndex]` if `_transientExecutions.length != 0`, else `verificationByRollup[_currentEntryRollupId].executionQueue[_currentEntryIndex]`.
 
-##### `_applyAndExecute(StateDelta[] memory deltas, uint256 callCount, bytes32 rollingHash, int256 etherIn)`
+##### `_applyAndExecute(StateDelta[] memory deltas, uint256 callCount, bytes32 rollingHash)`
+
+`_entryEtherIn` already holds the entry-point call's `msg.value` here (SET by the top-level entry point — `executeCrossChainCall` / `executeL2TX` / `attemptApplyImmediate` — before consumption), so it is NOT reset in the preamble — only at the end, after the invariant check.
 
 ```
 _rollingHash = bytes32(0)
@@ -603,10 +611,11 @@ require(!_l1ToL2CallNotFound)                                                // 
 require(_rollingHash == rollingHash)                                         // RollingHashMismatch
 require(_currentL2ToL1Call == entry.l2ToL1Calls.length)                      // UnconsumedL2ToL1Calls
 require(_lastL1ToL2CallConsumed == entry.expectedL1ToL2Calls.length)         // UnconsumedL1ToL2Calls
-require(totalEtherDelta == etherIn - etherOut)                               // EtherDeltaMismatch
+require(totalEtherDelta == _entryEtherIn - etherOut)                         // EtherDeltaMismatch
 
 emit EntryExecuted(_currentEntryIndex, _rollingHash, _currentL2ToL1Call, _lastL1ToL2CallConsumed)
 _currentL2ToL1Call = 0   // reset so _insideExecution() returns false again
+_entryEtherIn = 0        // reset for the next top-level entry in this tx
 ```
 
 ##### `_processNCalls(uint256 count) → int256 etherOut`
@@ -850,7 +859,7 @@ Identical to the proxy that triggered the reentrant call. The protocol does not 
 
 ### D.1 Sequential Entry Consumption
 
-Entries in `verificationByRollup[rid].executionQueue` (or `_transientExecutions` during `postAndVerifyBatch`) are consumed in posted order via the rollup's `executionQueueIndex` (or the global `_transientExecutionIndex` during the transient phase). Each call to `executeCrossChainCall` (top-level), `executeL2TX(rollupId)`, or — during `postAndVerifyBatch`'s meta hook — both, increments the per-rollup cursor by exactly one. There is no hash-based search and no swap-and-pop.
+Entries in `verificationByRollup[rid].executionQueue` (or `_transientExecutions` during `postAndVerifyBatch`) are consumed in posted order via the rollup's `executionQueueIndex` (or the global `_transientExecutionIndex` during the transient phase). Each call to `executeCrossChainCall` (top-level), `executeL2TX(rollupId)`, or — during `postAndVerifyBatch`'s meta hook — both, increments the active cursor by exactly one (the rollup's `executionQueueIndex`, or the global `_transientExecutionIndex` while the transient table is non-empty — per-rollup cursors stay untouched during the transient phase). There is no hash-based search and no swap-and-pop.
 
 `_consumeAndExecute` checks `entry.proxyEntryHash == expectedHash` and reverts `ExecutionNotFound` on mismatch (there is no separate `entry.destinationRollupId == rollupId` check — the target rollup is already bound into the hash preimage and into the proof's entry hash). This catches out-of-order calls from a buggy hook, a wrong builder, or a routing mismatch.
 
@@ -1161,7 +1170,7 @@ The fields actually **compared** in the scan are the 3-tuple:
 - `l2ToL1CallNumber` — `uint64(_currentL2ToL1Call)` at lookup time (L2: `callNumber` / `_currentIncomingCall`).
 - `lastL1ToL2CallConsumed` — `uint64(_lastL1ToL2CallConsumed)` at lookup time (L2: `lastOutgoingCallConsumed` / `_lastOutgoingCallConsumed`).
 
-`destinationRollupId` (L1 only) is **not** a compared field. For the per-rollup *persistent* `lookupQueue` it is enforced *structurally* — the scan targets `verificationByRollup[rollupId].lookupQueue`, so only that rollup's entries are visible. The global `_transientLookupCalls` table (L1) is **not** filtered by destination rollup at all; the prover must not collide transient lookup keys across rollups within one batch. (The target rollup is also bound into `crossChainCallHash` itself, and a failed lookup's `destinationRollupId` must equal that destRID — `_replayFailedLookup` re-derives the queue from it mid-replay.) Static lookups on L1 are additionally pinned by `expectedQueueIndices[]` (checked in `_resolveLookupCall`).
+`destinationRollupId` (L1 only) is **not** a compared field. For the per-rollup *persistent* `lookupQueue` it is enforced *structurally* — the scan targets `verificationByRollup[rollupId].lookupQueue`, so only that rollup's entries are visible. The global `_transientLookupCalls` table (L1) is **not** filtered by destination rollup at all; the prover must not collide transient lookup keys across rollups within one batch. (The target rollup is also bound into `crossChainCallHash` itself, and a failed lookup's `destinationRollupId` must equal that destRID — `_replayFailedLookup` re-derives the queue from it mid-replay.) L1 lookups are additionally pinned by `expectedQueueIndices[]` (checked on both paths — `_resolveLookupCall` and `_replayFailedLookup`).
 
 The counters together identify a unique phase of execution. They both advance monotonically and never repeat within a single entry's execution.
 
@@ -1218,7 +1227,7 @@ Within a single `postAndVerifyBatch`:
 2. Mark `verificationByRollup[rid].lastVerifiedBlock = block.number` for every touched rollup; wipe each touched rollup's queues / cursor on every verify (`_markVerifiedBlockPerRollup`).
 3. Load the batch's transient prefix into `_transientExecutions` / `_transientLookupCalls`.
 4. Drain leading immediate entries (skip-on-revert via `ImmediateEntrySkipped`).
-5. Meta hook runs if transient stream not yet drained AND `msg.sender` has code (per-rollup cursors advance per consumption).
+5. Meta hook runs if transient stream not yet drained AND `msg.sender` has code (consumption advances the global `_transientExecutionIndex`; per-rollup cursors stay untouched until persistent consumption).
 6. Wipe transient tables; reset `_transientExecutionIndex`.
 7. Publish the batch's remainder to per-rollup queues by `destinationRollupId` (unconditionally — even if the transient prefix wasn't fully drained; there is no drain-cleanly gate). Soundness backstop is `StateDelta.currentState`.
 8. Emit `BatchPosted(batch.rollupIdsWithProofSystems.length)`.
@@ -1253,7 +1262,7 @@ The previous-state binding lives on the entry: `StateDelta.currentState` is chec
 
 ### H.2 Ether Accounting (L1)
 
-For each entry: `totalEtherDelta == etherIn - etherOut`, where `etherIn` is the `msg.value` received by the entry-point call (or 0 for `executeL2TX` and immediate entries) and `etherOut` is the sum of `value` fields on every **successful** call inside the entry.
+For each entry: `totalEtherDelta == entryEtherIn - etherOut`, where `entryEtherIn` (the transient `_entryEtherIn` accumulator) is ALL `msg.value` received via `executeCrossChainCall` during the entry — the entry-point call's value plus every reentrant call's (0 for `executeL2TX` and immediate entries unless reentrant receipts occur) — and `etherOut` is the sum of `value` fields on every **successful** call inside the entry. Calls inside a `revertSpan` count toward neither side — their ETH transfers are rolled back by the span's revert and the span-local accumulators are discarded with the frame, even though the rolling hash still records them as successful.
 
 Each entry independently balances — ether accounting is localized to a single entry rather than aggregated across the transaction — which simplifies the prover's job.
 

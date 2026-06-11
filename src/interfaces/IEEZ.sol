@@ -13,15 +13,85 @@ pragma solidity ^0.8.28;
 //        * an `ExpectedL1ToL2Call` is a reentrant L1→L2 call fired during execution
 //          (the `expectedL1ToL2Calls[]` table, counted by `_lastL1ToL2CallConsumed`).
 //
-//  The mirror-image L2 structs land in `IEEZL2.sol` (next iteration) with the
-//  directions flipped. The two will be layout-identical (same field order + types);
-//  only the names differ, so `abi.encode(entry)` — the preimage of L1's per-entry
-//  proof hash — is unaffected by the split.
+//  The mirror-image L2 structs live in `IEEZL2.sol` with self-relative names and a
+//  deliberately leaner layout (no `StateDelta`, `destinationRollupId`, or
+//  `ExpectedQueueIndexPerRollup`) — L2 never hashes a whole entry/lookup, so its
+//  layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`L2ToL1Call`, `L1ToL2CallConsumed`,
 //  `UnconsumedL2ToL1Calls`); variables / struct fields / params are mixedCase with
 //  the connector capitalized (`l2ToL1Calls`, `_currentL2ToL1Call`).
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// @notice One participating rollup in a `ProofSystemBatchPerVerificationEntries` together
+///         with the SUBSET of the batch's global `proofSystems[]` that this rollup accepts.
+/// @dev `proofSystemIndex[]` is a list of indices into the parent batch's `proofSystems[]`,
+///      strictly increasing. The on-chain registry resolves them to PS addresses and hands
+///      that subset to this rollup's contract via `IRollupContract.checkProofSystemsAndGetVkeys`
+struct RollupIdWithProofSystems {
+    uint256 rollupId;
+    uint64[] proofSystemIndex;
+}
+
+/// @notice One batch's payload — a group of proof systems jointly attesting to a set of
+///         rollups' state transitions. Each rollup picks the subset of `proofSystems[]` it
+///         accepts via `RollupIdWithProofSystems[r].proofSystemIndex`.
+/// @dev The participating rollups (read off `RollupIdWithProofSystems[r].rollupId`) must be
+///      strictly increasing — paired with the once-per-block-per-rollup invariant on
+///      `_markVerifiedBlockPerRollup`, this prevents a single batch from verifying the same
+///      rollup twice. `proofSystems[]` is the batch-global PS list (strictly increasing,
+///      rejects address(0) and duplicates). Each rollup's `proofSystemIndex[]` is strictly
+///      increasing too, indices in `[0, proofSystems.length)`, and its length must satisfy
+///      that rollup's threshold (enforced by `IRollupContract.checkProofSystemsAndGetVkeys`).
+/// @dev `blobIndices` selects which of the tx-level EIP-4844 blobs this batch consumes;
+///      `callData` is batch-scoped (each PS's circuit gets its own region).
+/// @dev `transientExecutionEntryCount` and `transientLookupCallCount` are pure on-chain
+///      dispatch parameters — not bound by the proof — so the orchestrator can tune the
+///      transient/persistent split without re-proving.
+/// @dev `blockNumber` is the single L1 block the whole batch binds to. The registry forwards
+///      it to every rollup's `getTimestampAndBlockHash(blockNumber)`, whose result folds into
+///      each proof's public input. 0 = no block context, type(uint64).max = "latest context"
+struct ProofSystemBatchPerVerificationEntries {
+    ExecutionEntry[] entries;
+    LookupCall[] l1ToL2lookupCalls;
+    uint256 transientExecutionEntryCount;
+    uint256 transientLookupCallCount;
+    address[] proofSystems;
+    RollupIdWithProofSystems[] rollupIdsWithProofSystems;
+    bytes32 crossProofSystemInteractions;
+    uint256[] blobIndices;
+    bytes callData;
+    bytes[] proofs;
+    uint64 blockNumber;
+}
+
+/// @notice Rollup configuration held by the central registry.
+/// @dev Owner, threshold, and per-PS vkeys live on the per-rollup `IRollupContract` contract pointed
+///      to by `rollupContract`. The central registry holds only the *state* (state root,
+///      ether balance) and reads vkeys through `IRollupContract.checkProofSystemsAndGetVkeys`
+struct RollupConfig {
+    address rollupContract;
+    bytes32 stateRoot;
+    uint256 etherBalance;
+}
+
+/// @notice Per-rollup deferred-consumption queue + per-block reset marker
+/// @dev `lastVerifiedBlock` doubles as:
+///        (a) per-block reset marker — every `postAndVerifyBatch` that touches `rid` wipes this
+///            rollup's queue and cursor (see `_markVerifiedBlockPerRollup`), so a same-block
+///            re-verify REPLACES (does not append to) the prior batch's entries;
+///        (b) read gate for consumers (entries can only be consumed in the block they were
+///            posted — `executeCrossChainCall` / `executeL2TX` / `staticCallLookup` all gate
+///            on `lastVerifiedBlock(rid) == block.number`), which also means a stale queue from
+///            a prior block is never read — it's simply overwritten on the next verify;
+///        (c) lockout signal for the registry's owner-escape path `EEZ.setStateRoot`,
+///            which reverts `RollupBatchActiveThisBlock` when this equals `block.number`.
+struct RollupVerification {
+    uint256 lastVerifiedBlock;
+    ExecutionEntry[] executionQueue;
+    LookupCall[] lookupQueue;
+    uint256 executionQueueIndex;
+}
 
 /// @notice Represents a state delta
 /// @dev `currentState` is the rollup's expected state root immediately before this delta is applied.
@@ -120,11 +190,12 @@ struct ExecutionEntry {
     bytes32 rollingHash;
 }
 
-/// @notice A rollup's expected queue cursor at the moment a static lookup is observed.
-/// @dev Pins a static `LookupCall` to a specific multi-rollup consumption point: at resolve
+/// @notice A rollup's expected queue cursor at the moment a lookup is observed.
+/// @dev Pins a `LookupCall` to a specific multi-rollup consumption point: at resolve
 ///      time the contract requires `verificationByRollup[rollupId].executionQueueIndex == executionQueueIndex`,
-///      so a cached read can't be replayed against a different interleaving of the per-rollup
-///      queues. L1-only — L2 has a single rollup and ignores this list.
+///      so a cached result can't be replayed against a different interleaving of the per-rollup
+///      queues. Checked on BOTH resolution paths — static (`_resolveLookupCall`) and failed
+///      (`_replayFailedLookup`). L1-only — L2 has a single rollup and ignores this list.
 struct ExpectedQueueIndexPerRollup {
     uint256 rollupId;
     uint256 executionQueueIndex;
@@ -136,7 +207,8 @@ struct ExpectedQueueIndexPerRollup {
 ///        `l2ToL1Calls[]` (if any) replay in STATICCALL context and are hashed into `rollingHash`
 ///        with the untagged static schema; reentry is encoded as *separate*
 ///        `LookupCall`s sharing the same `(l2ToL1CallNumber, lastL1ToL2CallConsumed)`.
-///        `expectedQueueIndices[]` pins the per-rollup queue positions (L1).
+///        `expectedQueueIndices[]` pins the per-rollup queue positions (L1; checked in
+///        failed mode too).
 ///      - **Failed (`failed == true`)** — a reverting reentrant call resolved via the
 ///        `_consumeNestedAction` fallback. When it carries a sub-execution (`callCount > 0`),
 ///        it replays as a mini-entry: `l2ToL1Calls[]` run as real calls and `expectedL1ToL2Calls[]`
@@ -185,9 +257,10 @@ struct LookupCall {
     /// is non-empty. Static mode uses the untagged schema (`_processNLookupCalls`); failed
     /// mode uses the tagged entry schema (`_replayFailedLookup`).
     bytes32 rollingHash;
-    /// Static-mode per-rollup queue-cursor pins (L1 only); see `ExpectedQueueIndexPerRollup`.
-    /// if it's used alongside l2ToL1CallNumber and lastL1ToL2CallConsumed, there should be only the
-    /// unaffected rollups by that execution (otherwise is redundant)
+    /// Per-rollup queue-cursor pins, checked on BOTH resolution paths — static
+    /// (`_resolveLookupCall`) and failed (`_replayFailedLookup`); see `ExpectedQueueIndexPerRollup`.
+    /// When used alongside l2ToL1CallNumber and lastL1ToL2CallConsumed, list only the rollups
+    /// unaffected by that execution (otherwise it is redundant).
     ExpectedQueueIndexPerRollup[] expectedQueueIndices;
 }
 

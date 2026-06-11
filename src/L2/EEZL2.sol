@@ -80,7 +80,7 @@ contract EEZL2 is EEZBase {
     event ExecutionTableLoaded(ExecutionEntry[] entries);
 
     /// @notice Emitted when an execution entry is consumed
-    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionQueueIndex);
+    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionIndex);
 
     /// @notice Emitted when the system address initiates an incoming cross-chain call from another rollup
     event IncomingCrossChainCallExecuted(

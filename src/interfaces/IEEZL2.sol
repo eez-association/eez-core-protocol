@@ -87,7 +87,9 @@ struct ExpectedOutgoingCrossChainCall {
 ///        `expectedOutgoingCalls[0].callCount = 2` (calls 2, 3 inside the reentrant frame),
 ///        and `_currentIncomingCall == 5` at the end (the `UnconsumedIncomingCalls` guard checks this).
 struct ExecutionEntry {
-    bytes32 proxyEntryHash; // hashed inbound call, otherwise bytes32(0) for L2 txs
+    /// Hash of the inbound call. Never bytes32(0) on L2 — there is no zero-hash consumption
+    /// path (`executeL2TX` is L1-only), and a zero-hash entry would block the table.
+    bytes32 proxyEntryHash;
     /// All calls executed by this entry, flat, in execution order. Partitioned between
     /// the entry's outermost frame and any reentrant (outgoing) frames — see the natspec
     /// above for the `callCount` partition invariant.

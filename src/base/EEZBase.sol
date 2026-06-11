@@ -7,7 +7,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 /// @title EEZBase
 /// @notice Direction-neutral shared base for the L1 (`EEZ`) and L2 (`EEZL2`) cross-chain managers.
 /// @dev Holds ONLY the machinery that is identical on both sides AND never names a direction-
-///      specific execution struct (those structs differ per side — `IEEZL1.sol` vs `IEEZL2.sol`):
+///      specific execution struct (those structs differ per side — `IEEZ.sol` vs `IEEZL2.sol`):
 ///        - Rolling-hash tag constants, the `_rollingHash` accumulator, and the fold helpers
 ///          (they operate on primitives, so they don't reference any execution struct).
 ///        - Neutral transient pointers: `_currentEntryIndex`, `_insideFailedLookup`, and
@@ -94,7 +94,8 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when caller is not a registered CrossChainProxy
     error UnauthorizedProxy();
 
-    /// @notice Error when `executeInContextAndRevert` is called by an external address
+    /// @notice Error when a self-call-only entry point (`executeInContextAndRevert`,
+    ///         L1's `attemptApplyImmediate`) is called by an external address
     error NotSelf();
 
     /// @notice Error when no matching execution entry exists for the action hash

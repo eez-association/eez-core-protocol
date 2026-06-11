@@ -75,7 +75,7 @@ struct ExecutionEntry {
 
 struct ExpectedQueueIndexPerRollup {
     uint256 rollupId;
-    uint256 executionQueueIndex;   // pins a static lookup to a queue-consumption point
+    uint256 executionQueueIndex;   // pins a lookup to a queue-consumption point (checked on static AND failed paths)
 }
 
 struct LookupCall {
@@ -89,7 +89,7 @@ struct LookupCall {
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;     // failed-mode reentrant table
     uint256              callCount;               // failed-mode top-level iterations
     bytes32              rollingHash;             // expected hash of replayed sub-calls
-    ExpectedQueueIndexPerRollup[] expectedQueueIndices;  // static-mode queue pins (L1 only)
+    ExpectedQueueIndexPerRollup[] expectedQueueIndices;  // queue pins (L1 only; checked on both static and failed paths)
 }
 ```
 
@@ -245,7 +245,6 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 - `docs/EXECUTION_TABLE_SPEC.md` — how to build execution entries.
 - `docs/LOOKUP_CALL_SPEC.md` — LookupCall semantics (static vs failed modes).
 - `docs/CAVEATS.md` — edge cases.
-- `docs/CHANGES_FROM_PREVIOUS.md` — migration notes from earlier branches.
 
 ## Testing
 

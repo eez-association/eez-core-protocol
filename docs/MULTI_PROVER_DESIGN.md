@@ -154,7 +154,7 @@ for each PS k in proofSystems:
 boundary messages this batch participates in (computed off-chain, mirrored in each PS's
 circuit). All proofs in a `postAndVerifyBatch` must verify atomically — if PS_A claims to
 send msg_0 to PS_B and PS_B's commitment doesn't include msg_0, one of them won't verify
-and the whole batch reverts. See `docs/hashedProofSystem.md` (port from source branch — TODO).
+and the whole batch reverts.
 
 ---
 
