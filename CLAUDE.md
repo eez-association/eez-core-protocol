@@ -95,6 +95,8 @@ struct LookupCall {
 
 Partition invariant: `callCount + Σ expected*Calls[i].callCount == flatCalls.length` — one global cursor walks the flat array across the whole execution tree.
 
+Prover obligation (L1): `stateDeltas` must be the entry's true state transition, and every entry must carry at least one `StateDelta` — asserted by the prover, not enforced on-chain (an empty array would leave the entry unpinned from the `StateRootMismatch` backstop).
+
 ### Data Types (L2 — IEEZL2.sol)
 
 Leaner: no `StateDelta`, no `destinationRollupId`, no `expectedQueueIndices`.
@@ -171,7 +173,7 @@ keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, 
 ### Key Functions (L1 — EEZ)
 
 1. **registerRollup(address rollupContract, bytes32 initialState) → uint256 rollupId** — caller pre-deploys an `IRollupContract` manager, then registers it. Registry assigns a fresh id and fires `rollupContractRegistered(rollupId)` once on the manager.
-2. **postAndVerifyBatch(ProofSystemBatchPerVerificationEntries batch)** — validates sorted invariants, fetches the vkey matrix via each rollup's `checkProofSystemsAndGetVkeys`, verifies one proof per proof system against `publicInputsHash` (atomic: any failure reverts the batch), marks each rollup verified this block, loads the leading `transientExecutionEntryCount` entries into `_transientExecutions`, runs the leading run of `proxyEntryHash == 0` entries inline (`attemptApplyImmediate` self-call with try/catch — a revert emits `ImmediateEntrySkipped` and advances), fires `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` if `msg.sender` has code, then publishes the remainder into per-rollup queues UNCONDITIONALLY (soundness backstop: `StateDelta.currentState` is re-checked at consumption, so orphaned entries fail `StateRootMismatch`). Transient tables are cleared at the end.
+2. **postAndVerifyBatch(ProofSystemBatchPerVerificationEntries batch)** — validates sorted invariants, fetches the vkey matrix via each rollup's `checkProofSystemsAndGetVkeys`, verifies one proof per proof system against `publicInputsHash` (atomic: any failure reverts the batch), marks each rollup verified this block, loads the leading `transientExecutionEntryCount` entries into `_transientExecutions`, runs the leading run of `proxyEntryHash == 0` entries inline (`attemptApplyImmediate` self-call with try/catch — a revert emits `ImmediateEntrySkipped` and advances), fires `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` if transient entries remain and `msg.sender` has code, then publishes the remainder into per-rollup queues UNCONDITIONALLY (soundness backstop: `StateDelta.currentState` is re-checked at consumption, so orphaned entries fail `StateRootMismatch`). Transient tables are cleared at the end.
 3. **executeCrossChainCall(sourceAddress, callData)** — entry point for proxies. Top-level → consume next entry from the routed rollup's queue (transient table first while a batch is mid-flight); reentrant (`_insideExecution()`) → `_consumeNestedAction`.
 4. **executeL2TX(uint256 rollupId)** — permissionless. Consumes the next entry on `rollupId`'s queue, which must have `proxyEntryHash == bytes32(0)`.
 5. **staticCallLookup(sourceAddress, callData)** — view. Looks up a `LookupCall` by `(crossChainCallHash, l2ToL1CallNumber, lastL1ToL2CallConsumed)`, scanning the transient table then the routed rollup's `lookupQueue`; checks `expectedQueueIndices` pins; replays cached sub-calls in static context, then returns `returnData` or reverts with it (when `failed`).

@@ -249,8 +249,8 @@ The terminal `revert` discards the sub-call **state changes** *and* restores the
 
 ## 8. L1 / L2 differences
 
-These mirror the existing intentional divergences (`src/L1_L2_PARITY_TODOS.md`):
-- The two sides define **different `LookupCall` structs** (see §3). `destinationRollupId` and
+The two sides intentionally diverge:
+- They define **different `LookupCall` structs** (see §3). `destinationRollupId` and
   `expectedQueueIndices` are **L1-only** — the L2 struct drops them entirely (no parity
   placeholders): L2 has a single rollup and a single sequential table, so there is nothing to
   route or pin. `_checkExpectedRollupExecutionQueueIndex` exists only in `EEZ.sol`; L2's

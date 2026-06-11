@@ -395,6 +395,6 @@ Two parallel reviews were run after the latest round of changes:
 
 ## Versioning
 
-This document tracks the `feature/flatten` branch state. Updates are appended/edited inline
-as the design evolves; commit hashes referenced in section headings where significant
-changes land (TBD as we progress).
+This document originated on `feature/flatten` and now tracks the current branch state
+(`feature/lookUP` as of the L1/L2 naming split). Updates are appended/edited inline as the
+design evolves.

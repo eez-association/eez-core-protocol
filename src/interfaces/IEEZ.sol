@@ -100,7 +100,10 @@ struct ExpectedL1ToL2Call {
 ///        `expectedL1ToL2Calls[0].callCount = 2` (calls 2, 3 inside the reentrant frame),
 ///        and `_currentL2ToL1Call == 5` at the end (the `UnconsumedL2ToL1Calls` guard checks this).
 struct ExecutionEntry {
-    StateDelta[] stateDeltas; // initial state --> Final state
+    /// Initial state --> final state. PROVER OBLIGATION: the deltas must be the entry's true
+    /// state transition, and every entry must carry at least one StateDelta (never empty) —
+    /// asserted by the prover, not enforced on-chain.
+    StateDelta[] stateDeltas;
     bytes32 proxyEntryHash; // hashed call (L2 -> L1), otherwise bytes32(0) for L2 txs
     uint256 destinationRollupId;
     /// All calls executed by this entry, flat, in execution order. Partitioned between

@@ -472,7 +472,7 @@ contract EEZ is EEZBase {
     // ──────────────────────────────────────────────
 
     /// @notice Self-call wrapper that runs `_applyAndExecute` for one immediate entry
-    ///         in an isolated frame. Used by `postAndVerifyBatch` step 4 to make immediate-entry
+    ///         in an isolated frame. Used by `postAndVerifyBatch` step 5 to make immediate-entry
     ///         execution revertible: if this frame reverts, the surrounding `try/catch`
     ///         in postAndVerifyBatch catches and skips to the next entry instead of aborting the
     ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner

@@ -42,6 +42,8 @@ Tooling computes `crossChainCallHash` from six fields (`targetRollupId, targetAd
 
 Describes one rollup's state transition caused by executing one entry. The pre-state binding lives on the entry: `currentState` is checked at consumption time against `rollups[delta.rollupId].stateRoot`; mismatch reverts `StateRootMismatch`. This makes entries content-addressed against the trajectory the proof committed to and is the soundness backstop that lets the per-rollup queue model interleave consumption across rollups safely.
 
+**Prover obligation**: an entry's `stateDeltas` must be its true state transition, and every entry must carry **at least one** `StateDelta` — the prover asserts `stateDeltas.length >= 1` for every entry it emits. This is not enforced on-chain; an empty `stateDeltas[]` would leave the entry unpinned from any rollup trajectory (nothing for the `StateRootMismatch` backstop to check).
+
 ```solidity
 struct StateDelta {
     uint256 rollupId;       // which rollup's state changes

@@ -265,6 +265,8 @@ struct StateDelta {
 
 `currentState` is checked at consumption time against `rollups[delta.rollupId].stateRoot`; mismatch reverts `StateRootMismatch`. This is the per-rollup-queue model's soundness backstop: entries are content-addressed against the trajectory the proof committed to, so consumption interleaved across rollups can't quietly land an entry whose preconditions don't hold. A stale builder either fails proof verification (the proof binds to the recorded `currentState`) or fails the on-chain match at consumption.
 
+**Prover obligation.** The `stateDeltas` attached to an entry must be the entry's true state transition — the proof is what makes them correct. In addition, every entry must carry **at least one** `StateDelta`: the prover must assert `stateDeltas.length >= 1` for every entry it emits. An empty `stateDeltas[]` is not rejected on-chain, but it leaves the entry unpinned from any rollup trajectory (nothing for the `StateRootMismatch` backstop to check), so the prover must never produce one.
+
 ### Ether bridging (`etherDelta`)
 
 `etherDelta` is signed:
