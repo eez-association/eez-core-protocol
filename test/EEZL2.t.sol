@@ -452,7 +452,7 @@ contract EEZL2Test is Test {
     // NOTE: dropped after refactor — `ExecutionEntry.failed` no longer exists.
     // Reverting top-level cross-chain calls are now expressed via `LookupCall { failed: true }`
     // consumed through `staticCallLookup` (static-context entry point) or the failed-reentry
-    // fallback in `_consumeNestedAction`. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §D.3 for the rationale.
+    // fallback in `_consumeNestedAction`. See `docs/CORE_PROTOCOL_SPEC.md` §D.3 for the rationale.
     // function test_ExecuteCrossChainCall_FailedEntryReverts() — removed.
 
     function test_ExecuteCrossChainCall_ConsumesInFifoOrder() public {

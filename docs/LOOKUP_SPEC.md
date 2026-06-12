@@ -18,8 +18,8 @@ cross-entry collisions, no cross-rollup routing concerns. Field names below are 
 (`callNumber`, `lastOutgoingCallConsumed`, `incomingCalls`, `expectedOutgoingCalls`) and drops
 the L1-only fields (`destinationRollupId`, `expectedStateRoots`).
 
-This document complements `EXECUTION_TABLE_SPEC.md` (how `ExecutionEntry`s are built) and
-`SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E/§F (rolling hash, lookup resolution).
+This document complements `EXECUTION_ENTRY_SPEC.md` (how `ExecutionEntry`s are built) and
+`CORE_PROTOCOL_SPEC.md` §E/§F (rolling hash, lookup resolution).
 
 ---
 

@@ -1,4 +1,4 @@
-# Execution Table Specification
+# Execution Entry Specification
 
 How to correctly build execution entries for L1 (`postAndVerifyBatch`) and L2 (`loadExecutionTable`).
 
@@ -40,7 +40,7 @@ Top-level entries always succeed: `executeCrossChainCall` returns `entry.returnD
 
 ### Per-rollup queue routing
 
-`destinationRollupId` selects which rollup's queue this entry is loaded into during `postAndVerifyBatch`'s deferred publish. The central `EEZ` registry stores per-rollup queues (`verificationByRollup[rid].executionQueue` and `verificationByRollup[rid].lookupQueue`) with their own per-rollup cursor (`executionQueueIndex`). Each `postAndVerifyBatch` call carries one `ProofSystemBatchPerVerificationEntries` payload covering one or more rollups; entries are routed by `destinationRollupId` into the matching rollup's queue. Cross-rollup state is independent — a stuck cursor on one rollup does not block another. See `MULTI_PROVER_DESIGN.md` for the multi-prover / per-rollup-queue specifics.
+`destinationRollupId` selects which rollup's queue this entry is loaded into during `postAndVerifyBatch`'s deferred publish. The central `EEZ` registry stores per-rollup queues (`verificationByRollup[rid].executionQueue` and `verificationByRollup[rid].lookupQueue`) with their own per-rollup cursor (`executionQueueIndex`). Each `postAndVerifyBatch` call carries one `ProofSystemBatchPerVerificationEntries` payload covering one or more rollups; entries are routed by `destinationRollupId` into the matching rollup's queue. Cross-rollup state is independent — a stuck cursor on one rollup does not block another. See `MULTI_PROVER_SPEC.md` for the multi-prover / per-rollup-queue specifics.
 
 ### IMMEDIATE entries (`proxyEntryHash == 0`)
 
@@ -186,7 +186,7 @@ Calls in `entry.l2ToL1Calls[]` are read sequentially. The sum of all `callCount`
 
 ## Lookups (`ExpectedLookup` nested / `LookupCall` top-level)
 
-Two structs in two homes (full spec: `LOOKUP_CALL_SPEC.md`):
+Two structs in two homes (full spec: `LOOKUP_SPEC.md`):
 
 ```solidity
 // NESTED — lives INSIDE the entry: ExecutionEntry.expectedLookups[]
@@ -320,7 +320,7 @@ L2 runs the same checks with its own names (`_currentIncomingCall` / `Unconsumed
 
 A single mismatch anywhere in the execution tree changes the final hash — this catches wrong return data, wrong success/failure flags, missing or extra calls, and incorrect nesting structure with one comparison.
 
-For the full hash chain semantics (with worked example and multi-phase static-call disambiguation), see `SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E.
+For the full hash chain semantics (with worked example and multi-phase static-call disambiguation), see `CORE_PROTOCOL_SPEC.md` §E.
 
 ---
 
@@ -336,7 +336,7 @@ On L1, `postAndVerifyBatch` itself can run user-driven cross-chain calls inline 
 
 ### transient / deferred split (L1 `postAndVerifyBatch`)
 
-`postAndVerifyBatch` takes a single `ProofSystemBatchPerVerificationEntries calldata batch` argument (NOT an array). The batch carries `entries[]`, `l1ToL2lookupCalls[]`, `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`, each row carrying a `proofSystemIndex[]` of indices into `proofSystems[]`), `crossProofSystemInteractions`, `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (the single L1 block the batch binds to; `0` = no block context, `type(uint64).max` = latest). See `MULTI_PROVER_DESIGN.md` for the full struct shape and proof-public-inputs construction.
+`postAndVerifyBatch` takes a single `ProofSystemBatchPerVerificationEntries calldata batch` argument (NOT an array). The batch carries `entries[]`, `l1ToL2lookupCalls[]`, `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`, each row carrying a `proofSystemIndex[]` of indices into `proofSystems[]`), `crossProofSystemInteractions`, `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (the single L1 block the batch binds to; `0` = no block context, `type(uint64).max` = latest). See `MULTI_PROVER_SPEC.md` for the full struct shape and proof-public-inputs construction.
 
 Flow:
 

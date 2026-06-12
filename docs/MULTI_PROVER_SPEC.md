@@ -1,4 +1,4 @@
-# Multi-Prover Refactor — Design Notes
+# Multi-Prover Specification
 
 Living document tracking the architecture and design decisions of the multi-prover /
 per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.

@@ -1,11 +1,11 @@
-# Sync-Rollups Protocol Specification
+# Core Protocol Specification
 
 **Source**: `src/`
 **Purpose**: Formal reference for implementing the Rust rollup node. Supersedes informal comments in source code.
 
 This document covers the **flat sequential execution model** layered with the **multi-prover / per-rollup-queue** model from the `feature/flatten` refactor. Every cross-chain entry is a flat list of calls processed sequentially, with reentrant calls resolved via a parallel expected-calls table and integrity verified by a single `rollingHash` per entry. The execution structs are split per side: L1 (`src/interfaces/IEEZ.sol`) uses absolute directional names (`L2ToL1Call` / `l2ToL1Calls`, `ExpectedL1ToL2Call` / `expectedL1ToL2Calls`); L2 (`src/interfaces/IEEZL2.sol`) uses **self-relative** directional names (`CrossChainCall` / `incomingCalls`, `ExpectedOutgoingCrossChainCall` / `expectedOutgoingCalls`) because an L2's counterparty can be L1 OR another L2 — see §A.1. Entries are routed by `destinationRollupId` into per-rollup queues on L1. `postAndVerifyBatch` carries a single `ProofSystemBatchPerVerificationEntries` whose proofs verify atomically.
 
-For the multi-prover design (batch shape, per-PS public-inputs construction, threshold semantics, `crossProofSystemInteractions`), see `MULTI_PROVER_DESIGN.md`.
+For the multi-prover design (batch shape, per-PS public-inputs construction, threshold semantics, `crossProofSystemInteractions`), see `MULTI_PROVER_SPEC.md`.
 
 ---
 
@@ -145,7 +145,7 @@ struct ExpectedLookup {
 }
 ```
 
-`executingLookupIndex` makes the flat host table context-unambiguous across the entry and its execution contexts — compared against the live `_insideRevertedLookup ? _revertedLookupIndex + 1 : 0` (an enforced check, no longer a prover convention). `ExpectedLookup` cannot nest itself (Solidity forbids recursive structs): deeper lookups inside any sub-execution resolve from the same host table. See `LOOKUP_CALL_SPEC.md`.
+`executingLookupIndex` makes the flat host table context-unambiguous across the entry and its execution contexts — compared against the live `_insideRevertedLookup ? _revertedLookupIndex + 1 : 0` (an enforced check, no longer a prover convention). `ExpectedLookup` cannot nest itself (Solidity forbids recursive structs): deeper lookups inside any sub-execution resolve from the same host table. See `LOOKUP_SPEC.md`.
 
 #### ExpectedStateRootPerRollup (L1 only)
 
@@ -211,7 +211,7 @@ struct RollupConfig {
 }
 ```
 
-The central registry no longer holds owner or vkey — those live on each rollup's `rollupContract` (reference impl: `src/rollupContract/Rollup.sol`). See `MULTI_PROVER_DESIGN.md` for the per-rollup-manager model.
+The central registry no longer holds owner or vkey — those live on each rollup's `rollupContract` (reference impl: `src/rollupContract/Rollup.sol`). See `MULTI_PROVER_SPEC.md` for the per-rollup-manager model.
 
 #### RollupVerification (L1 only)
 
@@ -309,7 +309,7 @@ Emits `RollupCreated(rollupId, rollupContract, initialState)`.
 function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external
 ```
 
-Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `crossProofSystemInteractions`, `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getTimestampAndBlockHash(blockNumber)`; 0 = no block context). See `MULTI_PROVER_DESIGN.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
+Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `crossProofSystemInteractions`, `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getTimestampAndBlockHash(blockNumber)`; 0 = no block context). See `MULTI_PROVER_SPEC.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
 
 **Preconditions** (enforced by `_validateStructure`):
 - `_transientExecutions.length == 0` else `PostBatchReentry` (reentry guard).
@@ -320,7 +320,7 @@ Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an
 - `transientLookupCallCount <= l1ToL2lookupCalls.length` else `TransientLookupCallCountExceedsLookupCalls`.
 - Each entry's `destinationRollupId` (and each lookup call's) is contained in the batch's rollup set else `RollupNotInBatch(rid)`.
 
-**Per-PS public-inputs construction** (two-stage; see `MULTI_PROVER_DESIGN.md` for details):
+**Per-PS public-inputs construction** (two-stage; see `MULTI_PROVER_SPEC.md` for details):
 
 ```
 sharedPublicInput = keccak256(abi.encodePacked(
@@ -509,7 +509,7 @@ Subject to two reverts:
 
 **No manager-handoff path**: there is no `setRollupContract` and no `RollupContractChanged` event. A rollup's manager binding is set at registration time and is immutable thereafter (the one-shot `rollupContractRegistered` latch, `src/rollupContract/Rollup.sol:156`). To "migrate" off a manager, the orchestrator must register a new rollupId pointing at a new manager and migrate state out-of-band.
 
-Per-rollup operations like `addProofSystem` / `removeProofSystem`, `updateVerificationKey`, `setThreshold`, `transferOwnership`, and any owner-driven `setStateRoot` initiation live on the manager itself. See `MULTI_PROVER_DESIGN.md` and `src/rollupContract/Rollup.sol`.
+Per-rollup operations like `addProofSystem` / `removeProofSystem`, `updateVerificationKey`, `setThreshold`, `transferOwnership`, and any owner-driven `setStateRoot` initiation live on the manager itself. See `MULTI_PROVER_SPEC.md` and `src/rollupContract/Rollup.sol`.
 
 #### View accessors
 
@@ -730,7 +730,7 @@ Tooling can match this preimage by `keccak256(abi.encode(action))` over a six-fi
 
 ##### `entryHashes` for the public-inputs preimage
 
-Each entry's contribution is `keccak256(abi.encode(entry))` — the FULL `ExecutionEntry` struct, including `stateDeltas` (which carry the entry's `currentState` precondition), `proxyEntryHash`, `destinationRollupId`, `l2ToL1Calls`, `expectedL1ToL2Calls`, `expectedLookups`, `callCount`, `returnData`, and `rollingHash`. Same for top-level lookups (`keccak256(abi.encode(lookupCall))`). See `MULTI_PROVER_DESIGN.md` for the full per-PS public-inputs construction.
+Each entry's contribution is `keccak256(abi.encode(entry))` — the FULL `ExecutionEntry` struct, including `stateDeltas` (which carry the entry's `currentState` precondition), `proxyEntryHash`, `destinationRollupId`, `l2ToL1Calls`, `expectedL1ToL2Calls`, `expectedLookups`, `callCount`, `returnData`, and `rollingHash`. Same for top-level lookups (`keccak256(abi.encode(lookupCall))`). See `MULTI_PROVER_SPEC.md` for the full per-PS public-inputs construction.
 
 ##### Per-PS verify (inlined in `_verifyProofSystemBatch`)
 
@@ -1348,7 +1348,7 @@ Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch
 
 ### I.1 Multi-Prover Verification
 
-`postAndVerifyBatch` verifies one proof per `(batch, proofSystem)` pair. Each proof's public-inputs hash covers (see `MULTI_PROVER_DESIGN.md` for the exact construction):
+`postAndVerifyBatch` verifies one proof per `(batch, proofSystem)` pair. Each proof's public-inputs hash covers (see `MULTI_PROVER_SPEC.md` for the exact construction):
 
 - Every entry hash — `keccak256(abi.encode(entry))` over the FULL `ExecutionEntry` struct (including `stateDeltas` with `currentState`, `proxyEntryHash`, `destinationRollupId`, `l2ToL1Calls`, `expectedL1ToL2Calls`, `callCount`, `returnData`, `rollingHash`).
 - Every lookup-call hash — `keccak256(abi.encode(lookupCall))`.

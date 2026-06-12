@@ -236,7 +236,7 @@ NESTED_BEGIN (3)   keccak256(prev, 0x03, nestedNumber)
 NESTED_END   (4)   keccak256(prev, 0x04, nestedNumber)
 ```
 
-One mismatch anywhere — wrong return data, wrong success flag, missing/extra calls, wrong nesting — changes the final hash and is caught with one comparison. End-of-entry checks: rolling hash, flat-call cursor == flat array length, reentrant cursor == reentrant table length, and (L1) the ether-delta invariant. Static lookup sub-calls use a simpler untagged accumulator (`keccak256(prev, success, retData)`) verified against `LookupCall.rollingHash`. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E.
+One mismatch anywhere — wrong return data, wrong success flag, missing/extra calls, wrong nesting — changes the final hash and is caught with one comparison. End-of-entry checks: rolling hash, flat-call cursor == flat array length, reentrant cursor == reentrant table length, and (L1) the ether-delta invariant. Static lookup sub-calls use a simpler untagged accumulator (`keccak256(prev, success, retData)`) verified against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.
 
 ### `revertSpan`
 
@@ -267,10 +267,10 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 
 ## Documentation
 
-- `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` — formal protocol specification.
-- `docs/MULTI_PROVER_DESIGN.md` — design rationale for the multi-prover model.
-- `docs/EXECUTION_TABLE_SPEC.md` — how to build execution entries.
-- `docs/LOOKUP_CALL_SPEC.md` — LookupCall semantics (static vs reverted modes).
+- `docs/CORE_PROTOCOL_SPEC.md` — formal protocol specification.
+- `docs/MULTI_PROVER_SPEC.md` — design rationale for the multi-prover model.
+- `docs/EXECUTION_ENTRY_SPEC.md` — how to build execution entries.
+- `docs/LOOKUP_SPEC.md` — lookup semantics, nested + top-level (static vs reverted modes).
 - `docs/CAVEATS.md` — edge cases.
 
 ## Testing

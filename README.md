@@ -27,9 +27,8 @@ forge fmt            # Format code
 
 Start with [`CLAUDE.md`](CLAUDE.md) — a condensed architecture reference (contracts, data types, key functions, execution flow, naming conventions). For depth:
 
-- [`docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md`](docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md) — formal protocol specification
-- [`docs/EXECUTION_TABLE_SPEC.md`](docs/EXECUTION_TABLE_SPEC.md) — how to build execution entries
-- [`docs/LOOKUP_CALL_SPEC.md`](docs/LOOKUP_CALL_SPEC.md) — LookupCall semantics
-- [`docs/MULTI_PROVER_DESIGN.md`](docs/MULTI_PROVER_DESIGN.md) — multi-prover design rationale
+- [`docs/CORE_PROTOCOL_SPEC.md`](docs/CORE_PROTOCOL_SPEC.md) — formal protocol specification
+- [`docs/EXECUTION_ENTRY_SPEC.md`](docs/EXECUTION_ENTRY_SPEC.md) — how to build execution entries
+- [`docs/LOOKUP_SPEC.md`](docs/LOOKUP_SPEC.md) — lookup semantics (nested + top-level)
+- [`docs/MULTI_PROVER_SPEC.md`](docs/MULTI_PROVER_SPEC.md) — multi-prover design rationale
 - [`docs/CAVEATS.md`](docs/CAVEATS.md) — edge cases
-- [`docs/CHANGES_FROM_PREVIOUS.md`](docs/CHANGES_FROM_PREVIOUS.md) — migration notes

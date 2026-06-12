@@ -1165,7 +1165,7 @@ contract EEZ is EEZBase {
     ///         rolling hash of the results (untagged static schema). No `revertSpan` handling.
     /// @dev All proxies referenced must already be deployed; CREATE2 is unavailable inside a
     ///      STATICCALL frame. The accumulator is a local, not `_rollingHash`, so this is verified
-    ///      against `LookupCall.rollingHash`. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E.2.
+    ///      against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
     function _processNLookupCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory cc = calls[i];

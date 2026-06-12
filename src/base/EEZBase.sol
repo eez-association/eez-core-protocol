@@ -239,7 +239,7 @@ abstract contract EEZBase is IEEZ {
     // end of each reentrant frame. Each event is tagged with a domain byte
     // (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END) so the same set of inputs can't collide
     // across event types. The final value is checked against `entry.rollingHash` at the end
-    // of execution. See `docs/SYNC_ROLLUPS_PROTOCOL_SPEC.md` §E for the full specification.
+    // of execution. See `docs/CORE_PROTOCOL_SPEC.md` §E for the full specification.
     //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
     // because they're verified against `LookupCall.rollingHash`, a separate accumulator
