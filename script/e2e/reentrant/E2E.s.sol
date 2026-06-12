@@ -4,7 +4,21 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedLookup
+} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {ReentrantCounter} from "../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
@@ -18,18 +32,18 @@ import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E
 //    if N > 0: peer.deepCall(N-1)   // cross-chain via proxy
 //    return ++count
 //
-//  On L1 (1 entry, 2 calls, 2 nestedActions):
+//  On L1 (1 entry, 2 calls, 2 expectedL1ToL2Calls):
 //    calls[0]: rcL1.dC(3) from batcher
-//      -> calls rcL2ProxyOnL1.dC(2) -> nestedAction[0] consumed (callCount=1)
-//        calls[1]: rcL1.dC(1) from rcL2 (inside nestedAction[0])
-//          -> calls rcL2ProxyOnL1.dC(0) -> nestedAction[1] consumed (callCount=0)
+//      -> calls rcL2ProxyOnL1.dC(2) -> expectedL1ToL2Calls[0] consumed (callCount=1)
+//        calls[1]: rcL1.dC(1) from rcL2 (inside expectedL1ToL2Calls[0])
+//          -> calls rcL2ProxyOnL1.dC(0) -> expectedL1ToL2Calls[1] consumed (callCount=0)
 //          -> rcL1.count++ -> 1, returns 1
 //      -> rcL1.count++ -> 2, returns 2
 //
-//  On L2 (1 entry, 2 calls, 1 nestedAction):
-//    calls[0]: rcL2.dC(2) from rcL1
-//      -> calls rcL1ProxyOnL2.dC(1) -> nestedAction[0] consumed (callCount=1)
-//        calls[1]: rcL2.dC(0) from rcL1 (inside nestedAction[0])
+//  On L2 (1 entry, 2 incomingCalls, 1 expectedOutgoingCall):
+//    incomingCalls[0]: rcL2.dC(2) from rcL1
+//      -> calls rcL1ProxyOnL2.dC(1) -> expectedOutgoingCalls[0] consumed (callCount=1)
+//        incomingCalls[1]: rcL2.dC(0) from rcL1 (inside expectedOutgoingCalls[0])
 //          -> no peer call (remainingCalls=0)
 //          -> rcL2.count++ -> 1, returns 1
 //      -> rcL2.count++ -> 2, returns 2
@@ -57,7 +71,7 @@ abstract contract ReentrantActions {
         );
     }
 
-    /// @dev L1 nestedAction[0]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(2)
+    /// @dev L1 expectedL1ToL2Calls[0]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(2)
     function _l1NestedHash0(address rcL2, address rcL1) internal pure returns (bytes32) {
         return crossChainCallHash(
             L2_ROLLUP_ID,
@@ -69,7 +83,7 @@ abstract contract ReentrantActions {
         );
     }
 
-    /// @dev L1 nestedAction[1]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(0)
+    /// @dev L1 expectedL1ToL2Calls[1]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(0)
     function _l1NestedHash1(address rcL2, address rcL1) internal pure returns (bytes32) {
         return crossChainCallHash(
             L2_ROLLUP_ID,
@@ -93,7 +107,7 @@ abstract contract ReentrantActions {
         );
     }
 
-    /// @dev L2 nestedAction[0]: rcL2 calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(1)
+    /// @dev L2 expectedOutgoingCalls[0]: rcL2 calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(1)
     function _l2NestedHash0(address rcL1, address rcL2) internal pure returns (bytes32) {
         return crossChainCallHash(
             MAINNET_ROLLUP_ID,
@@ -179,8 +193,9 @@ abstract contract ReentrantActions {
             stateDeltas: deltas,
             proxyEntryHash: _l1OuterActionHash(rcL1, batcher),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
+            l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             // Top-level rcL1.deepCall(3) returns ++count == 2 after the chain.
             returnData: abi.encode(uint256(2)),
@@ -191,10 +206,10 @@ abstract contract ReentrantActions {
     function _l2Entries(address rcL1, address rcL2, address alice)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](2);
+        calls[0] = CrossChainCall({
             targetAddress: rcL2,
             value: 0,
             data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
@@ -202,7 +217,7 @@ abstract contract ReentrantActions {
             sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
-        calls[1] = L2ToL1Call({
+        calls[1] = CrossChainCall({
             targetAddress: rcL2,
             value: 0,
             data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(0)),
@@ -211,18 +226,17 @@ abstract contract ReentrantActions {
             revertSpan: 0
         });
 
-        ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
-        nested[0] = ExpectedL1ToL2Call({
+        ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
+        nested[0] = ExpectedOutgoingCrossChainCall({
             crossChainCallHash: _l2NestedHash0(rcL1, rcL2), callCount: 1, returnData: abi.encode(uint256(1))
         });
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _l2OuterActionHash(rcL1, alice),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: nested,
+            incomingCalls: calls,
+            expectedOutgoingCalls: nested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             // Top-level rcL2.deepCall(2) returns ++count == 2 after the chain.
             returnData: abi.encode(uint256(2)),
@@ -317,7 +331,7 @@ contract ExecuteL2 is Script, ReentrantActions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), noLookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), new L2LookupCall[](0));
 
         // Trigger: alice calls rcL1ProxyOnL2.deepCall(2)
         (bool ok,) = rcL1ProxyOnL2.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)));
@@ -435,7 +449,7 @@ contract ComputeExpected is ComputeExpectedBase, ReentrantActions {
         ExecutionEntry[] memory l1 = _l1Entries(rcL1Addr, rcL2Addr, alice);
         bytes32 l1Hash = _entryHash(l1[0]);
 
-        ExecutionEntry[] memory l2 = _l2Entries(rcL1Addr, rcL2Addr, alice);
+        L2ExecutionEntry[] memory l2 = _l2Entries(rcL1Addr, rcL2Addr, alice);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));

@@ -4,16 +4,17 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, L2ToL1Call, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {
-    crossChainCallHash,
-    noLookupCalls,
-    noNestedActions,
-    noCalls,
-    RollingHashBuilder
-} from "../shared/E2EHelpers.sol";
+import {crossChainCallHash, noLookupCalls, noNestedActions, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  CounterL2 scenario — L2-starting, simplest case, two-sided
@@ -21,13 +22,13 @@ import {
 //  L2 side (ExecuteL2):
 //    1. SYSTEM loads ONE entry on L2 with precomputed return=uint256(1)
 //    2. User calls CAP.incrementProxy() on L2
-//    3. CAP calls CounterProxy (L2 proxy for Counter on L1) → managerL2.executeL1ToL2Call
+//    3. CAP calls CounterProxy (L2 proxy for Counter on L1) → managerL2.executeCrossChainCall
 //    4. Entry consumed, returns abi.encode(1); CAP (L2): counter=1, targetCounter=1
 //
 //  L1 side (Execute):
 //    1. postAndVerifyBatch loads ONE deferred entry
 //       (proxyEntryHash=0 — no source-side hash to match; system-driven) whose
-//       L2ToL1Calls describe the inbound call from CAP (L2) to Counter (L1)
+//       l2ToL1Calls describe the inbound call from CAP (L2) to Counter (L1)
 //    2. executeL2TX(L2_ROLLUP_ID) drains the entry via _processNCalls
 //    3. _processNCalls forwards through the lazily-created source proxy
 //       (proxy_for_CAP_on_L2 deployed on L1) into Counter.increment() on L1
@@ -49,15 +50,14 @@ abstract contract CounterL2Actions {
     function _l2Entries(address counterL1, address counterAndProxyL2)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _callHash(counterL1, counterAndProxyL2),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: new CrossChainCall[](0),
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode(uint256(1)),
             rollingHash: bytes32(0)
@@ -65,7 +65,7 @@ abstract contract CounterL2Actions {
     }
 
     /// @dev Single L1 entry — L2-TX style, system-driven (proxyEntryHash=0).
-    /// `L2ToL1Calls[0]` is the inbound call delivered through the source proxy
+    /// `l2ToL1Calls[0]` is the inbound call delivered through the source proxy
     /// for CAP-on-L2 (lazily created by `_processNCalls`).
     function _l1Entries(address counterL1, address counterAndProxyL2)
         internal
@@ -91,8 +91,9 @@ abstract contract CounterL2Actions {
             stateDeltas: new StateDelta[](0),
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
+            l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode(uint256(1)),
             rollingHash: rh
@@ -160,7 +161,7 @@ contract ExecuteL2 is Script, CounterL2Actions {
         console.log("ExecuteL2: manager=%s counterL1=%s cap=%s", managerAddr, counterL1Addr, capAddr);
 
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr), noLookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr), new L2LookupCall[](0));
         console.log("ExecuteL2: loadExecutionTable done");
 
         CounterAndProxy(capAddr).incrementProxy();
@@ -273,7 +274,7 @@ contract ComputeExpected is ComputeExpectedBase, CounterL2Actions {
         address counterL1Addr = vm.envAddress("COUNTER_L1");
         address capAddr = vm.envAddress("COUNTER_AND_PROXY_L2");
 
-        ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capAddr);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capAddr);
         ExecutionEntry[] memory l1 = _l1Entries(counterL1Addr, capAddr);
 
         bytes32 l2Hash = _entryHash(l2[0]);

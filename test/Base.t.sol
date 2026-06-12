@@ -233,7 +233,7 @@ abstract contract Base is Test {
         entry.stateDeltas = deltas;
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = rid;
-        entry.L2ToL1Calls = _emptyCalls();
+        entry.l2ToL1Calls = _emptyCalls();
         entry.expectedL1ToL2Calls = _emptyNested();
         entry.callCount = 0;
         entry.returnData = "";
@@ -247,7 +247,7 @@ abstract contract Base is Test {
         entry.stateDeltas = new StateDelta[](0);
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = rid;
-        entry.L2ToL1Calls = _emptyCalls();
+        entry.l2ToL1Calls = _emptyCalls();
         entry.expectedL1ToL2Calls = _emptyNested();
         entry.callCount = 0;
         entry.returnData = "";

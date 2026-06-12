@@ -7,7 +7,21 @@ import {EEZL2} from "../../src/L2/EEZL2.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {FlashLoan} from "../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall} from "../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ExpectedLookup
+} from "../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../src/interfaces/IEEZL2.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
@@ -105,40 +119,36 @@ contract ExecuteFlashLoanL2 is Script {
         vm.startBroadcast();
 
         // Load execution table (3 entries -- no calls[], simple sequential consumption)
-        ExecutionEntry[] memory l2Entries = new ExecutionEntry[](3);
-        StateDelta[] memory emptyDeltas = new StateDelta[](0);
-        L2ToL1Call[] memory noCalls = new L2ToL1Call[](0);
-        ExpectedL1ToL2Call[] memory noNested = new ExpectedL1ToL2Call[](0);
-        LookupCall[] memory noLookupCalls = new LookupCall[](0);
+        L2ExecutionEntry[] memory l2Entries = new L2ExecutionEntry[](3);
+        CrossChainCall[] memory noCalls = new CrossChainCall[](0);
+        ExpectedOutgoingCrossChainCall[] memory noNested = new ExpectedOutgoingCrossChainCall[](0);
+        L2LookupCall[] memory noLookupCalls = new L2LookupCall[](0);
 
-        l2Entries[0] = ExecutionEntry({
-            stateDeltas: emptyDeltas,
+        l2Entries[0] = L2ExecutionEntry({
             proxyEntryHash: actionHash0,
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
-            expectedL1ToL2Calls: noNested,
+            incomingCalls: noCalls,
+            expectedOutgoingCalls: noNested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
         });
 
-        l2Entries[1] = ExecutionEntry({
-            stateDeltas: emptyDeltas,
+        l2Entries[1] = L2ExecutionEntry({
             proxyEntryHash: actionHash1,
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
-            expectedL1ToL2Calls: noNested,
+            incomingCalls: noCalls,
+            expectedOutgoingCalls: noNested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
         });
 
-        l2Entries[2] = ExecutionEntry({
-            stateDeltas: emptyDeltas,
+        l2Entries[2] = L2ExecutionEntry({
             proxyEntryHash: actionHash2,
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
-            expectedL1ToL2Calls: noNested,
+            incomingCalls: noCalls,
+            expectedOutgoingCalls: noNested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
@@ -246,7 +256,7 @@ contract ExecuteFlashLoanL1 is Script {
 
         // ── Compute action hashes ──
 
-        // L1 entry for the forward bridge call (bridgeTokens triggers proxy -> executeL1ToL2Call)
+        // L1 entry for the forward bridge call (bridgeTokens triggers proxy -> executeCrossChainCall)
         // proxy identity: bridgeL1 on L2, sourceAddress = bridgeL1, sourceRollup = MAINNET
         bytes32 callForwardHash = keccak256(
             abi.encode(
@@ -310,15 +320,16 @@ contract ExecuteFlashLoanL1 is Script {
             stateDeltas: deltas1,
             proxyEntryHash: callForwardHash,
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
+            l2ToL1Calls: noCalls,
             expectedL1ToL2Calls: noNested,
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
         });
 
         // Entry 1: claimAndBridgeBack -- consumed when executor calls executorL2Proxy
-        // This entry has a nestedAction for the bridge return call (reentrant)
+        // This entry has an expectedL1ToL2Call for the bridge return call (reentrant)
         ExpectedL1ToL2Call[] memory nested1 = new ExpectedL1ToL2Call[](1);
         nested1[0] = ExpectedL1ToL2Call({crossChainCallHash: callReturnHash, callCount: 0, returnData: ""});
 
@@ -326,20 +337,22 @@ contract ExecuteFlashLoanL1 is Script {
             stateDeltas: deltas2,
             proxyEntryHash: callClaimHash,
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
+            l2ToL1Calls: noCalls,
             expectedL1ToL2Calls: nested1,
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: _computeRollingHashForNested1()
         });
 
-        // Entry 2: final state update (L2TX -- crossChainCallHash == 0, consumed via executeL2TX)
+        // Entry 2: final state update (L2TX -- proxyEntryHash == 0, consumed via executeL2TX)
         entries[2] = ExecutionEntry({
             stateDeltas: deltas3,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls,
+            l2ToL1Calls: noCalls,
             expectedL1ToL2Calls: noNested,
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
@@ -361,10 +374,10 @@ contract ExecuteFlashLoanL1 is Script {
         vm.stopBroadcast();
     }
 
-    /// @dev Compute rolling hash for entry 1 which has 1 nested action
+    /// @dev Compute rolling hash for entry 1 which has 1 reentrant (nested) frame
     function _computeRollingHashForNested1() internal pure returns (bytes32) {
         bytes32 h = bytes32(0);
-        // Nested action #1 consumed (nestedNumber = 1)
+        // Nested frame #1 consumed (nestedNumber = 1)
         h = keccak256(abi.encodePacked(h, NESTED_BEGIN, uint256(1)));
         // No calls inside nested, so nothing between BEGIN and END
         h = keccak256(abi.encodePacked(h, NESTED_END, uint256(1)));

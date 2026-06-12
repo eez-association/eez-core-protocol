@@ -4,16 +4,30 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedLookup
+} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {Action, actionHash, noLookupCalls, noStaticCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {Action, actionHash, noLookupCalls, noL2LookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  MultiCallNestedL2 — L2-side mirror of multi-call-nested
 //
 //  Entry has 2 calls, both invoke CAP.incrementProxy(). Each call
-//  triggers one nested action (CAP→counterProxy→_consumeNestedAction).
+//  triggers one nested call (CAP→counterProxy→_consumeNestedAction).
 //
 //  Rolling hash: CALL_BEGIN(1) NESTED_BEGIN(1) NESTED_END(1) CALL_END(1,true,"")
 //               CALL_BEGIN(2) NESTED_BEGIN(2) NESTED_END(2) CALL_END(2,true,"")
@@ -55,7 +69,7 @@ abstract contract MultiCallNestedL2Actions {
         );
     }
 
-    /// @dev Rolling hash: 2 calls, each with 1 nested action
+    /// @dev Rolling hash: 2 calls, each with 1 nested call
     function _expectedRollingHash() internal pure returns (bytes32 h) {
         h = bytes32(0);
         // call[0]: CAP.incrementProxy() -> nested[0]
@@ -100,8 +114,9 @@ abstract contract MultiCallNestedL2Actions {
             stateDeltas: new StateDelta[](0),
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls0,
+            l2ToL1Calls: calls0,
             expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode(uint256(1)),
             rollingHash: _expectedRollingHashL1(1)
@@ -110,8 +125,9 @@ abstract contract MultiCallNestedL2Actions {
             stateDeltas: new StateDelta[](0),
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls1,
+            l2ToL1Calls: calls1,
             expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode(uint256(2)),
             rollingHash: _expectedRollingHashL1(2)
@@ -121,10 +137,10 @@ abstract contract MultiCallNestedL2Actions {
     function _l2Entries(address counterL1, address cap, address alice)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](2);
+        calls[0] = CrossChainCall({
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
@@ -132,7 +148,7 @@ abstract contract MultiCallNestedL2Actions {
             sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
-        calls[1] = L2ToL1Call({
+        calls[1] = CrossChainCall({
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
@@ -142,19 +158,20 @@ abstract contract MultiCallNestedL2Actions {
         });
 
         bytes32 innerHash = _innerActionHash(counterL1, cap);
-        ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](2);
-        nested[0] =
-            ExpectedL1ToL2Call({crossChainCallHash: innerHash, callCount: 0, returnData: abi.encode(uint256(1))});
-        nested[1] =
-            ExpectedL1ToL2Call({crossChainCallHash: innerHash, callCount: 0, returnData: abi.encode(uint256(2))});
+        ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](2);
+        nested[0] = ExpectedOutgoingCrossChainCall({
+            crossChainCallHash: innerHash, callCount: 0, returnData: abi.encode(uint256(1))
+        });
+        nested[1] = ExpectedOutgoingCrossChainCall({
+            crossChainCallHash: innerHash, callCount: 0, returnData: abi.encode(uint256(2))
+        });
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _outerActionHash(cap, alice),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: nested,
+            incomingCalls: calls,
+            expectedOutgoingCalls: nested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 2,
             returnData: "",
             rollingHash: _expectedRollingHash()
@@ -227,7 +244,7 @@ contract ExecuteL2 is Script, MultiCallNestedL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s cap=%s capL1Proxy=%s", alice, capAddr, capL1Proxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noStaticCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noL2LookupCalls());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls capL1Proxy.incrementProxy()
@@ -336,7 +353,7 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallNestedL2Actions {
         address capAddr = vm.envAddress("COUNTER_AND_PROXY_L2");
         address alice = msg.sender;
 
-        ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capAddr, alice);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capAddr, alice);
         ExecutionEntry[] memory l1 = _l1Entries(counterL1Addr, capAddr);
         bytes32 l2Hash = _entryHash(l2[0]);
         bytes32 l1Hash0 = _entryHash(l1[0]);

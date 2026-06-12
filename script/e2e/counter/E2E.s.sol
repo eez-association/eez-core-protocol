@@ -4,7 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
@@ -23,7 +30,7 @@ import {
 //       with precomputed return=uint256(1) and a StateDelta advancing L2's stateRoot
 //    2. User calls CounterAndProxy.incrementProxy() on L1
 //    3. CAP calls CounterProxy (L1 proxy for Counter@L2)
-//    4. Proxy forwards to EEZ.executeL1ToL2Call
+//    4. Proxy forwards to EEZ.executeCrossChainCall
 //    5. Entry consumed, returns abi.encode(1); CAP: counter=1, targetCounter=1
 //    6. L2 rollup stateRoot in the registry updated via StateDelta
 //
@@ -70,8 +77,9 @@ abstract contract CounterActions {
             stateDeltas: deltas,
             proxyEntryHash: _callHash(counterL2, counterAndProxy),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
+            l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode(uint256(1)),
             rollingHash: bytes32(0)
@@ -79,15 +87,15 @@ abstract contract CounterActions {
     }
 
     /// @dev Single L2 entry — L2-side mirror that drives the actual Counter.increment() on L2.
-    /// `L2ToL1Calls[0]` is the inbound call delivered through the source proxy
+    /// `calls[0]` is the inbound call delivered through the source proxy
     /// (lazily created by `_processNCalls`). Same `proxyEntryHash` as the L1 entry.
     function _l2Entries(address counterL2, address counterAndProxy)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: counterL2,
             value: 0,
             data: _incrementCallData(),
@@ -100,13 +108,12 @@ abstract contract CounterActions {
         rh = RollingHashBuilder.appendCallBegin(rh, 1);
         rh = RollingHashBuilder.appendCallEnd(rh, 1, true, abi.encode(uint256(1)));
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _callHash(counterL2, counterAndProxy),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode(uint256(1)),
             rollingHash: rh
@@ -223,7 +230,7 @@ contract ExecuteL2 is Script, CounterActions {
                 capAddr,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(counterL2Addr, capAddr),
-                noLookupCalls()
+                new L2LookupCall[](0)
             );
 
         console.log("done");
@@ -291,7 +298,7 @@ contract ComputeExpected is ComputeExpectedBase, CounterActions {
         address capAddr = vm.envAddress("COUNTER_AND_PROXY");
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, capAddr);
-        ExecutionEntry[] memory l2 = _l2Entries(counterL2Addr, capAddr);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2Addr, capAddr);
 
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);

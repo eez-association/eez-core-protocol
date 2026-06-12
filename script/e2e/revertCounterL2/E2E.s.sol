@@ -4,7 +4,21 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedLookup
+} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
@@ -27,7 +41,7 @@ import {
 //  cursors propagate out.
 //
 //  L2 side (ExecuteL2):
-//    1. loadExecutionTable installs ONE entry with calls[0].revertSpan=1.
+//    1. loadExecutionTable installs ONE entry with incomingCalls[0].revertSpan=1.
 //    2. Alice calls counterProxy (L2 proxy for Counter on L1) — consumes
 //       the entry by matching actionHash.
 //    3. _processNCalls sees revertSpan=1, self-calls executeInContext(1).
@@ -77,14 +91,14 @@ abstract contract RevertL2Actions {
     function _l2Entries(address counterL2, address counterL1, address alice)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
         // Inner call: a Counter.increment() on L2 wrapped in revertSpan=1 to
         // demonstrate the EVM state effect being rolled back while the rolling
         // hash still records the successful outcome. sourceRollupId mirrors the
         // entry's outer source (Alice on L2) per the spec convention.
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: counterL2,
             value: 0,
             data: abi.encodeWithSelector(Counter.increment.selector),
@@ -93,13 +107,12 @@ abstract contract RevertL2Actions {
             revertSpan: 1
         });
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _outerActionHash(counterL1, alice),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: "",
             rollingHash: _expectedRollingHash()
@@ -107,7 +120,7 @@ abstract contract RevertL2Actions {
     }
 
     /// @dev Single L1 entry — destination-side mirror, system-driven (proxyEntryHash=0).
-    /// `L2ToL1Calls[0]` targets the real Counter on L1 with revertSpan=1; the inner
+    /// `l2ToL1Calls[0]` targets the real Counter on L1 with revertSpan=1; the inner
     /// span increments it, returns abi.encode(1), and executeInContext rolls back state.
     /// Source matches the L2-anchored entry: (alice, L2_ROLLUP_ID).
     function _l1Entries(address counterL1, address counterL2, address alice)
@@ -130,8 +143,9 @@ abstract contract RevertL2Actions {
             stateDeltas: new StateDelta[](0),
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
+            l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             returnData: "",
             rollingHash: _expectedRollingHash()
@@ -194,7 +208,7 @@ contract ExecuteL2 is Script, RevertL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s counterProxy=%s", alice, counterProxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), noLookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), new L2LookupCall[](0));
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls counterProxy.increment() — consumes the entry.
@@ -316,7 +330,7 @@ contract ComputeExpected is ComputeExpectedBase, RevertL2Actions {
         address counterL2 = vm.envAddress("COUNTER_L2");
         address alice = msg.sender;
 
-        ExecutionEntry[] memory l2 = _l2Entries(counterL2, counterL1, alice);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, counterL1, alice);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, alice);

@@ -4,7 +4,21 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedLookup
+} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
@@ -21,26 +35,26 @@ import {
 //  SelfCallerWithRevert.execute():
 //    a. try this.innerCall() {} catch {}
 //         — innerCall does target.increment() (the reentrant proxy call SUCCEEDS,
-//           consuming nestedActions[0] and bumping the cursor), then innerCall()
+//           consuming expectedOutgoingCalls[0] and bumping the cursor), then innerCall()
 //           wraps up with `revert("inner scope revert")`. The revert rolls back
-//           innerCall()'s frame, including the ExpectedL1ToL2Call-cursor bump.
+//           innerCall()'s frame, including the ExpectedOutgoingCrossChainCall-cursor bump.
 //    b. lastResult = target.increment()
-//         — second reentrant call re-consumes nestedActions[0] from the same
+//         — second reentrant call re-consumes expectedOutgoingCalls[0] from the same
 //           cursor (since the bump was rolled back) and succeeds for real.
 //
-//  Net effect: exactly ONE nested action consumption survives. ExpectedL1ToL2Call
+//  Net effect: exactly ONE nested call consumption survives. ExpectedOutgoingCrossChainCall
 //  is the correct primitive — the reentrant call itself succeeds; only the
 //  Solidity wrapper around it reverts.
 //
 //  Chain of events (entirely on L2):
-//    1. loadExecutionTable loads ONE entry with calls[] + nestedActions[]
+//    1. loadExecutionTable loads ONE entry with incomingCalls[] + expectedOutgoingCalls[]
 //    2. Alice calls selfCallerProxy (proxy for SelfCallerWithRevert@MAINNET on L2)
-//    3. _processNCalls: calls[0] routes via proxy → selfCaller.execute()
+//    3. _processNCalls: incomingCalls[0] routes via proxy → selfCaller.execute()
 //    4. execute() does try this.innerCall() catch {} then target.increment()
 //    5. innerCall(): counterProxy reentrant call SUCCEEDS, then innerCall reverts
 //       — cursor bump rolled back by EVM
-//    6. target.increment(): counterProxy reentrant call re-consumes nestedActions[0]
-//    7. Nested action returns abi.encode(1) → lastResult=1
+//    6. target.increment(): counterProxy reentrant call re-consumes expectedOutgoingCalls[0]
+//    7. Nested call returns abi.encode(1) → lastResult=1
 // ═══════════════════════════════════════════════════════════════════════
 
 uint256 constant L2_ROLLUP_ID = 1;
@@ -76,7 +90,7 @@ abstract contract RevertContinueL2Actions {
     /// @dev Rolling hash: CALL_BEGIN(1) → NESTED_BEGIN(1) → NESTED_END(1) → CALL_END(1, true, "")
     ///      innerCall()'s revert rolls back the rolling-hash and cursor writes
     ///      from its successful reentrant consumption. The second target.increment()
-    ///      call re-consumes nestedActions[0] from the rolled-back cursor — that
+    ///      call re-consumes expectedOutgoingCalls[0] from the rolled-back cursor — that
     ///      is the only consumption recorded in the surviving rolling hash.
     function _expectedRollingHash() internal pure returns (bytes32 h) {
         h = bytes32(0);
@@ -96,7 +110,7 @@ abstract contract RevertContinueL2Actions {
     }
 
     /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — drained by executeL2TX.
-    ///      `L2ToL1Calls[0]` is the inbound call from SelfCaller (on L2) to Counter on MAINNET,
+    ///      `l2ToL1Calls[0]` is the inbound call from SelfCaller (on L2) to Counter on MAINNET,
     ///      delivered through the lazily-created source proxy for (SelfCaller, L2_ROLLUP_ID) on L1.
     function _l1Entries(address counterL1, address selfCallerL2)
         internal
@@ -118,8 +132,9 @@ abstract contract RevertContinueL2Actions {
             stateDeltas: new StateDelta[](0),
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
+            l2ToL1Calls: calls,
             expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode(uint256(1)),
             rollingHash: _expectedRollingHashL1()
@@ -129,10 +144,10 @@ abstract contract RevertContinueL2Actions {
     function _l2Entries(address selfCaller, address counterL1, address alice)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: selfCaller,
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
@@ -141,20 +156,19 @@ abstract contract RevertContinueL2Actions {
             revertSpan: 0
         });
 
-        ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
-        nested[0] = ExpectedL1ToL2Call({
+        ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
+        nested[0] = ExpectedOutgoingCrossChainCall({
             crossChainCallHash: _innerActionHash(counterL1, selfCaller),
             callCount: 0,
             returnData: abi.encode(uint256(1))
         });
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _outerActionHash(selfCaller, alice),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: nested,
+            incomingCalls: calls,
+            expectedOutgoingCalls: nested,
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: "",
             rollingHash: _expectedRollingHash()
@@ -230,7 +244,7 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s selfCaller=%s selfCallerProxy=%s", alice, selfCallerAddr, selfCallerProxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), noLookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), new L2LookupCall[](0));
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls selfCallerProxy.execute()
@@ -338,7 +352,7 @@ contract ComputeExpected is ComputeExpectedBase, RevertContinueL2Actions {
         address selfCallerAddr = vm.envAddress("SELF_CALLER");
         address alice = msg.sender;
 
-        ExecutionEntry[] memory l2 = _l2Entries(selfCallerAddr, counterL1Addr, alice);
+        L2ExecutionEntry[] memory l2 = _l2Entries(selfCallerAddr, counterL1Addr, alice);
         ExecutionEntry[] memory l1 = _l1Entries(counterL1Addr, selfCallerAddr);
         bytes32 l2Hash = _entryHash(l2[0]);
         bytes32 l1Hash = _entryHash(l1[0]);

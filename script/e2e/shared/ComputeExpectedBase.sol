@@ -2,7 +2,21 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExpectedLookup,
+    ExecutionEntry,
+    LookupCall
+} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 
 /// @title ComputeExpectedBase — Shared formatting helpers for ComputeExpected contracts
 /// @dev Each test's ComputeExpected inherits this and overrides _name() and _funcName().
@@ -23,6 +37,10 @@ abstract contract ComputeExpectedBase is Script {
         return _entryHash(e.proxyEntryHash, e.rollingHash);
     }
 
+    function _entryHash(L2ExecutionEntry memory e) internal pure returns (bytes32) {
+        return _entryHash(e.proxyEntryHash, e.rollingHash);
+    }
+
     // ══════════════════════════════════════════════════════════════════
     //  Address / selector naming — override per test.
     // ══════════════════════════════════════════════════════════════════
@@ -36,10 +54,28 @@ abstract contract ComputeExpectedBase is Script {
     }
 
     // ══════════════════════════════════════════════════════════════════
-    //  L2ToL1Call formatting (the legacy `Action` struct was removed)
+    //  Call formatting — L1 `L2ToL1Call` / L2 `CrossChainCall` overloads
+    //  (the legacy `Action` struct was removed)
     // ══════════════════════════════════════════════════════════════════
 
     function _fmtCall(L2ToL1Call memory c) internal view returns (string memory) {
+        string memory func = c.data.length == 0 ? "(ETH transfer)" : string.concat(".", _funcName(bytes4(c.data)), "()");
+        string memory valStr = c.value > 0 ? string.concat("  value=", _fmtEther(c.value)) : "";
+        string memory revertStr = c.revertSpan > 0 ? string.concat("  revertSpan=", vm.toString(c.revertSpan)) : "";
+        return string.concat(
+            "CALL ",
+            _name(c.targetAddress),
+            func,
+            valStr,
+            revertStr,
+            "\n          from ",
+            _name(c.sourceAddress),
+            " @ rollup ",
+            vm.toString(c.sourceRollupId)
+        );
+    }
+
+    function _fmtCall(CrossChainCall memory c) internal view returns (string memory) {
         string memory func = c.data.length == 0 ? "(ETH transfer)" : string.concat(".", _funcName(bytes4(c.data)), "()");
         string memory valStr = c.value > 0 ? string.concat("  value=", _fmtEther(c.value)) : "";
         string memory revertStr = c.revertSpan > 0 ? string.concat("  revertSpan=", vm.toString(c.revertSpan)) : "";
@@ -67,6 +103,17 @@ abstract contract ComputeExpectedBase is Script {
         );
     }
 
+    function _fmtNested(ExpectedOutgoingCrossChainCall memory n) internal pure returns (string memory) {
+        return string.concat(
+            "NESTED crossChainCallHash=",
+            _shortHash(n.crossChainCallHash),
+            "  callCount=",
+            vm.toString(n.callCount),
+            "  retData=",
+            _shortBytes(n.returnData)
+        );
+    }
+
     // ══════════════════════════════════════════════════════════════════
     //  Entry formatting
     // ══════════════════════════════════════════════════════════════════
@@ -79,7 +126,7 @@ abstract contract ComputeExpectedBase is Script {
         console.log("      proxyEntryHash:  %s", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.L2ToL1Calls.length, e.expectedL1ToL2Calls.length
+            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
         );
 
         for (uint256 d = 0; d < e.stateDeltas.length; d++) {
@@ -92,8 +139,8 @@ abstract contract ComputeExpectedBase is Script {
                 )
             );
         }
-        for (uint256 c = 0; c < e.L2ToL1Calls.length; c++) {
-            console.log(string.concat("      ", _fmtCall(e.L2ToL1Calls[c])));
+        for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
+            console.log(string.concat("      ", _fmtCall(e.l2ToL1Calls[c])));
         }
         for (uint256 n = 0; n < e.expectedL1ToL2Calls.length; n++) {
             console.log(string.concat("      ", _fmtNested(e.expectedL1ToL2Calls[n])));
@@ -105,19 +152,22 @@ abstract contract ComputeExpectedBase is Script {
     }
 
     /// @notice L2 entry (no state deltas, no ether tracking).
-    function _logL2Entry(uint256 idx, ExecutionEntry memory e) internal view {
+    function _logL2Entry(uint256 idx, L2ExecutionEntry memory e) internal view {
         bytes32 hash = _entryHash(e);
         console.log("  [%s] entryHash=%s", idx, vm.toString(hash));
         console.log("      proxyEntryHash:  %s", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.L2ToL1Calls.length, e.expectedL1ToL2Calls.length
+            "      callCount=%s  calls=%s  nested=%s",
+            e.callCount,
+            e.incomingCalls.length,
+            e.expectedOutgoingCalls.length
         );
-        for (uint256 c = 0; c < e.L2ToL1Calls.length; c++) {
-            console.log(string.concat("      ", _fmtCall(e.L2ToL1Calls[c])));
+        for (uint256 c = 0; c < e.incomingCalls.length; c++) {
+            console.log(string.concat("      ", _fmtCall(e.incomingCalls[c])));
         }
-        for (uint256 n = 0; n < e.expectedL1ToL2Calls.length; n++) {
-            console.log(string.concat("      ", _fmtNested(e.expectedL1ToL2Calls[n])));
+        for (uint256 n = 0; n < e.expectedOutgoingCalls.length; n++) {
+            console.log(string.concat("      ", _fmtNested(e.expectedOutgoingCalls[n])));
         }
         if (e.returnData.length > 0) {
             console.log("      returnData: %s", _shortBytes(e.returnData));
@@ -125,15 +175,46 @@ abstract contract ComputeExpectedBase is Script {
     }
 
     function _logLookupCall(uint256 idx, LookupCall memory sc) internal pure {
-        console.log("  [%s] STATIC crossChainCallHash=%s", idx, vm.toString(sc.crossChainCallHash));
+        console.log("  [%s] TOP-LEVEL crossChainCallHash=%s", idx, vm.toString(sc.crossChainCallHash));
         console.log(
-            "      callNumber=%s  lastNA=%s  failed=%s",
-            sc.callNumber,
-            sc.lastNestedActionConsumed,
-            sc.failed ? "true" : "false"
+            "      failed=%s  rootPins=%s", sc.failed ? "true" : "false", vm.toString(sc.expectedStateRoots.length)
         );
         if (sc.returnData.length > 0) {
             console.log("      returnData: %s", _shortBytes(sc.returnData));
+        }
+    }
+
+    function _logLookupCall(uint256 idx, L2LookupCall memory sc) internal pure {
+        console.log("  [%s] TOP-LEVEL crossChainCallHash=%s", idx, vm.toString(sc.crossChainCallHash));
+        console.log("      failed=%s", sc.failed ? "true" : "false");
+        if (sc.returnData.length > 0) {
+            console.log("      returnData: %s", _shortBytes(sc.returnData));
+        }
+    }
+
+    function _logNestedLookup(uint256 idx, ExpectedLookup memory el) internal pure {
+        console.log("  [%s] NESTED-LOOKUP crossChainCallHash=%s", idx, vm.toString(el.crossChainCallHash));
+        console.log(
+            "      callNumber=%s  lastL1ToL2=%s  failed=%s",
+            el.l2ToL1CallNumber,
+            el.lastL1ToL2CallConsumed,
+            el.failed ? "true" : "false"
+        );
+        if (el.returnData.length > 0) {
+            console.log("      returnData: %s", _shortBytes(el.returnData));
+        }
+    }
+
+    function _logNestedLookup(uint256 idx, L2ExpectedLookup memory el) internal pure {
+        console.log("  [%s] NESTED-LOOKUP crossChainCallHash=%s", idx, vm.toString(el.crossChainCallHash));
+        console.log(
+            "      callNumber=%s  lastOutgoing=%s  failed=%s",
+            el.callNumber,
+            el.lastOutgoingCallConsumed,
+            el.failed ? "true" : "false"
+        );
+        if (el.returnData.length > 0) {
+            console.log("      returnData: %s", _shortBytes(el.returnData));
         }
     }
 
@@ -155,7 +236,7 @@ abstract contract ComputeExpectedBase is Script {
                 "] proxyEntryHash=",
                 _shortHash(e.proxyEntryHash),
                 "  calls=",
-                vm.toString(e.L2ToL1Calls.length),
+                vm.toString(e.l2ToL1Calls.length),
                 "  nested=",
                 vm.toString(e.expectedL1ToL2Calls.length)
             )

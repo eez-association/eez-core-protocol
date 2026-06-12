@@ -5,7 +5,14 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall} from "../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ExpectedLookup
+} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
 
 contract MockProofSystem is IProofSystem {
@@ -15,7 +22,7 @@ contract MockProofSystem is IProofSystem {
 }
 
 /// @notice Helper that executes postAndVerifyBatch + incrementProxy in a single transaction.
-/// @dev Same-block requirement for executeL1ToL2Call after postAndVerifyBatch.
+/// @dev Same-block requirement for executeCrossChainCall after postAndVerifyBatch.
 contract Batcher {
     function execute(
         EEZ rollups,
@@ -129,8 +136,9 @@ contract E2EExecute is Script {
             stateDeltas: stateDeltas,
             proxyEntryHash: callHash,
             destinationRollupId: 1,
-            L2ToL1Calls: new L2ToL1Call[](0),
+            l2ToL1Calls: new L2ToL1Call[](0),
             expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode(uint256(1)),
             rollingHash: bytes32(0)

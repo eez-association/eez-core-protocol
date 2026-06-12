@@ -5,7 +5,14 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, LookupCall} from "../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    LookupCall,
+    ExpectedLookup
+} from "../../src/interfaces/IEEZ.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
 
@@ -127,8 +134,9 @@ contract E2EBridgeExecute is Script {
             stateDeltas: stateDeltas,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: new L2ToL1Call[](0),
+            l2ToL1Calls: new L2ToL1Call[](0),
             expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)

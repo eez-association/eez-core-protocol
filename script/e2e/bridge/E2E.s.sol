@@ -4,7 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
@@ -19,7 +26,7 @@ import {
 //
 //  L1 side (Execute):
 //    BridgeSender.bridge{value: 1 ether}() → L2_PROXY.call{value: 1 ether}("")
-//    → EEZ.executeL1ToL2Call consumes the L1 entry; manager balance grows by 1 ether
+//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 1 ether
 //    (the etherDelta on the StateDelta records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
@@ -71,17 +78,22 @@ abstract contract BridgeActions {
             stateDeltas: deltas,
             proxyEntryHash: _callHash(l2Destination, sender),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
+            l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: "",
             rollingHash: bytes32(0)
         });
     }
 
-    function _l2Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+    function _l2Entries(address l2Destination, address sender)
+        internal
+        pure
+        returns (L2ExecutionEntry[] memory entries)
+    {
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: l2Destination,
             value: 1 ether,
             data: "",
@@ -94,13 +106,12 @@ abstract contract BridgeActions {
         rh = RollingHashBuilder.appendCallBegin(rh, 1);
         rh = RollingHashBuilder.appendCallEnd(rh, 1, true, "");
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _callHash(l2Destination, sender),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: "",
             rollingHash: rh
@@ -203,7 +214,15 @@ contract ExecuteL2 is Script, BridgeActions {
         EEZL2(managerAddr)
         .executeIncomingCrossChainCall{
             value: 1 ether
-        }(l2DestAddr, 1 ether, "", senderAddr, MAINNET_ROLLUP_ID, _l2Entries(l2DestAddr, senderAddr), noLookupCalls());
+        }(
+            l2DestAddr,
+            1 ether,
+            "",
+            senderAddr,
+            MAINNET_ROLLUP_ID,
+            _l2Entries(l2DestAddr, senderAddr),
+            new L2LookupCall[](0)
+        );
 
         console.log("done");
         console.log("L2 receiver balance=%s", l2DestAddr.balance);
@@ -257,7 +276,7 @@ contract ComputeExpected is ComputeExpectedBase, BridgeActions {
         address senderAddr = vm.envAddress("BRIDGE_SENDER");
 
         ExecutionEntry[] memory l1 = _l1Entries(l2DestAddr, senderAddr);
-        ExecutionEntry[] memory l2 = _l2Entries(l2DestAddr, senderAddr);
+        L2ExecutionEntry[] memory l2 = _l2Entries(l2DestAddr, senderAddr);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
 

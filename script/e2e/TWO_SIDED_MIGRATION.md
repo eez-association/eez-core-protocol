@@ -14,8 +14,8 @@ Pick the right destination-side pattern by where the user-trigger lives:
 
 | Source-side trigger | Destination-side simulation |
 |---|---|
-| L1 (`postBatch` + user tx)           | **`managerL2.executeIncomingCrossChainCall(dest, value, data, src, srcRollup, entries, lookups)` from SYSTEM** — combines load + execute, lazily creates the source proxy on L2, runs `_processNCalls` which actually invokes the destination |
-| L2 (`loadExecutionTable` + user tx)  | **L1 batcher with `transientExecutionEntryCount=0` + `EEZ.executeL2TX(rollupId)`** — postBatch routes a deferred entry into the L2-rollup queue, then `executeL2TX` drains it via `_consumeAndExecute(rollupId, bytes32(0), 0)` which runs `_processNCalls` on the L1 anvil |
+| L1 (`postAndVerifyBatch` + user tx)  | **`managerL2.executeIncomingCrossChainCall(dest, value, data, src, srcRollup, entries, lookups)` from SYSTEM** — combines load + execute, lazily creates the source proxy on L2, runs `_processNCalls` which actually invokes the destination |
+| L2 (`loadExecutionTable` + user tx)  | **L1 batcher with `transientExecutionEntryCount=0` + `EEZ.executeL2TX(rollupId)`** — `postAndVerifyBatch` routes a deferred entry into the L2-rollup queue, then `executeL2TX` drains it via `_consumeAndExecute(rollupId, bytes32(0))` which runs `_processNCalls` on the L1 anvil |
 
 There is no `executeIncomingCrossChainCall` on L1 — the L1-side analog for system-driven execution is `executeL2TX`, and the destination-side entry has `proxyEntryHash = bytes32(0)`.
 
@@ -50,8 +50,9 @@ ExecutionEntry entry = {
     stateDeltas:         deltas,
     proxyEntryHash:      crossChainCallHash(L2_ROLLUP_ID, dest, value, data, srcAddr, MAINNET_ROLLUP_ID),
     destinationRollupId: L2_ROLLUP_ID,
-    L2ToL1Calls:         [],            // no inner calls — top-level only
+    l2ToL1Calls:         [],            // no inner calls — top-level only
     expectedL1ToL2Calls: [],
+    expectedLookups:     [],            // entry-scoped nested lookups (static/reverted) — empty here
     callCount:           0,
     returnData:          <cached>,
     rollingHash:         bytes32(0),    // zero calls means zero-tape
@@ -61,8 +62,8 @@ ExecutionEntry entry = {
 ### L2 entry shape (destination-side)
 
 ```solidity
-L2ToL1Call[] calls = [
-    L2ToL1Call(dest, value, data, srcAddr /* CAP@L1 */, MAINNET_ROLLUP_ID, 0 /* revertSpan */)
+CrossChainCall[] calls = [
+    CrossChainCall(dest, value, data, srcAddr /* CAP on L1 */, MAINNET_ROLLUP_ID, 0 /* revertSpan */)
 ];
 
 bytes32 rh = bytes32(0);
@@ -70,16 +71,17 @@ rh = RollingHashBuilder.appendCallBegin(rh, 1);
 rh = RollingHashBuilder.appendCallEnd(rh, 1, true, <cached>);
 
 ExecutionEntry entry = {
-    stateDeltas:         [],
     proxyEntryHash:      <same hash as L1 side>,
-    destinationRollupId: L2_ROLLUP_ID,
-    L2ToL1Calls:         calls,
-    expectedL1ToL2Calls: [],
+    incomingCalls:       calls,
+    expectedOutgoingCalls: [],
+    expectedLookups:     [],            // nested lookups (static/reverted) live HERE when needed
     callCount:           1,
     returnData:          <cached>,
     rollingHash:         rh,
 };
 ```
+
+For scenarios with a try/catch'd reverting reentrant call, put the reverted `ExpectedLookup` inside `expectedLookups` (reference: `nestedCallRevert/E2E.s.sol`).
 
 ### `ExecuteL2` contract
 
@@ -98,7 +100,7 @@ contract ExecuteL2 is Script, <Scenario>Actions {
             srcAddr,
             MAINNET_ROLLUP_ID,
             _l2Entries(destAddr, srcAddr),
-            noLookupCalls()
+            noL2LookupCalls()
         );
 
         console.log("L2 done; counter=%s", <DestContract>(destAddr).counter());
@@ -107,11 +109,11 @@ contract ExecuteL2 is Script, <Scenario>Actions {
 }
 ```
 
-`SYSTEM_ADDRESS` is anvil account 0 by default (the broadcaster). The source proxy is lazy-created by `_processNCalls` (`src/L2/EEZL2.sol:426-429`) — no explicit `createCrossChainProxy` needed.
+`SYSTEM_ADDRESS` is anvil account 0 by default (the broadcaster). The source proxy is lazy-created by `_processNCalls` — no explicit `createCrossChainProxy` needed.
 
-`msg.value` must equal `<value>` strictly (`ValueMismatch` revert otherwise — `src/L2/EEZL2.sol:268`).
+`msg.value` must equal `<value>` strictly (`ValueMismatch` revert otherwise).
 
-**Single-entry only.** `executeIncomingCrossChainCall` is designed for one entry per transaction (`_currentEntryIndex`/`_rollingHash` aren't reset between back-to-back invocations in the same tx — the natspec at line 278 explicitly says "once per tx"). For multi-entry L2 destinations (multi-call-twice, multi-call-two-diff, multi-call-nested), use Pattern C below.
+**Single-entry only.** `executeIncomingCrossChainCall` is designed for one entry per transaction (`_currentEntryIndex`/`_rollingHash` aren't reset between back-to-back invocations in the same tx — its natspec explicitly says "once per tx"). For multi-entry L2 destinations (multi-call-twice, multi-call-two-diff, multi-call-nested), use Pattern C below.
 
 ## Pattern C — Multi-entry destination (multi-call-twice, multi-call-two-diff, multi-call-nested)
 
@@ -125,21 +127,22 @@ When the L2 destination needs to consume N entries in sequence — e.g. a `CallT
 2. **L2 entry shape**:
    ```solidity
    proxyEntryHash:      crossChainCallHash(MAINNET_ROLLUP_ID, dest, value, data, l2Trigger, L2_ROLLUP_ID)
-   L2ToL1Calls:         [ L2ToL1Call(dest, value, data, l2Trigger, L2_ROLLUP_ID, 0) ]
+   incomingCalls:       [ CrossChainCall(dest, value, data, l2Trigger, L2_ROLLUP_ID, 0) ]
+   expectedLookups:     []
    callCount:           1
    rollingHash:         CB(1) → CE(1, true, <cached>)   // starts from 0; _consumeAndExecute
-                                                          // (src/L2/EEZL2.sol:408) resets _rollingHash
-                                                          // at the start of each entry consumption.
+                                                          // resets _rollingHash at the start of
+                                                          // each entry consumption.
    ```
 
 3. **ExecuteL2 contract**:
    ```solidity
    vm.startBroadcast();
-   EEZL2(managerAddr).loadExecutionTable(_l2Entries(...), noLookupCalls());
+   EEZL2(managerAddr).loadExecutionTable(_l2Entries(...), noL2LookupCalls());
    CallTwice(l2Trigger).callCounterTwice(triggerProxy);   // or whatever shape the trigger has
    vm.stopBroadcast();
    ```
-   Each proxy call inside the trigger forwards to `managerL2.executeL1ToL2Call`, which calls `_consumeAndExecute` → resets `_rollingHash`/`_currentCallNumber` per entry, then `_processNCalls(entry.callCount)`. The trigger pattern matches `multi-call-nested/E2E.s.sol::ExecuteL2` — use it as the reference implementation.
+   Each proxy call inside the trigger forwards to `managerL2.executeCrossChainCall`, which calls `_consumeAndExecute` → resets `_rollingHash`/`_currentIncomingCall` per entry, then `_processNCalls(entry.callCount)`. The trigger pattern matches `multi-call-nested/E2E.s.sol::ExecuteL2` — use it as the reference implementation.
 
 The trade-off: L1 and L2 `proxyEntryHash` values diverge for these scenarios. The cross-chain tie is at the level of "the destination chain produced what the source-side cached `returnData` claimed it would" — verified by asserting real counter state at the end of `ExecuteL2`.
 
@@ -162,8 +165,9 @@ ExecutionEntry entry = {
     stateDeltas:         [],            // optional — set if you want stateRoot to advance
     proxyEntryHash:      bytes32(0),    // ← system-driven; no source-side hash to match
     destinationRollupId: L2_ROLLUP_ID,  // ← queue routed to the L2 rollup id
-    L2ToL1Calls:         calls,
+    l2ToL1Calls:         calls,
     expectedL1ToL2Calls: [],
+    expectedLookups:     [],
     callCount:           1,
     returnData:          <cached>,
     rollingHash:         rh,
@@ -172,7 +176,7 @@ ExecutionEntry entry = {
 
 ### Inline `DeferredL2TXBatcher`
 
-The shared `L2TXBatcher` in `E2EHelpers.sol:119` auto-promotes leading zero-hash entries into the transient prefix — which would consume the entry inline during `postBatch` and leave nothing for `executeL2TX` to drain. For Pattern B, inline a batcher that pins `transientExecutionEntryCount=0`:
+The shared `L2TXBatcher` in `E2EHelpers.sol` auto-promotes leading zero-hash entries into the transient prefix — which would consume the entry inline during `postAndVerifyBatch` and leave nothing for `executeL2TX` to drain. For Pattern B, inline a batcher that pins `transientExecutionEntryCount=0`:
 
 ```solidity
 contract DeferredL2TXBatcher {
@@ -190,6 +194,7 @@ contract DeferredL2TXBatcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            blockNumber: 0,
             entries: entries,
             l1ToL2lookupCalls: lookupCalls,
             transientExecutionEntryCount: 0,          // ← deferred
@@ -226,7 +231,7 @@ contract Execute is Script, <Scenario>Actions {
 
 ## Rolling hash — the most common bug
 
-For each top-level call in `L2ToL1Calls`:
+For each top-level call in `l2ToL1Calls` (L2: `incomingCalls`):
 
 ```
 CB(n)              keccak256(prev || 0x01 || n)
@@ -246,7 +251,7 @@ For Pattern A L2 entry / Pattern B L1 entry: `callCount=1`, one CB/CE pair.
 
 ## The `callCount` partition invariant
 
-`entry.callCount + Σ expectedL1ToL2Calls[i].callCount == L2ToL1Calls.length`. Easiest in simple scenarios: `callCount = L2ToL1Calls.length` and no nested actions.
+`entry.callCount + Σ expectedL1ToL2Calls[i].callCount == l2ToL1Calls.length`. Easiest in simple scenarios: `callCount = l2ToL1Calls.length` and no nested actions.
 
 ## ComputeExpected — print both tables
 
@@ -290,9 +295,9 @@ Then move the log to `tmp/e2e-success/<scenario>.log`.
 
 | Selector | Error | Most likely cause in a two-sided context |
 |---|---|---|
-| `0x7d79e7e5` | `RollingHashMismatch` | Off-chain `rollingHash` doesn't replay the on-chain tape — check `success`/`retData` and the partition invariant. |
+| `0xf3a3b67c` | `RollingHashMismatch` | Off-chain `rollingHash` doesn't reproduce the on-chain tape — check `success`/`retData` and the partition invariant. |
 | `0xed6bc750` | `ExecutionNotFound`  | `crossChainCallHash` differs between source and destination sides — make sure both call `_callHash(...)` from the same `<Scenario>Actions` mixin. |
-| `0xf9d330ad` | `ExecutionNotInCurrentBlock` | `lastVerifiedBlock` (L1) / `lastLoadBlock` (L2) ≠ `block.number` — don't roll blocks between phases. |
-| `0x16c31b8c` | `UnconsumedCalls`    | `entry.callCount` < `L2ToL1Calls.length` — usually `callCount = L2ToL1Calls.length` for simple entries. |
-| `0xa2cdd0ba` | `UnconsumedNestedActions` | An `ExpectedL1ToL2Call` was declared but the destination didn't re-enter. |
-| `ValueMismatch` | — | `msg.value` ≠ `value` in `executeIncomingCrossChainCall`. |
+| `0x2ae204bd` / `0xf9d330ad` | `ExecutionNotInCurrentBlock(uint256)` (L1) / `()` (L2) | `lastVerifiedBlock` (L1) / `lastLoadBlock` (L2) ≠ `block.number` — don't roll blocks between phases. |
+| `0xdd0c77c5` / `0x093a2b9f` | `UnconsumedL2ToL1Calls` (L1) / `UnconsumedIncomingCalls` (L2) | `entry.callCount` < flat array length — usually `callCount = l2ToL1Calls.length` for simple entries. |
+| `0xed4a913d` / `0x03ae6521` | `UnconsumedL1ToL2Calls` (L1) / `UnconsumedOutgoingCalls` (L2) | An expected reentrant call was declared but the destination didn't re-enter. |
+| `0xdd8e4af7` | `ValueMismatch` | `msg.value` ≠ `value` in `executeIncomingCrossChainCall`. |

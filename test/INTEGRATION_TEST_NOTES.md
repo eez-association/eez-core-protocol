@@ -1,122 +1,44 @@
 # Integration Test Notes & Open Questions
 
-## What we built
+Notes for `test/IntegrationTest.t.sol` (single-EVM L1+L2 integration suite). Both managers are
+deployed in one EVM, so cross-chain effects that would normally settle asynchronously are
+observable in the same transaction.
 
-4 integration test scenarios covering all cross-chain call patterns. **Every scenario executes on BOTH L1 and L2.**
+## Scenarios
 
-| # | Flow | Direction | What it tests |
-|---|------|-----------|---------------|
-| 1 | Alice -> A (-> B') -> B | L1 -> L2 | Simple: L1 contract calls L2 via proxy. Phase 1: L2 executes B via `executeIncomingCrossChainCall`. Phase 2: L1 resolves via `postAndVerifyBatch` + proxy call. |
-| 2 | Alice -> D (-> C') -> C | L2 -> L1 | Simple reverse: Phase 1: L1 executes C via `executeL2TX` + scope nav. Phase 2: L2 resolves via execution table. |
-| 3 | Alice -> A' (-> A -> B') -> B | L2 -> L1 -> L2 | Nested: Phase 1: L1 runs A via `executeL2TX` (A calls B' reentrant). Phase 2: L2 runs B via scope navigation through A'. |
-| 4 | Alice -> D' (-> D -> C') -> C | L1 -> L2 -> L1 | Nested: Phase 1: L2 runs D via `executeIncomingCrossChainCall` (D calls C' reentrant). Phase 2: L1 runs C via scope navigation through D'. |
+Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
+`D` = CounterAndProxy on L2, `X'` = CrossChainProxy for X (deployed on the other chain).
 
-## Design decisions
+| # | Flow | Type | What it tests |
+|---|------|------|---------------|
+| 1 | Alice → A (→ B') → resolved | L1 deferred, simple | A calls B' on L1 → `EEZ.executeCrossChainCall` consumes a deferred entry (no `l2ToL1Calls[]`) and returns the pre-computed `returnData`. |
+| 2 | Alice → D (→ C') → resolved | L2 deferred, simple | Reverse of 1: D calls C' on L2 → `EEZL2.executeCrossChainCall` consumes a table entry (no `incomingCalls[]`). |
+| 3 | Alice → A' (→ A → B') → resolved | L2 entry + calls, nested | L2 entry's `incomingCalls[0]` drives `A.incrementProxy()` via A'; inside it, A calls B', which crosses into `EEZ.executeCrossChainCall` and consumes a separate L1 deferred entry (a different manager — NOT an `expectedOutgoingCalls` slot). |
+| 4 | Alice → D' (→ D → C') → resolved | L1 entry + calls, nested | Mirror of 3: L1 entry's `l2ToL1Calls[0]` drives `D.incrementProxy()`; D calls C', consuming a separate L2 table entry. |
 
-### Every scenario must execute on both L1 and L2
+## Design notes
 
-This is a core design principle. Even for nested scenarios (3 & 4), both chains must have an execution phase:
-- **Scenario 3:** L1 runs A via `executeL2TX` (Phase 1), then L2 runs B via scope navigation (Phase 2)
-- **Scenario 4:** L2 runs D via `executeIncomingCrossChainCall` (Phase 1), then L1 runs C via scope navigation (Phase 2)
+- **Cross-manager calls are separate entries.** When an inner call targets the *other* manager
+  (Scenarios 3/4), it consumes that manager's own entry — the reentrant tables
+  (`expectedL1ToL2Calls` / `expectedOutgoingCalls`) only serve reentry into the SAME manager.
+- **Sequential state deltas (L1).** Entries consuming the same rollup must chain
+  `currentState → newState`; `StateDelta.currentState` is checked against the live
+  `rollups[rid].stateRoot` at consumption (`StateRootMismatch` otherwise).
+- **Same-block consumption.** Deferred entries are only consumable in the block their batch was
+  posted (`lastVerifiedBlock` gate on L1, `lastLoadBlock` on L2) — tests post and consume in
+  the same block.
+- **Proxy reentrancy is safe.** A proxy can be entered twice in one transaction (caller's
+  `fallback()` then the manager's `executeOnBehalf()`): `CrossChainProxy` holds only immutable
+  fields, and the two entry points are independent.
 
-The nested scenarios are NOT just "scope navigation on one chain" — they reflect the full cross-chain reality where the inner contract (B or C) must actually execute on its home chain.
+## Open questions / future work
 
-### Why `executeL2TX` for L1 execution (Scenarios 2 & 3)?
-
-`EEZ.sol` has no `executeIncomingCrossChainCall` (unlike `EEZL2`). This is by design: **L1 always initiates L2 execution** — an L2 can receive execution from L1, but not the other way around. `executeL2TX` starts the L2 tx execution that interacts with L1.
-
-How it works:
-1. `postAndVerifyBatch` stores deferred entries with an L2TX action hash
-2. `executeL2TX(rollupId, rlpEncodedTx)` builds an L2TX action, matches it
-3. The matched entry's `nextAction` is a CALL → enters scope navigation
-4. `_processCallAtScope` → proxy `executeOnBehalf` → actual execution
-
-### Reentrant `executeL1ToL2Call` in nested scenarios
-
-In Scenarios 3 and 4, the inner contract (A or D) itself makes a cross-chain call during execution:
-- **Scenario 3 Phase 1:** `executeL2TX` → runs A on L1 → A calls B' → this triggers a **reentrant** `executeL1ToL2Call` inside the same transaction
-- **Scenario 4 Phase 1:** `executeIncomingCrossChainCall` → runs D on L2 → D calls C' → this triggers a **reentrant** `executeL1ToL2Call`
-
-This means the execution table needs entries for BOTH the outer call AND the inner reentrant call. For example, Scenario 3 Phase 1 needs 3 `postAndVerifyBatch` entries:
-1. `L2TX → CALL to A` (consumed by `executeL2TX`)
-2. `CALL to B → RESULT(1)` (consumed inside the reentrant `executeL1ToL2Call` when A calls B')
-3. `RESULT(void from A) → terminal` (consumed after A.increment() returns)
-
-### Sequential state deltas
-
-When multiple entries consume L2 state (like Scenario 3 Phase 1), their state deltas must chain sequentially: S0→S1 for entry 1, S1→S2 for entry 2. `_findAndApplyExecution` checks that `currentState` matches the rollup's actual state at consumption time.
-
-The `_etherDelta` transient storage is reset by each `_applyStateDeltas` call, so sequential entries with `etherDelta=0` work correctly even across reentrant calls.
-
-### Void vs valued returns
-
-- `Counter.increment()` returns `uint256` → RESULT data = `abi.encode(1)`
-- `CounterAndProxy.increment()` returns void → RESULT data = `""` (empty bytes)
-
-The RESULT's `rollupId` comes from the CALL action's `rollupId` (the chain where the target lives), NOT from the chain where execution physically happens.
-
-### Proxy reentrancy is safe
-
-In Scenarios 3 and 4, the proxy (A' or D') is entered twice in the same transaction:
-1. First via `fallback()` (Alice's call)
-2. Then via `executeOnBehalf()` (manager's call during scope navigation)
-
-This is safe because:
-- `CrossChainProxy` has no mutable storage (only `immutable` fields)
-- `fallback()` and `executeOnBehalf()` are independent entry points
-- No reentrancy guards needed
-
-### Scope navigation in Phase 2 of nested scenarios
-
-Phase 2 uses execution table entries with `scope=[0]` to trigger scope navigation. The flow:
-1. Alice calls proxy (A' or D') → `executeL1ToL2Call` builds CALL#1 (outer, scope=[])
-2. CALL#1 matches → returns CALL#2 (inner, scope=[0])
-3. `_resolveScopes(CALL#2)` → `newScope([], CALL#2)` → child scope detected → `newScope([0], CALL#2)`
-4. Scopes match → `_processCallAtScope` → proxy's `executeOnBehalf` → actual execution
-5. RESULT matches → terminal → unwinds back to caller
-
-## Visualizer presentation order logic
-
-The visualizer (`visualizator/index.html`) shows steps sequentially. The order follows the **arrow direction** of each scenario, NOT a fixed "always L1 first" or "always L2 first" rule.
-
-### Rules for determining step order
-
-1. **Follow the arrows.** The `→` in the scenario flow tells you which chain the story starts on.
-2. **Simple scenarios (S1, S2):** Show the initiating chain first, then the remote chain.
-   - S1 `Alice → A (→ B') → B` [L1→L2]: L1 first (Alice calls A), then L2 (B executes)
-   - S2 `Alice → D (→ C') → C` [L2→L1]: L2 first (Alice calls D), then L1 (C executes)
-3. **Nested scenarios (S3, S4):** The "inner" execution (the chain in the middle of the arrows) must complete first, because its result gets pre-loaded into the "outer" chain's table. Then the "outer" chain consumes it via scope navigation.
-   - S3 `Alice → A' (→ A → B') → B` [L2→L1→L2]: L1 first (A runs as inner), then L2 (Alice→A'→B as outer)
-   - S4 `Alice → D' (→ D → C') → C` [L1→L2→L1]: L2 first (D runs as inner), then L1 (Alice→D'→C as outer)
-4. **Within each chain phase:** setup (postAndVerifyBatch/loadTable) comes before execution (call/executeL2TX/executeIncoming).
-
-### How to build future flows
-
-For a new scenario with flow `X → Y → Z`:
-1. Identify the chains: which chain does each entity (X, Y, Z) live on?
-2. Identify the direction: the arrows tell you the conceptual order.
-3. Determine execution phases: the "inner" cross-chain calls must execute first on their home chain, producing results that get loaded into the "outer" chain's table.
-4. For each phase: first show table loading (postAndVerifyBatch on L1 / loadExecutionTable on L2), then show the execution that consumes those entries.
-5. Show both execution tables at all times — entries appear when loaded, disappear when consumed.
-
-## Open questions for future work
-
-1. **Negative test cases:** Should we add tests for:
-   - Wrong state delta (currentState doesn't match) → should revert with `ExecutionNotFound`
-   - Wrong action hash (no matching entry) → should revert
-   - Failed proof verification (set `verifier.setVerifyResult(false)`)
-   - RESULT with `failed=true` → should revert with `CallExecutionFailed`
-
-2. **ETH value transfers:** All current scenarios use `value=0`. Should we add scenarios that test:
-   - `depositEther` + cross-chain calls with value
-   - `etherDelta` accounting in state deltas
-   - Negative ether delta (rollup sends ETH out)
-
-3. **Deeper nesting:** Current nested tests go 2 levels deep (scope=[0]). Should we test:
-   - 3+ levels of nesting (scope=[0,0])
-   - Multiple sibling calls (scope=[0], scope=[1])
-   - Mixed success/revert with `REVERT` and `REVERT_CONTINUE` actions
-
-4. **Multiple rollups:** All tests use a single L2 rollup. Should we test cross-chain calls spanning 3+ rollups?
-
-5. **Multiple entries in a batch:** Current tests post 1-2 entries per batch. Should we test batches with many entries, some immediate (actionHash=0) and some deferred?
+1. **ETH value transfers**: scenarios with non-zero `value`, `etherDelta` accounting in state
+   deltas, and negative deltas (rollup sends ETH out). (`IntegrationTestBridge` covers some
+   value flow; the delta-accounting matrix is not systematic.)
+2. **Deeper nesting**: 3+ levels of same-manager reentry and multiple sibling reentrant calls
+   (partial coverage exists in `script/e2e/deepNested/`).
+3. **Multiple rollups**: cross-chain calls spanning 3+ rollups with interleaved per-rollup
+   queues (unit-level coverage exists in `test/EEZ.t.sol`; no integration scenario).
+4. **Many-entry batches**: batches mixing immediate (`proxyEntryHash == 0`) and deferred
+   entries at scale.

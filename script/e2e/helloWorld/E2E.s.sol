@@ -4,7 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {HelloWorldL1, HelloWorldL2, IHelloWorldL2} from "../../../test/mocks/helloword.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
@@ -19,7 +26,7 @@ import {
 //  HelloWorld scenario — L1→L2 with rich return data, two-sided
 //
 //  L1 side (Execute):
-//    HelloWorldL1.helloL2World() → HelloWorldProxy@L1 → EEZ.executeL1ToL2Call
+//    HelloWorldL1.helloL2World() → HelloWorldProxy@L1 → EEZ.executeCrossChainCall
 //    consumes the L1 entry whose returnData == abi.encode("World"); helloL2World
 //    returns that string back to the caller.
 //
@@ -55,17 +62,18 @@ abstract contract HelloActions {
             stateDeltas: deltas,
             proxyEntryHash: _callHash(helloL2, helloL1),
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
+            l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode("World"),
             rollingHash: bytes32(0)
         });
     }
 
-    function _l2Entries(address helloL2, address helloL1) internal pure returns (ExecutionEntry[] memory entries) {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+    function _l2Entries(address helloL2, address helloL1) internal pure returns (L2ExecutionEntry[] memory entries) {
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: helloL2,
             value: 0,
             data: _getWordCallData(),
@@ -78,13 +86,12 @@ abstract contract HelloActions {
         rh = RollingHashBuilder.appendCallBegin(rh, 1);
         rh = RollingHashBuilder.appendCallEnd(rh, 1, true, abi.encode("World"));
 
-        entries = new ExecutionEntry[](1);
-        entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
             proxyEntryHash: _callHash(helloL2, helloL1),
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: abi.encode("World"),
             rollingHash: rh
@@ -185,7 +192,7 @@ contract ExecuteL2 is Script, HelloActions {
                 helloL1Addr,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(helloL2Addr, helloL1Addr),
-                noLookupCalls()
+                new L2LookupCall[](0)
             );
 
         console.log("done");
@@ -233,7 +240,7 @@ contract ComputeExpected is ComputeExpectedBase, HelloActions {
         address h1Addr = vm.envAddress("HELLO_WORLD_L1");
 
         ExecutionEntry[] memory l1 = _l1Entries(helloL2Addr, h1Addr);
-        ExecutionEntry[] memory l2 = _l2Entries(helloL2Addr, h1Addr);
+        L2ExecutionEntry[] memory l2 = _l2Entries(helloL2Addr, h1Addr);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
 

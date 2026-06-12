@@ -3,15 +3,29 @@ pragma solidity ^0.8.28;
 
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
 
-/// @notice Mock proof system that returns a configurable verify result. Default: always succeeds.
+/// @notice Mock proof system. Default: accepts any proof without checking the hash.
+/// @dev With `shouldVerify` on, only the pinned `expectedPublicInputsHash` is accepted —
+///      so tests can assert WHAT the registry feeds the prover. Enabling verification
+///      without pinning a hash rejects everything (real hashes never equal 0).
 contract MockProofSystem is IProofSystem {
-    bool public shouldVerify = true;
+    /// @notice When false (default), `verify` accepts without checking the hash.
+    bool public shouldVerify;
 
-    function setVerifyResult(bool _shouldVerify) external {
+    /// @notice The only publicInputsHash accepted while `shouldVerify` is on.
+    bytes32 public expectedPublicInputsHash;
+
+    function setShouldVerify(bool _shouldVerify) external {
         shouldVerify = _shouldVerify;
     }
 
-    function verify(bytes calldata, bytes32) external view override returns (bool) {
-        return shouldVerify;
+    /// @notice Pins the exact hash `verify` must see, and enables verification.
+    function setExpectedPublicInputsHash(bytes32 expected) external {
+        expectedPublicInputsHash = expected;
+        shouldVerify = true;
+    }
+
+    function verify(bytes calldata, bytes32 publicInputsHash) external view override returns (bool) {
+        if (!shouldVerify) return true;
+        return publicInputsHash == expectedPublicInputsHash;
     }
 }

@@ -10,16 +10,17 @@ import {Vm} from "forge-std/Vm.sol";
 ///         L1 (EEZ.sol) and L2 (EEZL2.sol).
 ///
 /// NOTE: Pre-execution entry payload is NOT decoded by this script.
-///       Post-refactor, `BatchPosted(uint256 subBatchCount)` carries only the
-///       sub-batch count; the full `ExecutionEntry[]` payload lives in the
+///       Post-refactor, `BatchPosted(uint256 rollupCount)` carries only the
+///       number of rollups verified; the full `ExecutionEntry[]` payload lives in the
 ///       `postAndVerifyBatch` transaction input calldata. Decoding tx input from inside
 ///       a Forge script is awkward (no direct cheatcode for it), so this
 ///       decoder reports execution flow purely from emitted events. The events
 ///       it relies on are rich enough for almost all debugging use cases:
-///       BatchPosted, RollupCreated, RollupContractChanged, StateUpdated,
+///       BatchPosted, RollupCreated, StateUpdated,
 ///       L2ExecutionPerformed, ImmediateEntrySkipped, ExecutionConsumed,
 ///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted, CallResult,
-///       NestedActionConsumed, RevertSpanExecuted, CrossChainProxyCreated,
+///       L1ToL2CallConsumed (L1) / OutgoingCallConsumed (L2), RevertSpanExecuted,
+///       CrossChainProxyCreated,
 ///       and the L2-only ExecutionTableLoaded / IncomingCrossChainCallExecuted.
 ///       For a full pre-execution dump of entries, decode the postAndVerifyBatch tx
 ///       input off-chain (e.g. with `cast calldata-decode`).
@@ -31,7 +32,6 @@ contract DecodeExecutions is Script {
     // ── Event signatures (L1 + L2 share most of these) ──
     bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
     bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint256,address,bytes32)");
-    bytes32 constant SIG_ROLLUP_CONTRACT_CHANGED = keccak256("RollupContractChanged(uint256,address,address)");
     bytes32 constant SIG_STATE_UPDATED = keccak256("StateUpdated(uint256,bytes32)");
     bytes32 constant SIG_L2_EXEC_PERFORMED = keccak256("L2ExecutionPerformed(uint256,bytes32)");
     bytes32 constant SIG_IMMEDIATE_SKIPPED = keccak256("ImmediateEntrySkipped(uint256,bytes)");
@@ -42,12 +42,13 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");
-    bytes32 constant SIG_NESTED_ACTION_CONSUMED = keccak256("NestedActionConsumed(uint256,uint256,bytes32,uint256)");
+    bytes32 constant SIG_L1_TO_L2_CALL_CONSUMED = keccak256("L1ToL2CallConsumed(uint256,uint256,bytes32,uint256)");
+    bytes32 constant SIG_OUTGOING_CALL_CONSUMED = keccak256("OutgoingCallConsumed(uint256,uint256,bytes32,uint256)");
     bytes32 constant SIG_REVERT_SPAN = keccak256("RevertSpanExecuted(uint256,uint256,uint256)");
     bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint256)");
     // L2-only:
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded(((uint256,bytes32,bytes32,int256)[],bytes32,uint256,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
+        "ExecutionTableLoaded((bytes32,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
         keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint256)");
@@ -116,8 +117,6 @@ contract DecodeExecutions is Script {
             _printBatchPosted(topics, p);
         } else if (sig == SIG_ROLLUP_CREATED) {
             _printRollupCreated(topics, data, p);
-        } else if (sig == SIG_ROLLUP_CONTRACT_CHANGED) {
-            _printRollupContractChanged(topics, p);
         } else if (sig == SIG_STATE_UPDATED) {
             _printStateUpdated(topics, data, p);
         } else if (sig == SIG_L2_EXEC_PERFORMED) {
@@ -136,8 +135,10 @@ contract DecodeExecutions is Script {
             _printCrossChainCallExecuted(topics, data, p);
         } else if (sig == SIG_CALL_RESULT) {
             _printCallResult(topics, data, p);
-        } else if (sig == SIG_NESTED_ACTION_CONSUMED) {
-            _printNestedActionConsumed(topics, data, p);
+        } else if (sig == SIG_L1_TO_L2_CALL_CONSUMED) {
+            _printNestedCallConsumed(topics, data, p, "L1ToL2CallConsumed");
+        } else if (sig == SIG_OUTGOING_CALL_CONSUMED) {
+            _printNestedCallConsumed(topics, data, p, "OutgoingCallConsumed");
         } else if (sig == SIG_REVERT_SPAN) {
             _printRevertSpan(topics, data, p);
         } else if (sig == SIG_PROXY_CREATED) {
@@ -154,9 +155,9 @@ contract DecodeExecutions is Script {
     // ──────────────────── Per-event formatters ────────────────────
 
     function _printBatchPosted(bytes32[] memory topics, string memory p) internal pure {
-        // event BatchPosted(uint256 indexed subBatchCount)
+        // event BatchPosted(uint256 indexed rollupCount)
         uint256 count = uint256(topics[1]);
-        console.log(string.concat(p, "BatchPosted(subBatches=", vm.toString(count), ")"));
+        console.log(string.concat(p, "BatchPosted(rollups=", vm.toString(count), ")"));
     }
 
     function _printRollupCreated(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
@@ -173,25 +174,6 @@ contract DecodeExecutions is Script {
                 _shortAddr(rollupContract),
                 ", initState=",
                 _shortHash(initialState),
-                ")"
-            )
-        );
-    }
-
-    function _printRollupContractChanged(bytes32[] memory topics, string memory p) internal pure {
-        // RollupContractChanged(uint256 indexed rollupId, address indexed previous, address indexed new)
-        uint256 rollupId = uint256(topics[1]);
-        address prev = address(uint160(uint256(topics[2])));
-        address next = address(uint160(uint256(topics[3])));
-        console.log(
-            string.concat(
-                p,
-                "RollupContractChanged(id=",
-                vm.toString(rollupId),
-                ", ",
-                _shortAddr(prev),
-                " -> ",
-                _shortAddr(next),
                 ")"
             )
         );
@@ -229,7 +211,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printExecutionConsumedL1(bytes32[] memory topics, string memory p) internal pure {
-        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed cursor)
+        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed executionQueueIndex)
         bytes32 cchash = topics[1];
         uint256 rollupId = uint256(topics[2]);
         uint256 cursor = uint256(topics[3]);
@@ -248,7 +230,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printExecutionConsumedL2(bytes32[] memory topics, string memory p) internal pure {
-        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryIndex)
+        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionQueueIndex)
         bytes32 cchash = topics[1];
         uint256 entryIndex = uint256(topics[2]);
         console.log(
@@ -259,7 +241,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printL2TXExecuted(bytes32[] memory topics, string memory p) internal pure {
-        // L2TXExecuted(uint256 indexed rollupId, uint256 indexed cursor)
+        // L2TXExecuted(uint256 indexed rollupId, uint256 indexed executionQueueIndex)
         uint256 rollupId = uint256(topics[1]);
         uint256 cursor = uint256(topics[2]);
         console.log(
@@ -268,9 +250,10 @@ contract DecodeExecutions is Script {
     }
 
     function _printEntryExecuted(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActionsConsumed)
+        // EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 nestedConsumed)
+        // (L1: l2ToL1CallsProcessed/l1ToL2CallsConsumed; L2: callsProcessed/outgoingCallsConsumed — same ABI)
         uint256 entryIndex = uint256(topics[1]);
-        (bytes32 rollingHash, uint256 callsProcessed, uint256 nestedActions) =
+        (bytes32 rollingHash, uint256 callsProcessed, uint256 nestedConsumed) =
             abi.decode(data, (bytes32, uint256, uint256));
         console.log(
             string.concat(
@@ -282,7 +265,7 @@ contract DecodeExecutions is Script {
                 ", calls=",
                 vm.toString(callsProcessed),
                 ", nested=",
-                vm.toString(nestedActions),
+                vm.toString(nestedConsumed),
                 ")"
             )
         );
@@ -332,15 +315,20 @@ contract DecodeExecutions is Script {
         );
     }
 
-    function _printNestedActionConsumed(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // NestedActionConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 cchash, uint256 callCount)
+    function _printNestedCallConsumed(bytes32[] memory topics, bytes memory data, string memory p, string memory name)
+        internal
+        pure
+    {
+        // L1: L1ToL2CallConsumed(uint256 indexed entryIndex, uint256 indexed l1ToL2CallNumber, bytes32 cchash, uint256 callCount)
+        // L2: OutgoingCallConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 cchash, uint256 callCount)
         uint256 entryIndex = uint256(topics[1]);
         uint256 nestedNumber = uint256(topics[2]);
         (bytes32 cchash, uint256 callCount) = abi.decode(data, (bytes32, uint256));
         console.log(
             string.concat(
                 p,
-                "NestedActionConsumed(entry=",
+                name,
+                "(entry=",
                 vm.toString(entryIndex),
                 ", nested#=",
                 vm.toString(nestedNumber),
@@ -441,7 +429,7 @@ contract DecodeExecutions is Script {
                 callsExec++;
                 (bool success,) = abi.decode(logs[i].data, (bool, bytes));
                 if (!success) callsFailed++;
-            } else if (sig == SIG_NESTED_ACTION_CONSUMED) {
+            } else if (sig == SIG_L1_TO_L2_CALL_CONSUMED || sig == SIG_OUTGOING_CALL_CONSUMED) {
                 nested++;
             } else if (sig == SIG_REVERT_SPAN) {
                 reverts++;

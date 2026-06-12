@@ -4,7 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    LookupCall as L2LookupCall,
+    ExpectedLookup as L2ExpectedLookup,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {CallTwice} from "../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
@@ -29,7 +36,7 @@ import {
 //    Counter on L2.increment() is invoked twice via a CallTwiceL2 trigger
 //    contract on L2. SYSTEM loads the L2 table with both entries; CallTwiceL2
 //    then calls a trigger proxy (originalRollupId=MAINNET, originalAddress=
-//    counterL2) twice. Each proxy call forwards to managerL2.executeL1ToL2Call,
+//    counterL2) twice. Each proxy call forwards to managerL2.executeCrossChainCall,
 //    which consumes entries[0] then entries[1] sequentially via executionIndex.
 //    _consumeAndExecute resets _rollingHash to 0 between entries, so each
 //    entry's rollingHash starts fresh at CB(1)→CE(1, true, retData).
@@ -82,8 +89,9 @@ abstract contract MultiCallActions {
             stateDeltas: deltasA,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
+            l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode(uint256(1)),
             rollingHash: bytes32(0)
@@ -92,8 +100,9 @@ abstract contract MultiCallActions {
             stateDeltas: deltasB,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: noCalls(),
+            l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
+            expectedLookups: new ExpectedLookup[](0),
             callCount: 0,
             returnData: abi.encode(uint256(2)),
             rollingHash: bytes32(0)
@@ -101,21 +110,21 @@ abstract contract MultiCallActions {
     }
 
     /// @dev Two L2-side mirror entries — one per inbound call. Each entry has
-    /// a single L2ToL1Call invoking Counter.increment() on counterL2 from
+    /// a single CrossChainCall invoking Counter.increment() on counterL2 from
     /// `caller` (CallTwice on L1). Same proxyEntryHash as the L1 entries.
     /// returnData and rolling-hash CALL_END payload differ per entry (1 vs 2).
     function _l2Entries(address counterL2, address callTwiceL2)
         internal
         pure
-        returns (ExecutionEntry[] memory entries)
+        returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 ah = _l2CallHash(counterL2, callTwiceL2);
 
-        // Each L2 entry is consumed by a separate `executeL1ToL2Call` invocation
+        // Each L2 entry is consumed by a separate `executeCrossChainCall` invocation
         // (driven by callTwiceL2 calling the trigger proxy twice). `_consumeAndExecute`
         // resets `_rollingHash` to 0 at the start of each entry — so both entries
         // have rh = CB(1)→CE(1, true, retData) starting fresh.
-        entries = new ExecutionEntry[](2);
+        entries = new L2ExecutionEntry[](2);
         entries[0] = _buildL2Entry(counterL2, callTwiceL2, ah, abi.encode(uint256(1)));
         entries[1] = _buildL2Entry(counterL2, callTwiceL2, ah, abi.encode(uint256(2)));
     }
@@ -123,10 +132,10 @@ abstract contract MultiCallActions {
     function _buildL2Entry(address counterL2, address callTwiceL2, bytes32 ah, bytes memory retData)
         private
         pure
-        returns (ExecutionEntry memory)
+        returns (L2ExecutionEntry memory)
     {
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
             targetAddress: counterL2,
             value: 0,
             data: _incrementCallData(),
@@ -139,12 +148,11 @@ abstract contract MultiCallActions {
         rh = RollingHashBuilder.appendCallBegin(rh, 1);
         rh = RollingHashBuilder.appendCallEnd(rh, 1, true, retData);
 
-        return ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+        return L2ExecutionEntry({
             proxyEntryHash: ah,
-            destinationRollupId: L2_ROLLUP_ID,
-            L2ToL1Calls: calls,
-            expectedL1ToL2Calls: noNestedActions(),
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            expectedLookups: new L2ExpectedLookup[](0),
             callCount: 1,
             returnData: retData,
             rollingHash: rh
@@ -160,7 +168,7 @@ contract DeployL2 is Script {
         Counter counter = new Counter();
 
         // Trigger proxy on L2 for the real counter, tagged as originalRollupId=MAINNET so the
-        // hash computed by managerL2.executeL1ToL2Call matches the L2 entries' proxyEntryHash.
+        // hash computed by managerL2.executeCrossChainCall matches the L2 entries' proxyEntryHash.
         EEZL2 manager = EEZL2(managerAddr);
         address counterTriggerProxy;
         try manager.createCrossChainProxy(address(counter), MAINNET_ROLLUP_ID) returns (address p) {
@@ -249,7 +257,7 @@ contract Batcher {
 
 /// @title ExecuteL2 — local mode: drive Counter.increment() twice on L2 via a trigger contract.
 /// @dev SYSTEM loads the two-entry table; CallTwiceL2 calls the trigger proxy twice.
-///      Each proxy call forwards to managerL2.executeL1ToL2Call which consumes the next
+///      Each proxy call forwards to managerL2.executeCrossChainCall which consumes the next
 ///      entry sequentially. `_consumeAndExecute` resets `_rollingHash` per entry.
 /// Env: MANAGER_L2, COUNTER_L2, COUNTER_TRIGGER_PROXY_L2, CALL_TWICE_L2
 contract ExecuteL2 is Script, MultiCallActions {
@@ -260,7 +268,7 @@ contract ExecuteL2 is Script, MultiCallActions {
         address callTwiceL2 = vm.envAddress("CALL_TWICE_L2");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2Addr, callTwiceL2), noLookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2Addr, callTwiceL2), new L2LookupCall[](0));
         CallTwice(callTwiceL2).callCounterTwice(triggerProxy);
 
         console.log("done");
@@ -323,7 +331,7 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallActions {
         address callTwiceL2Addr = vm.envAddress("CALL_TWICE_L2");
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, callerAddr);
-        ExecutionEntry[] memory l2 = _l2Entries(counterL2Addr, callTwiceL2Addr);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2Addr, callTwiceL2Addr);
         bytes32 h0 = _entryHash(l1[0]);
         bytes32 h1 = _entryHash(l1[1]);
         bytes32 l2h0 = _entryHash(l2[0]);

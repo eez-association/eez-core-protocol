@@ -74,7 +74,9 @@ contract Rollup is IRollupContract, Ownable {
         uint256 _threshold,
         address[] memory proofSystems,
         bytes32[] memory vkeys
-    ) Ownable(_owner) {
+    )
+        Ownable(_owner)
+    {
         if (rollupsRegistry == address(0)) revert InvalidConfig();
         if (proofSystems.length != vkeys.length) revert InvalidConfig();
 
@@ -145,7 +147,7 @@ contract Rollup is IRollupContract, Ownable {
         // If we think is necessary we can use the EIP-2935 for checking last 8k~ block headers
         blockHash = blockhash(blockNumber);
         if (blockHash == bytes32(0)) revert BlockHashUnavailable(blockNumber);
-        
+
         return (0, blockHash);
     }
 

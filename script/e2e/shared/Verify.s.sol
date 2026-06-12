@@ -4,6 +4,11 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../src/interfaces/IEEZL2.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Shared helpers — event signatures + formatting
@@ -23,21 +28,24 @@ abstract contract VerifyHelpers is Script {
     bytes32 constant SIG_INCOMING_CROSSCHAIN_CALL =
         keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint256)");
 
-    // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only.
-    //   ExecutionEntry = (StateDelta[], bytes32, uint256, L2ToL1Call[], ExpectedL1ToL2Call[], uint256, bytes, bytes32)
-    //                       deltas        cchHash  destRid  calls            nested            cnt   ret    rollingHash
-    //   StateDelta     = (uint256, bytes32, bytes32, int256)
-    //                     rid       curr     new      etherDelta
-    //   L2ToL1Call = (address, uint256, bytes, address, uint256, uint256)
-    //   ExpectedL1ToL2Call   = (bytes32, uint256, bytes)
+    // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only (IEEZL2 structs; no
+    // StateDelta[] / destinationRollupId on L2).
+    //   ExecutionEntry     = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], uint256, bytes, bytes32)
+    //                         proxyEntryHash  incomingCalls  expectedOutgoingCalls          cnt     ret    rollingHash
+    //   CrossChainCall     = (address, uint256, bytes, address, uint256, uint256)
+    //   ExpectedOutgoingCrossChainCall = (bytes32, uint256, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded(((uint256,bytes32,bytes32,int256)[],bytes32,uint256,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
+        "ExecutionTableLoaded((bytes32,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
     );
 
     // CrossChainCallExecuted(bytes32 crossChainCallHash, address proxy, address sourceAddress, bytes callData, uint256 value)
     bytes32 constant SIG_CROSSCHAIN_CALL = keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
 
     function _entryHash(ExecutionEntry memory e) internal pure returns (bytes32) {
+        return keccak256(abi.encode(e.proxyEntryHash, e.rollingHash));
+    }
+
+    function _entryHash(L2ExecutionEntry memory e) internal pure returns (bytes32) {
         return keccak256(abi.encode(e.proxyEntryHash, e.rollingHash));
     }
 
@@ -71,7 +79,7 @@ abstract contract VerifyHelpers is Script {
         );
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.L2ToL1Calls.length, e.expectedL1ToL2Calls.length
+            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
         );
         for (uint256 d = 0; d < e.stateDeltas.length; d++) {
             StateDelta memory sd = e.stateDeltas[d];
@@ -86,8 +94,8 @@ abstract contract VerifyHelpers is Script {
                 )
             );
         }
-        for (uint256 c = 0; c < e.L2ToL1Calls.length; c++) {
-            L2ToL1Call memory cc = e.L2ToL1Calls[c];
+        for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
+            L2ToL1Call memory cc = e.l2ToL1Calls[c];
             console.log(
                 string.concat(
                     "      call[",
@@ -132,6 +140,63 @@ abstract contract VerifyHelpers is Script {
         console.log("      entryHash: %s", vm.toString(_entryHash(e)));
     }
 
+    /// @dev L2 (IEEZL2) entry — no stateDeltas / destinationRollupId.
+    function _printEntryDetailed(uint256 idx, L2ExecutionEntry memory e) internal pure {
+        bool immediate = e.proxyEntryHash == bytes32(0);
+        console.log(
+            "  [%s] %s  crossChainCallHash=%s", idx, immediate ? "IMMEDIATE" : "DEFERRED", vm.toString(e.proxyEntryHash)
+        );
+        console.log("      rollingHash: %s", vm.toString(e.rollingHash));
+        console.log(
+            "      callCount=%s  calls=%s  nested=%s",
+            e.callCount,
+            e.incomingCalls.length,
+            e.expectedOutgoingCalls.length
+        );
+        for (uint256 c = 0; c < e.incomingCalls.length; c++) {
+            CrossChainCall memory cc = e.incomingCalls[c];
+            console.log(
+                string.concat(
+                    "      call[",
+                    vm.toString(c),
+                    "]: target=",
+                    vm.toString(cc.targetAddress),
+                    "  value=",
+                    vm.toString(cc.value),
+                    "  revertSpan=",
+                    vm.toString(cc.revertSpan)
+                )
+            );
+            console.log(
+                string.concat(
+                    "               from=",
+                    vm.toString(cc.sourceAddress),
+                    " @ rollup ",
+                    vm.toString(cc.sourceRollupId),
+                    "  data=",
+                    _shortBytes(cc.data)
+                )
+            );
+        }
+        for (uint256 n = 0; n < e.expectedOutgoingCalls.length; n++) {
+            ExpectedOutgoingCrossChainCall memory na = e.expectedOutgoingCalls[n];
+            console.log(
+                string.concat(
+                    "      nested[",
+                    vm.toString(n),
+                    "]: crossChainCallHash=",
+                    _shortHash(na.crossChainCallHash),
+                    "  callCount=",
+                    vm.toString(na.callCount)
+                )
+            );
+        }
+        if (e.returnData.length > 0) {
+            console.log("      returnData: %s", _shortBytes(e.returnData));
+        }
+        console.log("      entryHash: %s", vm.toString(_entryHash(e)));
+    }
+
     // ── Log collection: decode BatchPosted ──
 
     function _collectBatchEntries(Vm.EthGetLogs[] memory logs) internal pure returns (ExecutionEntry[] memory) {
@@ -155,21 +220,21 @@ abstract contract VerifyHelpers is Script {
         return all;
     }
 
-    // ── Log collection: decode ExecutionTableLoaded ──
+    // ── Log collection: decode ExecutionTableLoaded (L2 entries) ──
 
-    function _collectTableEntries(Vm.EthGetLogs[] memory logs) internal pure returns (ExecutionEntry[] memory) {
+    function _collectTableEntries(Vm.EthGetLogs[] memory logs) internal pure returns (L2ExecutionEntry[] memory) {
         uint256 totalCount;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == SIG_TABLE_LOADED) {
-                ExecutionEntry[] memory entries = abi.decode(logs[i].data, (ExecutionEntry[]));
+                L2ExecutionEntry[] memory entries = abi.decode(logs[i].data, (L2ExecutionEntry[]));
                 totalCount += entries.length;
             }
         }
-        ExecutionEntry[] memory all = new ExecutionEntry[](totalCount);
+        L2ExecutionEntry[] memory all = new L2ExecutionEntry[](totalCount);
         uint256 idx;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == SIG_TABLE_LOADED) {
-                ExecutionEntry[] memory entries = abi.decode(logs[i].data, (ExecutionEntry[]));
+                L2ExecutionEntry[] memory entries = abi.decode(logs[i].data, (L2ExecutionEntry[]));
                 for (uint256 j = 0; j < entries.length; j++) {
                     all[idx++] = entries[j];
                 }
@@ -281,7 +346,7 @@ contract VerifyL2Blocks is VerifyHelpers {
         }
 
         for (uint256 i = 0; i < l2Blocks.length; i++) {
-            ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
+            L2ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
             if (_allPresent(entries, expectedEntryHashes)) {
                 console.log(
                     "PASS: all %s expected entries found at L2 block %s", expectedEntryHashes.length, l2Blocks[i]
@@ -300,7 +365,7 @@ contract VerifyL2Blocks is VerifyHelpers {
 
         console.log("FAIL: expected entries not found in any of %s L2 blocks", l2Blocks.length);
         for (uint256 i = 0; i < l2Blocks.length; i++) {
-            ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
+            L2ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
             console.log("");
             console.log("=== L2 BLOCK %s (%s entries) ===", l2Blocks[i], entries.length);
             for (uint256 j = 0; j < entries.length; j++) {
@@ -315,13 +380,13 @@ contract VerifyL2Blocks is VerifyHelpers {
         revert("Verification failed");
     }
 
-    function _getEntries(uint256 blockNumber, address managerL2) internal view returns (ExecutionEntry[] memory) {
+    function _getEntries(uint256 blockNumber, address managerL2) internal view returns (L2ExecutionEntry[] memory) {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blockNumber, blockNumber, managerL2, topics);
         return _collectTableEntries(logs);
     }
 
-    function _allPresent(ExecutionEntry[] memory entries, bytes32[] calldata expectedEntryHashes)
+    function _allPresent(L2ExecutionEntry[] memory entries, bytes32[] calldata expectedEntryHashes)
         internal
         pure
         returns (bool)
@@ -458,7 +523,7 @@ contract VerifyL2Absent is VerifyHelpers {
         for (uint256 i = 0; i < blocks.length; i++) {
             bytes32[] memory topics = new bytes32[](0);
             Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            ExecutionEntry[] memory entries = _collectTableEntries(logs);
+            L2ExecutionEntry[] memory entries = _collectTableEntries(logs);
             count += entries.length;
         }
         bytes32[] memory result = new bytes32[](count);
@@ -466,7 +531,7 @@ contract VerifyL2Absent is VerifyHelpers {
         for (uint256 i = 0; i < blocks.length; i++) {
             bytes32[] memory topics = new bytes32[](0);
             Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            ExecutionEntry[] memory entries = _collectTableEntries(logs);
+            L2ExecutionEntry[] memory entries = _collectTableEntries(logs);
             for (uint256 j = 0; j < entries.length; j++) {
                 result[idx++] = _entryHash(entries[j]);
             }
