@@ -85,7 +85,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256 transientLookupCallCount;
     address[] proofSystems;                              // sorted asc, no duplicates, no zero
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly ascending by rollupId
-    bytes32 crossProofSystemInteractions;                 // hash binding cross-PS messages
     uint256[] blobIndices;                                // selects which tx-level 4844 blobs the batch consumes
     bytes callData;                                       // batch-scoped (each PS's circuit gets its own region)
     bytes[] proofs;                                       // parallel to proofSystems — one proof per PS
@@ -126,8 +125,7 @@ sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
-    keccak256(callData),
-    crossProofSystemInteractions
+    keccak256(callData)
 ))
 
 for each PS k in proofSystems:
@@ -147,14 +145,6 @@ for each PS k in proofSystems:
   `prevBlockhash` and `ts` are NOT in `sharedPublicInput`; each rollup folds its own values
   into the per-PS accumulator.
 - `vkMatrix[r][j]` is the vkey of `proofSystems[proofSystemIndex[r][j]]` for `rollupId_r`.
-
-### Cross-PS interactions hash
-
-`crossProofSystemInteractions` is a per-batch hash committing to the set of cross-PS
-boundary messages this batch participates in (computed off-chain, mirrored in each PS's
-circuit). All proofs in a `postAndVerifyBatch` must verify atomically — if PS_A claims to
-send msg_0 to PS_B and PS_B's commitment doesn't include msg_0, one of them won't verify
-and the whole batch reverts.
 
 ---
 
@@ -333,8 +323,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **The rollup owner trusts their own proof system(s) and threshold.** Registry makes no
   judgment about whether a PS is "real"; just calls `verify(...)` and trusts the return.
 - **Atomic verification across the batch.** All proofs in a `postAndVerifyBatch` call must
-  verify; if any fails, the whole call reverts. This is what makes
-  `crossProofSystemInteractions` load-bearing across PSes.
+  verify; if any fails, the whole call reverts.
 - **The orchestrator (`postAndVerifyBatch` caller) pays for any waste.** Unrelated PSes,
   unconsumed transient entries, etc. — registry doesn't grief-check.
 
@@ -367,12 +356,10 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **Per-(destination rollup) call ID counter**: introduce a monotonic `callId` per
   destination rollup (or maybe globally per `postAndVerifyBatch` / per cross-PS-interaction set) baked
   into each `L2ToL1Call` / `Action`. Useful for: deterministic cross-PS message
-  ordering (replaces ad-hoc execution-order indexing in `crossProofSystemInteractions`),
-  off-chain indexing / debugging, deduplication of identical-looking calls. Open questions:
-  scope (per-rollup, per-tx, per-batch?), where the counter lives (registry storage vs.
-  prover-supplied + bound by hash?), how it interacts with `revertSpan` when a call's
-  state is rolled back. Worth investigating once the cross-PS interactions hash work
-  starts.
+  ordering, off-chain indexing / debugging, deduplication of identical-looking calls. Open
+  questions: scope (per-rollup, per-tx, per-batch?), where the counter lives (registry storage
+  vs. prover-supplied + bound by hash?), how it interacts with `revertSpan` when a call's
+  state is rolled back. Worth investigating later.
 
 ---
 

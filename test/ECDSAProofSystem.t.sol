@@ -98,7 +98,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
 
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256(""), bytes32(0)
+                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256("")
             )
         );
 
@@ -139,7 +139,6 @@ contract ECDSAProofSystemIntegrationTest is Base {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

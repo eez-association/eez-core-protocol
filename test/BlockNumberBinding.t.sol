@@ -60,11 +60,7 @@ contract BlockNumberBindingTest is Base {
 
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes),
-                abi.encode(lookupCallHashes),
-                abi.encode(blobHashes),
-                keccak256(batch.callData),
-                batch.crossProofSystemInteractions
+                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256(batch.callData)
             )
         );
 

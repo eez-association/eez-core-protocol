@@ -156,7 +156,7 @@ abstract contract NestedActions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID, // matches the entry's outer src — Alice on Mainnet
+            sourceRollupId: L2_ROLLUP_ID, // sub-call source must be in the entry's stateDeltas (the proven rollup)
             revertSpan: 0
         });
 
@@ -329,7 +329,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

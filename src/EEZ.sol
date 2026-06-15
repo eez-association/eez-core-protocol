@@ -333,9 +333,8 @@ contract EEZ is EEZBase {
     ///         transient bounds, per-rollup PS-index ranges). NO external calls.
     ///      2. Atomic verification: fetch the vkMatrix per rollup (each manager enforces its
     ///         own threshold against the rollup's chosen PS subset) and verify every proof.
-    ///         ALL must verify before any state mutation — atomicity is what makes
-    ///         `crossProofSystemInteractions` load-bearing across PSes. These external calls
-    ///         are `view` (STATICCALL), so no reentrancy concern.
+    ///         ALL must verify before any state mutation — atomicity across the jointly-attesting
+    ///         proof systems. These external calls are `view` (STATICCALL), so no reentrancy concern.
     ///      3. Mark every touched rollup as verified-this-block. Sets the once-per-block-per-rollup
     ///         invariant AND the read gate for `executeCrossChainCall` / `executeL2TX` (which
     ///         require `lastVerifiedBlock(rid) == block.number`). Done before the meta hook
@@ -632,8 +631,7 @@ contract EEZ is EEZBase {
 
     /// @notice Builds per-PS publicInputsHash and verifies every proof in the batch
     /// @dev Two-stage shape:
-    ///        sharedPublicInput = H(entryHashes, lookupCallHashes, blobHashes, H(callData),
-    ///                              crossProofSystemInteractions)
+    ///        sharedPublicInput = H(entryHashes, lookupCallHashes, blobHashes, H(callData))
     ///      For each PS k we walk the rollupIdsWithProofSystems table in canonical order;
     ///      every rollup that lists k in its `proofSystemIndex[]` folds into a per-PS
     ///      rolling accumulator one rollup at a time:
@@ -670,11 +668,7 @@ contract EEZ is EEZBase {
 
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes),
-                abi.encode(lookupCallHashes),
-                abi.encode(blobHashes),
-                keccak256(batch.callData),
-                batch.crossProofSystemInteractions
+                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256(batch.callData)
             )
         );
 

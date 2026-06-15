@@ -105,7 +105,8 @@ abstract contract NestedCallRevertActions {
             value: 0,
             data: abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            // L1 calls must be sourced from a rollup in the entry's stateDeltas (L2), not MAINNET.
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -351,7 +352,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

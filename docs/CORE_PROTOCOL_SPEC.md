@@ -5,7 +5,7 @@
 
 This document covers the **flat sequential execution model** layered with the **multi-prover / per-rollup-queue** model from the `feature/flatten` refactor. Every cross-chain entry is a flat list of calls processed sequentially, with reentrant calls resolved via a parallel expected-calls table and integrity verified by a single `rollingHash` per entry. The execution structs are split per side: L1 (`src/interfaces/IEEZ.sol`) uses absolute directional names (`L2ToL1Call` / `l2ToL1Calls`, `ExpectedL1ToL2Call` / `expectedL1ToL2Calls`); L2 (`src/interfaces/IEEZL2.sol`) uses **self-relative** directional names (`CrossChainCall` / `incomingCalls`, `ExpectedOutgoingCrossChainCall` / `expectedOutgoingCalls`) because an L2's counterparty can be L1 OR another L2 — see §A.1. Entries are routed by `destinationRollupId` into per-rollup queues on L1. `postAndVerifyBatch` carries a single `ProofSystemBatchPerVerificationEntries` whose proofs verify atomically.
 
-For the multi-prover design (batch shape, per-PS public-inputs construction, threshold semantics, `crossProofSystemInteractions`), see `MULTI_PROVER_SPEC.md`.
+For the multi-prover design (batch shape, per-PS public-inputs construction, threshold semantics), see `MULTI_PROVER_SPEC.md`.
 
 ---
 
@@ -309,7 +309,7 @@ Emits `RollupCreated(rollupId, rollupContract, initialState)`.
 function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external
 ```
 
-Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `crossProofSystemInteractions`, `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getTimestampAndBlockHash(blockNumber)`; 0 = no block context). See `MULTI_PROVER_SPEC.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
+Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getTimestampAndBlockHash(blockNumber)`; 0 = no block context). See `MULTI_PROVER_SPEC.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
 
 **Preconditions** (enforced by `_validateStructure`):
 - `_transientExecutions.length == 0` else `PostBatchReentry` (reentry guard).
@@ -327,8 +327,7 @@ sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
-    keccak256(callData),
-    crossProofSystemInteractions
+    keccak256(callData)
 ))
 
 for each PS k in proofSystems:
@@ -1355,7 +1354,6 @@ Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch
 - Every blob hash (for data availability).
 - Per-rollup `(blockHash, timestamp)` fetched via `IRollupContract.getTimestampAndBlockHash(batch.blockNumber)` and folded into the per-PS accumulator `acc_k` (one quadruple per attesting rollup).
 - `keccak256(callData)`.
-- `crossProofSystemInteractions` (binds cross-PS messages within the batch).
 - The per-rollup vkey row (`vkMatrix[r][j]`) for the rollup's `proofSystemIndex[]` subset.
 
 All proofs in the batch verify atomically — a single failure reverts. Per-rollup attestation is enforced inside each manager's `checkProofSystemsAndGetVkeys`, which reverts (threshold-not-met / unknown-PS / zero-vkey) if the resolved subset for `rid` is insufficient.

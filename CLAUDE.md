@@ -180,7 +180,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256                     transientLookupCallCount;
     address[]                   proofSystems;                   // batch-global, strictly increasing
     RollupIdWithProofSystems[]  rollupIdsWithProofSystems;      // strictly increasing rollupIds
-    bytes32                     crossProofSystemInteractions;   // domain separator for joined proofs
     uint256[]                   blobIndices;                    // EIP-4844 blobs this batch consumes
     bytes                       callData;
     bytes[]                     proofs;                         // one per proofSystems entry

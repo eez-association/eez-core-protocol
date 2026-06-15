@@ -264,13 +264,17 @@ abstract contract MCNActions {
         bytes32 innerCounterL1 = _l2InnerHashCounterL1(counterL1, cap2L2);
 
         // Outer call shared by entries [0] and [1]: app→CAP2 on L2.
+        // sourceRollupId is the REMOTE counterparty (MAINNET) — never this L2's own id,
+        // which `_processNCalls` would reject with SameNetworkProxy when auto-creating the
+        // source proxy. The L2 outer/inner action hashes already commit to source=ROLLUP_ID
+        // (forced by the manager) and target=MAINNET, so the rolling hash is unaffected.
         CrossChainCall memory cap2RunCall = CrossChainCall({
             isStatic: false,
             targetAddress: cap2L2,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: l2App,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
         // Outer call for entry [2]: app→CounterL2 on L2.
@@ -280,7 +284,7 @@ abstract contract MCNActions {
             value: 0,
             data: abi.encodeWithSelector(Counter.increment.selector),
             sourceAddress: l2App,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -371,7 +375,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

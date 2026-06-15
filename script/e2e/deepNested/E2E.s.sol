@@ -130,22 +130,28 @@ abstract contract DeepNestedActions {
     }
 
     // ── L2 mirror action hashes ──
-    // On L2, reentrant calls hash with sourceRollupId = ROLLUP_ID = L2_ROLLUP_ID.
-    // The cross-chain proxies on L2 are created with originalRollupId = L2_ROLLUP_ID
-    // (a self-referential proxy chain that still routes through managerL2 to trigger
-    // nested-action consumption).
+    // On L2, reentrant calls hash with sourceRollupId = ROLLUP_ID = L2_ROLLUP_ID (forced by
+    // executeCrossChainCall). The cross-chain proxies on L2 are created with originalRollupId =
+    // MAINNET_ROLLUP_ID (the remote network — a proxy may never represent the L2's own id, else
+    // SameNetworkProxy(1)), so each reentrant hash's targetRollupId is MAINNET_ROLLUP_ID. The
+    // proxies still route through managerL2 to trigger nested-action consumption.
 
     /// @dev L2 nested[1]: CAP on L2 calls counterProxyOnL2 (representing Counter on L2)
     function _l2CounterActionHash(address counterL2, address capL2) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID, counterL2, 0, abi.encodeWithSelector(Counter.increment.selector), capL2, L2_ROLLUP_ID
+            MAINNET_ROLLUP_ID, counterL2, 0, abi.encodeWithSelector(Counter.increment.selector), capL2, L2_ROLLUP_ID
         );
     }
 
     /// @dev L2 nested[0]: NestedCaller on L2 calls capProxyOnL2 (representing CAP on L2)
     function _l2CapActionHash(address capL2, address ncL2) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID, capL2, 0, abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector), ncL2, L2_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            capL2,
+            0,
+            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
+            ncL2,
+            L2_ROLLUP_ID
         );
     }
 
@@ -182,7 +188,7 @@ abstract contract DeepNestedActions {
             value: 0,
             data: abi.encodeWithSelector(NestedCaller.callNested.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = L2ToL1Call({
@@ -191,7 +197,7 @@ abstract contract DeepNestedActions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: nestedCaller,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -253,7 +259,7 @@ abstract contract DeepNestedActions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: ncL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -291,10 +297,10 @@ contract DeployL2 is Script {
         // Proxy on L2 representing "Counter@L2" — routes back through managerL2
         // so reentrant calls trigger _consumeNestedAction with the matching hash.
         address counterProxyOnL2;
-        try manager.createCrossChainProxy(address(counter), L2_ROLLUP_ID) returns (address p) {
+        try manager.createCrossChainProxy(address(counter), MAINNET_ROLLUP_ID) returns (address p) {
             counterProxyOnL2 = p;
         } catch {
-            counterProxyOnL2 = manager.computeCrossChainProxyAddress(address(counter), L2_ROLLUP_ID);
+            counterProxyOnL2 = manager.computeCrossChainProxyAddress(address(counter), MAINNET_ROLLUP_ID);
         }
 
         // Real CounterAndProxy on L2, wrapping counterProxyOnL2 (so cap.incrementProxy()
@@ -303,10 +309,10 @@ contract DeployL2 is Script {
 
         // Proxy on L2 representing "CAP@L2" — used by NestedCaller as its `target`.
         address capProxyOnL2;
-        try manager.createCrossChainProxy(address(cap), L2_ROLLUP_ID) returns (address p) {
+        try manager.createCrossChainProxy(address(cap), MAINNET_ROLLUP_ID) returns (address p) {
             capProxyOnL2 = p;
         } catch {
-            capProxyOnL2 = manager.computeCrossChainProxyAddress(address(cap), L2_ROLLUP_ID);
+            capProxyOnL2 = manager.computeCrossChainProxyAddress(address(cap), MAINNET_ROLLUP_ID);
         }
 
         // Real NestedCaller on L2 — destination of the outer call. Wraps capProxyOnL2
@@ -402,7 +408,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

@@ -120,8 +120,9 @@ abstract contract RevertActions {
 
         // Inner call: a Counter.increment() on L1 wrapped in revertSpan=1 to
         // demonstrate the EVM state effect being rolled back while the rolling
-        // hash still records the successful outcome. sourceRollupId mirrors the
-        // entry's outer source (Alice on Mainnet) per the spec convention.
+        // hash still records the successful outcome. sourceRollupId must be a
+        // rollup proved by this entry's stateDeltas (L2_ROLLUP_ID); L1 is never
+        // its own cross-chain counterparty (rule #2).
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
             isStatic: false,
@@ -129,7 +130,7 @@ abstract contract RevertActions {
             value: 0,
             data: abi.encodeWithSelector(Counter.increment.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 1
         });
 
@@ -255,7 +256,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

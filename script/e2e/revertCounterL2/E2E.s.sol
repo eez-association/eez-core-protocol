@@ -104,7 +104,7 @@ abstract contract RevertL2Actions {
             value: 0,
             data: abi.encodeWithSelector(Counter.increment.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 1
         });
 
@@ -140,9 +140,17 @@ abstract contract RevertL2Actions {
             revertSpan: 1
         });
 
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-initial-state"),
+            newState: keccak256("l2-state-after-revertCounter"),
+            etherDelta: 0
+        });
+
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+            stateDeltas: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -270,7 +278,6 @@ contract DeferredL2TXBatcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

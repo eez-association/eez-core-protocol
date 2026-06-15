@@ -58,7 +58,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256 transientLookupCallCount;
     address[] proofSystems;
     RollupIdWithProofSystems[] rollupIdsWithProofSystems;
-    bytes32 crossProofSystemInteractions;
     uint256[] blobIndices;
     bytes callData;
     bytes[] proofs;

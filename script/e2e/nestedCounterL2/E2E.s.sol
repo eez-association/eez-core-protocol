@@ -117,7 +117,7 @@ abstract contract NestedL2Actions {
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID, // matches the entry's outer src — Alice on L2
+            sourceRollupId: MAINNET_ROLLUP_ID, // remote source — Alice (logically on MAINNET); L2 may not proxy its own id
             revertSpan: 0
         });
 
@@ -164,9 +164,17 @@ abstract contract NestedL2Actions {
             returnData: abi.encode(uint256(1))
         });
 
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-initial-state"),
+            newState: keccak256("l2-state-after-nestedCounter"),
+            etherDelta: 0
+        });
+
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+            stateDeltas: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -309,7 +317,6 @@ contract DeferredL2TXBatcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
