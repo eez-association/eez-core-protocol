@@ -293,7 +293,7 @@ struct LookupCall {
     /// partition). Zero for static mode.
     uint256 callCount;
     /// Expected rolling hash of the executed sub-calls — always checked (an empty `l2ToL1Calls[]`
-    /// must carry `rollingHash == 0`). Untagged schema in static mode (`_processNLookupCalls`);
+    /// must carry `rollingHash == 0`). Untagged schema in static mode (`_processNStaticCalls`);
     /// tagged entry schema in reverted mode.
     bytes32 rollingHash;
     /// State-root pins — part of the MATCH predicate; see `ExpectedStateRootPerRollup`.

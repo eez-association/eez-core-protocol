@@ -27,7 +27,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
 ///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`.
 ///        - `_activeCalls` / `_activeNested` / `_getActiveLookups`, `_getCurrentEntryStoragePointer`,
-///          `_currentTopLevelLookup`, `_resolveStaticLookup`, `_processNLookupCalls`,
+///          `_currentTopLevelLookup`, `_resolveStaticLookup`, `_processNStaticCalls`,
 ///          `_executeRevertedNestedLookup` / `_executeRevertedTopLevelLookup`, `staticCallLookup`.
 ///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
 ///          L2: `OutgoingCallConsumed`, `UnconsumedIncomingCalls`, …).

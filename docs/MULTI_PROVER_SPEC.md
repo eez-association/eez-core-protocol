@@ -344,7 +344,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **`_processNCalls` runs before `_applyStateDeltas`**: outer entry's state deltas applied
   at end. Reentrant entries from other rollups apply their own deltas during dispatch. By
   design, document.
-- **`_processNLookupCalls` rolling hash format differs** from the main rolling hash (no
+- **`_processNStaticCalls` rolling hash format differs** from the main rolling hash (no
   CALL_BEGIN/CALL_END tags). Pre-existing simplification; document or align.
 - **Possible "join" of `Action` and `L2ToL1Call`**: the two structs have overlapping
   shape (target, value, data, sourceAddress, sourceRollupId, plus a few extras each). The
@@ -370,7 +370,7 @@ Two parallel reviews were run after the latest round of changes:
 - **Code-quality review**: flagged threshold-as-separate-call (now fixed by moving threshold
   inside `checkProofSystemsAndGetVkeys`), stale natspec referencing the removed reverse map,
   `StateDeltaRollupNotInBatch` error reused for lookup call destination (renamed to
-  `RollupNotInBatch`), `_processNLookupCalls` rolling hash format divergence (pre-existing).
+  `RollupNotInBatch`), `_processNStaticCalls` rolling hash format divergence (pre-existing).
 - **Security review**: HIGH on reentrancy via `_fetchVkMatrix` / `threshold()` BEFORE
   `_markVerifiedBlockPerRollup` — fixed by hoisting the mark to step 4 (still before any external
   CALL, since steps 2/3 are static-only). MEDIUM on `rollupContractRegistered` reentrancy in

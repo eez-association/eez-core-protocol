@@ -1169,7 +1169,7 @@ contract EEZ is EEZBase {
         view
         returns (bytes memory)
     {
-        if (_processNLookupCalls(calls) != rollingHash) revert RollingHashMismatch();
+        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
         if (failed) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
@@ -1249,7 +1249,7 @@ contract EEZ is EEZBase {
     /// @dev All proxies referenced must already be deployed; CREATE2 is unavailable inside a
     ///      STATICCALL frame. The accumulator is a local, not `_rollingHash`, so this is verified
     ///      against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
-    function _processNLookupCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
+    function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory cc = calls[i];
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);

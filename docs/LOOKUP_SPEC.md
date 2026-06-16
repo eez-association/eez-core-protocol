@@ -32,7 +32,7 @@ A lookup is interpreted in one of two modes, selected by `failed`:
   top-level: by its pool branch. Both resolve through the shared
   `_resolveStaticLookup`.
 - Read-only. The sub-call array (if any) is executed in **STATICCALL** context via
-  `_processNLookupCalls` and hashed with the **untagged** schema
+  `_processNStaticCalls` and hashed with the **untagged** schema
   (`keccak256(prev, success, retData)` per sub-call), checked against `rollingHash`.
 - **No nested table, no partition** — `expectedL1ToL2Calls` is empty and **`callCount == 0`**.
 - Multiple reentrant reads "at the same moment" are encoded as **separate** nested lookups
@@ -135,7 +135,7 @@ exactly like an entry.
 ⇒ `callCount = 2`, `expectedL1ToL2Calls[0].callCount = 2`, and `2 + 2 == 4`.
 
 ### Why `callCount == 0` for static (and plain failed) lookups
-Static lookups run their `l2ToL1Calls[]` *flatly* via `_processNLookupCalls` — a simple
+Static lookups run their `l2ToL1Calls[]` *flatly* via `_processNStaticCalls` — a simple
 STATICCALL loop with an untagged hash. No frame split, no cursor, no nested table — nothing to
 partition. `callCount` is unused and **must be 0** (a prover convention — the static resolvers
 never read it). The mode split is by **context**, not by `callCount`: a `failed` lookup

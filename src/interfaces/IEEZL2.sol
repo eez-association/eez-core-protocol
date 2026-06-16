@@ -173,6 +173,6 @@ struct LookupCall {
     uint256 callCount;
     /// Expected rolling hash of the executed sub-calls — always checked (an empty
     /// `incomingCalls[]` must carry `rollingHash == 0`). Untagged schema in static mode
-    /// (`_processNLookupCalls`); tagged entry schema in reverted mode.
+    /// (`_processNStaticCalls`); tagged entry schema in reverted mode.
     bytes32 rollingHash;
 }

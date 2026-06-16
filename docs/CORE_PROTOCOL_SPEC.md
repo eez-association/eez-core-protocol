@@ -458,7 +458,7 @@ revert ExecutionNotFound();
 ```
 
 `_resolveStaticLookup(calls, rollingHash, failed, returnData)` (shared by both branches):
-- **Always** run the sub-calls via `_processNLookupCalls(calls)` (each via `sourceProxy.staticcall(executeOnBehalf(...))`) and check `computedHash == rollingHash` else `RollingHashMismatch` — an empty array hashes to `bytes32(0)`, which must match a sub-call-less lookup's `rollingHash`.
+- **Always** run the sub-calls via `_processNStaticCalls(calls)` (each via `sourceProxy.staticcall(executeOnBehalf(...))`) and check `computedHash == rollingHash` else `RollingHashMismatch` — an empty array hashes to `bytes32(0)`, which must match a sub-call-less lookup's `rollingHash`.
 - If `failed`: revert with `returnData` (bubbles back to the proxy and out to the caller).
 - Else return `returnData`.
 
@@ -685,7 +685,7 @@ For each delta:
 - If `delta.etherDelta > 0`: `etherBalance += delta`.
 - Emit `L2ExecutionPerformed(rollupId, newState)`.
 
-##### `_processNLookupCalls(L2ToL1Call[] memory calls) → bytes32`
+##### `_processNStaticCalls(L2ToL1Call[] memory calls) → bytes32`
 
 ```
 hash = bytes32(0)
@@ -1011,7 +1011,7 @@ The mechanism relies on EIP-1153 `tload` / `tstore` semantics:
 
 Every lookup carries its own `rollingHash` — **a separate accumulator**, scoped to that lookup and computed over its optional sub-call array (`l2ToL1Calls[]` on L1, `incomingCalls[]` on L2). It is **not** the entry-level `_rollingHash`. Which schema applies depends on the lookup's mode:
 
-- **Static mode (`staticCallLookup` → `_resolveStaticLookup`)** — a deliberately simpler, **untagged** scheme computed by `_processNLookupCalls`:
+- **Static mode (`staticCallLookup` → `_resolveStaticLookup`)** — a deliberately simpler, **untagged** scheme computed by `_processNStaticCalls`:
 
 ```
 hash = bytes32(0)
@@ -1028,7 +1028,7 @@ The static-mode differences from the entry-level scheme:
 
 - **No event tags** (no `CALL_BEGIN` / `CALL_END` / `NESTED_BEGIN` / `NESTED_END` domain bytes).
 - **No call number** mixed into each fold.
-- **No nesting** at all — `_processNLookupCalls` does not handle reentrancy; STATICCALL forbids state writes, so the proxies' `executeOnBehalf` paths cannot reenter the manager's mutating entrypoints and consume nested actions or further lookup calls.
+- **No nesting** at all — `_processNStaticCalls` does not handle reentrancy; STATICCALL forbids state writes, so the proxies' `executeOnBehalf` paths cannot reenter the manager's mutating entrypoints and consume nested actions or further lookup calls.
 
 This simpler schema is safe because the surrounding lookup key already pins the call context that tagged events disambiguate at entry level. A NESTED lookup is content-addressed within its entry by the compared 4-tuple:
 
@@ -1037,7 +1037,7 @@ This simpler schema is safe because the surrounding lookup key already pins the 
 (crossChainCallHash, callNumber, lastOutgoingCallConsumed, executingLookupIndex)       // L2
 ```
 
-and a TOP-LEVEL lookup by `crossChainCallHash` + the structural queue routing + (L1) the `expectedStateRoots[]` pins — so the entry/call/nesting position is already locked in. The only thing left for a static lookup's `rollingHash` to commit to is the **outcome of the static sub-calls**, in order, which is exactly what the untagged `keccak256(prev, success, retData)` chain captures. There is also no cross-contamination risk with the entry-level accumulator: `_processNLookupCalls` returns a local `computedHash` and never reads or writes `_rollingHash`.
+and a TOP-LEVEL lookup by `crossChainCallHash` + the structural queue routing + (L1) the `expectedStateRoots[]` pins — so the entry/call/nesting position is already locked in. The only thing left for a static lookup's `rollingHash` to commit to is the **outcome of the static sub-calls**, in order, which is exactly what the untagged `keccak256(prev, success, retData)` chain captures. There is also no cross-contamination risk with the entry-level accumulator: `_processNStaticCalls` returns a local `computedHash` and never reads or writes `_rollingHash`.
 
 The two accumulators serve different verification scopes and intentionally do not share a schema. Static-mode lookup sub-calls are flat by construction; only reverted-mode runs carry richer structure, and those use the tagged schema for exactly that reason.
 
@@ -1216,7 +1216,7 @@ The scan targets only the active host's table (`_getActiveLookups()`) — entry-
 See the `staticCallLookup` pseudocode in §B.1 (nested branch + top-level branch) and `_tryRevertedTopLevelLookup` for the failed top-level path. Resolution helpers:
 
 `_resolveStaticLookup(calls, rollingHash, failed, returnData)` (static mode, both kinds):
-- **Always** run the sub-calls in static context (`_processNLookupCalls(calls)`) and check `computedHash == rollingHash` (else `RollingHashMismatch`); an empty array hashes to `bytes32(0)`.
+- **Always** run the sub-calls in static context (`_processNStaticCalls(calls)`) and check `computedHash == rollingHash` (else `RollingHashMismatch`); an empty array hashes to `bytes32(0)`.
 - If `failed`: revert with `returnData`. Else return `returnData`.
 
 `_executeRevertedNestedLookup(i)` / `_executeRevertedTopLevelLookup(lc, i)` (reverted mode): run as a mini-entry and revert with `returnData` — see §B.1.
