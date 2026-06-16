@@ -36,7 +36,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 │  - addProofSystem / removeProofSystem        │
 │  - updateVerificationKey / setThreshold      │
 │  - transferOwnership / setStateRoot          │
-│  - getTimestampAndBlockHash                  │
+│  - getCustomData                             │
 └──────────────────────────────────────────────┘
               ▲ verify(proof, hash)
               │
@@ -121,17 +121,22 @@ governance-driven, time-weighted, etc.) — the registry just consumes the retur
 ### Per-PS publicInputsHash (two-stage)
 
 ```
+customDataAcc = bytes32(0)
+for each rollup r in rollupIdsWithProofSystems (rollupId-ascending):
+  customDataAcc = keccak256(abi.encode(customDataAcc, rollupId_r, customData_r))
+
 sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
-    keccak256(callData)
+    keccak256(callData),
+    customDataAcc
 ))
 
 for each PS k in proofSystems:
   acc_k = bytes32(0)
   for each rollup r where k ∈ rollupIdsWithProofSystems[r].proofSystemIndex:
-    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j], blockHash_r, timestamp_r))
+    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j]))
   publicInputsHash[k] = keccak256(abi.encodePacked(sharedPublicInput, acc_k))
 ```
 
@@ -140,10 +145,12 @@ for each PS k in proofSystems:
   expectedL1ToL2Calls, callCount, returnData, rollingHash). Prevents an orchestrator from
   swapping inputs at execution time without invalidating the proof.
 - `lookupCallHashes[i] = keccak256(abi.encode(batch.l1ToL2lookupCalls[i]))` — same rationale.
-- `(blockHash_r, timestamp_r)` are fetched per-rollup via
-  `IRollupContract.getTimestampAndBlockHash(batch.blockNumber)` and folded into per-PS `acc_k`.
-  `prevBlockhash` and `ts` are NOT in `sharedPublicInput`; each rollup folds its own values
-  into the per-PS accumulator.
+- `customData_r` is the opaque blob fetched per-rollup via
+  `IRollupContract.getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment — the
+  reference `Rollup` returns ABI-encoded `(timestamp, blockHash)`). Each rollup's blob is folded,
+  keyed by `rollupId_r` in rollupId-ascending order, into `customDataAcc`, which binds into
+  `sharedPublicInput`. It does NOT vary per PS, so it is shared across all `acc_k` rather than
+  re-folded into each one.
 - `vkMatrix[r][j]` is the vkey of `proofSystems[proofSystemIndex[r][j]]` for `rollupId_r`.
 
 ---
@@ -214,8 +221,8 @@ consumers — they just fail their own state-root check if they depended on it.
 3. **Fetch vkMatrix + verify**: `_fetchVkMatrix(batch)` calls each rollup's manager via
    `IRollupContract.checkProofSystemsAndGetVkeys(subset)` — manager enforces threshold and
    returns one vkey per PS in the subset. Then `_verifyProofSystemBatch(batch, vkMatrix)`
-   computes `sharedPublicInput`, builds per-PS `publicInputsHash[k]` (folding each rollup's
-   `(blockHash, timestamp)` via `getTimestampAndBlockHash(batch.blockNumber)`), and calls
+   computes `sharedPublicInput` (folding each rollup's `customData` via
+   `getCustomData(batch.blockNumber)`), builds per-PS `publicInputsHash[k]`, and calls
    `IProofSystem.verify(proofs[k], publicInputsHash[k])` for each PS. ALL proofs must verify
    atomically (one revert reverts the whole call).
 4. **Mark verified-this-block** (`_markVerifiedBlockPerRollup(rid)` for each rollup): wipes

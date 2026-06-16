@@ -309,7 +309,7 @@ Emits `RollupCreated(rollupId, rollupContract, initialState)`.
 function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external
 ```
 
-Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getTimestampAndBlockHash(blockNumber)`; 0 = no block context). See `MULTI_PROVER_SPEC.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
+Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an array) carries `entries[]`, `l1ToL2lookupCalls[]` (TOP-LEVEL lookups only — nested lookups travel inside their entries), `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`; each `RollupIdWithProofSystems` row pairs the rollupId with a strictly-ascending `proofSystemIndex[]` of indices into `proofSystems[]`), `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (uint64 — the single L1 block the whole batch binds to, forwarded to every rollup's `getCustomData(blockNumber)`; 0 = no block context). See `MULTI_PROVER_SPEC.md` for the multi-prover model — struct shape, per-PS public-inputs construction, and threshold enforcement.
 
 **Preconditions** (enforced by `_validateStructure`):
 - `_transientExecutions.length == 0` else `PostBatchReentry` (reentry guard).
@@ -323,24 +323,29 @@ Permissionless. A single `ProofSystemBatchPerVerificationEntries` struct (NOT an
 **Per-PS public-inputs construction** (two-stage; see `MULTI_PROVER_SPEC.md` for details):
 
 ```
+customDataAcc = bytes32(0)
+for each rollup r in rollupIdsWithProofSystems (rollupId-ascending):
+  customDataAcc = keccak256(abi.encode(customDataAcc, rollupId_r, customData_r))
+
 sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
-    keccak256(callData)
+    keccak256(callData),
+    customDataAcc
 ))
 
 for each PS k in proofSystems:
   acc_k = bytes32(0)
   for each rollup r where k ∈ rollupIdsWithProofSystems[r].proofSystemIndex:
-    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j], blockHash_r, timestamp_r))
+    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j]))
   publicInputsHash[k] = keccak256(abi.encodePacked(sharedPublicInput, acc_k))
 
 entryHashes[i]      = keccak256(abi.encode(batch.entries[i]))
 lookupCallHashes[i] = keccak256(abi.encode(batch.l1ToL2lookupCalls[i]))
 ```
 
-`(blockHash_r, timestamp_r)` are fetched per-rollup via `IRollupContract(rollupContract).getTimestampAndBlockHash(batch.blockNumber)`. They are NOT in `sharedPublicInput` — each rollup folds its own values into the per-PS accumulator.
+`customData_r` is the opaque per-rollup blob fetched via `IRollupContract(rollupContract).getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment; the reference `Rollup` returns ABI-encoded `(timestamp, blockHash)`). Each blob folds — keyed by `rollupId_r`, rollupId-ascending — into `customDataAcc`, which binds into `sharedPublicInput`. It does NOT vary per PS, so it is folded ONCE into the shared input rather than into each per-PS `acc_k`.
 
 Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proofs verify atomically — any failure reverts the whole call.
 
@@ -395,7 +400,7 @@ return _consumeAndExecute(rollupId, crossChainCallHash);
 
 `_consumeAndExecute` routes to the rollup's queue (`verificationByRollup[rollupId]`) — transient stream first if inside `postAndVerifyBatch`, otherwise the persistent per-rollup queue. On a miss (cursor out-of-bounds or `proxyEntryHash` mismatch), it falls back to `_tryRevertedTopLevelLookup(crossChainCallHash, destRid)`, which scans the transient lookup table then the per-rollup `lookupQueue` for a `failed` lookup matching `crossChainCallHash` with live state-root pins and resolves it via `_executeRevertedTopLevelLookup` (runs any sub-execution, then reverts with the cached `returnData`); only if that also misses does it revert `ExecutionNotFound`.
 
-**Revert conditions**: `UnauthorizedProxy`, `ExecutionNotInCurrentBlock(rollupId)`, `ExecutionNotFound`, `RollingHashMismatch`, `UnconsumedL2ToL1Calls`, `UnconsumedL1ToL2Calls`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `StateRootMismatch(rollupId)`, plus any revert from the destination call (which is captured into `_rollingHash` via `CALL_END`).
+**Revert conditions**: `UnauthorizedProxy`, `ExecutionNotInCurrentBlock(rollupId)`, `ExecutionNotFound`, `RollingHashMismatch`, `UnconsumedL2ToL1Calls`, `UnconsumedL1ToL2Calls`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `StateRootMismatch(rollupId)`, `StaticCallWithValue` (a flat call flagged `isStatic` but carrying non-zero `value` — a STATICCALL cannot transfer ETH, so it is rejected rather than silently dropping the value), plus any revert from the destination call (which is captured into `_rollingHash` via `CALL_END`).
 
 #### `executeL2TX`
 
@@ -1352,7 +1357,7 @@ Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch
 - Every entry hash — `keccak256(abi.encode(entry))` over the FULL `ExecutionEntry` struct (including `stateDeltas` with `currentState`, `proxyEntryHash`, `destinationRollupId`, `l2ToL1Calls`, `expectedL1ToL2Calls`, `callCount`, `returnData`, `rollingHash`).
 - Every lookup-call hash — `keccak256(abi.encode(lookupCall))`.
 - Every blob hash (for data availability).
-- Per-rollup `(blockHash, timestamp)` fetched via `IRollupContract.getTimestampAndBlockHash(batch.blockNumber)` and folded into the per-PS accumulator `acc_k` (one quadruple per attesting rollup).
+- Per-rollup `customData` blob fetched via `IRollupContract.getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment) and folded — keyed by rollupId — into `customDataAcc`, which binds into `sharedPublicInput` (shared across all PS, not per-PS).
 - `keccak256(callData)`.
 - The per-rollup vkey row (`vkMatrix[r][j]`) for the rollup's `proofSystemIndex[]` subset.
 
