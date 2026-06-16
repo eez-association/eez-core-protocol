@@ -30,12 +30,13 @@ abstract contract VerifyHelpers is Script {
 
     // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only (IEEZL2 structs; no
     // StateDelta[] / destinationRollupId on L2).
-    //   ExecutionEntry     = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], uint256, bytes, bytes32)
-    //                         proxyEntryHash  incomingCalls  expectedOutgoingCalls          cnt     ret    rollingHash
-    //   CrossChainCall     = (address, uint256, bytes, address, uint256, uint256)
+    //   ExecutionEntry     = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], ExpectedLookup[], uint256, bytes, bytes32)
+    //                         proxyEntryHash  incomingCalls  expectedOutgoingCalls          expectedLookups  cnt     ret    rollingHash
+    //   CrossChainCall     = (bool, address, uint256, bytes, address, uint256, uint256)  // leading isStatic
     //   ExpectedOutgoingCrossChainCall = (bytes32, uint256, bytes)
+    //   ExpectedLookup     = (bytes32, bytes, bool, uint64, uint64, uint64, CrossChainCall[], ExpectedOutgoingCrossChainCall[], uint256, bytes32)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
+        "ExecutionTableLoaded((bytes32,(bool,address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],(bytes32,bytes,bool,uint64,uint64,uint64,(bool,address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes32)[],uint256,bytes,bytes32)[])"
     );
 
     // CrossChainCallExecuted(bytes32 crossChainCallHash, address proxy, address sourceAddress, bytes callData, uint256 value)
