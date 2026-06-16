@@ -466,6 +466,8 @@ contract EEZL2 is EEZBase {
                 bytes memory retData;
                 if (cc.isStatic) {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
+                    // A static call loaded with value is malformed — reject it rather than drop the value.
+                    if (cc.value != 0) revert StaticCallWithValue();
                     (success, retData) = sourceProxy.staticcall(
                         abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data))
                     );

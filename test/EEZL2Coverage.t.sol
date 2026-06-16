@@ -69,7 +69,11 @@ contract EEZL2CoverageTest is Test {
         bytes memory data,
         address sourceAddress,
         uint256 sourceRollup
-    ) internal pure returns (bytes32) {
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(rollupId, destination, value_, data, sourceAddress, sourceRollup));
     }
 
@@ -190,9 +194,9 @@ contract EEZL2CoverageTest is Test {
         vm.deal(SYSTEM_ADDRESS, 10);
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.ValueMismatch.selector);
-        manager.executeIncomingCrossChainCall{value: 1}(
-            address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new LookupCall[](0)
-        );
+        manager.executeIncomingCrossChainCall{
+            value: 1
+        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new LookupCall[](0));
     }
 
     function test_IncomingCrossChainCall_NotSystem() public {
@@ -248,9 +252,9 @@ contract EEZL2CoverageTest is Test {
         entries[0].rollingHash = _rollingHashSingleCall("");
 
         vm.prank(SYSTEM_ADDRESS);
-        bytes memory ret = manager.executeIncomingCrossChainCall{value: value}(
-            address(target), value, data, sourceAddr, sourceRollup, entries, new LookupCall[](0)
-        );
+        bytes memory ret = manager.executeIncomingCrossChainCall{
+            value: value
+        }(address(target), value, data, sourceAddr, sourceRollup, entries, new LookupCall[](0));
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
@@ -289,14 +293,17 @@ contract EEZL2CoverageTest is Test {
         bytes memory outgoingRet = abi.encode(uint256(1));
 
         // Rolling hash: CALL_BEGIN(1), [reentrant frame: NESTED_BEGIN(1), CALL_BEGIN(2),
-        // CALL_END(2,true,""), NESTED_END(1)], CALL_END(1,true,"").
+        // CALL_END(2,true,""), NESTED_END(1)], CALL_END(2,true,"").
+        // The outer CALL_END uses call number 2, not 1: `_rollingHashCallEnd` reads
+        // `_currentIncomingCall` *after* the call returns, and the reentrant frame already
+        // advanced the cursor to 2 (matching L1's post-bump convention in `EEZ._processNCalls`).
         bytes32 h = bytes32(0);
         h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
         h = keccak256(abi.encodePacked(h, NESTED_BEGIN, uint256(1)));
         h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(2)));
         h = keccak256(abi.encodePacked(h, CALL_END, uint256(2), true, innerActualRet));
         h = keccak256(abi.encodePacked(h, NESTED_END, uint256(1)));
-        h = keccak256(abi.encodePacked(h, CALL_END, uint256(1), true, bytes("")));
+        h = keccak256(abi.encodePacked(h, CALL_END, uint256(2), true, bytes("")));
 
         ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
         outgoing[0] = ExpectedOutgoingCrossChainCall({
@@ -527,6 +534,9 @@ contract EEZL2CoverageTest is Test {
         _loadSingle(entry, new LookupCall[](0));
 
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
+        // Invoke from 0xD00D so the consumed hash matches the entry's proxyEntryHash, whose
+        // bound sourceAddress is 0xD00D.
+        vm.prank(address(0xD00D));
         (bool ok,) = outerProxy.call(outerData);
         assertTrue(ok, "entry with nested static read must commit");
     }
@@ -569,4 +579,5 @@ contract EEZL2CoverageTest is Test {
 
 contract RejectEther {
     // No payable receive/fallback → any value transfer reverts.
-}
+
+    }

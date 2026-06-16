@@ -129,6 +129,11 @@ abstract contract EEZBase is IEEZ {
     /// @dev STATICCALL to a codeless address returns `(true, "")`; prover could pre-hash that.
     error LookupCallProxyNotDeployed(address sourceProxy);
 
+    /// @notice Error when a call marked `isStatic` was loaded carrying ETH value.
+    /// @dev A STATICCALL cannot transfer value, so a non-zero `value` on a static call is a
+    ///      malformed entry. We reject it explicitly rather than silently dropping the value.
+    error StaticCallWithValue();
+
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own

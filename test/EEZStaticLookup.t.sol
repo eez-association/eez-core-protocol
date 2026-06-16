@@ -56,7 +56,11 @@ contract EEZStaticLookupTest is Base {
     }
 
     /// @notice Minimal top-level lookup pinned to `rid`'s live root.
-    function _lookup(uint256 rid, bytes32 hash, bool failed, bytes memory ret) internal view returns (LookupCall memory lc) {
+    function _lookup(uint256 rid, bytes32 hash, bool failed, bytes memory ret)
+        internal
+        view
+        returns (LookupCall memory lc)
+    {
         lc.crossChainCallHash = hash;
         lc.destinationRollupId = rid;
         lc.returnData = ret;

@@ -631,16 +631,18 @@ contract EEZ is EEZBase {
 
     /// @notice Builds per-PS publicInputsHash and verifies every proof in the batch
     /// @dev Two-stage shape:
-    ///        sharedPublicInput = H(entryHashes, lookupCallHashes, blobHashes, H(callData))
+    ///        customDataAcc = bytes32(0)
+    ///        for each rollup r: customDataAcc = H(customDataAcc, rollupId_r, customData_r)
+    ///        sharedPublicInput = H(entryHashes, lookupCallHashes, blobHashes, H(callData), customDataAcc)
     ///      For each PS k we walk the rollupIdsWithProofSystems table in canonical order;
     ///      every rollup that lists k in its `proofSystemIndex[]` folds into a per-PS
     ///      rolling accumulator one rollup at a time:
     ///        acc_k = bytes32(0)
     ///        for each rollup r with k ∈ proofSystemIndex[r]:
-    ///          acc_k = H(acc_k, rollupId_r, vkMatrix[r][j], blockHash_r, timestamp_r)
-    ///      Then `publicInputsHash[k] = H(sharedPublicInput, acc_k)`. (blockHash, timestamp)
-    ///      are fetched ONCE per rollup via `getTimestampAndBlockHash` ahead of the per-PS
-    ///      loop, intentionally OUTSIDE sharedPublicInput so they can be rollup-specific.
+    ///          acc_k = H(acc_k, rollupId_r, vkMatrix[r][j])
+    ///      Then `publicInputsHash[k] = H(sharedPublicInput, acc_k)`. Each rollup's
+    ///      `customData` is fetched ONCE via `getCustomData` and folded into the SHARED input
+    ///      (it doesn't vary per PS), keyed by rollupId so the binding stays rollup-specific.
     function _verifyProofSystemBatch(ProofSystemBatchPerVerificationEntries calldata batch, bytes32[][] memory vkMatrix)
         internal
         view
@@ -666,34 +668,43 @@ contract EEZ is EEZBase {
             lookupCallHashes[i] = keccak256(abi.encode(batch.l1ToL2lookupCalls[i]));
         }
 
+        // Fetch each rollup's customData blob ONCE and fold it (keyed by rollupId) into a
+        // single accumulator. The read is `view` (STATICCALL) so a malicious manager cannot
+        // reenter. customData doesn't vary per PS, so it binds into the SHARED input below
+        // rather than the per-PS accumulator.
+        uint256 rollupCount = batch.rollupIdsWithProofSystems.length;
+        bytes32 customDataAcc = bytes32(0);
+        for (uint256 r = 0; r < rollupCount; r++) {
+            bytes memory customData = IRollupContract(
+                    rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
+                ).getCustomData(batch.blockNumber);
+            // acc_r = H(acc_{r-1}, rollupId_r, customData_r), folded in canonical rollupId order.
+            // Keyed by rollupId so each blob is bound to its rollup; provers must mirror this.
+            customDataAcc =
+                keccak256(abi.encode(customDataAcc, batch.rollupIdsWithProofSystems[r].rollupId, customData));
+        }
+
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256(batch.callData)
+                abi.encode(entryHashes),
+                abi.encode(lookupCallHashes),
+                abi.encode(blobHashes),
+                keccak256(batch.callData),
+                customDataAcc // per-rollup customData fold; shared across all PS
             )
         );
 
-        // Fetch (timestamp, blockHash) for every rollup ONCE — reused across all PS loops
-        // below. Both reads are `view` (STATICCALL) so a malicious manager cannot reenter.
-        uint256 rollupCount = batch.rollupIdsWithProofSystems.length;
-        uint256[] memory timestamps = new uint256[](rollupCount);
-        bytes32[] memory blockHashes = new bytes32[](rollupCount);
-        for (uint256 r = 0; r < rollupCount; r++) {
-            (timestamps[r], blockHashes[r]) = IRollupContract(
-                    rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
-                ).getTimestampAndBlockHash(batch.blockNumber);
-        }
-
         // Per-PS verification — for each PS k, walk attesting rollups in canonical order
         // (rollupId-ascending, the order the batch enforces) and fold each rollup's
-        // (rollupId, vkey_for_PS_k, blockHash, timestamp) into a rolling accumulator. Off-
-        // chain provers MUST mirror this incremental scheme so the on-chain rebuild matches.
+        // (rollupId, vkey_for_PS_k) into a rolling accumulator. Off-chain provers MUST mirror
+        // this incremental scheme so the on-chain rebuild matches.
         for (uint256 k = 0; k < batch.proofSystems.length; k++) {
             bytes32 acc = bytes32(0);
             for (uint256 r = 0; r < rollupCount; r++) {
                 RollupIdWithProofSystems calldata rps = batch.rollupIdsWithProofSystems[r];
                 uint256 j = _findIndexPosition(rps.proofSystemIndex, k);
                 if (j == type(uint256).max) continue;
-                acc = keccak256(abi.encode(acc, rps.rollupId, vkMatrix[r][j], blockHashes[r], timestamps[r]));
+                acc = keccak256(abi.encode(acc, rps.rollupId, vkMatrix[r][j]));
             }
 
             bytes32 publicInputsHash = keccak256(abi.encodePacked(sharedPublicInput, acc));
@@ -1039,6 +1050,9 @@ contract EEZ is EEZBase {
                 bytes memory retData;
                 if (cc.isStatic) {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
+                    // A static call loaded with value is malformed — reject it rather than drop the value.
+                    if (cc.value != 0) revert StaticCallWithValue();
+
                     (success, retData) = sourceProxy.staticcall(
                         abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data))
                     );

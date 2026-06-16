@@ -48,6 +48,7 @@ struct StateDelta {
 }
 
 struct L2ToL1Call {
+    bool    isStatic;       // true = dispatch via STATICCALL (read-only, no value, reverts on state write)
     address targetAddress;
     uint256 value;
     bytes   data;
@@ -116,6 +117,7 @@ Leaner: no `StateDelta`, no `destinationRollupId`, no `expectedStateRoots`.
 
 ```solidity
 struct CrossChainCall {       // same field layout as L1's L2ToL1Call
+    bool    isStatic;         // true = dispatch via STATICCALL (read-only, no value, reverts on state write)
     address targetAddress;
     uint256 value;
     bytes   data;

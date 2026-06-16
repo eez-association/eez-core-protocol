@@ -3,11 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    RollupIdWithProofSystems
-} from "../src/EEZ.sol";
+import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {IRollupContract} from "../src/interfaces/IRollup.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
@@ -90,8 +86,8 @@ contract BadVkeyManager is IRollupContract {
         vkeys[1] = bytes32(uint256(2));
     }
 
-    function getTimestampAndBlockHash(uint64) external pure returns (uint256, bytes32) {
-        return (0, bytes32(0));
+    function getCustomData(uint64) external pure returns (bytes memory) {
+        return "";
     }
 }
 
@@ -147,7 +143,13 @@ contract EEZCoverageTest is Base {
     }
 
     /// @notice Default single-PS [ps] + ["proof"] for a single rollup with `nPs` index slots.
-    function _stdBatch(uint256 rid, ExecutionEntry[] memory entries, LookupCall[] memory lookups, uint256 tc, uint256 tlc)
+    function _stdBatch(
+        uint256 rid,
+        ExecutionEntry[] memory entries,
+        LookupCall[] memory lookups,
+        uint256 tc,
+        uint256 tlc
+    )
         internal
         view
         returns (ProofSystemBatchPerVerificationEntries memory b)
@@ -198,8 +200,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_UnregisteredRollup() public {
         // rollupId 999 has no manager registered.
-        ProofSystemBatchPerVerificationEntries memory b =
-            _stdBatch(999, _emptyEntries(), _emptyLookupCalls(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(999, _emptyEntries(), _emptyLookupCalls(), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -293,8 +294,9 @@ contract EEZCoverageTest is Base {
         StateDelta[] memory deltas = new StateDelta[](1);
         deltas[0] = StateDelta({rollupId: r.id, currentState: bytes32(0), newState: bytes32(0), etherDelta: 0});
         ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
-        reentrant[0] =
-            ExpectedL1ToL2Call({crossChainCallHash: bytes32(0), destinationRollupId: 8888, callCount: 0, returnData: ""});
+        reentrant[0] = ExpectedL1ToL2Call({
+            crossChainCallHash: bytes32(0), destinationRollupId: 8888, callCount: 0, returnData: ""
+        });
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].expectedL1ToL2Calls = reentrant;
@@ -371,8 +373,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_TransientCountExceedsEntries() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        ProofSystemBatchPerVerificationEntries memory b =
-            _stdBatch(r.id, _emptyEntries(), _emptyLookupCalls(), 1, 0); // tc 1 > 0 entries
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyLookupCalls(), 1, 0); // tc 1 > 0 entries
         vm.expectRevert(EEZ.TransientCountExceedsEntries.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -395,8 +396,7 @@ contract EEZCoverageTest is Base {
         BadVkeyManager bad = new BadVkeyManager();
         uint256 rid = rollups.registerRollup(address(bad), bytes32(0));
         // Single PS queried → manager returns 2 vkeys → length mismatch.
-        ProofSystemBatchPerVerificationEntries memory b =
-            _stdBatch(rid, _emptyEntries(), _emptyLookupCalls(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(rid, _emptyEntries(), _emptyLookupCalls(), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -440,14 +440,8 @@ contract EEZCoverageTest is Base {
         idxOne[0] = 0;
 
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] = RollupIdWithProofSystems({
-            rollupId: idLo,
-            proofSystemIndex: idLo == rAll.id ? idxAll : idxOne
-        });
-        rps[1] = RollupIdWithProofSystems({
-            rollupId: idHi,
-            proofSystemIndex: idHi == rAll.id ? idxAll : idxOne
-        });
+        rps[0] = RollupIdWithProofSystems({rollupId: idLo, proofSystemIndex: idLo == rAll.id ? idxAll : idxOne});
+        rps[1] = RollupIdWithProofSystems({rollupId: idHi, proofSystemIndex: idHi == rAll.id ? idxAll : idxOne});
 
         ProofSystemBatchPerVerificationEntries memory b =
             _raw(_emptyEntries(), _emptyLookupCalls(), psSorted, proofs, rps, 0, 0);
@@ -601,8 +595,9 @@ contract EEZCoverageTest is Base {
             revertSpan: 0
         });
         ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
-        reentrant[0] =
-            ExpectedL1ToL2Call({crossChainCallHash: keccak256("never"), destinationRollupId: r.id, callCount: 0, returnData: ""});
+        reentrant[0] = ExpectedL1ToL2Call({
+            crossChainCallHash: keccak256("never"), destinationRollupId: r.id, callCount: 0, returnData: ""
+        });
 
         StateDelta[] memory deltas = new StateDelta[](1);
         deltas[0] = StateDelta({rollupId: r.id, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
@@ -634,7 +629,8 @@ contract EEZCoverageTest is Base {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
         address proxyAddr = rollups.createCrossChainProxy(address(target), r.id);
         vm.prank(alice);
-        (bool ok,) = proxyAddr.call(abi.encodeWithSignature("executeOnBehalf(address,bytes)", address(target), bytes("")));
+        (bool ok,) =
+            proxyAddr.call(abi.encodeWithSignature("executeOnBehalf(address,bytes)", address(target), bytes("")));
         assertFalse(ok); // routed through _fallback, reverted in EEZ (not verified this block)
     }
 
@@ -688,14 +684,9 @@ contract EEZCoverageTest is Base {
         lc.expectedStateRoots = pins;
     }
 
-    function _twoPsSorted(MockProofSystem ps2)
-        internal
-        view
-        returns (address[] memory psList, bytes32[] memory vks)
-    {
+    function _twoPsSorted(MockProofSystem ps2) internal view returns (address[] memory psList, bytes32[] memory vks) {
         psList = new address[](2);
-        (address a, address b) =
-            address(ps) < address(ps2) ? (address(ps), address(ps2)) : (address(ps2), address(ps));
+        (address a, address b) = address(ps) < address(ps2) ? (address(ps), address(ps2)) : (address(ps2), address(ps));
         psList[0] = a;
         psList[1] = b;
         vks = new bytes32[](2);

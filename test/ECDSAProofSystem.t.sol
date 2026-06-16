@@ -73,9 +73,8 @@ contract ECDSAProofSystemIntegrationTest is Base {
     }
 
     /// @dev Mirrors `EEZ._verifyProofSystemBatch` for the single-PS / single-rollup shape
-    ///      we build below. The reference `Rollup` manager returns `(0, bytes32(0))` from
-    ///      `getTimestampAndBlockHash`, so the per-rollup `(blockHash, timestamp)` pair
-    ///      folded into the accumulator is `(bytes32(0), 0)`.
+    ///      we build below. The batch leaves `blockNumber == 0`, so the reference `Rollup`
+    ///      manager returns an empty `customData` blob, folded into the shared public input.
     function _computePublicInputsHash(
         ExecutionEntry[] memory entries,
         LookupCall[] memory lookupCalls,
@@ -96,14 +95,19 @@ contract ECDSAProofSystemIntegrationTest is Base {
         }
         bytes32[] memory blobHashes = new bytes32[](0);
 
+        bytes32 customDataAcc = keccak256(abi.encode(bytes32(0), rid, bytes("")));
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
-                abi.encode(entryHashes), abi.encode(lookupCallHashes), abi.encode(blobHashes), keccak256("")
+                abi.encode(entryHashes),
+                abi.encode(lookupCallHashes),
+                abi.encode(blobHashes),
+                keccak256(""),
+                customDataAcc
             )
         );
 
         bytes32 acc = bytes32(0);
-        acc = keccak256(abi.encode(acc, rid, vk, bytes32(0), uint256(0)));
+        acc = keccak256(abi.encode(acc, rid, vk));
 
         return keccak256(abi.encodePacked(sharedPublicInput, acc));
     }

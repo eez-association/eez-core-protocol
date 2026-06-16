@@ -49,8 +49,8 @@ struct RollupIdWithProofSystems {
 ///      dispatch parameters — not bound by the proof — so the orchestrator can tune the
 ///      transient/persistent split without re-proving.
 /// @dev `blockNumber` is the single L1 block the whole batch binds to. The registry forwards
-///      it to every rollup's `getTimestampAndBlockHash(blockNumber)`, whose result folds into
-///      each proof's public input. 0 = no block context, type(uint64).max = "latest context"
+///      it to every rollup's `getCustomData(blockNumber)`, whose result folds into the batch's
+///      shared public input. 0 = no block context, type(uint64).max = "latest context"
 struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries;
     LookupCall[] l1ToL2lookupCalls;
