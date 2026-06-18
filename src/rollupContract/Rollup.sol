@@ -56,7 +56,7 @@ contract Rollup is IRollupContract, Ownable {
     ///         be returned than this manager's threshold requires
     error ThresholdNotMet(uint256 submitted, uint256 required);
 
-    /// @notice `getTimestampAndBlockHash` was asked to bind a blockNumber whose `blockhash`
+    /// @notice `getCustomData` was asked to bind a blockNumber whose `blockhash`
     ///         is unavailable (≥ current block or older than the last 256 blocks → 0).
     error BlockHashUnavailable(uint64 blockNumber);
 
@@ -124,31 +124,33 @@ contract Rollup is IRollupContract, Ownable {
         }
     }
 
-    /// @notice (timestamp, blockHash) this rollup binds into its per-rollup verification commit
-    ///         for the L1 `blockNumber` the batch is bound to. The registry folds the result
-    ///         into every proof's public input, so the proof attests against this exact L1 view.
-    /// @dev Reference impl returns timestamp 0: a past block's timestamp can't be recovered
-    ///      on-chain (only `block.timestamp` of the current block is available), so it's read
-    ///      off-chain from the header instead. A real rollup can override this via handoff.
-    /// @param blockNumber L1 block to bind. 0 = no block context (legacy `(0, 0)`);
+    /// @notice Opaque `customData` blob this rollup binds into its per-rollup verification
+    ///         commit for the L1 `blockNumber` the batch is bound to. The registry folds the
+    ///         result into the batch's shared public input, so the proof attests against this
+    ///         exact L1 view.
+    /// @dev Reference impl returns ABI-encoded `(timestamp, blockHash)` with timestamp 0: a
+    ///      past block's timestamp can't be recovered on-chain (only `block.timestamp` of the
+    ///      current block is available), so it's read off-chain from the header instead. A real
+    ///      rollup can override this via handoff to commit any view its circuit expects.
+    /// @param blockNumber L1 block to bind. 0 = no block context (empty blob);
     ///        type(uint64).max = latest context (current timestamp + last block header).
-    function getTimestampAndBlockHash(uint64 blockNumber) external view returns (uint256 timestamp, bytes32 blockHash) {
-        // 0 is the "no L1 context" sentinel — skip the blockhash bind entirely.
-        if (blockNumber == 0) return (0, bytes32(0));
+    function getCustomData(uint64 blockNumber) external view returns (bytes memory customData) {
+        // 0 is the "no L1 context" sentinel — bind an empty blob.
+        if (blockNumber == 0) return "";
 
         // type(uint64).max is the "latest context" sentinel — bind the current block's
         // timestamp and the most recent available block hash (the previous block).
-        if (blockNumber == type(uint64).max) return (block.timestamp, blockhash(block.number - 1));
+        if (blockNumber == type(uint64).max) return abi.encode(block.timestamp, blockhash(block.number - 1));
 
         // `blockhash` only resolves the most recent 256 blocks; the current/future block and
         // anything older than 256 return 0. Reject that: a stale or out-of-range blockNumber
         // must not silently bind a zero hash, which would let a proof built for a different
         // (or absent) L1 view pass verification.
         // If we think is necessary we can use the EIP-2935 for checking last 8k~ block headers
-        blockHash = blockhash(blockNumber);
+        bytes32 blockHash = blockhash(blockNumber);
         if (blockHash == bytes32(0)) revert BlockHashUnavailable(blockNumber);
 
-        return (0, blockHash);
+        return abi.encode(uint256(0), blockHash);
     }
 
     /// @notice One-shot registration callback fired by the central registry.

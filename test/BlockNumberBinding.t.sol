@@ -7,9 +7,9 @@ import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {ExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
 /// @notice Covers `ProofSystemBatchPerVerificationEntries.blockNumber`:
-///         path coverage of `Rollup.getTimestampAndBlockHash` (0 / recent block /
+///         path coverage of `Rollup.getCustomData` (0 / recent block /
 ///         `type(uint64).max` sentinel / `BlockHashUnavailable` reverts) AND the binding
-///         guarantee — the returned (timestamp, blockHash) folds into `publicInputsHash`
+///         guarantee — the returned `customData` blob folds into `publicInputsHash`
 ///         exactly as `_verifyProofSystemBatch` computes it. The fold is asserted with a
 ///         pinned-hash `MockProofSystem`: the mock only accepts the exact hash the test
 ///         replicates off-band, so a successful post proves the registry computed it.
@@ -41,12 +41,9 @@ contract BlockNumberBindingTest is Base {
     }
 
     /// @notice Mirrors `_verifyProofSystemBatch`'s two-stage publicInputsHash for the
-    ///         single-PS / single-rollup shape built by `_batchWithBlockNumber`.
-    function _expectedPublicInputsHash(
-        ProofSystemBatchPerVerificationEntries memory batch,
-        uint256 timestamp,
-        bytes32 blockHash
-    )
+    ///         single-PS / single-rollup shape built by `_batchWithBlockNumber`. `customData`
+    ///         is the blob `Rollup.getCustomData` returns for the bound block.
+    function _expectedPublicInputsHash(ProofSystemBatchPerVerificationEntries memory batch, bytes memory customData)
         internal
         view
         returns (bytes32)
@@ -58,17 +55,18 @@ contract BlockNumberBindingTest is Base {
         bytes32[] memory lookupCallHashes = new bytes32[](0);
         bytes32[] memory blobHashes = new bytes32[](0);
 
+        bytes32 customDataAcc = keccak256(abi.encode(bytes32(0), r.id, customData));
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
                 abi.encode(entryHashes),
                 abi.encode(lookupCallHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
-                batch.crossProofSystemInteractions
+                customDataAcc
             )
         );
 
-        bytes32 acc = keccak256(abi.encode(bytes32(0), r.id, DEFAULT_VK, blockHash, timestamp));
+        bytes32 acc = keccak256(abi.encode(bytes32(0), r.id, DEFAULT_VK));
         return keccak256(abi.encodePacked(sharedPublicInput, acc));
     }
 
@@ -120,8 +118,8 @@ contract BlockNumberBindingTest is Base {
 
     function test_ZeroBlockNumber_BindsNoContext() public {
         ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(0);
-        // 0 sentinel → manager returns (0, 0).
-        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, 0, bytes32(0)));
+        // 0 sentinel → manager returns an empty blob.
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, ""));
         rollups.postAndVerifyBatch(batch);
         _assertEntryApplied();
     }
@@ -132,7 +130,7 @@ contract BlockNumberBindingTest is Base {
         bytes32 expectedBlockHash = blockhash(990);
         assertTrue(expectedBlockHash != bytes32(0), "fixture: blockhash(990) must resolve");
         // Specific-block path: timestamp is 0 (historical timestamps unrecoverable on-chain).
-        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, 0, expectedBlockHash));
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, abi.encode(uint256(0), expectedBlockHash)));
         rollups.postAndVerifyBatch(batch);
         _assertEntryApplied();
     }
@@ -141,7 +139,9 @@ contract BlockNumberBindingTest is Base {
         vm.roll(500);
         vm.warp(123_456);
         ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(type(uint64).max);
-        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, block.timestamp, blockhash(block.number - 1)));
+        ps.setExpectedPublicInputsHash(
+            _expectedPublicInputsHash(batch, abi.encode(block.timestamp, blockhash(block.number - 1)))
+        );
         rollups.postAndVerifyBatch(batch);
         _assertEntryApplied();
     }
@@ -153,7 +153,7 @@ contract BlockNumberBindingTest is Base {
         ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(990);
         assertTrue(blockhash(990) != blockhash(991), "fixture: distinct block hashes required");
         // Pin the hash for block 991, then post a batch bound to 990.
-        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, 0, blockhash(991)));
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, abi.encode(uint256(0), blockhash(991))));
         vm.expectRevert(EEZ.InvalidProof.selector);
         rollups.postAndVerifyBatch(batch);
     }

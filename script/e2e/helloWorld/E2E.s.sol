@@ -74,6 +74,7 @@ abstract contract HelloActions {
     function _l2Entries(address helloL2, address helloL1) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: helloL2,
             value: 0,
             data: _getWordCallData(),
@@ -165,7 +166,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

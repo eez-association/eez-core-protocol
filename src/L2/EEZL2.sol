@@ -169,6 +169,11 @@ contract EEZL2 is EEZBase {
         return _currentIncomingCall != 0;
     }
 
+    /// @notice This L2's own network — `createCrossChainProxy` may not proxy a local address.
+    function _getRollupId() internal view override returns (uint256) {
+        return ROLLUP_ID;
+    }
+
     // ──────────────────────────────────────────────
     //  Execution entry points
     // ──────────────────────────────────────────────
@@ -457,9 +462,20 @@ contract EEZL2 is EEZBase {
                     _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollupId);
                 }
 
-                (bool success, bytes memory retData) = sourceProxy.call{
-                    value: cc.value
-                }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
+                bool success;
+                bytes memory retData;
+                if (cc.isStatic) {
+                    // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
+                    // A static call loaded with value is malformed — reject it rather than drop the value.
+                    if (cc.value != 0) revert StaticCallWithValue();
+                    (success, retData) = sourceProxy.staticcall(
+                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data))
+                    );
+                } else {
+                    (success, retData) = sourceProxy.call{
+                        value: cc.value
+                    }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
+                }
 
                 _rollingHashCallEnd(_currentIncomingCall, success, retData);
                 emit CallResult(_currentEntryIndex, _currentIncomingCall, success, retData);
@@ -499,7 +515,7 @@ contract EEZL2 is EEZBase {
         view
         returns (bytes memory)
     {
-        if (_processNLookupCalls(calls) != rollingHash) revert RollingHashMismatch();
+        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
         if (failed) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
@@ -571,7 +587,7 @@ contract EEZL2 is EEZBase {
     /// @dev All proxies referenced must already be deployed; CREATE2 is unavailable inside a
     ///      STATICCALL frame. The accumulator is a local, not `_rollingHash`, so this is verified
     ///      against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
-    function _processNLookupCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
+    function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);

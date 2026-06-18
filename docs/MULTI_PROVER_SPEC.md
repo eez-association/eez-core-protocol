@@ -36,7 +36,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 │  - addProofSystem / removeProofSystem        │
 │  - updateVerificationKey / setThreshold      │
 │  - transferOwnership / setStateRoot          │
-│  - getTimestampAndBlockHash                  │
+│  - getCustomData                             │
 └──────────────────────────────────────────────┘
               ▲ verify(proof, hash)
               │
@@ -85,7 +85,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256 transientLookupCallCount;
     address[] proofSystems;                              // sorted asc, no duplicates, no zero
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly ascending by rollupId
-    bytes32 crossProofSystemInteractions;                 // hash binding cross-PS messages
     uint256[] blobIndices;                                // selects which tx-level 4844 blobs the batch consumes
     bytes callData;                                       // batch-scoped (each PS's circuit gets its own region)
     bytes[] proofs;                                       // parallel to proofSystems — one proof per PS
@@ -122,18 +121,22 @@ governance-driven, time-weighted, etc.) — the registry just consumes the retur
 ### Per-PS publicInputsHash (two-stage)
 
 ```
+customDataAcc = bytes32(0)
+for each rollup r in rollupIdsWithProofSystems (rollupId-ascending):
+  customDataAcc = keccak256(abi.encode(customDataAcc, rollupId_r, customData_r))
+
 sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
     keccak256(callData),
-    crossProofSystemInteractions
+    customDataAcc
 ))
 
 for each PS k in proofSystems:
   acc_k = bytes32(0)
   for each rollup r where k ∈ rollupIdsWithProofSystems[r].proofSystemIndex:
-    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j], blockHash_r, timestamp_r))
+    acc_k = keccak256(abi.encode(acc_k, rollupId_r, vkMatrix[r][j]))
   publicInputsHash[k] = keccak256(abi.encodePacked(sharedPublicInput, acc_k))
 ```
 
@@ -142,19 +145,13 @@ for each PS k in proofSystems:
   expectedL1ToL2Calls, callCount, returnData, rollingHash). Prevents an orchestrator from
   swapping inputs at execution time without invalidating the proof.
 - `lookupCallHashes[i] = keccak256(abi.encode(batch.l1ToL2lookupCalls[i]))` — same rationale.
-- `(blockHash_r, timestamp_r)` are fetched per-rollup via
-  `IRollupContract.getTimestampAndBlockHash(batch.blockNumber)` and folded into per-PS `acc_k`.
-  `prevBlockhash` and `ts` are NOT in `sharedPublicInput`; each rollup folds its own values
-  into the per-PS accumulator.
+- `customData_r` is the opaque blob fetched per-rollup via
+  `IRollupContract.getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment — the
+  reference `Rollup` returns ABI-encoded `(timestamp, blockHash)`). Each rollup's blob is folded,
+  keyed by `rollupId_r` in rollupId-ascending order, into `customDataAcc`, which binds into
+  `sharedPublicInput`. It does NOT vary per PS, so it is shared across all `acc_k` rather than
+  re-folded into each one.
 - `vkMatrix[r][j]` is the vkey of `proofSystems[proofSystemIndex[r][j]]` for `rollupId_r`.
-
-### Cross-PS interactions hash
-
-`crossProofSystemInteractions` is a per-batch hash committing to the set of cross-PS
-boundary messages this batch participates in (computed off-chain, mirrored in each PS's
-circuit). All proofs in a `postAndVerifyBatch` must verify atomically — if PS_A claims to
-send msg_0 to PS_B and PS_B's commitment doesn't include msg_0, one of them won't verify
-and the whole batch reverts.
 
 ---
 
@@ -224,8 +221,8 @@ consumers — they just fail their own state-root check if they depended on it.
 3. **Fetch vkMatrix + verify**: `_fetchVkMatrix(batch)` calls each rollup's manager via
    `IRollupContract.checkProofSystemsAndGetVkeys(subset)` — manager enforces threshold and
    returns one vkey per PS in the subset. Then `_verifyProofSystemBatch(batch, vkMatrix)`
-   computes `sharedPublicInput`, builds per-PS `publicInputsHash[k]` (folding each rollup's
-   `(blockHash, timestamp)` via `getTimestampAndBlockHash(batch.blockNumber)`), and calls
+   computes `sharedPublicInput` (folding each rollup's `customData` via
+   `getCustomData(batch.blockNumber)`), builds per-PS `publicInputsHash[k]`, and calls
    `IProofSystem.verify(proofs[k], publicInputsHash[k])` for each PS. ALL proofs must verify
    atomically (one revert reverts the whole call).
 4. **Mark verified-this-block** (`_markVerifiedBlockPerRollup(rid)` for each rollup): wipes
@@ -333,8 +330,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **The rollup owner trusts their own proof system(s) and threshold.** Registry makes no
   judgment about whether a PS is "real"; just calls `verify(...)` and trusts the return.
 - **Atomic verification across the batch.** All proofs in a `postAndVerifyBatch` call must
-  verify; if any fails, the whole call reverts. This is what makes
-  `crossProofSystemInteractions` load-bearing across PSes.
+  verify; if any fails, the whole call reverts.
 - **The orchestrator (`postAndVerifyBatch` caller) pays for any waste.** Unrelated PSes,
   unconsumed transient entries, etc. — registry doesn't grief-check.
 
@@ -355,7 +351,7 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **`_processNCalls` runs before `_applyStateDeltas`**: outer entry's state deltas applied
   at end. Reentrant entries from other rollups apply their own deltas during dispatch. By
   design, document.
-- **`_processNLookupCalls` rolling hash format differs** from the main rolling hash (no
+- **`_processNStaticCalls` rolling hash format differs** from the main rolling hash (no
   CALL_BEGIN/CALL_END tags). Pre-existing simplification; document or align.
 - **Possible "join" of `Action` and `L2ToL1Call`**: the two structs have overlapping
   shape (target, value, data, sourceAddress, sourceRollupId, plus a few extras each). The
@@ -367,12 +363,10 @@ function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
 - **Per-(destination rollup) call ID counter**: introduce a monotonic `callId` per
   destination rollup (or maybe globally per `postAndVerifyBatch` / per cross-PS-interaction set) baked
   into each `L2ToL1Call` / `Action`. Useful for: deterministic cross-PS message
-  ordering (replaces ad-hoc execution-order indexing in `crossProofSystemInteractions`),
-  off-chain indexing / debugging, deduplication of identical-looking calls. Open questions:
-  scope (per-rollup, per-tx, per-batch?), where the counter lives (registry storage vs.
-  prover-supplied + bound by hash?), how it interacts with `revertSpan` when a call's
-  state is rolled back. Worth investigating once the cross-PS interactions hash work
-  starts.
+  ordering, off-chain indexing / debugging, deduplication of identical-looking calls. Open
+  questions: scope (per-rollup, per-tx, per-batch?), where the counter lives (registry storage
+  vs. prover-supplied + bound by hash?), how it interacts with `revertSpan` when a call's
+  state is rolled back. Worth investigating later.
 
 ---
 
@@ -383,7 +377,7 @@ Two parallel reviews were run after the latest round of changes:
 - **Code-quality review**: flagged threshold-as-separate-call (now fixed by moving threshold
   inside `checkProofSystemsAndGetVkeys`), stale natspec referencing the removed reverse map,
   `StateDeltaRollupNotInBatch` error reused for lookup call destination (renamed to
-  `RollupNotInBatch`), `_processNLookupCalls` rolling hash format divergence (pre-existing).
+  `RollupNotInBatch`), `_processNStaticCalls` rolling hash format divergence (pre-existing).
 - **Security review**: HIGH on reentrancy via `_fetchVkMatrix` / `threshold()` BEFORE
   `_markVerifiedBlockPerRollup` — fixed by hoisting the mark to step 4 (still before any external
   CALL, since steps 2/3 are static-only). MEDIUM on `rollupContractRegistered` reentrancy in

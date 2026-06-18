@@ -48,6 +48,7 @@ struct StateDelta {
 }
 
 struct L2ToL1Call {
+    bool    isStatic;       // true = dispatch via STATICCALL (read-only, no value, reverts on state write)
     address targetAddress;
     uint256 value;
     bytes   data;
@@ -116,6 +117,7 @@ Leaner: no `StateDelta`, no `destinationRollupId`, no `expectedStateRoots`.
 
 ```solidity
 struct CrossChainCall {       // same field layout as L1's L2ToL1Call
+    bool    isStatic;         // true = dispatch via STATICCALL (read-only, no value, reverts on state write)
     address targetAddress;
     uint256 value;
     bytes   data;
@@ -180,7 +182,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256                     transientLookupCallCount;
     address[]                   proofSystems;                   // batch-global, strictly increasing
     RollupIdWithProofSystems[]  rollupIdsWithProofSystems;      // strictly increasing rollupIds
-    bytes32                     crossProofSystemInteractions;   // domain separator for joined proofs
     uint256[]                   blobIndices;                    // EIP-4844 blobs this batch consumes
     bytes                       callData;
     bytes[]                     proofs;                         // one per proofSystems entry

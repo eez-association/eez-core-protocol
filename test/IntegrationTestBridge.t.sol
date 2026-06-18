@@ -205,7 +205,6 @@ contract IntegrationTestBridge is Test {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
@@ -295,6 +294,7 @@ contract IntegrationTestBridge is Test {
 
         CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
         l2Calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: alice,
             value: 1 ether,
             data: "",
@@ -419,6 +419,7 @@ contract IntegrationTestBridge is Test {
         // Entry's calls: route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET)
         CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
         l2Calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(bridgeL2),
             value: 0,
             data: receiveTokensCalldata,
@@ -534,6 +535,7 @@ contract IntegrationTestBridge is Test {
 
         CrossChainCall[] memory fwdL2Calls = new CrossChainCall[](1);
         fwdL2Calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(bridgeL2),
             value: 0,
             data: fwdCalldata,
@@ -621,6 +623,7 @@ contract IntegrationTestBridge is Test {
         // The call inside the entry: proxy(bridgeL2, L2).executeOnBehalf(bridgeL1, retCalldata)
         L2ToL1Call[] memory retL1Calls = new L2ToL1Call[](1);
         retL1Calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(bridgeL1),
             value: 0,
             data: retCalldata,

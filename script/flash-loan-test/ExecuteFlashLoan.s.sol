@@ -197,7 +197,6 @@ contract FlashLoanBatcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
@@ -331,7 +330,9 @@ contract ExecuteFlashLoanL1 is Script {
         // Entry 1: claimAndBridgeBack -- consumed when executor calls executorL2Proxy
         // This entry has an expectedL1ToL2Call for the bridge return call (reentrant)
         ExpectedL1ToL2Call[] memory nested1 = new ExpectedL1ToL2Call[](1);
-        nested1[0] = ExpectedL1ToL2Call({crossChainCallHash: callReturnHash, callCount: 0, returnData: ""});
+        nested1[0] = ExpectedL1ToL2Call({
+            crossChainCallHash: callReturnHash, destinationRollupId: MAINNET_ROLLUP_ID, callCount: 0, returnData: ""
+        });
 
         entries[1] = ExecutionEntry({
             stateDeltas: deltas2,

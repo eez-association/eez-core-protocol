@@ -117,7 +117,10 @@ function _crossChainCallHash(
     bytes memory data,
     address sourceAddress,
     uint256 sourceRollupId
-) pure returns (bytes32) {
+)
+    pure
+    returns (bytes32)
+{
     return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
 }
 
@@ -207,10 +210,7 @@ contract Scenario1_L1 is Script {
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
             stateDeltas[0] = StateDelta({
-                rollupId: 1,
-                currentState: keccak256("l2-initial-state"),
-                newState: newState,
-                etherDelta: 0
+                rollupId: 1, currentState: keccak256("l2-initial-state"), newState: newState, etherDelta: 0
             });
 
             CrossChainCall[] memory calls = new CrossChainCall[](0);
@@ -244,8 +244,7 @@ contract Scenario1_L1 is Script {
                 transientLookupCallCount: 0,
                 blobIndices: new uint256[](0),
                 callData: "",
-                proof: proofs,
-                crossProofSystemInteractions: bytes32(0)
+                proof: proofs
             });
             rollups.postBatch(batches);
         }

@@ -198,7 +198,6 @@ contract EEZTest is Base {
             transientLookupCallCount: transientLookupCallCount,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
@@ -389,7 +388,9 @@ contract EEZTest is Base {
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (1));
         bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
         ExecutionEntry[] memory e1 = new ExecutionEntry[](1);
-        e1[0].stateDeltas = new StateDelta[](0);
+        StateDelta[] memory d1 = new StateDelta[](1);
+        d1[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: bytes32(0), etherDelta: 0});
+        e1[0].stateDeltas = d1;
         e1[0].proxyEntryHash = ah;
         e1[0].destinationRollupId = rid;
         e1[0].l2ToL1Calls = new L2ToL1Call[](0);
@@ -449,7 +450,6 @@ contract EEZTest is Base {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
@@ -527,11 +527,12 @@ contract EEZTest is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: cd,
             sourceAddress: address(this),
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: rid,
             revertSpan: 0
         });
         bytes32 rh = _rollingHashSingleCall("");
@@ -696,6 +697,7 @@ contract EEZTest is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(forwarder),
             value: 2 ether,
             data: abi.encodeCall(ValueForwarder.forward, (1.5 ether)),
@@ -705,7 +707,9 @@ contract EEZTest is Base {
         });
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
-        nested[0] = ExpectedL1ToL2Call({crossChainCallHash: nestedHash, callCount: 0, returnData: ""});
+        nested[0] = ExpectedL1ToL2Call({
+            crossChainCallHash: nestedHash, destinationRollupId: rid, callCount: 0, returnData: ""
+        });
 
         bytes32 h = bytes32(0);
         h = _hCallBegin(h, 1);
@@ -823,11 +827,12 @@ contract EEZTest is Base {
         bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: cd,
             sourceAddress: address(this),
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: rid,
             revertSpan: 0
         });
         StateDelta[] memory deltas = new StateDelta[](1);
@@ -852,11 +857,12 @@ contract EEZTest is Base {
         bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: cd,
             sourceAddress: address(this),
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: rid,
             revertSpan: 0
         });
         calls[1] = calls[0];
@@ -931,7 +937,7 @@ contract EEZTest is Base {
     /// @notice Builds a top-level reverted `LookupCall` (no sub-calls, no pins).
     function _revertedLookup(uint256 rid, bytes32 hash, bytes memory payload)
         internal
-        pure
+        view
         returns (LookupCall memory lc)
     {
         lc.crossChainCallHash = hash;
@@ -940,6 +946,11 @@ contract EEZTest is Base {
         lc.failed = true;
         lc.l2ToL1Calls = new L2ToL1Call[](0);
         lc.rollingHash = bytes32(0);
+        // A top-level lookup must pin its own destination (postBatch: destination ∈ pins). Pin the
+        // live root so `_stateRootsMatch` also passes at resolution.
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
+        lc.expectedStateRoots = pins;
     }
 
     /// @notice Deferred path: the reverted lookup sits in `verificationByRollup[rid].lookupQueue`
@@ -1045,11 +1056,12 @@ contract EEZTest is Base {
     {
         L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
         subCalls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: subTarget,
             value: 0,
             data: abi.encodeCall(TestTarget.setValue, (subValue)),
             sourceAddress: address(this),
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: rid,
             revertSpan: 0
         });
         lc.crossChainCallHash = hash;
@@ -1061,7 +1073,10 @@ contract EEZTest is Base {
         lc.expectedLookups = new ExpectedLookup[](0);
         lc.callCount = 1;
         lc.rollingHash = _rollingHashSingleCall(""); // CALL_BEGIN(1) → CALL_END(1, true, "")
-        lc.expectedStateRoots = new ExpectedStateRootPerRollup[](0);
+        // Pin the destination (postBatch: destination ∈ pins) at its live root so it also matches.
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
+        lc.expectedStateRoots = pins;
     }
 
     /// @notice Happy path: the reverted lookup runs its sub-execution, then reverts with the
@@ -1177,6 +1192,7 @@ contract EEZTest is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(scap),
             value: 0,
             data: outerCd,
@@ -1188,6 +1204,7 @@ contract EEZTest is Base {
         ExpectedLookup[] memory lookups = new ExpectedLookup[](1);
         lookups[0] = ExpectedLookup({
             crossChainCallHash: innerHash,
+            destinationRollupId: rid,
             returnData: bytes("inner reverts"),
             failed: true,
             l2ToL1CallNumber: 1,
@@ -1239,6 +1256,7 @@ contract EEZTest is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: address(scap),
             value: 0,
             data: outerCd,
@@ -1250,6 +1268,7 @@ contract EEZTest is Base {
         ExpectedLookup[] memory lookups = new ExpectedLookup[](1);
         lookups[0] = ExpectedLookup({
             crossChainCallHash: innerHash,
+            destinationRollupId: rid,
             returnData: bytes("inner reverts"),
             failed: true,
             l2ToL1CallNumber: 1,

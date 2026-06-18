@@ -158,36 +158,42 @@ contract Bridge {
         address bridgeProxy = _getOrDeployProxy(_bridgeAddress(), _rollupId);
         TokenInfo memory info = wrappedTokenInfo[token];
 
-        string memory name;
-        string memory symbol;
-        uint8 tokenDecimals;
-        address originalToken;
-        uint256 originalRollupId;
-
+        bytes memory payload;
         if (info.originalToken != address(0)) {
             // Wrapped token: burn and trace back to original
             WrappedToken(token).burn(msg.sender, amount);
-            originalToken = info.originalToken;
-            originalRollupId = info.originalRollupId;
-            (name, symbol, tokenDecimals) =
-                (IERC20Metadata(token).name(), IERC20Metadata(token).symbol(), IERC20Metadata(token).decimals());
+            payload =
+                _receiveTokensPayload(token, info.originalToken, info.originalRollupId, destinationAddress, amount);
         } else {
             // Native token: lock in this contract
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-            originalToken = token;
-            originalRollupId = rollupId;
-            (name, symbol, tokenDecimals) = _getSafeTokenMetadata(token);
+            payload = _receiveTokensPayload(token, token, rollupId, destinationAddress, amount);
         }
 
-        (bool success, bytes memory reason) = bridgeProxy.call(
-            abi.encodeCall(
-                this.receiveTokens,
-                (originalToken, originalRollupId, destinationAddress, amount, name, symbol, tokenDecimals, rollupId)
-            )
-        );
+        (bool success, bytes memory reason) = bridgeProxy.call(payload);
         if (!success) revert ProxyCallFailed(reason);
 
         emit TokensBridged(token, msg.sender, _rollupId, amount);
+    }
+
+    /// @dev Builds the `receiveTokens` calldata in its own frame — keeps `bridgeTokens`' stack
+    ///      shallow enough to compile without viaIR (forge coverage builds).
+    function _receiveTokensPayload(
+        address token,
+        address originalToken,
+        uint256 originalRollupId,
+        address destinationAddress,
+        uint256 amount
+    )
+        internal
+        view
+        returns (bytes memory)
+    {
+        (string memory name, string memory symbol, uint8 tokenDecimals) = _getSafeTokenMetadata(token);
+        return abi.encodeCall(
+            this.receiveTokens,
+            (originalToken, originalRollupId, destinationAddress, amount, name, symbol, tokenDecimals, rollupId)
+        );
     }
 
     // ══════════════════════════════════════════════

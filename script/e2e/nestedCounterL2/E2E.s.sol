@@ -112,11 +112,12 @@ abstract contract NestedL2Actions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID, // matches the entry's outer src — Alice on L2
+            sourceRollupId: MAINNET_ROLLUP_ID, // remote source — Alice (logically on MAINNET); L2 may not proxy its own id
             revertSpan: 0
         });
 
@@ -146,6 +147,7 @@ abstract contract NestedL2Actions {
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: capL1,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
@@ -156,12 +158,23 @@ abstract contract NestedL2Actions {
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
         nested[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: _l1InnerHash(counterL2Target, capL1), callCount: 0, returnData: abi.encode(uint256(1))
+            crossChainCallHash: _l1InnerHash(counterL2Target, capL1),
+            destinationRollupId: L2_ROLLUP_ID,
+            callCount: 0,
+            returnData: abi.encode(uint256(1))
+        });
+
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-initial-state"),
+            newState: keccak256("l2-state-after-nestedCounter"),
+            etherDelta: 0
         });
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+            stateDeltas: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -304,7 +317,6 @@ contract DeferredL2TXBatcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

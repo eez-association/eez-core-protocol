@@ -143,11 +143,12 @@ abstract contract TwoDiffActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: target,
             value: 0,
             data: _incrementCallData(),
             sourceAddress: l2Caller,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -266,7 +267,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

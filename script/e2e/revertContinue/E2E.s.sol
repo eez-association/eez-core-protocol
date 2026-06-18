@@ -138,6 +138,7 @@ abstract contract RevertContinueActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: selfCallerL2,
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
@@ -180,17 +181,19 @@ abstract contract RevertContinueActions {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: selfCaller,
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
             sourceAddress: batcher,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
         nested[0] = ExpectedL1ToL2Call({
             crossChainCallHash: _innerActionHash(counterL2, selfCaller),
+            destinationRollupId: L2_ROLLUP_ID,
             callCount: 0,
             returnData: abi.encode(uint256(1))
         });
@@ -327,7 +330,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

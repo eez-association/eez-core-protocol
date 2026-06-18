@@ -30,12 +30,13 @@ abstract contract VerifyHelpers is Script {
 
     // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only (IEEZL2 structs; no
     // StateDelta[] / destinationRollupId on L2).
-    //   ExecutionEntry     = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], uint256, bytes, bytes32)
-    //                         proxyEntryHash  incomingCalls  expectedOutgoingCalls          cnt     ret    rollingHash
-    //   CrossChainCall     = (address, uint256, bytes, address, uint256, uint256)
+    //   ExecutionEntry     = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], ExpectedLookup[], uint256, bytes, bytes32)
+    //                         proxyEntryHash  incomingCalls  expectedOutgoingCalls          expectedLookups  cnt     ret    rollingHash
+    //   CrossChainCall     = (bool, address, uint256, bytes, address, uint256, uint256)  // leading isStatic
     //   ExpectedOutgoingCrossChainCall = (bytes32, uint256, bytes)
+    //   ExpectedLookup     = (bytes32, bytes, bool, uint64, uint64, uint64, CrossChainCall[], ExpectedOutgoingCrossChainCall[], uint256, bytes32)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
+        "ExecutionTableLoaded((bytes32,(bool,address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],(bytes32,bytes,bool,uint64,uint64,uint64,(bool,address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes32)[],uint256,bytes,bytes32)[])"
     );
 
     // CrossChainCallExecuted(bytes32 crossChainCallHash, address proxy, address sourceAddress, bytes callData, uint256 value)
@@ -96,28 +97,10 @@ abstract contract VerifyHelpers is Script {
         }
         for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
             L2ToL1Call memory cc = e.l2ToL1Calls[c];
-            console.log(
-                string.concat(
-                    "      call[",
-                    vm.toString(c),
-                    "]: target=",
-                    vm.toString(cc.targetAddress),
-                    "  value=",
-                    vm.toString(cc.value),
-                    "  revertSpan=",
-                    vm.toString(cc.revertSpan)
-                )
-            );
-            console.log(
-                string.concat(
-                    "               from=",
-                    vm.toString(cc.sourceAddress),
-                    " @ rollup ",
-                    vm.toString(cc.sourceRollupId),
-                    "  data=",
-                    _shortBytes(cc.data)
-                )
-            );
+            console.log("      call[%s]: target=%s", c, cc.targetAddress);
+            console.log("        isStatic=%s  value=%s  revertSpan=%s", cc.isStatic, cc.value, cc.revertSpan);
+            console.log("        from=%s @ rollup %s", cc.sourceAddress, cc.sourceRollupId);
+            console.log("        data=%s", _shortBytes(cc.data));
         }
         for (uint256 n = 0; n < e.expectedL1ToL2Calls.length; n++) {
             ExpectedL1ToL2Call memory na = e.expectedL1ToL2Calls[n];
@@ -155,28 +138,10 @@ abstract contract VerifyHelpers is Script {
         );
         for (uint256 c = 0; c < e.incomingCalls.length; c++) {
             CrossChainCall memory cc = e.incomingCalls[c];
-            console.log(
-                string.concat(
-                    "      call[",
-                    vm.toString(c),
-                    "]: target=",
-                    vm.toString(cc.targetAddress),
-                    "  value=",
-                    vm.toString(cc.value),
-                    "  revertSpan=",
-                    vm.toString(cc.revertSpan)
-                )
-            );
-            console.log(
-                string.concat(
-                    "               from=",
-                    vm.toString(cc.sourceAddress),
-                    " @ rollup ",
-                    vm.toString(cc.sourceRollupId),
-                    "  data=",
-                    _shortBytes(cc.data)
-                )
-            );
+            console.log("      call[%s]: target=%s", c, cc.targetAddress);
+            console.log("        isStatic=%s  value=%s  revertSpan=%s", cc.isStatic, cc.value, cc.revertSpan);
+            console.log("        from=%s @ rollup %s", cc.sourceAddress, cc.sourceRollupId);
+            console.log("        data=%s", _shortBytes(cc.data));
         }
         for (uint256 n = 0; n < e.expectedOutgoingCalls.length; n++) {
             ExpectedOutgoingCrossChainCall memory na = e.expectedOutgoingCalls[n];
@@ -363,6 +328,16 @@ contract VerifyL2Blocks is VerifyHelpers {
             }
         }
 
+        _reportL2Failure(l2Blocks, managerL2, expectedEntryHashes);
+        revert("Verification failed");
+    }
+
+    /// @dev Failure diagnostics for `run`, split into its own frame to keep `run` under the
+    ///      via-ir stack limit (the inlined i/j/c loop nest would otherwise overflow).
+    function _reportL2Failure(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedEntryHashes)
+        internal
+        view
+    {
         console.log("FAIL: expected entries not found in any of %s L2 blocks", l2Blocks.length);
         for (uint256 i = 0; i < l2Blocks.length; i++) {
             L2ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
@@ -377,7 +352,6 @@ contract VerifyL2Blocks is VerifyHelpers {
         for (uint256 i = 0; i < expectedEntryHashes.length; i++) {
             console.log("  %s", vm.toString(expectedEntryHashes[i]));
         }
-        revert("Verification failed");
     }
 
     function _getEntries(uint256 blockNumber, address managerL2) internal view returns (L2ExecutionEntry[] memory) {

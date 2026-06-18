@@ -100,11 +100,13 @@ abstract contract NestedCallRevertActions {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: scap,
             value: 0,
             data: abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID,
+            // L1 calls must be sourced from a rollup in the entry's stateDeltas (L2), not MAINNET.
+            sourceRollupId: L2_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -131,6 +133,7 @@ abstract contract NestedCallRevertActions {
         nested = new ExpectedLookup[](1);
         nested[0] = ExpectedLookup({
             crossChainCallHash: _innerActionHash(counterL2, scap),
+            destinationRollupId: L2_ROLLUP_ID,
             returnData: bytes("inner reverts"),
             failed: true,
             l2ToL1CallNumber: 1,
@@ -176,6 +179,7 @@ abstract contract NestedCallRevertActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: scapL2,
             value: 0,
             data: abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
@@ -348,7 +352,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

@@ -151,17 +151,21 @@ abstract contract NestedActions {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            isStatic: false,
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: MAINNET_ROLLUP_ID, // matches the entry's outer src — Alice on Mainnet
+            sourceRollupId: L2_ROLLUP_ID, // sub-call source must be in the entry's stateDeltas (the proven rollup)
             revertSpan: 0
         });
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
         nested[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: _l1InnerHash(counterL2, cap), callCount: 0, returnData: abi.encode(uint256(1))
+            crossChainCallHash: _l1InnerHash(counterL2, cap),
+            destinationRollupId: L2_ROLLUP_ID,
+            callCount: 0,
+            returnData: abi.encode(uint256(1))
         });
 
         entries = new ExecutionEntry[](1);
@@ -187,6 +191,7 @@ abstract contract NestedActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: capL2,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
@@ -324,7 +329,6 @@ contract Batcher {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs

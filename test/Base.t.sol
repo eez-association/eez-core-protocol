@@ -170,7 +170,6 @@ abstract contract Base is Test {
             transientLookupCallCount: transientLookupCallCount,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
@@ -240,11 +239,14 @@ abstract contract Base is Test {
         entry.rollingHash = bytes32(0);
     }
 
-    /// @notice An immediate entry with no state deltas at all (`proxyEntryHash == 0`,
-    ///         empty deltas/calls). Useful for tests that want to verify
-    ///         postAndVerifyBatch flow without state changes.
+    /// @notice An immediate entry with a single no-op state delta (`proxyEntryHash == 0`, empty
+    ///         calls). The delta exists only so `destinationRollupId ∈ stateDeltas` (postBatch
+    ///         requires it); entries built with this helper are not consumed, so the state values
+    ///         are placeholders. Useful for tests that want to verify postAndVerifyBatch flow.
     function _emptyImmediateEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
-        entry.stateDeltas = new StateDelta[](0);
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: bytes32(0), etherDelta: 0});
+        entry.stateDeltas = deltas;
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = rid;
         entry.l2ToL1Calls = _emptyCalls();

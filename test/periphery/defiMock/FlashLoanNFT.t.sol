@@ -3,13 +3,26 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {FlashLoan} from "../../../src/periphery/defiMock/FlashLoan.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {FlashLoan, IFlashLoanReceiver} from "../../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanersNFT} from "../../../src/periphery/defiMock/FlashLoanersNFT.sol";
 
 contract MockToken is ERC20 {
     constructor() ERC20("Mock", "MCK") {
         _mint(msg.sender, 1_000_000e18);
     }
+}
+
+/// @notice Repays the loan in full inside the callback (happy path).
+contract RepayingReceiver is IFlashLoanReceiver {
+    function onFlashLoan(address token, uint256 amount) external override {
+        IERC20(token).transfer(msg.sender, amount);
+    }
+}
+
+/// @notice Keeps the borrowed tokens, so the repayment check must fail.
+contract NonRepayingReceiver is IFlashLoanReceiver {
+    function onFlashLoan(address, uint256) external override {}
 }
 
 contract FlashLoanNFTTest is Test {
@@ -52,5 +65,35 @@ contract FlashLoanNFTTest is Test {
         vm.expectRevert("Balance too low");
         vm.prank(alice);
         nft.claim();
+    }
+
+    function test_cannotClaimTwice() public {
+        token.transfer(alice, 10_000e18);
+
+        vm.startPrank(alice);
+        nft.claim();
+        vm.expectRevert("Already claimed");
+        nft.claim();
+        vm.stopPrank();
+    }
+
+    function test_flashLoanRepaidSuccessfully() public {
+        RepayingReceiver receiver = new RepayingReceiver();
+        // Fund the receiver so it can repay from its own balance.
+        token.transfer(address(receiver), 10_000e18);
+
+        vm.prank(address(receiver));
+        pool.flashLoan(address(token), 10_000e18);
+
+        // Pool keeps its liquidity after a clean repayment.
+        assertEq(token.balanceOf(address(pool)), 100_000e18);
+    }
+
+    function test_flashLoanNotRepaidReverts() public {
+        NonRepayingReceiver receiver = new NonRepayingReceiver();
+
+        vm.prank(address(receiver));
+        vm.expectRevert("Flash loan not repaid");
+        pool.flashLoan(address(token), 10_000e18);
     }
 }

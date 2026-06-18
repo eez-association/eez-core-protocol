@@ -28,7 +28,9 @@ pragma solidity ^0.8.28;
 
 /// @notice A cross-chain call executed within an execution entry
 /// @dev revertSpan > 0 opens an isolated revert context spanning the next revertSpan calls (including this one)
+/// @dev isStatic dispatches the call via STATICCALL — read-only, carries no value, reverts on any state write
 struct CrossChainCall {
+    bool isStatic;
     address targetAddress;
     uint256 value;
     bytes data;
@@ -171,6 +173,6 @@ struct LookupCall {
     uint256 callCount;
     /// Expected rolling hash of the executed sub-calls — always checked (an empty
     /// `incomingCalls[]` must carry `rollingHash == 0`). Untagged schema in static mode
-    /// (`_processNLookupCalls`); tagged entry schema in reverted mode.
+    /// (`_processNStaticCalls`); tagged entry schema in reverted mode.
     bytes32 rollingHash;
 }

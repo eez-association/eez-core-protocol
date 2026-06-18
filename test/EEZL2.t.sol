@@ -47,7 +47,8 @@ contract EEZL2Test is Test {
     EEZL2 public manager;
     L2TestTarget public target;
 
-    uint256 constant TEST_ROLLUP_ID = 42;
+    uint256 constant TEST_ROLLUP_ID = 42; // this L2's own rollup id
+    uint256 constant REMOTE_ROLLUP_ID = 1; // a remote counterparty rollup (≠ this L2's own id)
     address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
 
     // Rolling hash tag constants (matching contract)
@@ -168,19 +169,20 @@ contract EEZL2Test is Test {
     }
 
     function test_LoadExecutionTable_StoresEntries() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
 
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -196,18 +198,19 @@ contract EEZL2Test is Test {
     }
 
     function test_LoadExecutionTable_MultipleEntries() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -234,10 +237,10 @@ contract EEZL2Test is Test {
     // ── createCrossChainProxy ──
 
     function test_CreateCrossChainProxy() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         (address origAddr, uint64 origRollup) = manager.authorizedProxies(proxy);
         assertEq(origAddr, address(target));
-        assertEq(uint256(origRollup), TEST_ROLLUP_ID);
+        assertEq(uint256(origRollup), REMOTE_ROLLUP_ID);
         uint256 codeSize;
         assembly { codeSize := extcodesize(proxy) }
         assertTrue(codeSize > 0);
@@ -246,14 +249,14 @@ contract EEZL2Test is Test {
     function test_CreateCrossChainProxy_EmitsEvent() public {
         vm.expectEmit(true, true, true, true);
         emit EEZBase.CrossChainProxyCreated(
-            manager.computeCrossChainProxyAddress(address(target), TEST_ROLLUP_ID), address(target), TEST_ROLLUP_ID
+            manager.computeCrossChainProxyAddress(address(target), REMOTE_ROLLUP_ID), address(target), REMOTE_ROLLUP_ID
         );
-        manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
     }
 
     function test_ComputeCrossChainProxyAddress_MatchesActual() public {
-        address computed = manager.computeCrossChainProxyAddress(address(target), TEST_ROLLUP_ID);
-        address actual = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address computed = manager.computeCrossChainProxyAddress(address(target), REMOTE_ROLLUP_ID);
+        address actual = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         assertEq(computed, actual);
     }
 
@@ -265,8 +268,8 @@ contract EEZL2Test is Test {
 
     function test_MultipleProxies_DifferentAddresses() public {
         L2TestTarget target2 = new L2TestTarget();
-        address proxy1 = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
-        address proxy2 = manager.createCrossChainProxy(address(target2), TEST_ROLLUP_ID);
+        address proxy1 = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        address proxy2 = manager.createCrossChainProxy(address(target2), REMOTE_ROLLUP_ID);
         assertTrue(proxy1 != proxy2);
     }
 
@@ -278,7 +281,7 @@ contract EEZL2Test is Test {
     }
 
     function test_ExecuteCrossChainCall_RevertsExecutionNotInCurrentBlock() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
         vm.expectRevert(EEZL2.ExecutionNotInCurrentBlock.selector);
         (bool s,) = proxy.call(callData);
@@ -286,7 +289,7 @@ contract EEZL2Test is Test {
     }
 
     function test_ExecuteCrossChainCall_RevertsExecutionNotFound() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
         LookupCall[] memory noStatic = new LookupCall[](0);
@@ -310,12 +313,12 @@ contract EEZL2Test is Test {
     // lookupCalls + no entry → ExecutionNotFound) is covered by
     // `test_ExecuteCrossChainCall_RevertsExecutionNotFound` above. See docs §D.3.
     function test_RevertedLookup_TopLevel_Reverts() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
 
         bytes memory cd = abi.encodeCall(L2TestTarget.setValue, (7));
         bytes memory payload = hex"deadbeef";
         // sourceRollupId in the L2 action hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
-        bytes32 h = _computeActionHash(TEST_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
 
         LookupCall[] memory lookups = new LookupCall[](1);
         lookups[0].crossChainCallHash = h;
@@ -352,20 +355,22 @@ contract EEZL2Test is Test {
         address counterProxy = manager.createCrossChainProxy(counterL1, 0);
         SafeCounterAndProxy scap = new SafeCounterAndProxy(Counter(counterProxy));
 
-        address outerProxy = manager.createCrossChainProxy(address(scap), TEST_ROLLUP_ID);
+        address outerProxy = manager.createCrossChainProxy(address(scap), REMOTE_ROLLUP_ID);
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
 
-        bytes32 outerHash = _computeActionHash(TEST_ROLLUP_ID, address(scap), 0, outerCd, address(this), TEST_ROLLUP_ID);
+        bytes32 outerHash =
+            _computeActionHash(REMOTE_ROLLUP_ID, address(scap), 0, outerCd, address(this), TEST_ROLLUP_ID);
         // L2 forces sourceRollupId = ROLLUP_ID for reentrant calls it issues.
         bytes32 innerHash = _computeActionHash(0, counterL1, 0, innerCd, address(scap), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(scap),
             value: 0,
             data: outerCd,
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
         ExecutionEntry memory entry = _buildSimpleEntry(outerHash, cc, "", _rollingHashSingleCall(""));
@@ -394,18 +399,19 @@ contract EEZL2Test is Test {
     }
 
     function test_ExecuteCrossChainCall_SimpleResult() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -421,18 +427,19 @@ contract EEZL2Test is Test {
     }
 
     function test_ExecuteCrossChainCall_ResultWithReturnData() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.getValue, ()),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -456,18 +463,19 @@ contract EEZL2Test is Test {
     // function test_ExecuteCrossChainCall_FailedEntryReverts() — removed.
 
     function test_ExecuteCrossChainCall_ConsumesInFifoOrder() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.getValue, ()),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -495,7 +503,7 @@ contract EEZL2Test is Test {
     // ── CrossChainProxy direct tests ──
 
     function test_Proxy_ExecuteOnBehalf_NonManagerFallsThrough() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         CrossChainProxy p = CrossChainProxy(payable(proxy));
         vm.prank(address(0xDEAD));
         vm.expectRevert(EEZL2.ExecutionNotInCurrentBlock.selector);
@@ -505,18 +513,19 @@ contract EEZL2Test is Test {
     // ── Rolling hash mismatch ──
 
     function test_RollingHashMismatch_Reverts() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -531,27 +540,29 @@ contract EEZL2Test is Test {
     // ── UnconsumedIncomingCalls ──
 
     function test_UnconsumedIncomingCalls_Reverts() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (99)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -576,27 +587,29 @@ contract EEZL2Test is Test {
     // ── Multiple calls in entry ──
 
     function test_ExecuteCrossChainCall_MultipleCalls() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (10)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (20)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -633,20 +646,21 @@ contract EEZL2Test is Test {
     // ── revertSpan (isolated context) ──
 
     function test_ExecuteCrossChainCall_WithRevertSpan() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         RevertingTarget revTarget = new RevertingTarget();
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: address(revTarget),
             value: 0,
             data: hex"deadbeef",
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 1
         });
 
@@ -719,18 +733,19 @@ contract EEZL2Test is Test {
     // ── ExecutionConsumed ──
 
     function test_ExecutionConsumed_EmitsOnConsume() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -758,18 +773,19 @@ contract EEZL2Test is Test {
     }
 
     function test_ExecutionConsumed_EmitsForEachConsumption() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -804,18 +820,19 @@ contract EEZL2Test is Test {
     // ── CrossChainCallExecuted ──
 
     function test_CrossChainCallExecuted_EmitsOnProxyCall() public {
-        address proxy = manager.createCrossChainProxy(address(target), TEST_ROLLUP_ID);
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
         bytes32 crossChainCallHash =
-            _computeActionHash(TEST_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
+            _computeActionHash(REMOTE_ROLLUP_ID, address(target), 0, callData, address(this), TEST_ROLLUP_ID);
 
         CrossChainCall memory cc = CrossChainCall({
+            isStatic: false,
             targetAddress: address(target),
             value: 0,
             data: abi.encodeCall(L2TestTarget.setValue, (42)),
             sourceAddress: address(this),
-            sourceRollupId: TEST_ROLLUP_ID,
+            sourceRollupId: REMOTE_ROLLUP_ID,
             revertSpan: 0
         });
 

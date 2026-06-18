@@ -97,6 +97,7 @@ abstract contract MultiCallNestedL2Actions {
     ///      drained by one executeL2TX call.
     function _l1Entries(address counterL1, address cap) internal pure returns (ExecutionEntry[] memory entries) {
         L2ToL1Call memory innerCall = L2ToL1Call({
+            isStatic: false,
             targetAddress: counterL1,
             value: 0,
             data: abi.encodeWithSelector(Counter.increment.selector),
@@ -109,9 +110,24 @@ abstract contract MultiCallNestedL2Actions {
         L2ToL1Call[] memory calls1 = new L2ToL1Call[](1);
         calls1[0] = innerCall;
 
+        StateDelta[] memory deltas0 = new StateDelta[](1);
+        deltas0[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-initial-state"),
+            newState: keccak256("l2-state-mid"),
+            etherDelta: 0
+        });
+        StateDelta[] memory deltas1 = new StateDelta[](1);
+        deltas1[0] = StateDelta({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-state-mid"),
+            newState: keccak256("l2-state-final"),
+            etherDelta: 0
+        });
+
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+            stateDeltas: deltas0,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls0,
@@ -122,7 +138,7 @@ abstract contract MultiCallNestedL2Actions {
             rollingHash: _expectedRollingHashL1(1)
         });
         entries[1] = ExecutionEntry({
-            stateDeltas: new StateDelta[](0),
+            stateDeltas: deltas1,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls1,
@@ -141,19 +157,21 @@ abstract contract MultiCallNestedL2Actions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = CrossChainCall({
+            isStatic: false,
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
         calls[1] = CrossChainCall({
+            isStatic: false,
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: MAINNET_ROLLUP_ID,
             revertSpan: 0
         });
 
@@ -291,7 +309,6 @@ contract DeferredL2TXBatcherTwice {
             transientLookupCallCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
-            crossProofSystemInteractions: bytes32(0),
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs
