@@ -116,16 +116,21 @@ contract EEZ is EEZBase {
     /// @dev Also used by `staticCallLookup` to disambiguate multiple lookup calls within the same call.
     uint256 transient _lastL1ToL2CallConsumed;
 
-    /// @notice All ether received via `executeCrossChainCall` during the current entry —
-    ///         the top-level call's `msg.value` plus every reentrant call's.
-    /// @dev Single accounting side of the ether-delta invariant (`Σ etherDelta == _entryEtherIn
-    ///      - etherOut`). Defensive discipline at the top level: `executeCrossChainCall` SETS
-    ///      it to msg.value; `executeL2TX` and `attemptApplyImmediate` revert
-    ///      `ResidualEntryEtherIn` unless it is already 0 (no value path reaches them) —
-    ///      residue can never leak across entries — while reentrant calls ADD. Cleared again
-    ///      at the end of `_applyAndExecute`. Receipts inside a revertSpan or a reverted
-    ///      lookup's sub-execution roll back with that frame's revert, matching the physical ETH.
-    uint256 transient _entryEtherIn;
+    /// @notice Net ether flow for the current entry: `Σ inbound msg.value − Σ outbound call value`.
+    ///         The whole accounting side of the ether-delta invariant (`Σ etherDelta == _entryEtherDelta`).
+    /// @dev Signed and `transient`. Inbound side: `executeCrossChainCall` SETS it to `int256(msg.value)`
+    ///      at the top level (defensive — residue can never leak across entries) and ADDS at every
+    ///      reentrant call; `executeL2TX` / `attemptApplyImmediate` revert `ResidualEntryEtherIn`
+    ///      unless it is already 0 (no value path reaches them). Outbound side: `_processNCalls`
+    ///      SUBTRACTS `cc.value` for every successful value-bearing call. It MUST be `transient`,
+    ///      not a local: the global flat-call cursor walks calls across reentrant frames, so a
+    ///      value-bearing call processed inside a nested `ExpectedL1ToL2Call` frame
+    ///      (`_consumeNestedAction` -> `_processNCalls`) runs in a SEPARATE call stack — a local
+    ///      outflow would be dropped when that frame returns. As `transient` both sides accumulate
+    ///      across frames, while revertSpan / reverted-lookup frames — which always revert — have
+    ///      their additions AND subtractions rolled back by the EVM, matching the physical ETH that
+    ///      also rolls back. Reset to 0 at the end of `_applyAndExecute`.
+    int256 transient _entryEtherDelta;
 
     /// @notice Rollup whose persistent `lookupQueue` holds the TOP-LEVEL LookupCall being
     ///         executed (pairs with the base's `_topLevelLookupIndex`).
@@ -213,7 +218,7 @@ contract EEZ is EEZBase {
     /// @notice Error when the ether delta from state deltas doesn't match actual ETH flow
     error EtherDeltaMismatch();
 
-    /// @notice A no-value top-level entry point found a nonzero `_entryEtherIn` — should be
+    /// @notice A no-value top-level entry point found a nonzero `_entryEtherDelta` — should be
     ///         impossible; signals a corrupted execution context, not recoverable input.
     error ResidualEntryEtherIn();
 
@@ -407,7 +412,7 @@ contract EEZ is EEZBase {
         //    no source action to match, so the only way to consume them is here, before the
         //    meta hook starts driving non-zero-proxyEntryHash entries via proxy calls. Each runs
         //    its own `_applyAndExecute` cycle (rolling hash / cursors reset per entry).
-        //    `_entryEtherIn` is 0 here — these entries aren't driven by an external value transfer.
+        //    `_entryEtherDelta` is 0 here — these entries aren't driven by an external value transfer.
         //
         //    REVERTIBLE: each entry is dispatched through a self-call wrapper. If
         //    `_applyAndExecute` reverts (currentState mismatch, rolling-hash mismatch,
@@ -473,7 +478,7 @@ contract EEZ is EEZBase {
         ExecutionEntry storage entry = _transientExecutions[transientIdx];
         _currentEntryIndex = transientIdx;
         _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
-        if (_entryEtherIn != 0) revert ResidualEntryEtherIn(); // immediate entries receive no inbound value
+        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // immediate entries receive no inbound value
         _applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash);
     }
 
@@ -792,14 +797,14 @@ contract EEZ is EEZBase {
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
 
         if (_insideExecution()) {
-            // Reentrant — ADD this call's value to the entry's inbound-ether accumulator
-            _entryEtherIn += msg.value;
+            // Reentrant — ADD this call's value to the entry's net-ether accumulator
+            _entryEtherDelta += int256(msg.value);
             return _consumeNestedAction(destRid, crossChainCallHash);
         }
 
         // Top-level — SET (not add): a fresh entry starts from exactly its own msg.value,
         // so residue can never leak across entries.
-        _entryEtherIn = msg.value;
+        _entryEtherDelta = int256(msg.value);
         return _consumeAndExecute(destRid, crossChainCallHash);
     }
 
@@ -819,7 +824,7 @@ contract EEZ is EEZBase {
         if (_insideExecution()) revert L2TXNotAllowedDuringExecution();
 
         // Non-payable and never mid-entry — a dirty accumulator here is a bug; surface it, don't mask it.
-        if (_entryEtherIn != 0) revert ResidualEntryEtherIn();
+        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn();
 
         // During the transient phase consumption comes from the transient table — emit that cursor.
         uint256 idx = _transientExecutions.length != 0
@@ -996,7 +1001,7 @@ contract EEZ is EEZBase {
 
     /// @notice Applies state deltas (with currentState validation), processes calls,
     ///         verifies rolling hash, checks ether accounting, then resets _currentL2ToL1Call
-    /// @dev `_entryEtherIn` already holds the entry-point call's `msg.value` when we get here
+    /// @dev `_entryEtherDelta` already holds the entry-point call's `msg.value` when we get here
     ///      (SET by the top-level entry point before consumption), so it is NOT reset in
     ///      this preamble — only at the end, after the invariant check.
     function _applyAndExecute(StateDelta[] memory deltas, uint256 callCount, bytes32 rollingHash) internal {
@@ -1004,7 +1009,7 @@ contract EEZ is EEZBase {
         _currentL2ToL1Call = 0;
         _lastL1ToL2CallConsumed = 0;
 
-        int256 etherOut = _processNCalls(callCount);
+        _processNCalls(callCount);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
         ExecutionEntry storage entry = _getCurrentEntryStoragePointer();
@@ -1015,20 +1020,19 @@ contract EEZ is EEZBase {
         if (_rollingHash != rollingHash) revert RollingHashMismatch();
         if (_currentL2ToL1Call != entry.l2ToL1Calls.length) revert UnconsumedL2ToL1Calls();
         if (_lastL1ToL2CallConsumed != entry.expectedL1ToL2Calls.length) revert UnconsumedL1ToL2Calls();
-        if (totalEtherDelta != int256(_entryEtherIn) - etherOut) revert EtherDeltaMismatch();
+        if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch();
 
         emit EntryExecuted(_currentEntryIndex, _rollingHash, _currentL2ToL1Call, _lastL1ToL2CallConsumed);
         _currentL2ToL1Call = 0; // resets _insideExecution()
-        _entryEtherIn = 0; // reset for the next top-level entry in this tx
+        _entryEtherDelta = 0; // reset for the next top-level entry in this tx
     }
 
     /// @notice Processes N calls from the flat entry.l2ToL1Calls[] array
     /// @param count Number of iterations to process
-    /// @return etherOut Total ETH sent in successful (non-reverted) calls. Local var (not
-    ///         transient) so revertSpan rollbacks don't affect the outer accumulator — the
-    ///         inner `_processNCalls` invocation through `executeInContextAndRevert` keeps its own
-    ///         local that is discarded with the revert frame, which is exactly what we want.
-    function _processNCalls(uint256 count) internal returns (int256 etherOut) {
+    /// @dev Successful outbound ETH is SUBTRACTED from the `transient _entryEtherDelta` accumulator
+    ///      (NOT a local return) so it survives reentrant nested frames; revertSpan / reverted-lookup
+    ///      frames always revert, rolling their additions back automatically. See `_entryEtherDelta`.
+    function _processNCalls(uint256 count) internal {
         // Active flat-call array: the entry's, or the reverted lookup's while one is executing.
         L2ToL1Call[] storage calls = _activeCalls();
         uint256 processed = 0;
@@ -1061,7 +1065,7 @@ contract EEZ is EEZBase {
                         value: cc.value
                     }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
                     if (cc.value > 0 && success) {
-                        etherOut += int256(cc.value);
+                        _entryEtherDelta -= int256(cc.value);
                     }
                 }
 
