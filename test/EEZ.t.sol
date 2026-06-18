@@ -763,6 +763,110 @@ contract EEZTest is Base {
         assertEq(address(rollups).balance, 2 ether);
     }
 
+    /// @notice Entry whose REENTRANT (nested) frame itself sends ether OUT of EEZ — the case a
+    ///         per-frame local `etherOut` silently dropped. Top-level sends 2 ether to a forwarder;
+    ///         the forwarder reenters with 1.5 ether; the nested frame then sends 1 ether out to
+    ///         `sink`. True net = 1.5 in − 2 − 1 = −1.5 ether. A local accumulator (discarded when
+    ///         the reentrant frame returns) would have seen only the 2-ether top-level outflow and
+    ///         computed −0.5.
+    function _nestedOutflowEntry(uint256 rid, address sink, int256 etherDelta)
+        internal
+        returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)
+    {
+        forwarder = new ValueForwarder();
+        address remote = address(0xBEEF);
+        forwarder.setPeer(rollups.createCrossChainProxy(remote, rid));
+
+        bytes memory depositData = abi.encodeWithSignature("deposit()");
+        bytes32 nestedHash = _hashCall(rid, remote, 1.5 ether, depositData, address(forwarder), 0);
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
+        // Flat[0]: top-level call that drives the reentry.
+        calls[0] = L2ToL1Call({
+            isStatic: false,
+            targetAddress: address(forwarder),
+            value: 2 ether,
+            data: abi.encodeCall(ValueForwarder.forward, (1.5 ether)),
+            sourceAddress: address(0xD00D),
+            sourceRollupId: rid,
+            revertSpan: 0
+        });
+        // Flat[1]: consumed INSIDE the nested frame — sends 1 ether out of EEZ to `sink`.
+        calls[1] = L2ToL1Call({
+            isStatic: false,
+            targetAddress: sink,
+            value: 1 ether,
+            data: "",
+            sourceAddress: address(0xD00D),
+            sourceRollupId: rid,
+            revertSpan: 0
+        });
+
+        // The reentrant frame consumes ONE flat call (Flat[1]) → callCount: 1.
+        ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
+        nested[0] =
+            ExpectedL1ToL2Call({crossChainCallHash: nestedHash, destinationRollupId: rid, callCount: 1, returnData: ""});
+
+        bytes32 h = bytes32(0);
+        h = _hCallBegin(h, 1); // Flat[0] begin
+        h = _hNestedBegin(h, 1); // reentry begin
+        h = _hCallBegin(h, 2); // Flat[1] begin (nested outflow)
+        h = _hCallEnd(h, 2, true, ""); // Flat[1] end — plain ETH transfer returns ""
+        h = _hNestedEnd(h, 1); // reentry end
+        // Flat[0]'s CALL_END reads the LIVE cursor, which the nested frame advanced 1 -> 2.
+        h = _hCallEnd(h, 2, true, abi.encode(uint256(2 ether))); // forward() returns msg.value
+
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] =
+            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: etherDelta});
+
+        entries = new ExecutionEntry[](1);
+        entries[0].stateDeltas = deltas;
+        entries[0].proxyEntryHash = bytes32(0);
+        entries[0].destinationRollupId = rid;
+        entries[0].l2ToL1Calls = calls;
+        entries[0].expectedL1ToL2Calls = nested;
+        entries[0].callCount = 1;
+        entries[0].returnData = "";
+        entries[0].rollingHash = h;
+    }
+
+    /// @notice The fixed accounting credits the FULL net outflow, including ether sent inside a
+    ///         reentrant frame. Fails on the pre-fix code (local `etherOut` drops the nested 1 ether,
+    ///         so the −1.5 delta mismatches the computed −0.5 → ImmediateEntrySkipped).
+    function test_NestedOutflow_CountedInEtherAccounting() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        _fundRollup(rid, 2 ether);
+        TestTarget sink = new TestTarget();
+
+        (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _nestedOutflowEntry(rid, address(sink), -1.5 ether);
+        _postBatch(rid, entries);
+
+        assertEq(_getRollupState(rid), keccak256("s1"), "entry must apply");
+        assertEq(_getRollupEtherBalance(rid), 0.5 ether, "rollup debited the full net outflow");
+        assertEq(address(sink).balance, 1 ether, "nested outflow physically left EEZ");
+        assertEq(address(forwarder).balance, 0.5 ether);
+        assertEq(address(rollups).balance, 0.5 ether, "booked balance == physical balance");
+    }
+
+    /// @notice Soundness: the delta a per-frame local would have accepted (−0.5, nested outflow
+    ///         dropped) must now be REJECTED, otherwise EEZ would book 1 ether it no longer holds.
+    function test_NestedOutflow_DroppedDeltaRejected() public {
+        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        _fundRollup(rid, 2 ether);
+        TestTarget sink = new TestTarget();
+
+        (ExecutionEntry[] memory entries,) = _nestedOutflowEntry(rid, address(sink), -0.5 ether);
+        vm.expectEmit(true, false, false, false);
+        emit EEZ.ImmediateEntrySkipped(0, "");
+        _postBatch(rid, entries);
+
+        assertEq(_getRollupState(rid), bytes32(0), "unsound entry must not apply");
+        assertEq(_getRollupEtherBalance(rid), 2 ether);
+        assertEq(address(sink).balance, 0);
+        assertEq(address(rollups).balance, 2 ether);
+    }
+
     // ──────────────────────────────────────────────
     //  Owner ops on Rollup.sol (the per-rollup contract)
     // ──────────────────────────────────────────────
