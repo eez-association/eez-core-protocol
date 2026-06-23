@@ -27,7 +27,7 @@ pragma solidity ^0.8.28;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice A cross-chain call executed within an execution entry
-/// @dev revertSpan > 0 opens an isolated revert context spanning the next revertSpan calls (including this one)
+/// @dev revertNextNCalls > 0 opens an isolated revert context spanning the next revertNextNCalls calls (including this one)
 /// @dev isStatic dispatches the call via STATICCALL — read-only, carries no value, reverts on any state write
 struct CrossChainCall {
     bool isStatic;
@@ -36,7 +36,7 @@ struct CrossChainCall {
     bytes data;
     address sourceAddress;
     uint256 sourceRollupId;
-    uint256 revertSpan;
+    uint256 revertNextNCalls;
 }
 
 /// @notice Pre-computed result for a successful reentrant outgoing cross-chain call triggered during execution
@@ -159,8 +159,8 @@ struct LookupCall {
     bytes32 crossChainCallHash;
     bytes returnData;
     bool failed;
-    /// Sub-calls executed during resolution. Static mode: STATICCALL, no `revertSpan`.
-    /// Reverted mode: real calls (may host reentry and `revertSpan`), partitioned
+    /// Sub-calls executed during resolution. Static mode: STATICCALL, no `revertNextNCalls`.
+    /// Reverted mode: real calls (may host reentry and `revertNextNCalls`), partitioned
     /// against `expectedOutgoingCalls` exactly like `ExecutionEntry.incomingCalls`.
     CrossChainCall[] incomingCalls;
     /// Reverted-mode reentrant table for the sub-execution. Empty for static mode.

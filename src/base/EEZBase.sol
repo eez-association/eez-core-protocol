@@ -10,8 +10,8 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///      specific execution struct (those structs differ per side — `IEEZ.sol` vs `IEEZL2.sol`):
 ///        - Rolling-hash tag constants, the `_rollingHash` accumulator, and the fold helpers
 ///          (they operate on primitives, so they don't reference any execution struct).
-///        - Neutral transient pointers: `_currentEntryIndex`, `_insideRevertedLookup`,
-///          `_revertedLookupIndex`, `_revertedLookupTopLevel`, and `_topLevelLookupIndex` —
+///        - Neutral transient pointers: `_currentEntryIndex`, `_inReentrantSubFrame`,
+///          `_reentrantSubFrameIndex`, `_revertedLookupTopLevel`, and `_topLevelLookupIndex` —
 ///          plus `_activeLookupContext()`, the match-key component derived from them.
 ///        - The `authorizedProxies` registry, the external `createCrossChainProxy` entry point,
 ///          and the internal CREATE2 deploy helper (`_createCrossChainProxyInternal`).
@@ -26,7 +26,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
 ///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
 ///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`.
-///        - `_activeCalls` / `_activeNested` / `_getActiveLookups`, `_getCurrentEntryStoragePointer`,
+///        - `_activeCalls` / `_activeNested` / `_getActiveLookups`, `_getCurrentEntry`,
 ///          `_currentTopLevelLookup`, `_resolveStaticLookup`, `_processNStaticCalls`,
 ///          `_executeRevertedNestedLookup` / `_executeRevertedTopLevelLookup`, `staticCallLookup`.
 ///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
@@ -60,28 +60,28 @@ abstract contract EEZBase is IEEZ {
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
-    /// @notice True while executing a reverted NESTED lookup (`_executeRevertedNestedLookup`) — the
-    ///         `ExpectedLookup` at `_revertedLookupIndex` within the active host table.
-    /// @dev Scopes `_activeCalls()` / `_activeNested()` to that lookup instead of the host.
-    ///      Always cleared by the terminal revert of the sub-execution — and, for deeper reverted-lookup executions,
-    ///      restored to the parent's value by that same revert unwind (transient).
-    bool transient _insideRevertedLookup;
+    /// @notice True while a reentrant SUB-FRAME is running its own `l2ToL1Calls[]` — the entry at
+    ///         `_reentrantSubFrameIndex` within the active host reentrant table (L1: an
+    ///         `ExpectedL1ToL2Call`; L2 retains the legacy `ExpectedLookup`).
+    /// @dev Set for BOTH a reverted sub-execution (`_executeRevertedNestedLookup`) AND a committing
+    ///      success sub-frame (L1's `_consumeSuccessfulReentrant`), which is why the name is neutral
+    ///      rather than "reverted". Scopes `_activeCalls()` to that entry's own sub-calls instead of
+    ///      the host's. A reverted frame clears it via its terminal revert (and a deeper one is
+    ///      restored by that same unwind); a success frame saves/restores it manually.
+    bool transient _inReentrantSubFrame;
 
-    /// @notice Index of the nested `ExpectedLookup` being executed, within the active host
-    ///         table (`_getActiveLookups()`). Storage refs can't be transient, so the child
-    ///         reconstructs the pointer from this index.
-    uint256 transient _revertedLookupIndex;
+    /// @notice Index of the reentrant sub-frame entry being executed, within the active host
+    ///         reentrant table. Storage refs can't be transient, so the child reconstructs the
+    ///         pointer from this index.
+    uint256 transient _reentrantSubFrameIndex;
 
-    /// @notice True while a reverted TOP-LEVEL `LookupCall` is the active host
-    ///         (`_executeRevertedTopLevelLookup`) — the pool lookup at `_topLevelLookupIndex` supplies
-    ///         the flat calls, reentrant table, and nested-lookup table instead of an entry.
+    /// @notice DEAD ON L1 (only L2 reads these). After the static-only top-level-lookup change, L1
+    ///         has no reverted-top-level host to switch to, so `_revertedLookupTopLevel` is never set
+    ///         and `_topLevelLookupIndex` is never used on L1; they remain only for L2's reverted
+    ///         TOP-LEVEL `LookupCall` path. Removal is deferred with the L2 mirror.
     bool transient _revertedLookupTopLevel;
 
-    /// @notice Pool index of the top-level `LookupCall` being executed. Kept separate from
-    ///         `_revertedLookupIndex` so a nested reverted-lookup execution inside a top-level reverted-lookup execution doesn't
-    ///         clobber the pool coordinate. L1 re-derives the pool (transient table vs
-    ///         per-rollup queue keyed by `_revertedLookupRollupId`) from
-    ///         `_transientExecutions.length`; L2 has a single table.
+    /// @notice Pool index of the top-level `LookupCall` being executed (L2 only — see above).
     uint256 transient _topLevelLookupIndex;
 
     // ──────────────────────────────────────────────
@@ -220,7 +220,7 @@ abstract contract EEZBase is IEEZ {
     /// @notice Fourth component of the nested-lookup match key (`executingLookupIndex`):
     ///         0 = host level; k = inside the sub-execution of the host's `expectedLookups[k-1]`.
     function _activeLookupContext() internal view returns (uint64) {
-        return _insideRevertedLookup ? uint64(_revertedLookupIndex + 1) : 0;
+        return _inReentrantSubFrame ? uint64(_reentrantSubFrameIndex + 1) : 0;
     }
 
     // ──────────────────────────────────────────────

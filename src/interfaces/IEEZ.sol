@@ -45,7 +45,7 @@ struct RollupIdWithProofSystems {
 ///      that rollup's threshold (enforced by `IRollupContract.checkProofSystemsAndGetVkeys`).
 /// @dev `blobIndices` selects which of the tx-level EIP-4844 blobs this batch consumes;
 ///      `callData` is batch-scoped (each PS's circuit gets its own region).
-/// @dev `transientExecutionEntryCount` and `transientLookupCallCount` are pure on-chain
+/// @dev `transientExecutionEntryCount` and `transientStaticLookupCount` are pure on-chain
 ///      dispatch parameters — not bound by the proof — so the orchestrator can tune the
 ///      transient/persistent split without re-proving.
 /// @dev `blockNumber` is the single L1 block the whole batch binds to. The registry forwards
@@ -53,9 +53,9 @@ struct RollupIdWithProofSystems {
 ///      shared public input. 0 = no block context, type(uint64).max = "latest context"
 struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries;
-    LookupCall[] l1ToL2lookupCalls;
+    StaticLookup[] staticLookups;
     uint256 transientExecutionEntryCount;
-    uint256 transientLookupCallCount;
+    uint256 transientStaticLookupCount;
     address[] proofSystems;
     RollupIdWithProofSystems[] rollupIdsWithProofSystems;
     uint256[] blobIndices;
@@ -88,7 +88,7 @@ struct RollupConfig {
 struct RollupVerification {
     uint256 lastVerifiedBlock;
     ExecutionEntry[] executionQueue;
-    LookupCall[] lookupQueue;
+    StaticLookup[] staticLookupQueue;
     uint256 executionQueueIndex;
 }
 
@@ -105,7 +105,7 @@ struct StateDelta {
 }
 
 /// @notice Represents a cross-chain call within an execution entry (L2→L1 on L1)
-/// @dev revertSpan > 0 opens an isolated revert context spanning the next revertSpan calls (including this one)
+/// @dev revertNextNCalls > 0 opens an isolated revert context spanning the next revertNextNCalls calls (including this one)
 /// @dev isStatic dispatches the call via STATICCALL — read-only, carries no value, reverts on any state write
 struct L2ToL1Call {
     bool isStatic;
@@ -114,110 +114,84 @@ struct L2ToL1Call {
     bytes data;
     address sourceAddress;
     uint256 sourceRollupId;
-    uint256 revertSpan;
+    uint256 revertNextNCalls;
 }
 
-/// @notice Pre-computed result for a successful reentrant cross-chain call (L1→L2) triggered during execution
-/// @dev Consumed sequentially from the entry's `expectedL1ToL2Calls` array. If a reentrant call itself
-///      triggers another reentrant call, it consumes the next element in the same flat array.
-/// @dev All entries here must succeed. Failed calls should use LookupCall instead.
-/// @dev Position in the execution tree (L2→L1 call index, reentrant index, parent context)
-///      is folded into the rolling hash rather than stored as explicit fields.
-/// @dev `destinationRollupId` is the rollup this reentrant call targets. It is bound two ways:
+/// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) triggered during
+///         execution. UNIFIED record: a single `expectedL1ToL2Calls[]` table now holds every
+///         flavour of reentrant call — a plain SUCCESS, a read-only STATICCALL (`isStatic`), and
+///         a reverting call the caller try/catches (`failed`). The old separate `ExpectedLookup`
+///         table and its 4-tuple coordinate key are gone: position is now content-addressed by
+///         `currentRollingHash` (the value of `_rollingHash` at the instant the call fires),
+///         which uniquely pins the execution point because the rolling hash folds every prior
+///         call / nesting boundary.
+/// @dev Resolution by role (all keyed by `(crossChainCallHash, currentRollingHash)`): EVERY
+///      flavour carries its OWN `l2ToL1Calls[]` sub-array and runs it to completion — there is no
+///      shared flat array partitioned by a `callCount` anymore, so the field is gone.
+///        - plain SUCCESS (`!isStatic && !failed`): consumed by `_consumeNestedAction`, which runs
+///          this entry's `l2ToL1Calls[]` as a sub-execution that COMMITS (state + rolling-hash
+///          contributions persist), folding into the host's continuous rolling hash between
+///          NESTED_BEGIN/END, then returns `returnData`. `rollingHash` here is unused (0).
+///        - STATIC read (`isStatic`): resolved by `staticCallLookup`'s in-execution branch via
+///          `_resolveStaticLookup` — runs its OWN `l2ToL1Calls[]` in STATICCALL context (untagged
+///          schema, checked against `rollingHash`) and returns `returnData` (reverts with it when
+///          `failed`).
+///        - REVERTED (`failed && !isStatic`): resolved by `_consumeNestedAction`'s fallback via
+///          `_executeRevertedNestedLookup` — runs its OWN `l2ToL1Calls[]` as a mini-entry (tagged
+///          schema, checked against `rollingHash`, seeded with `currentRollingHash`), then reverts
+///          with `returnData` (state rolled back).
+/// @dev Sub-execution context separation: a REVERTED entry's sub-execution reuses the SAME host
+///      `expectedL1ToL2Calls[]` for its own reentrant calls (Solidity forbids recursive structs).
+///      To keep keys unambiguous across contexts, the sub-execution SEEDS `_rollingHash` with this
+///      entry's `currentRollingHash` instead of resetting to 0 — every context therefore has a
+///      distinct rolling-hash namespace, which is what replaces the old `executingLookupIndex`. A
+///      SUCCESS sub-execution needs no seed: it folds into the host's single continuous hash.
+/// @dev `destinationRollupId` is the rollup this reentrant call targets, bound two ways:
 ///      `postAndVerifyBatch` requires it to be one of the host's verified rollups (the entry's
-///      `stateDeltas`, or a top-level `LookupCall`'s `expectedStateRoots` pins), and at execution
-///      `_consumeNestedAction` requires it to equal the calling proxy's rollup (`destRid`).
-///      Together this guarantees a reentrant call can only reach a rollup the entry actually
-///      proved — the `crossChainCallHash` alone is one-way, so the field carries the id in clear.
+///      `stateDeltas`, or a top-level `StaticLookup`'s `expectedStateRoots` pins), and at resolution
+///      (`_consumeNestedAction` / `staticCallLookup`) it must equal the calling proxy's rollup.
 struct ExpectedL1ToL2Call {
     bytes32 crossChainCallHash;
     uint256 destinationRollupId;
-    /// Iterations the reentrant frame's `_processNCalls` runs over the parent entry's `l2ToL1Calls[]`.
-    /// Continues advancing the same global `_currentL2ToL1Call` cursor that the outer frame
-    /// was using; outer resumes from `cursor + callCount` after the reentrant frame returns.
-    /// See `ExecutionEntry` natspec for the partition invariant.
-    uint256 callCount;
-    bytes returnData;
-}
-
-/// @notice NESTED lookup: the pre-computed result of a reentrant cross-chain call that is
-///         looked up rather than executed — a reentrant STATICCALL (static mode) or a
-///         reverting reentrant call the caller try/catches (reverted mode). Lives INSIDE the
-///         entry (`ExecutionEntry.expectedLookups`) — entry-scoped by construction, no queue
-///         routing. Matched by `(crossChainCallHash, l2ToL1CallNumber, lastL1ToL2CallConsumed,
-///         executingLookupIndex)`; the declared `destinationRollupId` is additionally checked
-///         against the calling proxy's rollup at resolution.
-/// @dev Reverted mode (`failed == true`) runs `l2ToL1Calls` as a mini-entry (tagged hash
-///      schema, partitioned by `callCount` against `expectedL1ToL2Calls`) then reverts with
-///      `returnData`; static mode runs them via STATICCALL (untagged schema) and returns
-///      it. A reverted lookup's own deeper lookups resolve from the SAME host table (Solidity
-///      forbids recursive structs) — the prover must keep keys collision-free across the
-///      entry and its execution contexts. PROVER OBLIGATION: cross-rollup consistency of a
-///      sub-call-less static read (the entry's deltas pin only the rollups they touch).
-/// @dev `destinationRollupId` is the rollup this looked-up reentrant call targets — same proxy
-///      protection as `ExpectedL1ToL2Call`: `postAndVerifyBatch` verifies it against the host's
-///      `stateDeltas`/pins, and resolution (`staticCallLookup` / `_consumeNestedAction`) requires
-///      it to equal the calling proxy's rollup (`destRid`).
-struct ExpectedLookup {
-    bytes32 crossChainCallHash;
-    uint256 destinationRollupId;
-    bytes returnData;
+    /// `_rollingHash` at the instant this call fires — the content-addressed position key.
+    bytes32 currentRollingHash;
+    /// Read-only STATICCALL mode (resolved through `staticCallLookup`).
+    bool isStatic;
+    /// Reverting mode (the caller try/catches the revert). For an `isStatic` entry, marks a
+    /// static read that itself reverts with `returnData`.
     bool failed;
-    /// `_currentL2ToL1Call` at observation (1-indexed; a sub-execution's fresh sub-cursor inside one).
-    uint64 l2ToL1CallNumber;
-    /// `_lastL1ToL2CallConsumed` at observation.
-    uint64 lastL1ToL2CallConsumed;
-    /// Execution context at observation: 0 = fired at entry/host level; k = fired inside the
-    /// sub-execution of `expectedLookups[k-1]` of the same host. Makes the key context-unambiguous
-    /// (enforced — no longer a prover convention).
-    uint64 executingLookupIndex;
-    /// Sub-calls executed at resolution: STATICCALL (static mode) or real calls (reverted mode).
+    bytes returnData;
+    /// The reentrant frame's own flat sub-calls, run to completion in every mode (success commits,
+    /// reverted rolls back, static runs read-only). Empty for a no-op frame.
     L2ToL1Call[] l2ToL1Calls;
-    /// Reverted-mode reentrant table for the sub-execution. Empty for static mode.
-    ExpectedL1ToL2Call[] expectedL1ToL2Calls;
-    /// Reverted-mode top-level iterations over `l2ToL1Calls[]` (0 for static mode).
-    uint256 callCount;
-    /// Expected hash of the executed sub-calls: untagged schema (static), tagged (reverted).
+    /// Expected hash of the executed sub-calls — folded into the host's continuous hash for SUCCESS
+    /// (unused, 0), checked standalone for STATIC (untagged) and REVERTED (tagged, seeded with
+    /// `currentRollingHash`).
     bytes32 rollingHash;
 }
 
 /// @notice Represents an execution entry with pre-computed calls and return hash verification
 /// @dev Execution entries always SUCCEED at the top level — `executeCrossChainCall` returns
-///      `entry.returnData` as success. There is no `failed` flag because **a reverting
-///      top-level call isn't an execution; it's a lookup**. Reverting cross-chain results
-///      are expressed via `LookupCall { failed: true }` consumed through `staticCallLookup`
-///      (static-context entry point) or the reverted-lookup fallback in `_consumeNestedAction`.
-///      Naturally-reverting INNER calls inside an entry are still expressible: the proxy
-///      `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`;
+///      `entry.returnData` as success. There is no `failed` flag at the entry level. A reverting
+///      REENTRANT call (try/catch'd during execution) is a `failed` entry in
+///      `expectedL1ToL2Calls` (see `ExpectedL1ToL2Call`); a read-only call resolved outside an
+///      execution is a `StaticLookup`. Naturally-reverting INNER calls inside an entry are still
+///      expressible: the proxy `.call` returns `(false, retData)` and the rolling hash captures it
+///      via `CALL_END`;
 ///      the entry's outer `executeCrossChainCall` still returns success with `entry.returnData`.
 /// @dev `destinationRollupId` is the rollup whose queue this entry is routed to on L1
 ///      (per-rollup queue model). Must match the rollupId derived from the consumer
 ///      (proxyInfo.originalRollupId for proxy calls; the explicit rollupId arg for
 ///      executeL2TX).
 ///
-/// @dev **`callCount` — flat-calls + reentrancy partition.**
-///      `l2ToL1Calls[]` is the FULL flat list of every call this entry will execute, in
-///      execution order. It is partitioned between the entry's outermost frame and any
-///      reentrant (L1→L2) frames triggered during execution:
-///        - `callCount`                       = iterations the entry's TOP-LEVEL `_processNCalls` runs.
-///        - `expectedL1ToL2Calls[i].callCount` = iterations the i-th reentrant frame's `_processNCalls` runs.
-///      And the invariant after the entry finishes:
-///        callCount + Σ expectedL1ToL2Calls[i].callCount == l2ToL1Calls.length
-///      The on-chain `_currentL2ToL1Call` cursor advances monotonically over `l2ToL1Calls[]` —
-///      there's only one cursor across the whole tree. When a top-level call triggers a
-///      reentrant cross-chain proxy invocation, control re-enters via `executeCrossChainCall`
-///      → `_consumeNestedAction`, which calls `_processNCalls(expectedL1ToL2Calls[i].callCount)`
-///      on the SAME `l2ToL1Calls[]` array, advancing the same cursor. Outer iteration resumes
-///      where the cursor left off after the reentrant frame returns.
-///
-///      Worked example. `l2ToL1Calls.length = 5`:
-///        - call 0: top-level, no reentry.
-///        - call 1: top-level, triggers a reentrant call → matched against `expectedL1ToL2Calls[0]`,
-///                  whose `callCount = 2` consumes calls 2 and 3 inside the reentrant frame.
-///        - call 4: top-level, no reentry.
-///      ⇒ `entry.callCount = 3` (calls 0, 1, 4 at the outer frame),
-///        `expectedL1ToL2Calls[0].callCount = 2` (calls 2, 3 inside the reentrant frame),
-///        and `_currentL2ToL1Call == 5` at the end (the `UnconsumedL2ToL1Calls` guard checks this).
+/// @dev **No flat-array partition.** `l2ToL1Calls[]` is the entry's TOP-LEVEL calls ONLY, run to
+///      completion by `_processNCalls(l2ToL1Calls.length)`. Each reentrant (L1→L2) frame carries
+///      its OWN `expectedL1ToL2Calls[i].l2ToL1Calls[]` sub-array (also run to completion), so there
+///      is no shared cursor partition and no `callCount` field. A top-level call that triggers a
+///      reentrant cross-chain proxy invocation re-enters via `executeCrossChainCall` →
+///      `_consumeNestedAction`, which runs that reentrant entry's own sub-array in a saved/restored
+///      cursor frame (success) or a seeded sub-execution (reverted); the outer cursor resumes
+///      untouched afterwards. The end check is simply `_currentL2ToL1Call == l2ToL1Calls.length`.
 struct ExecutionEntry {
     /// Initial state --> final state. PROVER OBLIGATION: the deltas must be the entry's true
     /// state transition, and every entry must carry at least one StateDelta (never empty) —
@@ -225,25 +199,20 @@ struct ExecutionEntry {
     StateDelta[] stateDeltas;
     bytes32 proxyEntryHash; // hashed call (L1 -> L2), otherwise bytes32(0) for L2 txs
     uint256 destinationRollupId; // double check
-    /// All calls executed by this entry, flat, in execution order. Partitioned between
-    /// the entry's outermost frame and any reentrant (L1→L2) frames — see the natspec
-    /// above for the `callCount` partition invariant.
+    /// The entry's TOP-LEVEL calls, flat, in execution order (reentrant frames carry their own
+    /// sub-calls — see `ExpectedL1ToL2Call`). Run to completion.
     bytes returnData;
     L2ToL1Call[] l2ToL1Calls;
-    /// Parallel partition table: each `ExpectedL1ToL2Call` consumes a slice of `l2ToL1Calls[]`
-    /// during a reentrant frame. Order matches the order in which reentrant calls fire.
+    /// Unified reentrant (L1→L2) table: plain successes, reentrant static reads, and try/catch'd
+    /// reverting reentrant calls, distinguished by the `isStatic` / `failed` flags and matched by
+    /// `(crossChainCallHash, currentRollingHash)`. Each entry carries its own sub-calls.
+    /// See `ExpectedL1ToL2Call`.
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;
-    /// Nested lookups (reentrant static reads + try/catch'd reverting reentrant calls)
-    /// consumed during this entry — entry-scoped; see `ExpectedLookup`.
-    ExpectedLookup[] expectedLookups;
-    /// Top-level iterations. Together with `expectedL1ToL2Calls[i].callCount`, partitions
-    /// `l2ToL1Calls[]` across the execution tree. See the natspec above.
-    uint256 callCount;
     bytes32 rollingHash;
 }
 
 /// @notice A rollup's expected state root at the moment a top-level lookup is observed.
-/// @dev Content-addresses a `LookupCall` to a point on each pinned rollup's trajectory: a
+/// @dev Content-addresses a `StaticLookup` to a point on each pinned rollup's trajectory: a
 ///      candidate only MATCHES when every pin equals the live `rollups[rollupId].stateRoot`
 ///      (full-scan semantics — a mismatching candidate is skipped, it does not revert).
 ///      Split-independent and valid in the transient phase, unlike the old queue-cursor pins.
@@ -253,48 +222,39 @@ struct ExpectedStateRootPerRollup {
     bytes32 stateRoot;
 }
 
-/// @notice TOP-LEVEL lookup: the pre-computed result of a top-level cross-chain call that is
-///         looked up rather than executed — a read-only call resolved via `staticCallLookup`,
-///         or a reverting call executed via `_tryRevertedTopLevelLookup`. Lives in the storage
-///         pool (`_transientLookupCalls` / per-rollup `lookupQueue`) and is consumable ONLY
-///         outside an execution (`!_insideExecution()`). Nested lookups live inside
-///         `ExecutionEntry.expectedLookups` instead — see `ExpectedLookup`.
+/// @notice TOP-LEVEL STATIC lookup: the pre-computed result of a read-only cross-chain call made
+///         OUTSIDE any execution (`!_insideExecution()`), resolved via `staticCallLookup`. Lives in
+///         the storage pool (`_transientStaticLookups` / per-rollup `staticLookupQueue`). This is now the
+///         ONLY top-level pooled shape — there is no reverted (state-changing) top-level path; a
+///         top-level call that mutates and reverts is expressed as a normal `ExecutionEntry`, and
+///         reentrant calls fired DURING an entry's execution live in
+///         `ExecutionEntry.expectedL1ToL2Calls` (see `ExpectedL1ToL2Call`).
+/// @dev A static lookup is just `l2ToL1Calls` (N read-only sub-calls) plus `returnData`. It has NO
+///      reentrant table: a reentrant cross-chain call observed while resolving it runs in STATICCALL
+///      context (`_insideExecution() == false`), so it re-enters `staticCallLookup`'s pool branch and
+///      resolves as ANOTHER `StaticLookup` matched on hash + the same state-root pins.
 /// @dev Match key: `crossChainCallHash` + `destinationRollupId == ` the calling proxy's rollup
 ///      + every `expectedStateRoots` pin equal to the live root (full scan — a non-matching
 ///      candidate is skipped, not reverted on). The `destinationRollupId` term is what makes the
-///      transient pool (a single un-routed table) resolve only for the right rollup. Reverted mode
-///      (`failed == true`) runs its sub-execution as a mini-entry (`l2ToL1Calls`
-///      partitioned by `callCount` against `expectedL1ToL2Calls`, nested lookups from its own
-///      `expectedLookups` table), then reverts with `returnData`. Static mode runs
-///      `l2ToL1Calls` via STATICCALL (untagged schema) and returns `returnData` (or reverts
-///      with it when `failed`). All proxies referenced by `l2ToL1Calls` must be deployed
-///      before static resolution.
-struct LookupCall {
+///      transient pool (a single un-routed table) resolve only for the right rollup. Resolution runs
+///      `l2ToL1Calls` via STATICCALL (untagged schema, checked against `rollingHash`) and returns
+///      `returnData` — or reverts with it when `failed` (a read that itself reverts). All proxies
+///      referenced by `l2ToL1Calls` must be deployed before static resolution.
+struct StaticLookup {
     bytes32 crossChainCallHash;
-    /// Rollup whose `lookupQueue` this lookup is published under, AND part of the resolution match
-    /// (`staticCallLookup` / `_tryRevertedTopLevelLookup` require it to equal the calling proxy's
-    /// rollup). For persistent lookups this is coherent by construction (queue-routed); for the
-    /// transient pool it is the load-bearing check that the lookup resolves only for that rollup.
-    /// postAndVerifyBatch also requires it to appear in `expectedStateRoots` (destination ∈ pins),
-    /// pinning the routing target to proven state.
+    /// Rollup whose `staticLookupQueue` this lookup is published under, AND part of the resolution match
+    /// (`staticCallLookup` requires it to equal the calling proxy's rollup). For persistent lookups
+    /// this is coherent by construction (queue-routed); for the transient pool it is the load-bearing
+    /// check that the lookup resolves only for that rollup. postAndVerifyBatch also requires it to
+    /// appear in `expectedStateRoots` (destination ∈ pins), pinning the routing target to proven state.
     uint256 destinationRollupId;
     bytes returnData;
+    /// A read that itself reverts: resolution reverts with `returnData` instead of returning it.
     bool failed;
-    /// Sub-calls executed during resolution. Static mode: STATICCALL, no `revertSpan`.
-    /// Reverted mode: real calls (may host reentry and `revertSpan`), partitioned
-    /// against `expectedL1ToL2Calls` exactly like `ExecutionEntry.l2ToL1Calls`.
+    /// Read-only sub-calls executed during resolution via STATICCALL (no `revertNextNCalls`, no value).
     L2ToL1Call[] l2ToL1Calls;
-    /// Reverted-mode reentrant table for the sub-execution. Empty for static mode.
-    ExpectedL1ToL2Call[] expectedL1ToL2Calls;
-    /// Reverted-mode nested lookups consumed during the sub-execution (the sub-execution's own flat table —
-    /// deeper reverted-lookup executions resolve from this same table). Empty for static mode.
-    ExpectedLookup[] expectedLookups;
-    /// Reverted-mode top-level iterations over `l2ToL1Calls[]` (the entry-style `callCount`
-    /// partition). Zero for static mode.
-    uint256 callCount;
     /// Expected rolling hash of the executed sub-calls — always checked (an empty `l2ToL1Calls[]`
-    /// must carry `rollingHash == 0`). Untagged schema in static mode (`_processNStaticCalls`);
-    /// tagged entry schema in reverted mode.
+    /// must carry `rollingHash == 0`). Untagged static schema (`_processNStaticCalls`).
     bytes32 rollingHash;
     /// State-root pins — part of the MATCH predicate; see `ExpectedStateRootPerRollup`.
     ExpectedStateRootPerRollup[] expectedStateRoots;

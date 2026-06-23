@@ -99,7 +99,7 @@ contract EEZL2 is EEZBase {
     );
 
     /// @notice Emitted after each call completes in `_processNCalls`.
-    /// @dev Not emitted for calls inside a revertSpan (those events are rolled back by the revert).
+    /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
 
     /// @notice Emitted when a reentrant (outgoing) call is consumed during reentrant execution
@@ -112,8 +112,9 @@ contract EEZL2 is EEZBase {
         uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 outgoingCallsConsumed
     );
 
-    /// @notice Emitted after a revert span is processed via `executeInContextAndRevert`
-    event RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span);
+    /// @notice Emitted after a rollback window (`revertNextNCalls`) is processed via
+    ///         `executeInContextAndRevert` — `nCalls` calls ran, succeeded, then had their state rolled back.
+    event CallsReverted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 nCalls);
 
     /// @param _rollupId Non-zero; 0 is reserved as the mainnet sentinel in call hashes.
     /// @param _systemAddress The privileged address allowed to load execution tables
@@ -218,7 +219,7 @@ contract EEZL2 is EEZBase {
     ///      (its `sourceAddress` / `sourceRollupId` / `targetAddress` / `value` / `data` must
     ///      match the explicit params passed here — the prover builds them consistently).
     ///      `_processNCalls` makes the actual proxy invocation, advances the call counter,
-    ///      folds tagged events into the rolling hash, and handles `revertSpan`. Reentrant
+    ///      folds tagged events into the rolling hash, and handles `revertNextNCalls`. Reentrant
     ///      cross-chain calls during execution see `_insideExecution() == true` and consume
     ///      from `executions[0].expectedOutgoingCalls`.
     /// @param destination The L2 destination address (target of the inbound call)
@@ -294,7 +295,7 @@ contract EEZL2 is EEZBase {
 
     /// @notice The execution entry currently being processed. L2 has a single table, so the
     ///         transient `_currentEntryIndex` indexes `executions` directly.
-    function _getCurrentEntryStoragePointer() internal view returns (ExecutionEntry storage) {
+    function _getCurrentEntry() internal view returns (ExecutionEntry storage) {
         return executions[_currentEntryIndex];
     }
 
@@ -312,21 +313,21 @@ contract EEZL2 is EEZBase {
     // nested-lookup tables are active. Three contexts:
     //   - normal entry execution → the entry's tables;
     //   - top-level reverted lookup executing (`_revertedLookupTopLevel`) → the pool lookup's tables;
-    //   - nested reverted lookup executing (`_insideRevertedLookup`) → the `ExpectedLookup` at
-    //     `_revertedLookupIndex` within the active host table (`_getActiveLookups()`).
+    //   - nested reverted lookup executing (`_inReentrantSubFrame`) → the `ExpectedLookup` at
+    //     `_reentrantSubFrameIndex` within the active host table (`_getActiveLookups()`).
 
     /// @notice The flat call array driving the current execution.
     function _activeCalls() internal view returns (CrossChainCall[] storage) {
-        if (_insideRevertedLookup) return _getActiveLookups()[_revertedLookupIndex].incomingCalls;
+        if (_inReentrantSubFrame) return _getActiveLookups()[_reentrantSubFrameIndex].incomingCalls;
         if (_revertedLookupTopLevel) return _currentTopLevelLookup().incomingCalls;
-        return _getCurrentEntryStoragePointer().incomingCalls;
+        return _getCurrentEntry().incomingCalls;
     }
 
     /// @notice The reentrant (outgoing) table for the current execution.
     function _activeNested() internal view returns (ExpectedOutgoingCrossChainCall[] storage) {
-        if (_insideRevertedLookup) return _getActiveLookups()[_revertedLookupIndex].expectedOutgoingCalls;
+        if (_inReentrantSubFrame) return _getActiveLookups()[_reentrantSubFrameIndex].expectedOutgoingCalls;
         if (_revertedLookupTopLevel) return _currentTopLevelLookup().expectedOutgoingCalls;
-        return _getCurrentEntryStoragePointer().expectedOutgoingCalls;
+        return _getCurrentEntry().expectedOutgoingCalls;
     }
 
     /// @notice The nested-lookup table of the active HOST — the entry's `expectedLookups`, or
@@ -335,7 +336,7 @@ contract EEZL2 is EEZBase {
     function _getActiveLookups() internal view returns (ExpectedLookup[] storage) {
         return _revertedLookupTopLevel
             ? _currentTopLevelLookup().expectedLookups
-            : _getCurrentEntryStoragePointer().expectedLookups;
+            : _getCurrentEntry().expectedLookups;
     }
 
     /// @notice Consumes the next reentrant action, or runs a pre-computed reverting
@@ -449,9 +450,9 @@ contract EEZL2 is EEZBase {
         CrossChainCall[] storage calls = _activeCalls();
         uint256 processed = 0;
         while (processed < count) {
-            uint256 revertSpan = calls[_currentIncomingCall].revertSpan;
+            uint256 revertNextNCalls = calls[_currentIncomingCall].revertNextNCalls;
 
-            if (revertSpan == 0) {
+            if (revertNextNCalls == 0) {
                 CrossChainCall memory cc = calls[_currentIncomingCall];
                 _currentIncomingCall++;
 
@@ -482,17 +483,17 @@ contract EEZL2 is EEZBase {
                 processed++;
             } else {
                 uint256 savedCallNumber = _currentIncomingCall;
-                calls[_currentIncomingCall].revertSpan = 0;
+                calls[_currentIncomingCall].revertNextNCalls = 0;
 
-                try this.executeInContextAndRevert(revertSpan) {}
+                try this.executeInContextAndRevert(revertNextNCalls) {}
                 catch (bytes memory revertData) {
                     // L2 has no deferred no-match flag — ignore the 4th tuple element.
                     (_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall,) = _decodeContextResult(revertData);
                 }
 
-                calls[savedCallNumber].revertSpan = revertSpan;
-                emit RevertSpanExecuted(_currentEntryIndex, savedCallNumber, revertSpan);
-                processed += revertSpan;
+                calls[savedCallNumber].revertNextNCalls = revertNextNCalls;
+                emit CallsReverted(_currentEntryIndex, savedCallNumber, revertNextNCalls);
+                processed += revertNextNCalls;
             }
         }
     }
@@ -531,8 +532,8 @@ contract EEZL2 is EEZBase {
 
         // Pointer for deeper frames (`_activeCalls()` / `_activeNested()`); storage refs
         // can't be transient.
-        _revertedLookupIndex = index;
-        _insideRevertedLookup = true;
+        _reentrantSubFrameIndex = index;
+        _inReentrantSubFrame = true;
 
         _executeRevertedLookup(
             el.callCount, el.rollingHash, el.incomingCalls.length, el.expectedOutgoingCalls.length, el.returnData
@@ -583,7 +584,7 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice Executes the lookup call's optional `calls[]` in static context and computes a
-    ///         rolling hash of the results (untagged static schema). No `revertSpan` handling.
+    ///         rolling hash of the results (untagged static schema). No `revertNextNCalls` handling.
     /// @dev All proxies referenced must already be deployed; CREATE2 is unavailable inside a
     ///      STATICCALL frame. The accumulator is a local, not `_rollingHash`, so this is verified
     ///      against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
