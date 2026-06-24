@@ -123,7 +123,7 @@ struct ExpectedLookup {
 ///        and `_currentIncomingCall == 5` at the end (the `UnconsumedIncomingCalls` guard checks this).
 struct ExecutionEntry {
     /// Hash of the inbound call. Never bytes32(0) on L2 — there is no zero-hash consumption
-    /// path (`executeL2TX` is L1-only), and a zero-hash entry would block the table.
+    /// path (`executeL2Txs` is L1-only), and a zero-hash entry would block the table.
     bytes32 proxyEntryHash;
     /// All calls executed by this entry, flat, in execution order. Partitioned between
     /// the entry's outermost frame and any reentrant (outgoing) frames — see the natspec
