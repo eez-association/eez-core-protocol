@@ -5,6 +5,7 @@ messages — no header.
 **Everything is a message**: chain-local operations, cross-chain calls, results, reverts,
 and transaction boundaries differ only by message type.
 
+Excalidraw: https://excalidraw.com/#json=6wvuE6FrHjoxqAkIlAiUe,0I3IqjvA9xbwOEz1bvDF8Q
 ---
 
 ## 1. Framing
