@@ -1,10 +1,9 @@
 # Standardized Message Format
 
-A binary format for publishing cross-chain activity as a single stream of uniform
-messages — no header, just messages (§1) laid back-to-back and read until exhausted.
+A binary format for publishing chain activity as a single stream of
+messages — no header.
 **Everything is a message**: chain-local operations, cross-chain calls, results, reverts,
 and transaction boundaries differ only by message type.
-
 
 ---
 
@@ -12,8 +11,7 @@ and transaction boundaries differ only by message type.
 
 Every message begins with a `message_type` byte, which selects one of two shapes:
 
-* **Content messages** carry data: `message_type | message_len | …fields…`, with the
-  dynamic-length field last so `message_len` brackets the message for one-jump skipping.
+* **Content messages** carry data: `message_type | message_len | …fields…`.
 * **Marker messages** carry none: a lone `message_type` byte, no length and no fields.
 
 Each type's exact byte layout is defined inline with the type in §2.
@@ -24,41 +22,27 @@ These conventions apply across the per-type layouts in §2:
 
 * All values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64` as written, `bool`
   is one byte, `address` is 20 bytes, `uint256` is 32 bytes. Chain ids are `u64`.
-* `message_len` is the byte length of the fields after it. It is `u16` for most content
-  messages, and `u32` for `ChainOperation` (whose op list can be large). Marker messages
-  have no `message_len`.
-* The **dynamic-length field is last** in a content message; within it a `bytes` value is
-  prefixed with its own `u32` byte length, and an array (e.g. `ChainOpItem[]`) with its own
-  `u32` element count.
-* An *optional* field (written `[+ field]`) is a `bytes` field whose length `0` means
-  **absent**.
-* To advance, a reader reads `message_type`: for a marker it is done; otherwise it reads
-  `message_len` and skips that many bytes. There is **no message count or end-of-stream
-  marker** — messages are parsed back-to-back until the input is exhausted: a `CloseBlob`
-  jumps to the next blob (the rest of the current one is padding), and parsing finishes
-  after the last blob's content plus the appended `callData` (§1.1 blob layout).
+* `message_len` is the byte length of the fields after it — `u16` for most messages, `u32`
+  for `ChainOperation`.
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
   A `CloseBlob` (§2.8) ends a blob early so the next blob starts a fresh message; the bytes
-  between it and the blob boundary are padding. How that stream is physically packed into a
+  between it and the blob boundary are padding. How that stream data is packed into a
   blob's field elements is detailed in §4.
 
 ---
 
 ## 2. Message types
 
-A chain id is encoded only when it can't be inferred: `ChainOperation` (`chain_id`),
-`InitiateCrossChainTransaction` and `Call` (`to_chain`). All other chains are the
-currently-executing context — a `Call`'s source, a `Result`'s pairing, a
-`FinishCrossChainTransaction`'s chain — so they are not encoded.
+A chain id is encoded only when it can't be inferred.
 
 Each row gives the complete field layout in wire order; §2.1–2.8 add the prose.
 
 | type | name | fields (in wire order) |
 |---|---|---|
 | `1` | `ChainOperation` | `u8 message_type` · `u32 message_len` · `u64 chain_id` · `bytes operations` |
-| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u16 message_len` · `u64 to_chain` · `bytes tx_data` |
+| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u16 message_len` · `u64 chain_id` · `bytes tx_data` |
 | `3` | `Call` | `u8 message_type` · `u16 message_len` · `u64 to_chain` · `bool is_static` · `address fromAddress` · `address toAddress` · `uint256 value` · `bytes data` |
 | `4` | `Result` | `u8 message_type` · `u16 message_len` · `bool success` · `bytes return_data` |
 | `5` | `Snapshot` | `u8 message_type` |
@@ -66,19 +50,14 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 | `7` | `FinishCrossChainTransaction` | `u8 message_type` |
 | `0xFF` | `CloseBlob` | `u8 message_type` |
 
-Every `bytes` field and array carries its own `u32` length/count prefix, and the dynamic
-field is always last (§1.1). Implicit fields (`from_chain` on `Call`, both chains on
-`Result`, the finishing chain) are not encoded — see below.
-
 > **Pairing.** Three pairs always come matched: every `Call` has a `Result`, every
-> `Snapshot` a `Revert` (balanced and nested), and every `InitiateCrossChainTransaction` a
+> `Snapshot` a `Revert`, and every `InitiateCrossChainTransaction` a
 > `FinishCrossChainTransaction`. `ChainOperation` and `CloseBlob` stand alone.
 
 ### 2.1 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
-payload is **opaque** — an ordered list the executing chain interprets on its own. It is
-the only type whose layout carries a `chain_id`, and it uses a wider `u32` length since the
-list can be large:
+payload is **opaque** — an ordered list the executing chain interprets on its own. It uses a
+wider `u32` `message_len` since the operations list can be large:
 
 ```c
 struct ChainOperation {          // type 1
@@ -97,8 +76,12 @@ struct ChainOperation {          // type 1
 >
 > ```c
 > ChainOpItem { u8 item_type; bytes item_data; }   // 1 = Transaction, 2 = NewBlock
-> // Transaction: rlp_transaction (signed)   |   NewBlock: block_params (e.g. timestamp)
+> // Transaction: rlp_transaction   |   NewBlock: block_params (e.g. timestamp)
 > ```
+>
+> Whether a `Transaction`'s `rlp_transaction` carries a signature is **up to the chain** —
+> some chains include it, others omit it. The format does not
+> mandate either way; the chain that interprets `operations` knows what to expect.
 
 **Example** — chain `7` opens a block, runs two txs, opens a second block, runs one more:
 
@@ -108,32 +91,29 @@ message_len  = <u32 byte length of chain_id + operations>
 chain_id     = 7
 operations   = ChainOpItem[5] {
     [0] NewBlock     { timestamp: 1_700_000_000, ... }   # block 1 opens
-    [1] Transaction  rlp_tx_0 [+ sig_0]                  #   |
-    [2] Transaction  rlp_tx_1 [+ sig_1]                  #   |  block 1
+    [1] Transaction  rlp_tx_0                            #   |
+    [2] Transaction  rlp_tx_1                            #   |  block 1
     [3] NewBlock     { timestamp: 1_700_000_012, ... }   # block 1 closes, block 2 opens
-    [4] Transaction  rlp_tx_2 [+ sig_2]                  #   |  block 2
+    [4] Transaction  rlp_tx_2                            #   |  block 2
 }
 ```
 
-On the wire: a `u32` count (`5`), then each item as `u8 item_type | u32 len | item_data`.
-
 ### 2.2 `InitiateCrossChainTransaction`
-Opens one cross-chain transaction. System-born (no source); `to_chain` is where the
-originating tx lives.
+Opens one cross-chain transaction. `chain_id` is where the originating tx lives.
 
 ```c
 struct InitiateCrossChainTransaction {   // type 2
     u8       message_type;   // = 2
     u16      message_len;    // byte length of the fields below
-    u64      to_chain;       // where the originating tx lives
+    u64      chain_id;       // where the originating tx lives
     bytes    tx_data;        // the originating transaction (TxData, incl. its signature) — last, u32 length-prefixed
 }
 ```
 
 `InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.7) are **always
-paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a
-matching `FinishCrossChainTransaction`, a `FinishCrossChainTransaction` requires an open
-transaction, and everything the transaction produces lives between the two.
+paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a matching
+`FinishCrossChainTransaction`, a `FinishCrossChainTransaction` requires an open transaction,
+and everything the transaction produces lives between the two.
 
 ### 2.3 `Call`
 A cross-chain call:
@@ -151,14 +131,13 @@ struct Call {                // type 3
 }
 ```
 
-`from_chain` is **not encoded** — it is the chain currently executing in the stream, known
-implicitly when the `Call` is read.
+`from_chain` is **not encoded** — it is the chain whose context is currently executing,
+established by the most recent `InitiateCrossChainTransaction` or `Call`.
 
-### 2.4 `Result` (a.k.a. Return or Revert)
+### 2.4 `Result` (a.k.a. Return)
 The outcome of a finished `Call`, flowing back to the caller — a successful **return**
 (`success = true`) or the call's own **revert** (`success = false`). It pairs with the last
-outstanding `Call`, so **both** chains are implicit — the callee (`from_chain`) and the
-caller (`to_chain`) are already known from that `Call`. No chain id is encoded:
+outstanding `Call`, so **both** chains (`from` and `to`) are implicit.
 
 ```c
 struct Result {              // type 4
@@ -170,7 +149,7 @@ struct Result {              // type 4
 ```
 
 `success = false` means the call **finished by reverting** on the callee: the caller
-receives the failure and handles it; nothing is unwound. That differs from a
+receives the failure and handles it like a same-chain contract revert. That differs from a
 `Snapshot`/`Revert` region (§2.5–2.6), which force-reverts calls that already *succeeded*.
 
 ### 2.5 `Snapshot`
@@ -197,9 +176,9 @@ struct Revert { u8 message_type; }            // = 6
 
 The region is delimited by the bracket, so no chain id, count, or call identifier is
 needed. A `Revert` is **not** a failed `Result`: a call that fails by itself reports
-`Result { success: false }` (§2.4) and is *not* unwound. `Revert` is the opposite case —
-calls inside the region completed with `success = true`, then get force-reverted when the
-region closes.
+`Result { success: false }` (§2.4). `Revert` is used when calls inside the region completed
+with `success = true`, but the chain that initiated them, later reverts that context —
+forcing those already-succeeded effects to roll back.
 
 ### 2.7 `FinishCrossChainTransaction`
 Closes the cross-chain transaction opened by `InitiateCrossChainTransaction` (§2.2). A
@@ -232,27 +211,26 @@ all are done, each chain **closes** its block (one `ChainOperation` per chain):
 
 ```
 # 1. L2_A: native txs + open its cross-chain block
-ChainOperation (chain_id: L2_A, params: [ NewBlock{ts}, Tx, Tx ])
+ChainOperation (chain_id: L2_A, operations: [ NewBlock{ts}, Tx, Tx ])
 
 # 2. L2_B: native txs + open its cross-chain block
-ChainOperation (chain_id: L2_B, params: [ NewBlock{ts}, Tx, Tx ])
+ChainOperation (chain_id: L2_B, operations: [ NewBlock{ts}, Tx, Tx ])
 
 # 3. process the cross-chain transaction(s) between the open blocks
-InitiateCrossChainTransaction (to_chain: L2_A, TxData)
+InitiateCrossChainTransaction (chain_id: L2_A, TxData)
     Call   (to L2_B, ...)                       # from L2_A (implicit)
     Result (success: true, return_data)         # pairs with the Call
 FinishCrossChainTransaction                     # ends on L2_A (implicit)
 
 # 4. all cross-chain done — close both blocks (a fresh NewBlock auto-closes the open one)
-ChainOperation (chain_id: L2_A, params: [ NewBlock{ts'} ])   # closeBlock for L2_A
-ChainOperation (chain_id: L2_B, params: [ NewBlock{ts'} ])   # closeBlock for L2_B
+ChainOperation (chain_id: L2_A, operations: [ NewBlock{ts'} ])   # closeBlock for L2_A
+ChainOperation (chain_id: L2_B, operations: [ NewBlock{ts'} ])   # closeBlock for L2_B
 ```
 
 ### 3.2 Stand-alone vs. framed
 
-* **`ChainOperation` is stand-alone and self-closing** — no pair, no explicit close; a
-  `NewBlock` implicitly closes the previous block and the message ends at its
-  `message_len` boundary.
+* **`ChainOperation` is stand-alone and self-closing** — no pair.
+
 * **`InitiateCrossChainTransaction` MUST always be terminated by a
   `FinishCrossChainTransaction`** — everything the tx produces lives between the two
   markers, and the tx is not complete until its `FinishCrossChainTransaction` arrives (see
@@ -301,9 +279,9 @@ end of the blob**:
 
 * **Data elements** carry the stream — 31 bytes + the low 7 bits of the 32nd byte, top bit
   clear — so each represents a full 32 bytes of logical data.
-* The one deferred high bit per data element is collected in order. Across 4096 elements
-  that is 4096 bits = **512 bytes**, which are packed (same 255-bit scheme) into the **last
-  ≈ 16 field elements** of the blob.
+* The one deferred high bit per data element is collected in order. Across the ~4080 data
+  elements that is ~4080 bits (**≤ 512 bytes**), which are packed (same 255-bit scheme) into
+  the **last ≈ 16 field elements** of the blob.
 * **Capacity:** `(4096 − 16) × 32 = 130,560` useful bytes per blob.
 * **Read:** decode the ≈16 tail elements to recover the deferred bits, restore each data
   element's full 32nd byte (in-place 7 bits + its deferred bit), concatenate all data
