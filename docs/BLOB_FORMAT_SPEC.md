@@ -25,6 +25,10 @@ These conventions apply across the per-type layouts in §2:
   is one byte, `address` is 20 bytes, `uint256` is 32 bytes. Chain ids are `u64`.
 * `message_len` is the byte length of the fields after it — `u16` for most messages, `u32`
   for `ChainOperation`.
+* A `bytes` field is length-prefixed: a `u16` byte length, then exactly that many bytes.
+* A `raw_bytes` field is **completely chain-defined** — opaque to the protocol, which never
+  parses it. It is always the message's final field and is bounded by `message_len` (no inner
+  length prefix), so the chain owns its entire encoding.
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
@@ -42,8 +46,8 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 
 | type | name | fields (in wire order) |
 |---|---|---|
-| `1` | `ChainOperation` | `u8 message_type` · `u32 message_len` · `u64 chain_id` · `bytes operations` |
-| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u16 message_len` · `u64 chain_id` · `bytes tx_data` |
+| `1` | `ChainOperation` | `u8 message_type` · `u32 message_len` · `u64 chain_id` · `raw_bytes operations` |
+| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u16 message_len` · `u64 chain_id` · `raw_bytes tx_data` |
 | `3` | `Call` | `u8 message_type` · `u16 message_len` · `u64 to_chain` · `bool is_static` · `address fromAddress` · `address toAddress` · `uint256 value` · `bytes data` |
 | `4` | `Result` | `u8 message_type` · `u16 message_len` · `bool success` · `bytes return_data` |
 | `5` | `Snapshot` | `u8 message_type` |
@@ -65,7 +69,7 @@ struct ChainOperation {          // type 1
     u8     message_type;         // = 1
     u32    message_len;          // byte length of the fields below (chain_id + operations)
     u64    chain_id;             // the executing chain
-    bytes  operations;           // opaque to the protocol; the chain interprets it
+    raw_bytes operations;        // opaque to the protocol; the chain interprets it (bounded by message_len)
 }
 ```
 
@@ -107,9 +111,12 @@ struct InitiateCrossChainTransaction {   // type 2
     u8       message_type;   // = 2
     u16      message_len;    // byte length of the fields below
     u64      chain_id;       // where the originating tx lives
-    bytes    tx_data;        // the originating transaction (TxData, incl. its signature) — last, u32 length-prefixed
+    raw_bytes tx_data;       // opaque — the chain decides what goes here; trailing, bounded by message_len
 }
 ```
+
+What `tx_data` contains is **up to the chain** — like `operations` (§2.1), the protocol
+treats it as opaque bytes (e.g. an RLP transaction with or without its signature).
 
 `InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.7) are **always
 paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a matching
@@ -128,9 +135,12 @@ struct Call {                // type 3
     address  fromAddress;
     address  toAddress;
     uint256  value;          // 0 when is_static
-    bytes    data;           // dynamic — last; u32 length-prefixed
+    bytes    data;           // the call's exact calldata; last, u16 length-prefixed
 }
 ```
+
+Unlike `operations` / `tx_data`, `data` is **not** chain-defined: it is exactly the
+calldata of the cross-chain call.
 
 `from_chain` is **not encoded** — it is the chain whose context is currently executing,
 established by the most recent `InitiateCrossChainTransaction` or `Call`.
@@ -145,9 +155,12 @@ struct Result {              // type 4
     u8       message_type;   // = 4
     u16      message_len;    // byte length of the fields below
     bool     success;        // false = the call itself reverted on the callee chain
-    bytes    return_data;    // dynamic — last; u32 length-prefixed
+    bytes    return_data;    // the call's exact return value (or revert data); last, u16 length-prefixed
 }
 ```
+
+Like `Call.data`, `return_data` is **not** chain-defined: it is exactly the call's return
+data.
 
 `success = false` means the call **finished by reverting** on the callee: the caller
 receives the failure and handles it like a same-chain contract revert. That differs from a
