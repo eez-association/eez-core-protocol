@@ -101,7 +101,7 @@ contract Rollup is IRollupContract, Ownable {
     ///      is no zero-padding semantic — the orchestrator must compose batches whose
     ///      proofSystem subset for THIS rollup is a subset of this manager's allowed set,
     ///      and whose size is at least the manager's threshold. Implication: the (rid × ps)
-    ///      vkMatrix the registry sees is uniformly non-zero.
+    ///      verificationKeysPerRollup the registry sees is uniformly non-zero.
     function checkProofSystemsAndGetVkeys(address[] calldata proofSystems)
         external
         view
@@ -111,7 +111,7 @@ contract Rollup is IRollupContract, Ownable {
         vkeys = new bytes32[](proofSystems.length);
         // Strictly-increasing check: rejects address(0) AND duplicates in one pass. The registry
         // already enforces the same invariant on the batch's global PS list and on each
-        // rollup's `proofSystemIndex[]` (so the resolved subset reaches us already sorted),
+        // rollup's `proofSystemIndexes[]` (so the resolved subset reaches us already sorted),
         // but checking here keeps this manager safe for callers that don't pre-sort.
         address prev = address(0);
         for (uint256 i = 0; i < proofSystems.length; i++) {
@@ -167,7 +167,7 @@ contract Rollup is IRollupContract, Ownable {
     //
     // No mid-flow lockout modifier here. Two scenarios to consider:
     //   1. During a `postAndVerifyBatch` meta hook — the registry already snapshotted this rollup's
-    //      vkMatrix in step 2 of postAndVerifyBatch (before the hook fires in step 6), so any
+    //      verificationKeysPerRollup in step 2 of postAndVerifyBatch (before the hook fires in step 6), so any
     //      mutation here doesn't affect the in-flight verification.
     //   2. The setStateRoot escape hatch — the only path that mutates central state — is
     //      itself gated by the registry's `RollupBatchActiveThisBlock` check.
