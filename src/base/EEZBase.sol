@@ -10,9 +10,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///      specific execution struct (those structs differ per side — `IEEZ.sol` vs `IEEZL2.sol`):
 ///        - Rolling-hash tag constants, the `_rollingHash` accumulator, and the fold helpers
 ///          (they operate on primitives, so they don't reference any execution struct).
-///        - Neutral transient pointers: `_currentEntryIndex`, `_inReentrantSubFrame`,
-///          `_reentrantSubFrameIndex`, `_revertedLookupTopLevel`, and `_topLevelLookupIndex` —
-///          plus `_activeLookupContext()`, the match-key component derived from them.
+///        - The neutral transient pointer `_currentEntryIndex` (which entry the child is executing).
 ///        - The `authorizedProxies` registry, the external `createCrossChainProxy` entry point,
 ///          and the internal CREATE2 deploy helper (`_createCrossChainProxyInternal`).
 ///        - Pure / view helpers (`computeCrossChainCallHash`, `computeCrossChainProxyAddress`).
@@ -25,10 +23,10 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///        - The call cursors — absolute-directional on L1 (`_currentL2ToL1Call` /
 ///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
 ///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
-///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`.
-///        - `_activeCalls` / `_activeNested` / `_getActiveLookups`, `_getCurrentEntry`,
-///          `_currentTopLevelLookup`, `_resolveStaticLookup`, `_processNStaticCalls`,
-///          `_executeRevertedNestedLookup` / `_executeRevertedTopLevelLookup`, `staticCallLookup`.
+///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`, `_getCurrentEntry`,
+///          `_resolveStaticLookup`, `_processNStaticCalls`, `_executeRevertedNestedLookup`,
+///          `staticCallLookup` — plus any per-side sub-frame / reverted-lookup transient pointers
+///          (e.g. L2's `_inReentrantSubFrame` / `_revertedLookupTopLevel`).
 ///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
 ///          L2: `OutgoingCallConsumed`, `UnconsumedIncomingCalls`, …).
 abstract contract EEZBase is IEEZ {
@@ -60,29 +58,8 @@ abstract contract EEZBase is IEEZ {
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
-    /// @notice True while a reentrant SUB-FRAME is running its own `l2ToL1Calls[]` — the entry at
-    ///         `_reentrantSubFrameIndex` within the active host reentrant table (L1: an
-    ///         `ExpectedL1ToL2Call`; L2 retains the legacy `ExpectedLookup`).
-    /// @dev Set for BOTH a reverted sub-execution (`_executeRevertedNestedLookup`) AND a committing
-    ///      success sub-frame (L1's `_consumeSuccessfulReentrant`), which is why the name is neutral
-    ///      rather than "reverted". Scopes `_activeCalls()` to that entry's own sub-calls instead of
-    ///      the host's. A reverted frame clears it via its terminal revert (and a deeper one is
-    ///      restored by that same unwind); a success frame saves/restores it manually.
-    bool transient _inReentrantSubFrame;
-
-    /// @notice Index of the reentrant sub-frame entry being executed, within the active host
-    ///         reentrant table. Storage refs can't be transient, so the child reconstructs the
-    ///         pointer from this index.
-    uint256 transient _reentrantSubFrameIndex;
-
-    /// @notice DEAD ON L1 (only L2 reads these). After the static-only top-level-lookup change, L1
-    ///         has no reverted-top-level host to switch to, so `_revertedLookupTopLevel` is never set
-    ///         and `_topLevelLookupIndex` is never used on L1; they remain only for L2's reverted
-    ///         TOP-LEVEL `LookupCall` path. Removal is deferred with the L2 mirror.
-    bool transient _revertedLookupTopLevel;
-
-    /// @notice Pool index of the top-level `LookupCall` being executed (L2 only — see above).
-    uint256 transient _topLevelLookupIndex;
+    // Sub-frame / reverted-lookup pointers are NOT shared here: L1 no longer needs them (it passes
+    // the active call array to `_processNCalls` by `memory`), so they live in `EEZL2` only.
 
     // ──────────────────────────────────────────────
     //  Events
@@ -214,16 +191,6 @@ abstract contract EEZBase is IEEZ {
     }
 
     // ──────────────────────────────────────────────
-    //  Lookup-context helper
-    // ──────────────────────────────────────────────
-
-    /// @notice Fourth component of the nested-lookup match key (`executingLookupIndex`):
-    ///         0 = host level; k = inside the sub-execution of the host's `expectedLookups[k-1]`.
-    function _activeLookupContext() internal view returns (uint64) {
-        return _inReentrantSubFrame ? uint64(_reentrantSubFrameIndex + 1) : 0;
-    }
-
-    // ──────────────────────────────────────────────
     //  Revert-context decode helper
     // ──────────────────────────────────────────────
 
@@ -259,6 +226,12 @@ abstract contract EEZBase is IEEZ {
     // across event types. The final value is checked against `entry.rollingHash` at the end
     // of execution. See `docs/CORE_PROTOCOL_SPEC.md` §E for the full specification.
     //
+    // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
+    // prior value), so order, count, and nesting are already bound by the chain + the tags. An
+    // explicit index would be a deterministic `1,2,3,…` that adds no information — omitting it is
+    // what lets a `revertNextNCalls` span be processed as a 0-based sub-slice without diverging
+    // the hash from a continuous run.
+    //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
     // because they're verified against `LookupCall.rollingHash`, a separate accumulator
     // whose surrounding lookup key already pins the entry/call/nesting context. See spec §E.2.
@@ -267,27 +240,25 @@ abstract contract EEZBase is IEEZ {
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame
     // concept, NOT a direction (the directional naming lives in the per-side children).
 
-    /// @notice Folds a CALL_BEGIN event into `_rollingHash` for the given call number.
-    function _rollingHashCallBegin(uint256 callNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN, callNumber));
+    /// @notice Folds a CALL_BEGIN event into `_rollingHash`.
+    function _rollingHashCallBegin() internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN));
     }
 
     /// @notice Folds a CALL_END event into `_rollingHash`, including the call's observed
     ///         outcome (success flag + raw return/revert data).
-    function _rollingHashCallEnd(uint256 callNumber, bool success, bytes memory retData) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, callNumber, success, retData));
+    function _rollingHashCallEnd(bool success, bytes memory retData) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, success, retData));
     }
 
-    /// @notice Folds a NESTED_BEGIN event into `_rollingHash` for the given reentrant-frame
-    ///         index (1-indexed).
-    function _rollingHashNestedBegin(uint256 nestedNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
+    /// @notice Folds a NESTED_BEGIN event into `_rollingHash` (start of a reentrant frame).
+    function _rollingHashNestedBegin() internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN));
     }
 
-    /// @notice Folds a NESTED_END event into `_rollingHash` for the given reentrant-frame
-    ///         index (1-indexed).
-    function _rollingHashNestedEnd(uint256 nestedNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+    /// @notice Folds a NESTED_END event into `_rollingHash` (end of a reentrant frame).
+    function _rollingHashNestedEnd() internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END));
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch

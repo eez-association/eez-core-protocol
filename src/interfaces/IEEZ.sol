@@ -25,22 +25,22 @@ pragma solidity ^0.8.28;
 
 /// @notice One participating rollup in a `ProofSystemBatchPerVerificationEntries` together
 ///         with the SUBSET of the batch's global `proofSystems[]` that this rollup accepts.
-/// @dev `proofSystemIndex[]` is a list of indices into the parent batch's `proofSystems[]`,
+/// @dev `proofSystemIndexes[]` is a list of indices into the parent batch's `proofSystems[]`,
 ///      strictly increasing. The on-chain registry resolves them to PS addresses and hands
 ///      that subset to this rollup's contract via `IRollupContract.checkProofSystemsAndGetVkeys`
 struct RollupIdWithProofSystems {
     uint256 rollupId;
-    uint64[] proofSystemIndex;
+    uint64[] proofSystemIndexes;
 }
 
 /// @notice One batch's payload — a group of proof systems jointly attesting to a set of
 ///         rollups' state transitions. Each rollup picks the subset of `proofSystems[]` it
-///         accepts via `RollupIdWithProofSystems[r].proofSystemIndex`.
+///         accepts via `RollupIdWithProofSystems[r].proofSystemIndexes`.
 /// @dev The participating rollups (read off `RollupIdWithProofSystems[r].rollupId`) must be
 ///      strictly increasing — paired with the once-per-block-per-rollup invariant on
 ///      `_markVerifiedBlockPerRollup`, this prevents a single batch from verifying the same
 ///      rollup twice. `proofSystems[]` is the batch-global PS list (strictly increasing,
-///      rejects address(0) and duplicates). Each rollup's `proofSystemIndex[]` is strictly
+///      rejects address(0) and duplicates). Each rollup's `proofSystemIndexes[]` is strictly
 ///      increasing too, indices in `[0, proofSystems.length)`, and its length must satisfy
 ///      that rollup's threshold (enforced by `IRollupContract.checkProofSystemsAndGetVkeys`).
 /// @dev `blobIndices` selects which of the tx-level EIP-4844 blobs this batch consumes;
