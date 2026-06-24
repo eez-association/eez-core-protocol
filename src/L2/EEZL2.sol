@@ -54,6 +54,25 @@ contract EEZL2 is EEZBase {
     /// @dev Also used by `staticCallLookup` to disambiguate multiple lookup calls within the same call.
     uint256 transient _lastOutgoingCallConsumed;
 
+    // ── Sub-frame / reverted-lookup pointers (L2-only) ──
+    // These scope `_activeCalls()` / `_getActiveLookups()` to a sub-execution's tables. They used to
+    // live in the shared `EEZBase`, but L1 no longer needs them (it passes the active call array by
+    // `memory`), so they're declared here.
+
+    /// @notice True while executing a reverted NESTED lookup — the `ExpectedLookup` at
+    ///         `_reentrantSubFrameIndex` within the active host table scopes `_activeCalls()`.
+    bool transient _inReentrantSubFrame;
+
+    /// @notice Index of the nested `ExpectedLookup` being executed, within the active host table.
+    uint256 transient _reentrantSubFrameIndex;
+
+    /// @notice True while a reverted TOP-LEVEL `LookupCall` is the active host — the pool lookup at
+    ///         `_topLevelLookupIndex` supplies the flat calls / reentrant / nested tables.
+    bool transient _revertedLookupTopLevel;
+
+    /// @notice Pool index of the top-level `LookupCall` being executed.
+    uint256 transient _topLevelLookupIndex;
+
     /// @notice Error when caller is not the system address
     error Unauthorized();
 
@@ -316,6 +335,12 @@ contract EEZL2 is EEZBase {
     //   - nested reverted lookup executing (`_inReentrantSubFrame`) → the `ExpectedLookup` at
     //     `_reentrantSubFrameIndex` within the active host table (`_getActiveLookups()`).
 
+    /// @notice Fourth component of the nested-lookup match key (`executingLookupIndex`):
+    ///         0 = host level; k = inside the sub-execution of the host's `expectedLookups[k-1]`.
+    function _activeLookupContext() internal view returns (uint64) {
+        return _inReentrantSubFrame ? uint64(_reentrantSubFrameIndex + 1) : 0;
+    }
+
     /// @notice The flat call array driving the current execution.
     function _activeCalls() internal view returns (CrossChainCall[] storage) {
         if (_inReentrantSubFrame) return _getActiveLookups()[_reentrantSubFrameIndex].incomingCalls;
@@ -356,9 +381,9 @@ contract EEZL2 is EEZBase {
             ExpectedOutgoingCrossChainCall storage nested = expectedCalls[idx];
             uint256 nestedNumber = idx + 1; // 1-indexed
             emit OutgoingCallConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, nested.callCount);
-            _rollingHashNestedBegin(nestedNumber);
+            _rollingHashNestedBegin(crossChainCallHash); // bind the reentrant call's identity
             _processNCalls(nested.callCount);
-            _rollingHashNestedEnd(nestedNumber);
+            _rollingHashNestedEnd();
             return nested.returnData;
         }
 
@@ -456,7 +481,12 @@ contract EEZL2 is EEZBase {
                 CrossChainCall memory cc = calls[_currentIncomingCall];
                 _currentIncomingCall++;
 
-                _rollingHashCallBegin(_currentIncomingCall);
+                // L2 mechanical update (full L2 pass deferred): bind the call's identity into CALL_BEGIN.
+                _rollingHashCallBegin(
+                    computeCrossChainCallHash(
+                        ROLLUP_ID, cc.targetAddress, cc.value, cc.data, cc.sourceAddress, cc.sourceRollupId
+                    )
+                );
 
                 address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
                 if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
@@ -478,7 +508,7 @@ contract EEZL2 is EEZBase {
                     }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
                 }
 
-                _rollingHashCallEnd(_currentIncomingCall, success, retData);
+                _rollingHashCallEnd(success, retData);
                 emit CallResult(_currentEntryIndex, _currentIncomingCall, success, retData);
                 processed++;
             } else {
