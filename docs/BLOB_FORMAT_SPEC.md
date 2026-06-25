@@ -12,8 +12,8 @@ Excalidraw: https://excalidraw.com/#json=6wvuE6FrHjoxqAkIlAiUe,0I3IqjvA9xbwOEz1b
 
 Every message begins with a `message_type` byte, which selects one of two shapes:
 
-* **Content messages** carry data: `message_type | message_len | …fields…`.
-* **Marker messages** carry none: a lone `message_type` byte, no length and no fields.
+* **Content messages** carry data: `message_type | …fields…`.
+* **Marker messages** carry none: a lone `message_type` byte, no fields.
 
 Each type's exact byte layout is defined inline with the type in §2.
 
@@ -21,14 +21,26 @@ Each type's exact byte layout is defined inline with the type in §2.
 
 These conventions apply across the per-type layouts in §2:
 
-* All values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64` as written, `bool`
-  is one byte, `address` is 20 bytes, `uint256` is 32 bytes. Chain ids are `u64`.
-* `message_len` is the byte length of the fields after it — `u16` for most messages, `u32`
-  for `ChainOperation`.
-* A `bytes` field is length-prefixed: a `u16` byte length, then exactly that many bytes.
-* A `raw_bytes` field is **completely chain-defined** — opaque to the protocol, which never
-  parses it. It is always the message's final field and is bounded by `message_len` (no inner
-  length prefix), so the chain owns its entire encoding.
+* All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64` as written,
+  `bool` is one byte, `address` is 20 bytes, `uint256` is 32 bytes. Chain ids are `u64`.
+* A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is a
+  single leading byte that either holds the length directly or announces how many following
+  little-endian bytes do:
+
+  | leading byte | the length is… |
+  |---|---|
+  | `0`–`251` | the leading byte itself (`0`–`251`) |
+  | `252` | the next **2** bytes, little-endian |
+  | `253` | the next **3** bytes, little-endian |
+  | `254` | the next **4** bytes, little-endian |
+  | `255` | reserved |
+
+  **All byte fields are encoded this way** — whether the protocol parses their contents or
+  treats them as opaque. 
+* A `u256` field (`Call.value`) is serialized with the **compressed `uint256` codec** — a
+  self-describing, variable-length encoding (1–33 bytes) defined in
+  [`U256_COMPRESSED_CODEC.md`](./U256_COMPRESSED_CODEC.md). The codec is self-delimiting, so no separate length prefix is
+  needed.
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
@@ -46,10 +58,10 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 
 | type | name | fields (in wire order) |
 |---|---|---|
-| `1` | `ChainOperation` | `u8 message_type` · `u32 message_len` · `u64 chain_id` · `raw_bytes operations` |
-| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u16 message_len` · `u64 chain_id` · `raw_bytes tx_data` |
-| `3` | `Call` | `u8 message_type` · `u16 message_len` · `u64 to_chain` · `bool is_static` · `address fromAddress` · `address toAddress` · `uint256 value` · `bytes data` |
-| `4` | `Result` | `u8 message_type` · `u16 message_len` · `bool success` · `bytes return_data` |
+| `1` | `ChainOperation` | `u8 message_type` · `u64 chain_id` · `bytes operations` |
+| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u64 chain_id` · `bytes tx_data` |
+| `3` | `Call` | `u8 message_type` · `u64 to_chain` · `bool is_static` · `address fromAddress` · `address toAddress` · `u256 value` (compressed) · `bytes data` |
+| `4` | `Result` | `u8 message_type` · `bool success` · `bytes return_data` |
 | `5` | `Snapshot` | `u8 message_type` |
 | `6` | `Revert` | `u8 message_type` |
 | `7` | `FinishCrossChainTransaction` | `u8 message_type` |
@@ -61,15 +73,14 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 
 ### 2.1 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
-payload is **opaque** — an ordered list the executing chain interprets on its own. It uses a
-wider `u32` `message_len` since the operations list can be large:
+payload is **opaque** — an ordered list the executing chain interprets on its own. The
+operations list can be large, but its length prefix scales to a 4-byte size when needed:
 
 ```c
 struct ChainOperation {          // type 1
     u8     message_type;         // = 1
-    u32    message_len;          // byte length of the fields below (chain_id + operations)
     u64    chain_id;             // the executing chain
-    raw_bytes operations;        // opaque to the protocol; the chain interprets it (bounded by message_len)
+    bytes  operations;           // opaque to the protocol; the chain interprets it (length-prefixed)
 }
 ```
 
@@ -92,7 +103,6 @@ struct ChainOperation {          // type 1
 
 ```
 message_type = 1
-message_len  = <u32 byte length of chain_id + operations>
 chain_id     = 7
 operations   = ChainOpItem[5] {
     [0] NewBlock     { timestamp: 1_700_000_000, ... }   # block 1 opens
@@ -109,9 +119,8 @@ Opens one cross-chain transaction. `chain_id` is where the originating tx lives.
 ```c
 struct InitiateCrossChainTransaction {   // type 2
     u8       message_type;   // = 2
-    u16      message_len;    // byte length of the fields below
     u64      chain_id;       // where the originating tx lives
-    raw_bytes tx_data;       // opaque — the chain decides what goes here; trailing, bounded by message_len
+    bytes    tx_data;        // opaque — the chain decides what goes here; trailing, length-prefixed
 }
 ```
 
@@ -129,13 +138,12 @@ A cross-chain call:
 ```c
 struct Call {                // type 3
     u8       message_type;   // = 3
-    u16      message_len;    // byte length of the fields below
     u64      to_chain;       // target chain (from_chain is implicit — the executing chain)
     bool     is_static;      // true = read-only STATICCALL (no value; reverts on state write)
     address  fromAddress;
     address  toAddress;
-    uint256  value;          // 0 when is_static
-    bytes    data;           // the call's exact calldata; last, u16 length-prefixed
+    u256     value;          // compressed uint256 (see U256_COMPRESSED_CODEC.md); 0 when is_static
+    bytes    data;           // the call's exact calldata; last, length-prefixed
 }
 ```
 
@@ -153,9 +161,8 @@ outstanding `Call`, so **both** chains (`from` and `to`) are implicit.
 ```c
 struct Result {              // type 4
     u8       message_type;   // = 4
-    u16      message_len;    // byte length of the fields below
     bool     success;        // false = the call itself reverted on the callee chain
-    bytes    return_data;    // the call's exact return value (or revert data); last, u16 length-prefixed
+    bytes    return_data;    // the call's exact return value (or revert data); last, length-prefixed
 }
 ```
 
