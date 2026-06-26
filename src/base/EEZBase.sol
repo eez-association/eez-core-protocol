@@ -244,7 +244,7 @@ abstract contract EEZBase is IEEZ {
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame
     // concept, NOT a direction (the directional naming lives in the per-side children).
 
- /// @notice Initializes `_rollingHash` to an entry's BEGIN seed — the ordered
+    /// @notice Initializes `_rollingHash` to an entry's BEGIN seed — the ordered
     ///         `(rollupId, currentState)` state context closed with the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
@@ -258,11 +258,12 @@ abstract contract EEZBase is IEEZ {
 
         bytes32 _rollupStatesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
-            _rollupStatesHash = keccak256(abi.encodePacked(_rollupStatesHash, deltas[i].rollupId, deltas[i].currentState));
+            _rollupStatesHash =
+                keccak256(abi.encodePacked(_rollupStatesHash, deltas[i].rollupId, deltas[i].currentState));
         }
         _rollingHash = keccak256(abi.encodePacked(_rollupStatesHash, proxyEntryHash));
     }
-    
+
     /// @notice Folds a CALL_BEGIN event into `_rollingHash`, binding the call's IDENTITY
     ///         (`crossChainCallHash`) so the hash commits to which call ran, not just its result.
     function _rollingHashCallBegin(bytes32 crossChainCallHash) internal {
@@ -285,7 +286,6 @@ abstract contract EEZBase is IEEZ {
     function _rollingHashNestedEnd() internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END));
     }
-
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
     ///         `_rollingHash` because lookup calls are verified against

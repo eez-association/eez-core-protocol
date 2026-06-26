@@ -42,7 +42,7 @@ struct CrossChainCall {
 /// @notice Pre-computed result for a successful reentrant outgoing cross-chain call triggered during execution
 /// @dev Consumed sequentially from the entry's `expectedOutgoingCalls` array. If an outgoing call itself
 ///      triggers another reentrant call, it consumes the next element in the same flat array.
-/// @dev All entries here must succeed. Failed calls should use LookupCall instead.
+/// @dev All entries here must succeed. Reverting calls should use LookupCall instead.
 /// @dev Position in the execution tree (call index, outgoing index, parent context)
 ///      is folded into the rolling hash rather than stored as explicit fields.
 struct ExpectedOutgoingCrossChainCall {
@@ -60,7 +60,7 @@ struct ExpectedOutgoingCrossChainCall {
 ///         reverting reentrant call the caller try/catches (reverted mode). Lives INSIDE the
 ///         entry (`ExecutionEntry.expectedLookups`) — entry-scoped by construction. Matched by
 ///         `(crossChainCallHash, callNumber, lastOutgoingCallConsumed)`.
-/// @dev Reverted mode (`failed == true`) runs `incomingCalls` as a mini-entry (tagged hash
+/// @dev Reverted mode (`success == false`) runs `incomingCalls` as a mini-entry (tagged hash
 ///      schema, partitioned by `callCount` against `expectedOutgoingCalls`) then reverts with
 ///      `returnData`; static mode runs them via STATICCALL (untagged schema) and returns
 ///      it. A reverted lookup's own deeper lookups resolve from the SAME host table (Solidity
@@ -69,7 +69,8 @@ struct ExpectedOutgoingCrossChainCall {
 struct ExpectedLookup {
     bytes32 crossChainCallHash;
     bytes returnData;
-    bool failed;
+    /// false ⇒ reverted mode (runs `incomingCalls` then reverts with `returnData`); true ⇒ static read.
+    bool success;
     /// `_currentIncomingCall` at observation (1-indexed; a sub-execution's fresh sub-cursor inside one).
     uint64 callNumber;
     /// `_lastOutgoingCallConsumed` at observation.
@@ -90,9 +91,9 @@ struct ExpectedLookup {
 
 /// @notice Represents an execution entry with pre-computed calls and return hash verification
 /// @dev Execution entries always SUCCEED at the top level — `executeCrossChainCall` returns
-///      `entry.returnData` as success. There is no `failed` flag because **a reverting
+///      `entry.returnData` as success. There is no `success` flag because **a reverting
 ///      top-level call isn't an execution; it's a lookup**. Reverting cross-chain results
-///      are expressed via `LookupCall { failed: true }` consumed through `staticCallLookup`
+///      are expressed via `LookupCall { success: false }` consumed through `staticCallLookup`
 ///      (static-context entry point) or the reverted-lookup fallback in `_consumeNestedAction`.
 ///      Naturally-reverting INNER calls inside an entry are still expressible: the proxy
 ///      `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`;
@@ -148,17 +149,18 @@ struct ExecutionEntry {
 ///         persistent `lookupCalls` table and is consumable ONLY outside an execution
 ///         (`!_insideExecution()`). Nested lookups live inside
 ///         `ExecutionEntry.expectedLookups` instead — see `ExpectedLookup`.
-/// @dev Match key: `crossChainCallHash` alone (L2 has no state roots, so no pins). Failed
-///      mode (`failed == true`) runs its sub-execution as a mini-entry (`incomingCalls`
+/// @dev Match key: `crossChainCallHash` alone (L2 has no state roots, so no pins). Reverted
+///      mode (`success == false`) runs its sub-execution as a mini-entry (`incomingCalls`
 ///      partitioned by `callCount` against `expectedOutgoingCalls`, nested lookups from its
 ///      own `expectedLookups` table), then reverts with `returnData`. Static mode runs
 ///      `incomingCalls` via STATICCALL (untagged schema) and returns `returnData` (or reverts
-///      with it when `failed`). All proxies referenced by `incomingCalls` must be deployed
+///      with it when `!success`). All proxies referenced by `incomingCalls` must be deployed
 ///      before static resolution. Loaded via loadExecutionTable / executeIncomingCrossChainCall.
 struct LookupCall {
     bytes32 crossChainCallHash;
     bytes returnData;
-    bool failed;
+    /// false ⇒ reverted mode (runs `incomingCalls` then reverts with `returnData`); true ⇒ static read.
+    bool success;
     /// Sub-calls executed during resolution. Static mode: STATICCALL, no `revertNextNCalls`.
     /// Reverted mode: real calls (may host reentry and `revertNextNCalls`), partitioned
     /// against `expectedOutgoingCalls` exactly like `ExecutionEntry.incomingCalls`.

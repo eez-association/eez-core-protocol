@@ -359,9 +359,7 @@ contract EEZL2 is EEZBase {
     ///         the top-level lookup's own table while one is being executed. Deeper reverted-lookup executions
     ///         within a host resolve from this same flat table.
     function _getActiveLookups() internal view returns (ExpectedLookup[] storage) {
-        return _revertedLookupTopLevel
-            ? _currentTopLevelLookup().expectedLookups
-            : _getCurrentEntry().expectedLookups;
+        return _revertedLookupTopLevel ? _currentTopLevelLookup().expectedLookups : _getCurrentEntry().expectedLookups;
     }
 
     /// @notice Consumes the next reentrant action, or runs a pre-computed reverting
@@ -388,7 +386,7 @@ contract EEZL2 is EEZBase {
         }
 
         // 2. Fallback. Lookup key uses `idx` (pre-bump) — that's what the prover observed. A
-        //    `failed` match in the active host's `expectedLookups` (entry-scoped) runs as a
+        //    reverted (`!success`) match in the active host's `expectedLookups` (entry-scoped) runs as a
         //    mini-entry via `_executeRevertedNestedLookup` (sub-calls, if any, run for real), then
         //    reverts with the cached `returnData`.
         uint64 callNum = uint64(_currentIncomingCall);
@@ -398,7 +396,7 @@ contract EEZL2 is EEZBase {
         for (uint256 i = 0; i < lookups.length; i++) {
             ExpectedLookup storage el = lookups[i];
             if (
-                el.failed && el.crossChainCallHash == crossChainCallHash && el.callNumber == callNum
+                !el.success && el.crossChainCallHash == crossChainCallHash && el.callNumber == callNum
                     && el.lastOutgoingCallConsumed == lastNA && el.executingLookupIndex == execIdx
             ) {
                 _executeRevertedNestedLookup(i); // always reverts
@@ -409,14 +407,14 @@ contract EEZL2 is EEZBase {
         revert ExecutionNotFound();
     }
 
-    /// @notice Top-level fallback: scan persistent `lookupCalls` for a `failed` `LookupCall`
+    /// @notice Top-level fallback: scan persistent `lookupCalls` for a reverted (`!success`) `LookupCall`
     ///         matching `crossChainCallHash`. Only reachable outside an execution — nested
     ///         lookups live on the entry. A match is resolved by `_executeRevertedTopLevelLookup`
     ///         (always reverts); no match returns so the caller reverts `ExecutionNotFound`.
     function _tryRevertedTopLevelLookup(bytes32 crossChainCallHash) internal {
         for (uint256 i = 0; i < lookupCalls.length; i++) {
             LookupCall storage sc = lookupCalls[i];
-            if (sc.failed && sc.crossChainCallHash == crossChainCallHash) {
+            if (!sc.success && sc.crossChainCallHash == crossChainCallHash) {
                 _executeRevertedTopLevelLookup(sc, i); // always reverts
             }
         }
@@ -424,7 +422,7 @@ contract EEZL2 is EEZBase {
 
     /// @notice Consumes the next execution entry, executes calls, and verifies rolling hash
     /// @dev Miss path: when the cursor is out of bounds or the next entry's `proxyEntryHash` doesn't
-    ///      match, `_tryRevertedTopLevelLookup` scans persistent `lookupCalls` for a `failed=true`
+    ///      match, `_tryRevertedTopLevelLookup` scans persistent `lookupCalls` for a `success=false`
     ///      `LookupCall` matching `crossChainCallHash` (top-level lookups carry no cursor key).
     ///      On match, that helper reverts with the cached `returnData` (so the caller's `try/catch`
     ///      observes the prover-specified revert). On no match the helper returns and we revert
@@ -535,11 +533,11 @@ contract EEZL2 is EEZBase {
     /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
     ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
     ///         lookup's `rollingHash`), then return the cached data, or revert with it when
-    ///         `failed`.
+    ///         `!success`.
     function _resolveStaticLookup(
         CrossChainCall[] storage calls,
         bytes32 rollingHash,
-        bool failed,
+        bool success,
         bytes memory returnData
     )
         internal
@@ -547,7 +545,7 @@ contract EEZL2 is EEZBase {
         returns (bytes memory)
     {
         if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
-        if (failed) {
+        if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
             }
@@ -668,7 +666,7 @@ contract EEZL2 is EEZBase {
                     el.crossChainCallHash == crossChainCallHash && el.callNumber == callNum
                         && el.lastOutgoingCallConsumed == lastNA && el.executingLookupIndex == execIdx
                 ) {
-                    return _resolveStaticLookup(el.incomingCalls, el.rollingHash, el.failed, el.returnData);
+                    return _resolveStaticLookup(el.incomingCalls, el.rollingHash, el.success, el.returnData);
                 }
             }
             revert ExecutionNotFound();
@@ -678,7 +676,7 @@ contract EEZL2 is EEZBase {
         for (uint256 i = 0; i < lookupCalls.length; i++) {
             LookupCall storage sc = lookupCalls[i];
             if (sc.crossChainCallHash == crossChainCallHash) {
-                return _resolveStaticLookup(sc.incomingCalls, sc.rollingHash, sc.failed, sc.returnData);
+                return _resolveStaticLookup(sc.incomingCalls, sc.rollingHash, sc.success, sc.returnData);
             }
         }
 
