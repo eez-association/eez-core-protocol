@@ -788,13 +788,12 @@ contract EEZ is EEZBase {
         // Host table is the current entry's `expectedL1ToL2Calls`; a reverted sub-execution shares it
         // for its own reentrant calls, disambiguated by `expectedRollingHash`.
         ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
-        bytes32 roll = _rollingHash;
 
         for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
             ExpectedL1ToL2Call storage nested = expectedCalls[i];
             if (
                 !nested.isStatic && nested.crossChainCallHash == crossChainCallHash
-                    && nested.expectedRollingHash == roll
+                    && nested.expectedRollingHash == _rollingHash
             ) {
                 return _resolveNestedReentrant(i, crossChainCallHash, nested.success);
             }
@@ -810,7 +809,7 @@ contract EEZ is EEZBase {
 
     /// @notice Resolves a matched reentrant (L1→L2) CALL by running its OWN `l2ToL1Calls[]` sub-array.
     /// @dev SUCCESS commits the sub-execution into the host's continuous `_rollingHash` (NESTED_END)
-    ///      and returns `returnData`. REVERTED checks the sub-hash against `expectedL1toL2Call.rollingHash`
+    ///      and returns `returnData`. REVERTED checks the sub-hash against `expectedL1toL2Call.revertedOrStaticRollingHash`
     ///      and reverts with `returnData`; the terminal revert rolls back the frame's state, hash, and
     ///      cursor (no save needed). The cursor is advanced PAST `index` BEFORE the sub-calls run so it
     ///      stays monotonic: the sub-frame scans strictly forward from here and a success needs no restore.
@@ -822,46 +821,23 @@ contract EEZ is EEZBase {
         L2ToL1Call[] memory l2ToL1Calls = expectedL1toL2Call.l2ToL1Calls;
 
         // Open the frame and run the sub-array. Advancing the cursor past this entry first keeps it
-        // monotonic — the sub-frame's own reentrant calls scan strictly forward from `index + 1`, so a
-        // success leaves the cursor at its high-water mark with no restore. On REVERT these mutations
-        // roll back, so running them unconditionally is free of effect.
+        // monotonic — the sub-frame's own reentrant calls scan strictly forward from `index + 1`
         _rollingHashNestedBegin(crossChainCallHash);
         _lastL1ToL2CallConsumed = index + 1;
         _processNCalls(l2ToL1Calls);
 
         if (success) {
+            // Updates the rolling hash closing the nested call
             _rollingHashNestedEnd();
             return expectedL1toL2Call.returnData;
         } else {
             // It reverts with the expected saved revert data only if expecting rolling hash matches
-            if (_rollingHash != expectedL1toL2Call.rollingHash) revert RollingHashMismatch();
+            if (_rollingHash != expectedL1toL2Call.revertedOrStaticRollingHash) revert RollingHashMismatch();
             bytes memory returnData = expectedL1toL2Call.returnData;
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
             }
         }
-    }
-
-    /// @notice Whether the entry at the cursor is the right one to consume: its identity
-    ///         (`proxyEntryHash`), routing (`destinationRollupId`), AND state preconditions (every
-    ///         delta's `currentState` == the live root) all hold.
-    /// @dev `destinationRollupId == destRid` is load-bearing in the transient branch (one global
-    ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
-    ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
-    ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
-    ///      immediate-L2TX path that doesn't pass through here.
-    function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint256 destRid)
-        internal
-        view
-        returns (bool)
-    {
-        if (entry.proxyEntryHash != crossChainCallHash) return false;
-        if (entry.destinationRollupId != destRid) return false;
-        StateDelta[] storage deltas = entry.stateDeltas;
-        for (uint256 i = 0; i < deltas.length; i++) {
-            if (rollups[deltas[i].rollupId].stateRoot != deltas[i].currentState) return false;
-        }
-        return true;
     }
 
     /// @notice Consumes the next execution entry, applies state deltas, executes calls, and verifies rolling hash
@@ -924,6 +900,28 @@ contract EEZ is EEZBase {
         _executeEntry();
 
         return entry.returnData;
+    }
+
+    /// @notice Whether the entry at the cursor is the right one to consume: its identity
+    ///         (`proxyEntryHash`), routing (`destinationRollupId`), AND state preconditions (every
+    ///         delta's `currentState` == the live root) all hold.
+    /// @dev `destinationRollupId == destRid` is load-bearing in the transient branch (one global
+    ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
+    ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
+    ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
+    ///      immediate-L2TX path that doesn't pass through here.
+    function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint256 destRid)
+        internal
+        view
+        returns (bool)
+    {
+        if (entry.proxyEntryHash != crossChainCallHash) return false;
+        if (entry.destinationRollupId != destRid) return false;
+        StateDelta[] storage deltas = entry.stateDeltas;
+        for (uint256 i = 0; i < deltas.length; i++) {
+            if (rollups[deltas[i].rollupId].stateRoot != deltas[i].currentState) return false;
+        }
+        return true;
     }
 
     /// @notice Applies state deltas (with currentState validation), processes the entry's
@@ -1153,7 +1151,7 @@ contract EEZ is EEZBase {
                 ) {
                     return _resolveStaticLookup(
                         expectedCall.l2ToL1Calls,
-                        expectedCall.rollingHash,
+                        expectedCall.revertedOrStaticRollingHash,
                         expectedCall.success,
                         expectedCall.returnData
                     );
@@ -1186,11 +1184,11 @@ contract EEZ is EEZBase {
 
     /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
     ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
-    ///         lookup's `rollingHash`), then return the cached data, or revert with it when
+    ///         lookup's `revertedOrStaticRollingHash`), then return the cached data, or revert with it when
     ///         `!success`.
     function _resolveStaticLookup(
         L2ToL1Call[] storage calls,
-        bytes32 rollingHash,
+        bytes32 revertedOrStaticRollingHash,
         bool success,
         bytes memory returnData
     )
@@ -1198,7 +1196,7 @@ contract EEZ is EEZBase {
         view
         returns (bytes memory)
     {
-        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
+        if (_processNStaticCalls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
         if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
