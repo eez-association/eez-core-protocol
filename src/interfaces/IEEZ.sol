@@ -91,17 +91,19 @@ struct L2ToL1Call {
 ///         prior call / nesting boundary).
 /// @dev Every flavour carries its OWN `l2ToL1Calls[]` sub-array, run to completion (no shared
 ///      partition). Resolution:
-///        - SUCCESS  (`!isStatic && success`): `_consumeNestedAction` runs the sub-array as a
+///        - SUCCESS  (`!isStatic && success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
 ///        - STATIC   (`isStatic`): `staticCallLookup` runs the sub-array via STATICCALL (untagged
 ///          hash vs `rollingHash`) and returns `returnData` (reverts with it if `!success`).
-///        - REVERTED (`!success && !isStatic`): `_executeRevertedNestedLookup` runs the sub-array as a
-///          mini-entry (tagged hash vs `rollingHash`, seeded with `expectedRollingHash`) then reverts.
+///        - REVERTED (`!success && !isStatic`): `_resolveNestedReentrant` runs the sub-array as a
+///          mini-entry (tagged hash vs `rollingHash`) then reverts.
 /// @dev A reverted sub-execution reuses the host table for its own reentrant calls (Solidity forbids
-///      recursive structs); SEEDING `_rollingHash` with this entry's `expectedRollingHash` gives each
-///      context a distinct namespace. A success sub-execution needs no seed (continuous hash).
+///      recursive structs). Both flavours open the frame with NESTED_BEGIN(crossChainCallHash);
+///      SUCCESS closes it with NESTED_END into the host's continuous hash, REVERTED's frame is rolled
+///      back by its terminal revert.
 /// @dev `destinationRollupId`: the rollup this call targets. Bound at `postAndVerifyBatch` (∈ host's
 ///      verified set) and re-checked at resolution (== the calling proxy's rollup).
+// TODO we can add isStatic, crosschainCallHahs and expectedRollingHahs in the same hash, drop destinationRollupID
 struct ExpectedL1ToL2Call {
     bytes32 crossChainCallHash;
     uint256 destinationRollupId;
@@ -117,6 +119,7 @@ struct ExpectedL1ToL2Call {
     L2ToL1Call[] l2ToL1Calls;
     /// Expected hash of the sub-calls — unused (0) for SUCCESS (folds into the host hash), checked
     /// standalone for STATIC (untagged) and REVERTED (tagged, seeded with `expectedRollingHash`).
+    // @claude we shoudl rename this as, revertedOrStaticRollingHash
     bytes32 rollingHash;
 }
 

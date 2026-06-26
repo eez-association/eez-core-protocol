@@ -102,10 +102,6 @@ contract EEZ is EEZBase {
     ///         disambiguates the queue in `_getCurrentEntry()`.
     uint256 transient _currentEntryRollupId;
 
-    /// @notice Deferred-revert flag: `_consumeNestedCall` sets it on a no-match (returns "") and
-    ///         `_executeEntry` reverts `ExecutionNotFound` at the entry boundary.
-    bool transient _l1ToL2CallNotFound;
-
     /// @notice Forward-scan position into the entry's `expectedL1ToL2Calls`. MUST be transient —
     ///         `_consumeNestedCall` / `staticCallLookup` read it from fresh reentrant frames.
     ///         Saved/restored across a sub-frame.
@@ -145,25 +141,9 @@ contract EEZ is EEZBase {
     ///         revert payload (custom error or message) for off-chain debugging.
     event L2TxSkipped(uint256 indexed transientIdx, bytes revertData);
 
-    /// @notice Emitted on `_consumeNestedCall`'s deferred no-match path. Returns empty
-    ///         bytes; the deferred-revert flag fires `ExecutionNotFound` at the entry boundary.
-    ///         Event exists because the no-match site has no error frame.
-    event L1ToL2CallNotFound(
-        uint256 indexed entryIndex,
-        bytes32 indexed crossChainCallHash,
-        uint256 currentL2ToL1Call,
-        uint256 lastL1ToL2CallConsumed
-    );
-
     /// @notice Emitted after each call completes in `_processNCalls`.
     /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed l2ToL1CallNumber, bool success, bytes returnData);
-
-    /// @notice Emitted when a reentrant L1→L2 call is consumed during reentrant execution
-    /// @param subCallCount number of sub-calls in the reentrant frame's own `l2ToL1Calls[]`
-    event L1ToL2CallConsumed(
-        uint256 indexed entryIndex, uint256 indexed l1ToL2CallNumber, bytes32 crossChainCallHash, uint256 subCallCount
-    );
 
     /// @notice Emitted after an entry's execution completes and all verifications pass
     event EntryExecuted(
@@ -787,106 +767,79 @@ contract EEZ is EEZBase {
         }
     }
 
-    /// @notice Resolves a reentrant (L1→L2) CALL: a plain-success entry consumed from the unified
-    ///         `expectedL1ToL2Calls` table, or a reverted entry executed as a sub-execution.
-    /// @dev Both are content-addressed by `(crossChainCallHash, expectedRollingHash)` against the
-    ///      active entry table (`expectedL1ToL2Calls`) — `expectedRollingHash` is the live `_rollingHash`,
-    ///      which uniquely pins the execution point (it folds every prior call / nesting boundary).
-    ///      Routing:
-    ///      1. PLAIN SUCCESS (`!isStatic && success`) matching the key → `_consumeSuccessfulReentrant`,
-    ///         which hashes NESTED_BEGIN/END and runs the entry's OWN `l2ToL1Calls[]` sub-array as a
-    ///         committing sub-execution (saving/restoring the reentrant forward cursor), then returns
-    ///         `returnData`.
-    ///      2. REVERTED (`!success && !isStatic`) matching the key → `_executeRevertedNestedLookup`,
-    ///         which runs the entry's own sub-calls and always reverts with `returnData`.
-    ///      3. No match → set the deferred-revert flag `_l1ToL2CallNotFound` and return empty
-    ///         bytes; the end-of-entry check in `_executeEntry` reverts `ExecutionNotFound`.
-    ///
-    ///      Matching is a STRICT FORWARD scan from `_lastL1ToL2CallConsumed`: a CALL only ever
-    ///      matches an entry at/after the cursor, and a plain success advances it past the matched
-    ///      index (never backward). Single pass — the first non-static match at/after the cursor IS
-    ///      the entry; its `success` flag picks reverted-vs-success (the key is unique per position, so
-    ///      success and revert can't share one). Static reentrant reads never reach here — the proxy
-    ///      dispatches them through `staticCallLookup` (a STATICCALL, which cannot advance the cursor,
-    ///      though it scans the same forward window). Completeness of the success entries rests on the
-    ///      rolling hash, not a table-length check: a skipped success entry omits its NESTED frame +
-    ///      sub-calls, diverging the hash; an entry left unconsumed is inert (like an unused lookup).
+    /// @notice Resolves a reentrant (L1→L2) CALL: a plain-success entry consumed from
+    ///         `expectedL1ToL2Calls`, or a reverted entry run as a sub-execution.
+    /// @dev Entries are content-addressed by `(crossChainCallHash, expectedRollingHash)`, where
+    ///      `expectedRollingHash` is the live `_rollingHash` — it folds every prior call and nesting
+    ///      boundary, so it uniquely pins the execution point. The scan walks STRICT FORWARD from
+    ///      `_lastL1ToL2CallConsumed` (calls are consumed in order, never before the cursor); the first
+    ///      non-`isStatic` match IS the entry, and its `success` flag selects the path in
+    ///      `_resolveNestedReentrant` (commit vs run-and-revert). The key is unique per position, so a
+    ///      success and a reverted entry can never share one. `isStatic` entries are skipped here — the
+    ///      proxy routes reentrant STATICCALLs to `staticCallLookup`. On no match,
+    ///      `_rollingHashCallNotFound` folds CALL_NOT_FOUND so the entry reverts at its rolling-hash
+    ///      check (`RollingHashMismatch`). Completeness of the success entries rests on that hash, not a
+    ///      table-length check: a skipped success entry omits its NESTED frame, diverging the hash; an
+    ///      unconsumed entry is inert.
     function _consumeNestedCall(uint256 destRid, bytes32 crossChainCallHash) internal returns (bytes memory) {
         // Proxy protection: the reentrant call's target rollup must be in the entry's proven set.
         if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
 
-        // Host reentrant table is always the current entry's `expectedL1ToL2Calls`. A reverted
-        // nested sub-execution shares this SAME table for its own reentrant calls; they're
-        // disambiguated by the seeded `expectedRollingHash`.
+        // Host table is the current entry's `expectedL1ToL2Calls`; a reverted sub-execution shares it
+        // for its own reentrant calls, disambiguated by `expectedRollingHash`.
         ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
-        bytes32 roll = _rollingHash; // position key — folds every prior call / nesting boundary
+        bytes32 roll = _rollingHash;
 
-        // STRICT FORWARD scan from `_lastL1ToL2CallConsumed`: reentrant calls are consumed in order,
-        // so the scan never looks before the cursor — a CALL can match a future entry but never a
-        // previously-consumed one. Content-addressing by (crossChainCallHash, expectedRollingHash) is
-        // unique per CALL position, so a success and a reverted entry can never share it — the first
-        // non-static match at/after the cursor IS the entry, and its `success` flag selects the path.
-        // Static entries are skipped here; they resolve through `staticCallLookup` (also forward-scanned).
         for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
             ExpectedL1ToL2Call storage nested = expectedCalls[i];
             if (
                 !nested.isStatic && nested.crossChainCallHash == crossChainCallHash
                     && nested.expectedRollingHash == roll
             ) {
-                if (!nested.success) {
-                    _executeRevertedNestedLookup(i); // always reverts (cursor advance would roll back anyway)
-                }
-                // Plain success: consume entry `i` and move the cursor PAST it (never backward).
-                _lastL1ToL2CallConsumed = i + 1;
-                return _consumeSuccessfulReentrant(i, crossChainCallHash, i + 1);
+                return _resolveNestedReentrant(i, crossChainCallHash, nested.success);
             }
         }
 
-        // No match — defer the revert: set the flag, return "" (the end-of-entry check in
-        // `_executeEntry` reverts `ExecutionNotFound`). NOTE: the caller may revert sooner if it
-        // ABI-decodes the "" into a typed value; the flag only guarantees the entry eventually reverts.
-        // Emit so off-chain can locate the no-match site. (3rd field is the legacy L2→L1 cursor → 0.)
-        emit L1ToL2CallNotFound(_currentEntryIndex, crossChainCallHash, 0, _lastL1ToL2CallConsumed);
-        // TODO review this
-        // The flag is load-bearing, not redundant with the rolling hash: returning "" folds
-        // CALL_END(true, "") just like any other result, so a prover that PRE-HASHED a "" no-match
-        // would still match `entry.rollingHash`. The flag, checked before the hash, forces
-        // `ExecutionNotFound` regardless — defeating that.
-        _l1ToL2CallNotFound = true;
+        // No match: CALL_NOT_FOUND is a distinct tag from the CALL_END(true, "") folded for a normal
+        // empty return, so it can't be forged as one. The hash divergence is what the entry boundary
+        // checks and it rides the `ContextResult` payload across a revert-span boundary, so it survives
+        // any intermediate try/catch.
+        _rollingHashCallNotFound(crossChainCallHash);
         return "";
     }
 
-    /// @notice Runs a plain-success reentrant call's OWN `l2ToL1Calls[]` sub-array as a COMMITTING
-    ///         sub-execution, then returns its cached `returnData`.
-    /// @dev Unlike a reverted sub-execution, the sub-calls' state AND rolling-hash contributions
-    ///      PERSIST, so they fold into the host's single continuous `_rollingHash` between
-    ///      NESTED_BEGIN/END. The sub-array is passed to `_processNCalls` by `memory` and runs to
-    ///      completion (structural — no cursor check). The L2→L1 position is a local in
-    ///      `_processNCalls`, so there is nothing to save there; only the transient reentrant
-    ///      forward cursor `_lastL1ToL2CallConsumed` is saved/restored (reset to 0 for the
-    ///      sub-frame's own in-order scan). `nestedNumber` (matched index + 1) is for the event only.
-    function _consumeSuccessfulReentrant(uint256 index, bytes32 crossChainCallHash, uint256 nestedNumber)
+    /// @notice Resolves a matched reentrant (L1→L2) CALL by running its OWN `l2ToL1Calls[]` sub-array.
+    /// @dev SUCCESS commits the sub-execution into the host's continuous `_rollingHash` (NESTED_END)
+    ///      and returns `returnData`. REVERTED checks the sub-hash against `expectedL1toL2Call.rollingHash`
+    ///      and reverts with `returnData`; the terminal revert rolls back the frame's state, hash, and
+    ///      cursor (no save needed). The cursor is advanced PAST `index` BEFORE the sub-calls run so it
+    ///      stays monotonic: the sub-frame scans strictly forward from here and a success needs no restore.
+    function _resolveNestedReentrant(uint256 index, bytes32 crossChainCallHash, bool success)
         internal
         returns (bytes memory)
     {
-        ExpectedL1ToL2Call storage nested = _getCurrentEntry().expectedL1ToL2Calls[index];
-        L2ToL1Call[] memory subCalls = nested.l2ToL1Calls; // storage -> memory copy for this frame
+        ExpectedL1ToL2Call storage expectedL1toL2Call = _getCurrentEntry().expectedL1ToL2Calls[index];
+        L2ToL1Call[] memory l2ToL1Calls = expectedL1toL2Call.l2ToL1Calls;
 
-        emit L1ToL2CallConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, subCalls.length);
-        _rollingHashNestedBegin(crossChainCallHash); // bind the reentrant call's identity
+        // Open the frame and run the sub-array. Advancing the cursor past this entry first keeps it
+        // monotonic — the sub-frame's own reentrant calls scan strictly forward from `index + 1`, so a
+        // success leaves the cursor at its high-water mark with no restore. On REVERT these mutations
+        // roll back, so running them unconditionally is free of effect.
+        _rollingHashNestedBegin(crossChainCallHash);
+        _lastL1ToL2CallConsumed = index + 1;
+        _processNCalls(l2ToL1Calls);
 
-        // Save the transient reentrant forward cursor; the sub-frame runs its own in-order scan.
-        // If `_processNCalls` reverts and propagates, the skipped restore is harmless — the tstore
-        // rolls back to the saved value on unwind.
-        uint256 outerConsumed = _lastL1ToL2CallConsumed;
-        _lastL1ToL2CallConsumed = 0;
-
-        _processNCalls(subCalls);
-
-        _lastL1ToL2CallConsumed = outerConsumed;
-
-        _rollingHashNestedEnd();
-        return nested.returnData;
+        if (success) {
+            _rollingHashNestedEnd();
+            return expectedL1toL2Call.returnData;
+        } else {
+            // It reverts with the expected saved revert data only if expecting rolling hash matches
+            if (_rollingHash != expectedL1toL2Call.rollingHash) revert RollingHashMismatch();
+            bytes memory returnData = expectedL1toL2Call.returnData;
+            assembly {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
     }
 
     /// @notice Whether the entry at the cursor is the right one to consume: its identity
@@ -1010,10 +963,8 @@ contract EEZ is EEZBase {
         _processNCalls(calls);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
-        // Check the deferred no-match flag from `_consumeNestedCall` first so the failure
-        // surfaces as `ExecutionNotFound` rather than the downstream `RollingHashMismatch` it
-        // would otherwise cause (returning empty bytes diverges the entry's rolling hash).
-        if (_l1ToL2CallNotFound) revert ExecutionNotFound();
+        // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
+        // `RollingHashMismatch` — no separate no-match check needed.
         if (_rollingHash != entry.rollingHash) revert RollingHashMismatch();
         // No reentrant table-length check: the unified `expectedL1ToL2Calls` mixes plain-success
         // entries with static / reverted ones (content-addressed, may be unused). Completeness of
@@ -1086,8 +1037,9 @@ contract EEZ is EEZBase {
             } else {
                 // Force-revert span: the next `n` calls (this one included) run, succeed, then have
                 // their state rolled back. Run them in an isolated self-call that always reverts; its
-                // committed-to-`_rollingHash`, reentrant-consumption, and no-match-flag escape via
-                // `ContextResult` and are restored here, while the EVM discards the state.
+                // committed-to-`_rollingHash` and reentrant-consumption escape via `ContextResult` and
+                // are restored here, while the EVM discards the state. A no-match inside the span is
+                // already folded into that `_rollingHash`, so it rides out with no separate flag.
                 if (i + revertNextNCalls > calls.length) {
                     revert RevertSpanOutOfBounds(i, revertNextNCalls, calls.length);
                 }
@@ -1098,9 +1050,7 @@ contract EEZ is EEZBase {
                 L2ToL1Call[] memory revertedSpan = _sliceL2ToL1Calls(calls, i, revertNextNCalls);
                 try this.executeInContextAndRevert(revertedSpan) {}
                 catch (bytes memory revertData) {
-                    // Direct assign is an OR-merge for the no-match flag: the inner frame inherits the
-                    // outer value and only ever sets it true, so a span no-match survives the revert.
-                    (_rollingHash, _lastL1ToL2CallConsumed,, _l1ToL2CallNotFound) = _decodeContextResult(revertData);
+                    (_rollingHash, _lastL1ToL2CallConsumed,) = _decodeContextResult(revertData);
                 }
                 emit CallsReverted(_currentEntryIndex, i, revertNextNCalls);
                 i += revertNextNCalls; // skip past the span — its calls ran inside the self-call
@@ -1114,8 +1064,8 @@ contract EEZ is EEZBase {
     function executeInContextAndRevert(L2ToL1Call[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(calls);
-        // 3rd field (legacy L2→L1 cursor) is unused on L1 now — kept 0 for the shared decoder.
-        revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed, 0, _l1ToL2CallNotFound);
+        // 3rd field is always 0 on L1; it exists for the shared L1/L2 ContextResult decoder.
+        revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed, 0);
     }
 
     /// @notice Applies state deltas (root + ether balance) and sums their ether deltas. The
@@ -1156,49 +1106,6 @@ contract EEZ is EEZBase {
     // always the current entry's `expectedL1ToL2Calls` (read off `_getCurrentEntry()` where needed);
     // a sub-frame's own reentrant calls live in that SAME table, disambiguated by the seeded /
     // continued `expectedRollingHash`.
-
-    // ──────────────────────────────────────────────
-    //  Static-lookup resolution
-    // ──────────────────────────────────────────────
-
-    /// @notice Runs a reverted NESTED reentrant call (the reverted `expectedL1ToL2Calls[index]`) as a
-    ///         self-contained mini-entry, then reverts with its cached `returnData`. Runs INLINE in
-    ///         the consuming `executeCrossChainCall` frame; the terminal revert discards the sub-call
-    ///         state AND restores the outer cursors (the EVM rolls back every tstore here), so the
-    ///         pre-revert checks need no `ContextResult` escape. The sub-execution SEEDS its rolling
-    ///         hash with the call's `expectedRollingHash` so its own reentrant calls (in the same host
-    ///         table) live in a hash namespace distinct from the host's and from sibling reverted
-    ///         lookups observed at DIFFERENT host positions. (Two reverted lookups at the SAME host
-    ///         position share a seed; the prover must let their sub-calls diverge — a same-seed
-    ///         collision can't forge a result, it just diverges the rolling hash and reverts.) Deeper
-    ///         reverted sub-executions compose via the same unwind.
-    // Kept separate from `_consumeNestedCall` (single caller) to isolate the reverted-execution
-    // concern — seed + run + checks + terminal revert — mirroring `_consumeSuccessfulReentrant`.
-    // TODO review can we join the other one?¿
-    function _executeRevertedNestedLookup(uint256 index) internal {
-        ExpectedL1ToL2Call storage expectedCall = _getCurrentEntry().expectedL1ToL2Calls[index];
-        L2ToL1Call[] memory subCalls = expectedCall.l2ToL1Calls; // storage -> memory copy for this frame
-
-        // Fresh sub-execution context. The flag reset shields it from an earlier outer no-match; the
-        // terminal revert restores the outer value. The rolling hash is SEEDED (not zeroed) so this
-        // context's reentrant keys stay distinct from the host's and sibling sub-executions'.
-        _l1ToL2CallNotFound = false;
-        _rollingHash = expectedCall.expectedRollingHash;
-        _lastL1ToL2CallConsumed = 0;
-
-        _processNCalls(subCalls); // runs the whole sub-array (structural completeness)
-
-        // Same end-checks/order as `_executeEntry` (deferred no-match first); no reentrant
-        // table-length check — static / reverted entries are a content-addressed pool that may be
-        // partially used.
-        if (_l1ToL2CallNotFound) revert ExecutionNotFound();
-        if (_rollingHash != expectedCall.rollingHash) revert RollingHashMismatch();
-
-        bytes memory returnData = expectedCall.returnData;
-        assembly {
-            revert(add(returnData, 0x20), mload(returnData))
-        }
-    }
 
     // ──────────────────────────────────────────────
     //  Static lookup
@@ -1258,9 +1165,8 @@ contract EEZ is EEZBase {
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue.
-        StaticLookup[] storage staticLookups = _transientExecutions.length != 0
-            ? _transientStaticLookups
-            : verificationByRollup[destRid].staticLookupQueue;
+        StaticLookup[] storage staticLookups =
+            _transientExecutions.length != 0 ? _transientStaticLookups : verificationByRollup[destRid].staticLookupQueue;
         for (uint256 i = 0; i < staticLookups.length; i++) {
             StaticLookup storage lookup = staticLookups[i];
             // Proxy protection: fold the declared destination into the match. The transient pool
