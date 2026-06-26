@@ -24,7 +24,8 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
 ///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
 ///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`, `_getCurrentEntry`,
-///          `_resolveStaticLookup`, `_processNStaticCalls`, `_executeRevertedNestedLookup`,
+///          `_resolveStaticLookup`, `_processNStaticCalls`, the reentrant resolver (L1:
+///          `_resolveNestedReentrant`; L2: `_consumeSuccessfulReentrant` / `_executeRevertedNestedLookup`),
 ///          `staticCallLookup` — plus any per-side sub-frame / reverted-lookup transient pointers
 ///          (e.g. L2's `_inReentrantSubFrame` / `_revertedLookupTopLevel`).
 ///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
@@ -37,6 +38,7 @@ abstract contract EEZBase is IEEZ {
     uint8 internal constant CALL_END = 2;
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
+    uint8 internal constant CALL_NOT_FOUND = 5;
 
     // ──────────────────────────────────────────────
     //  Storage shared with children
@@ -97,11 +99,10 @@ abstract contract EEZBase is IEEZ {
     error RollingHashNotCleared();
 
     /// @notice Carries execution results out of a reverted context
-    /// @dev Direction-neutral transport. `callNotFound` is the deferred-revert flag forwarded
-    ///      from L1's `_consumeNestedAction` no-match path. The EVM rolls back the transient
-    ///      write on revert, so it has to ride out in the payload. L2 has no such flag and
-    ///      always sends `false`.
-    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed, bool callNotFound);
+    /// @dev Direction-neutral transport. A no-match folds CALL_NOT_FOUND into `_rollingHash`, which
+    ///      is carried in the first field, so the isolated frame's not-found survives the revert with
+    ///      no separate flag.
+    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed);
 
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
@@ -199,23 +200,22 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Decodes a `ContextResult` revert payload returned by `executeInContextAndRevert`.
-    /// @dev Validates selector AND length (4 + 4*32 = 132) before the raw mloads — defense
+    /// @dev Validates selector AND length (4 + 3*32 = 100) before the raw mloads — defense
     ///      against a truncated revert that happens to share the selector.
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
-        returns (bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed, bool callNotFound)
+        returns (bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed)
     {
         if (bytes4(revertData) != ContextResult.selector) {
             revert UnexpectedContextRevert(revertData);
         }
-        if (revertData.length < 132) revert UnexpectedContextRevert(revertData);
+        if (revertData.length < 100) revert UnexpectedContextRevert(revertData);
         assembly {
             let ptr := add(revertData, 36)
             rollingHash := mload(ptr)
             reentrantConsumed := mload(add(ptr, 32))
             callsProcessed := mload(add(ptr, 64))
-            callNotFound := mload(add(ptr, 96))
         }
     }
 
@@ -285,6 +285,17 @@ abstract contract EEZBase is IEEZ {
     /// @notice Folds a NESTED_END event into `_rollingHash` (end of a reentrant frame).
     function _rollingHashNestedEnd() internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END));
+    }
+
+    /// @notice Folds a CALL_NOT_FOUND event into `_rollingHash` when a reentrant call has no
+    ///         matching expected entry. The dedicated tag is distinct from CALL_END(true, ""), so a
+    ///         no-match can never be forged as a normal empty-bytes return; the divergence reverts the
+    ///         entry at its rolling-hash check (surviving any intermediate try/catch). It rides the
+    ///         `_rollingHash` already carried across the `ContextResult` boundary, so no side flag is
+    ///         needed. A prover that deliberately pre-hashes this tag commits to a not-found at this
+    ///         exact position — a faithful outcome, not an attack.
+    function _rollingHashCallNotFound(bytes32 crossChainCallHash) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_NOT_FOUND, crossChainCallHash));
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
