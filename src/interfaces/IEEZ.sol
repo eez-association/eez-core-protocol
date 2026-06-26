@@ -85,17 +85,17 @@ struct L2ToL1Call {
 
 /// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) fired during execution.
 ///         One unified `expectedL1ToL2Calls[]` table holds every flavour — plain SUCCESS, read-only
-///         STATIC (`isStatic`), and try/catch'd REVERTED (`failed`) — each content-addressed by
+///         STATIC (`isStatic`), and try/catch'd REVERTED (`!success`) — each content-addressed by
 ///         `(crossChainCallHash, expectedRollingHash)`. `expectedRollingHash` is `_rollingHash` at
 ///         the instant the call fires, which uniquely pins the execution point (the hash folds every
 ///         prior call / nesting boundary).
 /// @dev Every flavour carries its OWN `l2ToL1Calls[]` sub-array, run to completion (no shared
 ///      partition). Resolution:
-///        - SUCCESS  (`!isStatic && !failed`): `_consumeNestedAction` runs the sub-array as a
+///        - SUCCESS  (`!isStatic && success`): `_consumeNestedAction` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
 ///        - STATIC   (`isStatic`): `staticCallLookup` runs the sub-array via STATICCALL (untagged
-///          hash vs `rollingHash`) and returns `returnData` (reverts with it if `failed`).
-///        - REVERTED (`failed && !isStatic`): `_executeRevertedNestedLookup` runs the sub-array as a
+///          hash vs `rollingHash`) and returns `returnData` (reverts with it if `!success`).
+///        - REVERTED (`!success && !isStatic`): `_executeRevertedNestedLookup` runs the sub-array as a
 ///          mini-entry (tagged hash vs `rollingHash`, seeded with `expectedRollingHash`) then reverts.
 /// @dev A reverted sub-execution reuses the host table for its own reentrant calls (Solidity forbids
 ///      recursive structs); SEEDING `_rollingHash` with this entry's `expectedRollingHash` gives each
@@ -109,8 +109,8 @@ struct ExpectedL1ToL2Call {
     bytes32 expectedRollingHash;
     /// Read-only STATICCALL mode (resolved through `staticCallLookup`).
     bool isStatic;
-    /// Reverting mode (caller try/catches). On an `isStatic` entry: a static read that itself reverts.
-    bool failed;
+    /// false ⇒ reverting mode (caller try/catches); on an `isStatic` entry, a static read that itself reverts.
+    bool success;
     bytes returnData;
     /// The reentrant frame's own sub-calls, run to completion (success commits, reverted rolls back,
     /// static runs read-only). Empty for a no-op frame.
@@ -120,28 +120,19 @@ struct ExpectedL1ToL2Call {
     bytes32 rollingHash;
 }
 
-/// @notice A pre-computed top-level execution entry.
-/// @dev Always SUCCEEDS at the top level (`executeCrossChainCall` returns `entry.returnData`); no
-///      entry-level `failed` flag. Reverting REENTRANT calls are `failed` entries in
-///      `expectedL1ToL2Calls`; a top-level reverting read is a `StaticLookup`. An inner call that
-///      naturally reverts is still fine — the proxy `.call` returns `(false, retData)` captured via
-///      `CALL_END`, and the entry still returns success. @claude currentl we do no support calling L1 to L2 and revert top level
-/// @dev `l2ToL1Calls[]` is the entry's TOP-LEVEL calls only, run to completion; each reentrant frame
-///      carries its own sub-array (no shared cursor partition, no `callCount`). `destinationRollupId`
-///      routes the entry to a per-rollup queue and must match the consumer's rollup.
+/// @notice A pre-computed TOP-LEVEL execution entry. Always SUCCEEDS at the top level
+///         (`executeCrossChainCall` returns `returnData`); reverting REENTRANT calls are `success == false`
+///         `ExpectedL1ToL2Call`s and a top-level reverting read is a `StaticLookup`.
+/// @dev TODO @claude we currently do not support calling L1→L2 and reverting at the top level.
+/// Maybe we can skip entries that are success == false
 struct ExecutionEntry {
-    /// The entry's true state transition (PROVER OBLIGATION). ≥1 delta is enforced on-chain
-    /// (`_validateBatchStructure`), so every entry is state-pinned to the `StateRootMismatch` backstop.
-    StateDelta[] stateDeltas;
-    bytes32 proxyEntryHash; // hashed L1→L2 call, else bytes32(0) for L2 txs
-    uint256 destinationRollupId;
-    /// The entry's TOP-LEVEL calls (reentrant frames carry their own — see `ExpectedL1ToL2Call`).
-    bytes returnData;
-    L2ToL1Call[] l2ToL1Calls;
-    /// Unified reentrant (L1→L2) table — success / static / reverted, matched by
-    /// `(crossChainCallHash, expectedRollingHash)`. See `ExpectedL1ToL2Call`.
-    ExpectedL1ToL2Call[] expectedL1ToL2Calls;
-    bytes32 rollingHash;
+    StateDelta[] stateDeltas; // true state transition ≥1 enforced on-chain
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash; bytes32(0) for L2 txs
+    uint256 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
+    bytes returnData; // pre-computed top-level return value
+    L2ToL1Call[] l2ToL1Calls; // the entry's TOP-LEVEL calls (reentrant frames carry their own)
+    ExpectedL1ToL2Call[] expectedL1ToL2Calls; // unified reentrant (L1→L2) table; see `ExpectedL1ToL2Call`
+    bytes32 rollingHash; // expected rolling hash over all calls + nestings
 }
 
 /// @notice A rollup's expected state root, pinning a `StaticLookup` to a trajectory point.
@@ -152,32 +143,21 @@ struct ExpectedStateRootPerRollup {
     bytes32 stateRoot;
 }
 
-/// @notice TOP-LEVEL STATIC lookup: a read-only cross-chain call resolved via `staticCallLookup`,
-///         consumed OUTSIDE any execution (`!_insideExecution()`) from the pool
-///         (`_transientStaticLookups` / per-rollup `staticLookupQueue`). The only top-level pooled
-///         shape — a state-changing top-level call is a normal `ExecutionEntry`; reentrant calls
-///         during execution live in `ExecutionEntry.expectedL1ToL2Calls`.
-/// @dev No reentrant table: a reentrant call observed while resolving runs in STATICCALL context, so
-///      it re-enters the pool branch and resolves as ANOTHER `StaticLookup`. Match key:
-///      `crossChainCallHash` + `destinationRollupId == ` the calling proxy's rollup + all
-///      `expectedStateRoots` pins live (full scan). Resolution runs `l2ToL1Calls` via STATICCALL
-///      (untagged hash vs `rollingHash`) and returns `returnData` (or reverts with it if `failed`);
-///      all referenced proxies must already be deployed.
+/// @notice A pre-computed TOP-LEVEL static lookup: a read-only cross-chain call resolved via
+///         `staticCallLookup` OUTSIDE any execution, from the pool (`_transientStaticLookups` /
+///         per-rollup `staticLookupQueue`). Reverting top-level reads land here; state-changing ones
+///         are `ExecutionEntry`s.
+/// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
+///      as ANOTHER `StaticLookup`). Match: `proxyEntryHash` + `destinationRollupId` + all
+///      `expectedStateRoots` pins live (full scan). Referenced proxies must already be deployed.
 struct StaticLookup {
-    bytes32 crossChainCallHash;
-    /// Publishing queue + resolution match (must equal the calling proxy's rollup — load-bearing for
-    /// the un-routed transient pool). `postAndVerifyBatch` requires destination ∈ `expectedStateRoots`.
-    uint256 destinationRollupId;
-    bytes returnData;
-    /// A read that itself reverts: resolution reverts with `returnData` instead of returning it.
-    bool failed;
-    /// Read-only sub-calls executed during resolution via STATICCALL (no `revertNextNCalls`, no value).
-    L2ToL1Call[] l2ToL1Calls;
-    /// Expected rolling hash of the executed sub-calls — always checked (an empty `l2ToL1Calls[]`
-    /// must carry `rollingHash == 0`). Untagged static schema (`_processNStaticCalls`).
-    bytes32 rollingHash;
-    /// State-root pins — part of the MATCH predicate; see `ExpectedStateRootPerRollup`.
-    ExpectedStateRootPerRollup[] expectedStateRoots;
+    ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH predicate
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
+    uint256 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
+    bool success; // false ⇒ resolution reverts with `returnData` instead of returning it
+    bytes returnData; // pre-computed return value (revert payload when !success)
+    L2ToL1Call[] l2ToL1Calls; // read-only sub-calls run via STATICCALL during resolution
+    bytes32 rollingHash; // expected (untagged) rolling hash of the sub-calls
 }
 
 /// @notice Stores the identity of an authorized CrossChainProxy
