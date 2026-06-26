@@ -121,11 +121,6 @@ contract EEZL2 is EEZBase {
     /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
 
-    /// @notice Emitted when a reentrant (outgoing) call is consumed during reentrant execution
-    event OutgoingCallConsumed(
-        uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 crossChainCallHash, uint256 callCount
-    );
-
     /// @notice Emitted after an entry's execution completes and all verifications pass
     event EntryExecuted(
         uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 outgoingCallsConsumed
@@ -377,8 +372,6 @@ contract EEZL2 is EEZBase {
         //    fallback path reverts and the EVM rolls the bump back.
         if (idx < expectedCalls.length && expectedCalls[idx].crossChainCallHash == crossChainCallHash) {
             ExpectedOutgoingCrossChainCall storage nested = expectedCalls[idx];
-            uint256 nestedNumber = idx + 1; // 1-indexed
-            emit OutgoingCallConsumed(_currentEntryIndex, nestedNumber, crossChainCallHash, nested.callCount);
             _rollingHashNestedBegin(crossChainCallHash); // bind the reentrant call's identity
             _processNCalls(nested.callCount);
             _rollingHashNestedEnd();
@@ -462,8 +455,7 @@ contract EEZL2 is EEZBase {
     function executeInContextAndRevert(uint256 callCount) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(callCount);
-        // L2 has no deferred no-match flag — always `false`.
-        revert ContextResult(_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall, false);
+        revert ContextResult(_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall);
     }
 
     /// @notice Processes N calls from the flat entry.incomingCalls[] array
@@ -515,8 +507,7 @@ contract EEZL2 is EEZBase {
 
                 try this.executeInContextAndRevert(revertNextNCalls) {}
                 catch (bytes memory revertData) {
-                    // L2 has no deferred no-match flag — ignore the 4th tuple element.
-                    (_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall,) = _decodeContextResult(revertData);
+                    (_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall) = _decodeContextResult(revertData);
                 }
 
                 calls[savedCallNumber].revertNextNCalls = revertNextNCalls;

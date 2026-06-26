@@ -119,8 +119,7 @@ struct ExpectedL1ToL2Call {
     L2ToL1Call[] l2ToL1Calls;
     /// Expected hash of the sub-calls — unused (0) for SUCCESS (folds into the host hash), checked
     /// standalone for STATIC (untagged) and REVERTED (tagged, seeded with `expectedRollingHash`).
-    // @claude we shoudl rename this as, revertedOrStaticRollingHash
-    bytes32 rollingHash;
+    bytes32 revertedOrStaticRollingHash;
 }
 
 /// @notice A pre-computed TOP-LEVEL execution entry. Always SUCCEEDS at the top level
