@@ -125,13 +125,13 @@ struct ExpectedL1ToL2Call {
 ///      entry-level `failed` flag. Reverting REENTRANT calls are `failed` entries in
 ///      `expectedL1ToL2Calls`; a top-level reverting read is a `StaticLookup`. An inner call that
 ///      naturally reverts is still fine — the proxy `.call` returns `(false, retData)` captured via
-///      `CALL_END`, and the entry still returns success.
+///      `CALL_END`, and the entry still returns success. @claude currentl we do no support calling L1 to L2 and revert top level
 /// @dev `l2ToL1Calls[]` is the entry's TOP-LEVEL calls only, run to completion; each reentrant frame
 ///      carries its own sub-array (no shared cursor partition, no `callCount`). `destinationRollupId`
 ///      routes the entry to a per-rollup queue and must match the consumer's rollup.
 struct ExecutionEntry {
-    /// PROVER OBLIGATION: the deltas are the entry's true state transition, and every entry carries
-    /// ≥1 StateDelta (not enforced on-chain).
+    /// The entry's true state transition (PROVER OBLIGATION). ≥1 delta is enforced on-chain
+    /// (`_validateBatchStructure`), so every entry is state-pinned to the `StateRootMismatch` backstop.
     StateDelta[] stateDeltas;
     bytes32 proxyEntryHash; // hashed L1→L2 call, else bytes32(0) for L2 txs
     uint256 destinationRollupId;

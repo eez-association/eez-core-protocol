@@ -35,7 +35,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///      The batch's leading `transientExecutionEntryCount` entries are loaded into
 ///      `_transientExecutions` (semantically transient, cleared at end of every batch). The
 ///      leading run of those entries with `proxyEntryHash == 0` runs inline as "immediate"
-///      entries (state deltas + flat calls + rolling hash, one `_applyAndExecute` cycle per
+///      entries (state deltas + flat calls + rolling hash, one `_executeEntry` cycle per
 ///      entry). Then `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`
 ///      is invoked (when msg.sender has code) so the caller can drive the remaining transient
 ///      entries via cross-chain proxy calls within the same transaction.
@@ -50,8 +50,16 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///      Deferred consumption: `executeCrossChainCall` (proxy entry) and `executeL2Txs(rid)` route
 ///      to `verificationByRollup[rid].executionQueue[cursor]` and advance the per-rollup cursor.
 contract EEZ is EEZBase {
+    // ──────────────────────────────────────────────
+    //  Constants
+    // ──────────────────────────────────────────────
+
     /// @notice The rollup ID representing L1 mainnet
     uint256 public constant MAINNET_ROLLUP_ID = 0;
+
+    // ──────────────────────────────────────────────
+    //  Storage
+    // ──────────────────────────────────────────────
 
     /// @notice Counter for generating rollup IDs
     uint256 public rollupCounter;
@@ -66,16 +74,25 @@ contract EEZ is EEZBase {
     /// @notice Per-rollup deferred queue + once-per-block guard
     mapping(uint256 rollupId => RollupVerification record) internal verificationByRollup;
 
-    // ── Transient-backed execution entries & static lookups ──
+    // ── Transient-BACKED storage (semantically transient, but plain storage) ──
     //
     // The batch's leading prefix lives here (not the persistent queues) to save storage gas during
-    // intra-tx meta-hook consumption. Semantically transient but plain storage, since Solidity 0.8.34
-    // lacks `transient` for nested-dynamic reference types; both are `delete`d at the end of every
-    // postAndVerifyBatch (SSTORE refunds). `_transientExecutions.length != 0` also flags the re-entry
-    // window, so no separate `_inPostBatch` guard is needed.
+    // intra-tx meta-hook consumption. Plain storage, since Solidity 0.8.34 lacks `transient` for
+    // nested-dynamic reference types; both are `delete`d at the end of every postAndVerifyBatch (SSTORE
+    // refunds). `_transientExecutions.length != 0` also flags the re-entry window (no `_inPostBatch`).
     // TODO: promote to real `transient` once Solidity supports it for these types.
     ExecutionEntry[] public _transientExecutions;
     StaticLookup[] public _transientStaticLookups;
+
+    /// @notice The rollups an entry may drive proxies for (its `stateDeltas` rollupIds): pushed at
+    ///         execution start, `delete`d at the end. Doubles as `_insideExecution()` (non-empty ⇔
+    ///         executing) and the proxy-protection set. Storage, not `transient` (no transient arrays);
+    ///         reverts roll the pushes back.
+    uint256[] internal _executingEntryVerifiedRollups;
+
+    // ──────────────────────────────────────────────
+    //  Transient state 
+    // ──────────────────────────────────────────────
 
     /// @notice Cursor for the next transient entry to consume (meaningful while
     ///         `_transientExecutions.length != 0`).
@@ -85,17 +102,12 @@ contract EEZ is EEZBase {
     ///         disambiguates the queue in `_getCurrentEntry()`.
     uint256 transient _currentEntryRollupId;
 
-    /// @notice Deferred-revert flag: `_consumeNestedAction` sets it on a no-match (returns "") and
-    ///         `_applyAndExecute` reverts `ExecutionNotFound` at the entry boundary. Transient.
+    /// @notice Deferred-revert flag: `_consumeNestedCall` sets it on a no-match (returns "") and
+    ///         `_executeEntry` reverts `ExecutionNotFound` at the entry boundary.
     bool transient _l1ToL2CallNotFound;
 
-    /// @notice True while an entry is executing (any frame). Backs `_insideExecution()` — a reentrant
-    ///         call arrives in a fresh frame and can only read transient state. (The L2→L1 position is
-    ///         a local in `_processNCalls`, so it no longer doubles as this predicate.)
-    bool transient _executing;
-
     /// @notice Forward-scan position into the entry's `expectedL1ToL2Calls`. MUST be transient —
-    ///         `_consumeNestedAction` / `staticCallLookup` read it from fresh reentrant frames.
+    ///         `_consumeNestedCall` / `staticCallLookup` read it from fresh reentrant frames.
     ///         Saved/restored across a sub-frame.
     uint256 transient _lastL1ToL2CallConsumed;
 
@@ -104,7 +116,7 @@ contract EEZ is EEZBase {
     /// @dev MUST be transient, not a local: a value call in a reentrant sub-frame runs in a separate
     ///      call stack, so a local outflow would be lost. revertNextNCalls / reverted-lookup frames
     ///      always revert, rolling back their contributions to match the physical ETH. Inbound is SET
-    ///      at the top level / ADDED per reentrant call; reset at the end of `_applyAndExecute`.
+    ///      at the top level / ADDED per reentrant call; reset at the end of `_executeEntry`.
     int256 transient _entryEtherDelta;
 
     /// @notice Emitted when a new rollup is created
@@ -127,13 +139,13 @@ contract EEZ is EEZBase {
     /// @notice Emitted when a batch is posted, carrying the number of rollups verified
     event BatchPosted(uint256 indexed rollupCount);
 
-    /// @notice Emitted when an L2 tx entry's `_applyAndExecute` reverts during postAndVerifyBatch's
+    /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
     ///         immediate-drain step. The entry's state changes are rolled back; the cursor advances
     ///         and the loop continues with the next L2 tx. `revertData` carries the inner
     ///         revert payload (custom error or message) for off-chain debugging.
     event L2TxSkipped(uint256 indexed transientIdx, bytes revertData);
 
-    /// @notice Emitted on `_consumeNestedAction`'s deferred no-match path. Returns empty
+    /// @notice Emitted on `_consumeNestedCall`'s deferred no-match path. Returns empty
     ///         bytes; the deferred-revert flag fires `ExecutionNotFound` at the entry boundary.
     ///         Event exists because the no-match site has no error frame.
     event L1ToL2CallNotFound(
@@ -233,35 +245,33 @@ contract EEZ is EEZBase {
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
 
-    /// @notice Proxy protection (postAndVerifyBatch): an entry routes to a rollup not in its own
-    ///         `stateDeltas`, so consuming it would drive a proxy for a rollup it never proved.
-    error EntryDestinationNotInStateDeltas(uint256 rollupId);
-
     /// @notice Proxy protection (postAndVerifyBatch): a top-level lookup's `destinationRollupId` is
     ///         not among its own `expectedStateRoots` pins — the routing target must be pinned to
     ///         proven state (mirrors the entry `destination ∈ stateDeltas` rule).
     error LookupDestinationNotPinned(uint256 rollupId);
 
-    /// @notice Proxy protection (postAndVerifyBatch): an L2→L1 call is sourced from a rollup not in
-    ///         the host's verified set (entry `stateDeltas`, or a top-level lookup's `expectedStateRoots` pins).
-    ///         MAINNET (L1) is never verified — an L1-sourced cross-chain call is rejected here
-    ///         (mirrors the same-network proxy ban: L1 is not its own cross-chain counterparty).
+    /// @notice Proxy protection (RUNTIME): an L2→L1 call's source rollup isn't in the executing
+    ///         entry's allowed set (its `stateDeltas`). Also covers a static lookup's sub-call
+    ///         sources at validation time (∉ its `expectedStateRoots` pins).
     error CallSourceNotVerified(uint256 rollupId);
 
-    /// @notice Proxy protection (postAndVerifyBatch): a reentrant L1→L2 call targets a rollup not in
-    ///         the host's verified set. MAINNET (L1) is never a valid cross-chain destination.
+    /// @notice Proxy protection (RUNTIME): a reentrant / static-read call targets a rollup not in the
+    ///         executing entry's allowed set.
     error ReentrantDestinationNotVerified(uint256 rollupId);
-
-    /// @notice Proxy protection (execution): a consumed `ExpectedL1ToL2Call`'s declared
-    ///         `destinationRollupId` does not equal the calling proxy's rollup. The clear-text id
-    ///         was verified against the host's `stateDeltas` at postAndVerifyBatch; this stops a
-    ///         prover from declaring one rollup yet routing the call to another via the one-way hash.
-    error ReentrantDestinationMismatch(uint256 declared, uint256 actual);
 
     /// @notice An entry's `stateDeltas` are not strictly increasing by `rollupId`. The strict order
     ///         rejects duplicate rollups (which would let one entry apply two transitions to the same
     ///         rollup) and, starting above MAINNET_ROLLUP_ID, also rejects a mainnet (L1) delta.
     error StateDeltasNotStrictlyIncreasing(uint256 rollupId);
+
+    /// @notice An entry carries no `stateDeltas` — it would be unpinned from the `StateRootMismatch`
+    ///         backstop, so it's rejected at validation.
+    error EntryHasNoStateDeltas();
+
+    /// @notice An entry's `destinationRollupId` (the queue it routes to) is not among its own
+    ///         `stateDeltas` — so it could be parked in a non-participating rollup's queue. Rejected
+    ///         at validation: the routing target must be a rollup this entry actually proved.
+    error EntryDestinationNotInStateDeltas(uint256 rollupId);
 
     /// @notice A top-level lookup's `expectedStateRoots` pins are not strictly increasing by
     ///         `rollupId`. Same rationale as `StateDeltasNotStrictlyIncreasing`: rejects duplicate
@@ -380,23 +390,22 @@ contract EEZ is EEZBase {
     //  postAndVerifyBatch internals
     // ──────────────────────────────────────────────
 
-    /// @notice Self-call wrapper that runs `_applyAndExecute` for one immediate entry
+    /// @notice Self-call wrapper that runs `_executeEntry` for one immediate entry
     ///         in an isolated frame. Used by `postAndVerifyBatch` step 5 to make immediate-entry
     ///         execution revertible: if this frame reverts, the surrounding `try/catch`
     ///         in postAndVerifyBatch catches and skips to the next entry instead of aborting the
     ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner
-    ///         result — succeeds when `_applyAndExecute` succeeds, reverts when it reverts.
+    ///         result — succeeds when `_executeEntry` succeeds, reverts when it reverts.
     /// @dev Sets `_currentEntryIndex` / `_currentEntryRollupId` here so transient state for
-    ///      the entry being processed is set within the same frame as `_applyAndExecute`.
+    ///      the entry being processed is set within the same frame as `_executeEntry`.
     ///      On revert those writes roll back too, which is fine — the next iteration sets
     ///      them fresh. The cursor advance in postAndVerifyBatch happens OUTSIDE this frame.
     function attemptExecuteL2Txs(uint256 transientIdx) public {
         if (msg.sender != address(this)) revert NotSelf();
-        ExecutionEntry storage entry = _transientExecutions[transientIdx];
         _currentEntryIndex = transientIdx;
         _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
         if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // immediate entries receive no inbound value
-        _applyAndExecute(entry.stateDeltas, entry.rollingHash);
+        _executeEntry();
     }
 
     /// @notice Structural validation of the batch — no external calls, no vkey reads.
@@ -443,14 +452,14 @@ contract EEZ is EEZBase {
             }
         }
 
-        // Proxy protection: every rollup an entry's cross-chain calls touch must be in the entry's
-        // proven set, so a consumed proxy is always backed by a verified rollup. The set is the
-        // entry's `stateDeltas` (validated strictly-increasing — sorts, dedups, rejects MAINNET); the
-        // entry's `destinationRollupId` must be in it (which also makes its batch membership transitive,
-        // keeping `_saveRemainderExecutions` from routing into a non-participating queue).
+        // Per entry: `stateDeltas` (≥1, strictly increasing, all ∈ batch), `destinationRollupId` ∈ deltas,
+        // and every call SOURCE ∈ deltas. Sources are fail-fast here; reentrant TARGETS carry no rollup
+        // field, so they stay a RUNTIME check (`_isRollupAllowed`) — together they replace the old static walk.
         for (uint256 i = 0; i < batch.entries.length; i++) {
             ExecutionEntry calldata entry = batch.entries[i];
             StateDelta[] calldata deltas = entry.stateDeltas;
+            if (deltas.length == 0) revert EntryHasNoStateDeltas(); // must be state-pinned to the backstop
+
             uint256[] memory verifiedRollups = new uint256[](deltas.length);
             uint256 prevDeltaRid = MAINNET_ROLLUP_ID;
             for (uint256 j = 0; j < deltas.length; j++) {
@@ -460,31 +469,49 @@ contract EEZ is EEZBase {
                 verifiedRollups[j] = drid;
                 prevDeltaRid = drid;
             }
-            if (!_contains(verifiedRollups, entry.destinationRollupId)) {
-                revert EntryDestinationNotInStateDeltas(entry.destinationRollupId);
+            // Route only into a proven rollup's queue — else `_saveRemainderExecutions` could park the
+            // entry in a non-participating queue. (Mirrors the lookup `destinationRollupId ∈ pins` check.)
+            uint256 destRid = entry.destinationRollupId;
+            if (!_contains(verifiedRollups, destRid)) revert EntryDestinationNotInStateDeltas(destRid);
+
+            // Every call SOURCE proven — top-level calls + each reentrant frame's sub-calls. Flat
+            // double-loop: reverted frames reuse the host table, so there's no deeper nesting to recurse.
+            L2ToL1Call[] calldata topCalls = entry.l2ToL1Calls;
+            for (uint256 j = 0; j < topCalls.length; j++) {
+                if (!_contains(verifiedRollups, topCalls[j].sourceRollupId)) {
+                    revert CallSourceNotVerified(topCalls[j].sourceRollupId);
+                }
             }
-            _validateCallsContainVerifiedRollups(entry.l2ToL1Calls, entry.expectedL1ToL2Calls, verifiedRollups);
+            ExpectedL1ToL2Call[] calldata reentrant = entry.expectedL1ToL2Calls;
+            for (uint256 j = 0; j < reentrant.length; j++) {
+                L2ToL1Call[] calldata subCalls = reentrant[j].l2ToL1Calls;
+                for (uint256 k = 0; k < subCalls.length; k++) {
+                    if (!_contains(verifiedRollups, subCalls[k].sourceRollupId)) {
+                        revert CallSourceNotVerified(subCalls[k].sourceRollupId);
+                    }
+                }
+            }
         }
 
         // Same shape for static lookups: the verified set is the rollups they pin
         // (`expectedStateRoots`, validated strictly-increasing); `destinationRollupId` must be pinned,
         // and the read-only sub-call sources must be in the set (a static lookup has no reentrant table).
         for (uint256 i = 0; i < batch.staticLookups.length; i++) {
-            StaticLookup calldata lc = batch.staticLookups[i];
-            ExpectedStateRootPerRollup[] calldata pins = lc.expectedStateRoots;
-            uint256[] memory verifiedRollups = new uint256[](pins.length);
+            StaticLookup calldata staticLookup = batch.staticLookups[i];
+            ExpectedStateRootPerRollup[] calldata expectedStateRoots = staticLookup.expectedStateRoots;
+            uint256[] memory verifiedRollups = new uint256[](expectedStateRoots.length);
             uint256 prevPinRid = MAINNET_ROLLUP_ID;
-            for (uint256 j = 0; j < pins.length; j++) {
-                uint256 prid = pins[j].rollupId;
+            for (uint256 j = 0; j < expectedStateRoots.length; j++) {
+                uint256 prid = expectedStateRoots[j].rollupId;
                 if (prid <= prevPinRid) revert ExpectedStateRootsNotStrictlyIncreasing(prid);
                 if (!_containsRollupInBatch(batch, prid)) revert RollupNotInBatch(prid);
                 verifiedRollups[j] = prid;
                 prevPinRid = prid;
             }
-            if (!_contains(verifiedRollups, lc.destinationRollupId)) {
-                revert LookupDestinationNotPinned(lc.destinationRollupId);
+            if (!_contains(verifiedRollups, staticLookup.destinationRollupId)) {
+                revert LookupDestinationNotPinned(staticLookup.destinationRollupId);
             }
-            L2ToL1Call[] calldata lcCalls = lc.l2ToL1Calls;
+            L2ToL1Call[] calldata lcCalls = staticLookup.l2ToL1Calls;
             for (uint256 j = 0; j < lcCalls.length; j++) {
                 if (!_contains(verifiedRollups, lcCalls[j].sourceRollupId)) {
                     revert CallSourceNotVerified(lcCalls[j].sourceRollupId);
@@ -542,9 +569,8 @@ contract EEZ is EEZBase {
 
     /// @notice Builds per-PS publicInputsHash and verifies every proof in the batch
     /// @dev Two-stage shape:
-    ///        customDataAcc = bytes32(0)
-    ///        for each rollup r: customDataAcc = H(customDataAcc, rollupId_r, customData_r)
-    ///        sharedPublicInput = H(entryHashes, staticLookupHashes, blobHashes, H(callData), customDataAcc)
+    ///        customDataHashes[r] = H(rollupId_r, customData_r)   // per-rollup, canonical order
+    ///        sharedPublicInput = H(entryHashes, staticLookupHashes, blobHashes, H(callData), customDataHashes)
     ///      For each PS k we walk the rollupIdsWithProofSystems table in canonical order;
     ///      every rollup that lists k in its `proofSystemIndexes[]` folds into a per-PS
     ///      rolling accumulator one rollup at a time:
@@ -564,11 +590,9 @@ contract EEZ is EEZBase {
             blobHashes[i] = blobhash(batch.blobIndices[i]);
         }
 
-        // Per-entry hash binds the FULL entry content: stateDeltas, proxyEntryHash,
-        // destinationRollupId, l2ToL1Calls[], the unified expectedL1ToL2Calls[] (success + static +
-        // reverted reentrant calls, each with its expectedRollingHash position key), returnData,
-        // rollingHash. Prevents an orchestrator from swapping call/reentrant-call/returnData at
-        // execution time without invalidating the proof.
+        // Per-entry hash binds the FULL entry content (stateDeltas, proxyEntryHash, destinationRollupId,
+        // l2ToL1Calls[], the unified expectedL1ToL2Calls[], returnData, rollingHash) — so an orchestrator
+        // can't swap calls / results at execution time without invalidating the proof.
         bytes32[] memory entryHashes = new bytes32[](batch.entries.length);
         for (uint256 i = 0; i < batch.entries.length; i++) {
             entryHashes[i] = keccak256(abi.encode(batch.entries[i]));
@@ -580,20 +604,17 @@ contract EEZ is EEZBase {
             staticLookupHashes[i] = keccak256(abi.encode(batch.staticLookups[i]));
         }
 
-        // Fetch each rollup's customData blob ONCE and fold it (keyed by rollupId) into a
-        // single accumulator. The read is `view` (STATICCALL) so a malicious manager cannot
-        // reenter. customData doesn't vary per PS, so it binds into the SHARED input below
-        // rather than the per-PS accumulator.
+        // Per-rollup customData hash, keyed by rollupId. Each blob
+        // is fetched ONCE via a `view` STATICCALL (a malicious manager cannot reenter).
         uint256 rollupCount = batch.rollupIdsWithProofSystems.length;
-        bytes32 customDataAcc = bytes32(0);
+        bytes32[] memory customDataHashes = new bytes32[](rollupCount);
         for (uint256 r = 0; r < rollupCount; r++) {
             bytes memory customData = IRollupContract(
                     rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
                 ).getCustomData(batch.blockNumber);
-            // acc_r = H(acc_{r-1}, rollupId_r, customData_r), folded in canonical rollupId order.
             // Keyed by rollupId so each blob is bound to its rollup; provers must mirror this.
-            customDataAcc =
-                keccak256(abi.encode(customDataAcc, batch.rollupIdsWithProofSystems[r].rollupId, customData));
+            customDataHashes[r] =
+                keccak256(abi.encode(batch.rollupIdsWithProofSystems[r].rollupId, customData));
         }
 
         bytes32 sharedPublicInput = keccak256(
@@ -602,7 +623,7 @@ contract EEZ is EEZBase {
                 abi.encode(staticLookupHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
-                customDataAcc // per-rollup customData fold; shared across all PS
+                abi.encode(customDataHashes) // per-rollup customData; shared across all PS
             )
         );
 
@@ -611,15 +632,15 @@ contract EEZ is EEZBase {
         // (rollupId, vkey_for_PS_k) into a rolling accumulator. Off-chain provers MUST mirror
         // this incremental scheme so the on-chain rebuild matches.
         for (uint256 k = 0; k < batch.proofSystems.length; k++) {
-            bytes32 acc = bytes32(0);
+            bytes32 accRollupsWithVerificationKeys = bytes32(0);
             for (uint256 r = 0; r < rollupCount; r++) {
                 RollupIdWithProofSystems calldata rollupInfoPerVerification = batch.rollupIdsWithProofSystems[r];
                 uint256 j = _findIndexPosition(rollupInfoPerVerification.proofSystemIndexes, k);
                 if (j == type(uint256).max) continue;
-                acc = keccak256(abi.encode(acc, rollupInfoPerVerification.rollupId, verificationKeysPerRollup[r][j]));
+                accRollupsWithVerificationKeys = keccak256(abi.encode(accRollupsWithVerificationKeys, rollupInfoPerVerification.rollupId, verificationKeysPerRollup[r][j]));
             }
 
-            bytes32 publicInputsHash = keccak256(abi.encodePacked(sharedPublicInput, acc));
+            bytes32 publicInputsHash = keccak256(abi.encodePacked(sharedPublicInput, accRollupsWithVerificationKeys));
 
             if (!IProofSystem(batch.proofSystems[k]).verify(batch.proofs[k], publicInputsHash)) {
                 revert InvalidProof();
@@ -705,13 +726,13 @@ contract EEZ is EEZBase {
         if (_insideExecution()) {
             // Reentrant — ADD this call's value to the entry's net-ether accumulator
             _entryEtherDelta += int256(msg.value);
-            return _consumeNestedAction(destRid, crossChainCallHash);
+            return _consumeNestedCall(destRid, crossChainCallHash);
         }
 
         // Top-level — SET (not add): a fresh entry starts from exactly its own msg.value,
         // so residue can never leak across entries.
         _entryEtherDelta = int256(msg.value);
-        return _consumeAndExecute(destRid, crossChainCallHash);
+        return _consumeAndExecuteEntry(destRid, crossChainCallHash);
     }
 
     // ──────────────────────────────────────────────
@@ -737,8 +758,8 @@ contract EEZ is EEZBase {
             ? _transientExecutionIndex
             : verificationByRollup[rollupId].executionQueueIndex;
 
-        emit L2TXExecuted(rollupId, idx); // @claude shoudl we add here if it's transinet?
-        return _consumeAndExecute(rollupId, bytes32(0));
+        emit L2TXExecuted(rollupId, idx);
+        return _consumeAndExecuteEntry(rollupId, bytes32(0));
     }
 
     // ──────────────────────────────────────────────
@@ -749,7 +770,7 @@ contract EEZ is EEZBase {
     /// @dev While the transient table is non-empty, `_currentEntryIndex` indexes into it.
     ///      Otherwise we route into `verificationByRollup[_currentEntryRollupId].executionQueue` —
     ///      the rollup whose queue supplied the entry being executed (set by
-    ///      `_consumeAndExecute` before entering the inner flow).
+    ///      `_consumeAndExecuteEntry` before entering the inner flow).
     function _getCurrentEntry() internal view returns (ExecutionEntry storage entry) {
         if (_transientExecutions.length != 0) {
             entry = _transientExecutions[_currentEntryIndex];
@@ -771,7 +792,7 @@ contract EEZ is EEZBase {
     ///      2. REVERTED (`failed && !isStatic`) matching the key → `_executeRevertedNestedLookup`,
     ///         which runs the entry's own sub-calls and always reverts with `returnData`.
     ///      3. No match → set the deferred-revert flag `_l1ToL2CallNotFound` and return empty
-    ///         bytes; the end-of-entry check in `_applyAndExecute` reverts `ExecutionNotFound`.
+    ///         bytes; the end-of-entry check in `_executeEntry` reverts `ExecutionNotFound`.
     ///
     ///      Matching is a STRICT FORWARD scan from `_lastL1ToL2CallConsumed`: a CALL only ever
     ///      matches an entry at/after the cursor, and a plain success advances it past the matched
@@ -782,7 +803,10 @@ contract EEZ is EEZBase {
     ///      though it scans the same forward window). Completeness of the success entries rests on the
     ///      rolling hash, not a table-length check: a skipped success entry omits its NESTED frame +
     ///      sub-calls, diverging the hash; an entry left unconsumed is inert (like an unused lookup).
-    function _consumeNestedAction(uint256 destRid, bytes32 crossChainCallHash) internal returns (bytes memory) {
+    function _consumeNestedCall(uint256 destRid, bytes32 crossChainCallHash) internal returns (bytes memory) {
+        // Proxy protection: the reentrant call's target rollup must be in the entry's proven set.
+        if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
+
         // Host reentrant table is always the current entry's `expectedL1ToL2Calls`. A reverted
         // nested sub-execution shares this SAME table for its own reentrant calls; they're
         // disambiguated by the seeded `expectedRollingHash`.
@@ -801,11 +825,6 @@ contract EEZ is EEZBase {
                 !nested.isStatic && nested.crossChainCallHash == crossChainCallHash
                     && nested.expectedRollingHash == roll
             ) {
-                // Proxy protection: the declared destination (verified against the host's stateDeltas
-                // at postAndVerifyBatch) must be the rollup actually being called — the proxy's rollup.
-                if (nested.destinationRollupId != destRid) {
-                    revert ReentrantDestinationMismatch(nested.destinationRollupId, destRid);
-                }
                 if (nested.failed) {
                     _executeRevertedNestedLookup(i); // always reverts (cursor advance would roll back anyway)
                 }
@@ -816,11 +835,15 @@ contract EEZ is EEZBase {
         }
 
         // No match — defer the revert: set the flag, return "" (the end-of-entry check in
-        // `_applyAndExecute` reverts `ExecutionNotFound`). NOTE: the caller may revert sooner if it
+        // `_executeEntry` reverts `ExecutionNotFound`). NOTE: the caller may revert sooner if it
         // ABI-decodes the "" into a typed value; the flag only guarantees the entry eventually reverts.
         // Emit so off-chain can locate the no-match site. (3rd field is the legacy L2→L1 cursor → 0.)
         emit L1ToL2CallNotFound(_currentEntryIndex, crossChainCallHash, 0, _lastL1ToL2CallConsumed);
-        _l1ToL2CallNotFound = true; //@claude maybe this is not needed, since we can hash it and add it to the rolling hahs, making the whole call invalid
+        // The flag is load-bearing, not redundant with the rolling hash: returning "" folds
+        // CALL_END(true, "") just like any other result, so a prover that PRE-HASHED a "" no-match
+        // would still match `entry.rollingHash`. The flag, checked before the hash, forces
+        // `ExecutionNotFound` regardless — defeating that.
+        _l1ToL2CallNotFound = true;
         return "";
     }
 
@@ -863,7 +886,7 @@ contract EEZ is EEZBase {
     /// @dev `destinationRollupId == destRid` is load-bearing in the transient branch (one global
     ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
     ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
-    ///      non-match (→ `ExecutionNotFound`); `_applyAndExecute` re-asserts it as the gate for the
+    ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
     ///      immediate-L2TX path that doesn't pass through here.
     function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint256 destRid)
         internal
@@ -897,7 +920,7 @@ contract EEZ is EEZBase {
     /// @param destRid The destination rollup whose queue / transient slot to consume from
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
-    function _consumeAndExecute(uint256 destRid, bytes32 crossChainCallHash) internal returns (bytes memory result) {
+    function _consumeAndExecuteEntry(uint256 destRid, bytes32 crossChainCallHash) internal returns (bytes memory result) {
         ExecutionEntry storage entry;
         uint256 idx;
 
@@ -928,7 +951,7 @@ contract EEZ is EEZBase {
         emit ExecutionConsumed(crossChainCallHash, destRid, idx);
 
         _currentEntryIndex = idx;
-        _applyAndExecute(entry.stateDeltas, entry.rollingHash); //@claude, why we put here the entry rollingHash?¿
+        _executeEntry();
 
         return entry.returnData;
     }
@@ -940,34 +963,40 @@ contract EEZ is EEZBase {
     ///      this preamble — only at the end, after the invariant check.
     /// @dev The entry's `l2ToL1Calls[]` is its TOP-LEVEL calls only (each reentrant frame carries
     ///      its own sub-calls); `_processNCalls` runs the whole array, so completeness is structural
-    ///      (no cursor-vs-length check). `_executing` is held true for the whole span so a reentrant
-    ///      call is routed correctly.
-    function _applyAndExecute(StateDelta[] memory deltas, bytes32 rollingHash) internal {
+    ///      (no cursor-vs-length check). `_executingEntryVerifiedRollups` is non-empty for the whole span (backs
+    ///      `_insideExecution()`), so a reentrant call is routed correctly.
+    function _executeEntry() internal {
         ExecutionEntry storage entry = _getCurrentEntry();
+        StateDelta[] memory deltas = entry.stateDeltas;
 
-        // Validity gate: reject a doomed entry BEFORE any call runs (fail fast). Re-asserts the
-        // consume-time `_entryMatches` check, and is the only gate on the immediate-L2TX path that
-        // skips `_consumeAndExecute`. `newState` is applied AFTER the calls (`_applyStateDeltas`) so
-        // mid-execution reads of `rollups[rid].stateRoot` see the pre-state the hash commits to.
+        // Redundant ≥1-delta guard (also enforced at validation): a non-empty `_executingEntryVerifiedRollups` is
+        // what backs `_insideExecution()`.
+        if (deltas.length == 0) revert EntryHasNoStateDeltas();
+
+        // Validity gate + allowed-rollups set, one pass. CHECK each `currentState` vs the live root
+        // (fail fast — `newState` applies after the calls so mid-execution reads see the pre-state),
+        // and ADD each delta's rollup to `_executingEntryVerifiedRollups` (proxy-protection: the proxies the entry
+        // can execute are limited to the rollups it proved). Populating the array also flips
+        // `_insideExecution()` true (it's non-empty now); `delete` at the end flips it back.
         for (uint256 i = 0; i < deltas.length; i++) {
             if (rollups[deltas[i].rollupId].stateRoot != deltas[i].currentState) {
                 revert StateRootMismatch(deltas[i].rollupId);
             }
+            _executingEntryVerifiedRollups.push(deltas[i].rollupId);
         }
 
-        _executing = true;
         _rollingHashEntryBegin(deltas, entry.proxyEntryHash); // initial hash: binds starting state + identity
         _lastL1ToL2CallConsumed = 0;
 
-        L2ToL1Call[] memory calls = entry.l2ToL1Calls; // storage -> memory copy for this frame
+        L2ToL1Call[] memory calls = entry.l2ToL1Calls;
         _processNCalls(calls);
         int256 totalEtherDelta = _applyStateDeltas(deltas);
 
-        // Check the deferred no-match flag from `_consumeNestedAction` first so the failure
+        // Check the deferred no-match flag from `_consumeNestedCall` first so the failure
         // surfaces as `ExecutionNotFound` rather than the downstream `RollingHashMismatch` it
         // would otherwise cause (returning empty bytes diverges the entry's rolling hash).
         if (_l1ToL2CallNotFound) revert ExecutionNotFound();
-        if (_rollingHash != rollingHash) revert RollingHashMismatch();
+        if (_rollingHash != entry.rollingHash) revert RollingHashMismatch();
         // No reentrant table-length check: the unified `expectedL1ToL2Calls` mixes plain-success
         // entries with static / reverted ones (content-addressed, may be unused). Completeness of
         // the success entries is enforced by the rolling hash; an unused entry is inert.
@@ -976,20 +1005,18 @@ contract EEZ is EEZBase {
         if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch();
 
         emit EntryExecuted(_currentEntryIndex, _rollingHash, calls.length, _lastL1ToL2CallConsumed);
-        _executing = false; // resets _insideExecution()
+        delete _executingEntryVerifiedRollups; // clears the allowed set AND resets _insideExecution() to false
         _entryEtherDelta = 0; // reset for the next top-level entry in this tx
     }
 
-    /// @notice Processes the WHOLE `calls` array (the entry's top-level calls, a reentrant
-    ///         sub-frame's own calls, or a force-revert span slice), walked by a plain LOCAL index.
-    /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the
-    ///      outer frame's stack is preserved across the call's return), so there is nothing to
-    ///      save/restore for the L2→L1 position. `_insideExecution()` is backed by the separate
-    ///      `_executing` flag instead.
-    /// @dev Outgoing ETH from successful value calls is SUBTRACTED from the transient `_entryEtherDelta`
-    ///      accumulator (NOT a local) so every frame contributes to one entry-wide total that survives
-    ///      the separate call stacks. Subtractions inside a force-revert span roll back with that
-    ///      frame's revert (the tstore is undone with the physical value transfer).
+    /// @notice Processes the WHOLE `calls` array (the entry's top-level calls, a reentrant sub-frame's
+    ///         own calls, or a force-revert span slice), walked by a plain LOCAL index, folding the
+    ///         rolling hash (source checked in validateStructure).
+    /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the outer
+    ///      stack is preserved across the return), so there's nothing to save/restore for the L2→L1
+    ///      position. Successful value calls SUBTRACT from the transient `_entryEtherDelta` (not a local)
+    ///      so every frame folds into one entry-wide total; a force-revert span's subtractions roll back
+    ///      with its revert (the tstore is undone with the physical value transfer).
     function _processNCalls(L2ToL1Call[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
             uint256 revertNextNCalls = calls[i].revertNextNCalls;
@@ -1004,6 +1031,8 @@ contract EEZ is EEZBase {
                     )
                 );
 
+                // No source check here: every executed call's `sourceRollupId` was already validated
+                // ∈ `stateDeltas` in `_validateBatchStructure` (entry + reentrant sub-call walk).
                 address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
                 if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
                     _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollupId);
@@ -1091,7 +1120,7 @@ contract EEZ is EEZBase {
     }
 
     /// @notice Applies state deltas (root + ether balance) and sums their ether deltas. The
-    ///         `currentState` precondition is the validity gate checked upfront in `_applyAndExecute`
+    ///         `currentState` precondition is the validity gate checked upfront in `_executeEntry`
     ///         (roots are immutable mid-execution), so this just applies `newState`.
     function _applyStateDeltas(StateDelta[] memory deltas) internal returns (int256 totalEtherDelta) {
         for (uint256 i = 0; i < deltas.length; i++) {
@@ -1123,15 +1152,6 @@ contract EEZ is EEZBase {
         return true;
     }
 
-    // ──────────────────────────────────────────────
-    //  Predicates
-    // ──────────────────────────────────────────────
-
-    /// @notice Returns true if currently inside a cross-chain call execution
-    function _insideExecution() internal view returns (bool) {
-        return _executing;
-    }
-
     // The flat call array driving execution is passed to `_processNCalls` explicitly by `memory`
     // (the entry's top-level calls, or a reentrant sub-frame's own). The reentrant (L1→L2) table is
     // always the current entry's `expectedL1ToL2Calls` (read off `_getCurrentEntry()` where needed);
@@ -1141,24 +1161,6 @@ contract EEZ is EEZBase {
     // ──────────────────────────────────────────────
     //  Static-lookup resolution
     // ──────────────────────────────────────────────
-
-    /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
-    ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
-    ///         lookup's `rollingHash`), then return the cached data, or revert with it when
-    ///         `failed`.
-    function _resolveStaticLookup(L2ToL1Call[] storage calls, bytes32 rollingHash, bool failed, bytes memory returnData)
-        internal
-        view
-        returns (bytes memory)
-    {
-        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
-        if (failed) {
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
-        return returnData;
-    }
 
     /// @notice Runs a reverted NESTED reentrant call (the reverted `expectedL1ToL2Calls[index]`) as a
     ///         self-contained mini-entry, then reverts with its cached `returnData`. Runs INLINE in
@@ -1171,7 +1173,9 @@ contract EEZ is EEZBase {
     ///         position share a seed; the prover must let their sub-calls diverge — a same-seed
     ///         collision can't forge a result, it just diverges the rolling hash and reverts.) Deeper
     ///         reverted sub-executions compose via the same unwind.
-    function _executeRevertedNestedLookup(uint256 index) internal { //@claude coudlnt we join this into executeNested nromamly?¿
+    // Kept separate from `_consumeNestedCall` (single caller) to isolate the reverted-execution
+    // concern — seed + run + checks + terminal revert — mirroring `_consumeSuccessfulReentrant`.
+    function _executeRevertedNestedLookup(uint256 index) internal {
         ExpectedL1ToL2Call storage el = _getCurrentEntry().expectedL1ToL2Calls[index];
         L2ToL1Call[] memory subCalls = el.l2ToL1Calls; // storage -> memory copy for this frame
 
@@ -1184,7 +1188,7 @@ contract EEZ is EEZBase {
 
         _processNCalls(subCalls); // runs the whole sub-array (structural completeness)
 
-        // Same end-checks/order as `_applyAndExecute` (deferred no-match first); no reentrant
+        // Same end-checks/order as `_executeEntry` (deferred no-match first); no reentrant
         // table-length check — static / reverted entries are a content-addressed pool that may be
         // partially used.
         if (_l1ToL2CallNotFound) revert ExecutionNotFound();
@@ -1193,23 +1197,6 @@ contract EEZ is EEZBase {
         bytes memory returnData = el.returnData;
         assembly {
             revert(add(returnData, 0x20), mload(returnData))
-        }
-    }
-
-    /// @notice Executes the lookup call's optional `calls[]` in static context and computes a
-    ///         rolling hash of the results (untagged static schema). No `revertNextNCalls` handling.
-    /// @dev All proxies referenced must already be deployed; CREATE2 is unavailable inside a
-    ///      STATICCALL frame. The accumulator is a local, not `_rollingHash`, so this is verified
-    ///      against `StaticLookup.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
-    function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
-        for (uint256 i = 0; i < calls.length; i++) {
-            L2ToL1Call memory cc = calls[i];
-            address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
-            // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
-            if (sourceProxy.code.length == 0) revert LookupCallProxyNotDeployed(sourceProxy);
-            (bool success, bytes memory retData) =
-                sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
-            computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
     }
 
@@ -1245,18 +1232,15 @@ contract EEZ is EEZBase {
         // (crossChainCallHash, expectedRollingHash). A STATICCALL cannot mutate the cursor, so a
         // static read is always position-pinned by the rolling hash rather than consumed.
         if (_insideExecution()) {
+            // Proxy protection: the read's target rollup must be in the entry's proven set.
+            if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
             bytes32 roll = _rollingHash;
-            // Forward scan from the cursor — same strict-forward window as `_consumeNestedAction`
+            // Forward scan from the cursor — same strict-forward window as `_consumeNestedCall`
             // (a static read cannot advance the cursor, but it still only matches at/after it).
             ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
                 ExpectedL1ToL2Call storage el = expectedCalls[i];
                 if (el.isStatic && el.crossChainCallHash == crossChainCallHash && el.expectedRollingHash == roll) {
-                    // Proxy protection: the declared destination (verified at postAndVerifyBatch)
-                    // must be the rollup actually being read — the proxy's rollup.
-                    if (el.destinationRollupId != destRid) {
-                        revert ReentrantDestinationMismatch(el.destinationRollupId, destRid);
-                    }
                     return _resolveStaticLookup(el.l2ToL1Calls, el.rollingHash, el.failed, el.returnData);
                 }
             }
@@ -1282,6 +1266,65 @@ contract EEZ is EEZBase {
         }
 
         revert ExecutionNotFound();
+    }
+
+    /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
+    ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
+    ///         lookup's `rollingHash`), then return the cached data, or revert with it when
+    ///         `failed`.
+    function _resolveStaticLookup(L2ToL1Call[] storage calls, bytes32 rollingHash, bool failed, bytes memory returnData)
+        internal
+        view
+        returns (bytes memory)
+    {
+        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
+        if (failed) {
+            assembly {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return returnData;
+    }
+
+    /// @notice Runs the lookup's `calls[]` in static context, folding an untagged rolling hash verified
+    ///         against `StaticLookup.rollingHash` (source checked in validateStructure).
+    /// @dev No `revertNextNCalls` since there are not changes on state; referenced proxies must already be deployed (CREATE2 is unavailable
+    ///      inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
+    function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
+        for (uint256 i = 0; i < calls.length; i++) {
+            L2ToL1Call memory cc = calls[i];
+            // No source check: sub-call sources are validated ∈ proven set in `_validateBatchStructure`
+            // — nested lookups via the entry's reentrant walk, top-level via the lookup's `expectedStateRoots`.
+            address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
+            // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
+            if (sourceProxy.code.length == 0) revert LookupCallProxyNotDeployed(sourceProxy);
+            (bool success, bytes memory retData) =
+                sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
+            computedHash = _rollingHashStaticResult(computedHash, success, retData);
+        }
+    }
+
+    /// @notice True while inside a cross-chain call execution — backed by the allowed-rollups array
+    ///         (non-empty ⇔ executing, since every entry has ≥1 delta and the array is `delete`d at the
+    ///         end of `_executeEntry`).
+    function _insideExecution() internal view returns (bool) {
+        return _executingEntryVerifiedRollups.length != 0;
+    }
+
+    // ── "Allowed rollups" set ────────────────────────────────────────────────────────────────────
+    // Runtime proxy-protection for reentrant / static-read TARGETS only. A target's rollup is whichever
+    // proxy re-enters (no clear-text field to validate at post time), so it's checked here against the
+    // executing entry's `stateDeltas` — populated into `_executingEntryVerifiedRollups` by `_executeEntry`. Call
+    // SOURCES need no runtime check: `_validateBatchStructure` already pins them ∈ `stateDeltas`.
+
+    /// @notice True iff `rollupId` is in the current entry's allowed set. Linear scan (deltas are few).
+    function _isRollupAllowed(uint256 rollupId) internal view returns (bool) {
+        uint256[] storage allowed = _executingEntryVerifiedRollups;
+        uint256 n = allowed.length;
+        for (uint256 i = 0; i < n; i++) {
+            if (allowed[i] == rollupId) return true;
+        }
+        return false;
     }
 
     // ──────────────────────────────────────────────
@@ -1358,48 +1401,10 @@ contract EEZ is EEZBase {
     }
 
     // ──────────────────────────────────────────────
-    //  Proxy-protection verified-rollup checks (postAndVerifyBatch)
+    //  Proxy-protection: call SOURCES are validated ∈ `stateDeltas` in `_validateBatchStructure`.
+    //  Reentrant / static-read TARGETS have no clear-text field, so they're checked at RUNTIME via
+    //  `_isRollupAllowed` against the per-entry allowed-rollups set (`stateDeltas`, set by `_executeEntry`).
     // ──────────────────────────────────────────────
-    //
-    // A cross-chain call only touches a rollup the host actually proved. The host's verified set is
-    // its `stateDeltas` (entry) or its `expectedStateRoots` pins (top-level lookup). MAINNET (L1) is never
-    // in a verified set — L1 is not its own cross-chain counterparty (mirrors the same-network proxy
-    // ban). Enforced statically here so every proxy a consumed entry drives is backed by a verified
-    // rollup. Reentrant calls and every lookup additionally re-check the clear-text destination id
-    // against the live calling-proxy rollup at execution.
-
-    /// @notice Every L2→L1 call's `sourceRollupId` and every reentrant L1→L2 call's
-    ///         `destinationRollupId` must be in `verifiedRollups`. Each reentrant entry's own
-    ///         sub-calls (static / reverted `l2ToL1Calls`) are validated in the same pass — the
-    ///         unified `expectedL1ToL2Calls` flat table holds every deeper-context reentrant call,
-    ///         so no recursion is needed.
-    function _validateCallsContainVerifiedRollups(
-        L2ToL1Call[] calldata calls,
-        ExpectedL1ToL2Call[] calldata reentrant,
-        uint256[] memory verifiedRollups
-    )
-        internal
-        pure
-    {
-        for (uint256 i = 0; i < calls.length; i++) {
-            if (!_contains(verifiedRollups, calls[i].sourceRollupId)) {
-                revert CallSourceNotVerified(calls[i].sourceRollupId);
-            }
-        }
-        for (uint256 i = 0; i < reentrant.length; i++) {
-            if (!_contains(verifiedRollups, reentrant[i].destinationRollupId)) {
-                revert ReentrantDestinationNotVerified(reentrant[i].destinationRollupId);
-            }
-            // Sub-calls carried by a static / reverted reentrant entry source from the host's
-            // verified set too (empty for a plain-success entry).
-            L2ToL1Call[] calldata subCalls = reentrant[i].l2ToL1Calls;
-            for (uint256 j = 0; j < subCalls.length; j++) {
-                if (!_contains(verifiedRollups, subCalls[j].sourceRollupId)) {
-                    revert CallSourceNotVerified(subCalls[j].sourceRollupId);
-                }
-            }
-        }
-    }
 
     /// @notice True if `rollupId` appears in `ids`. Strict membership — no MAINNET exemption.
     /// @dev Linear scan (vs `_containsRollupInBatch`'s binary search): `ids` here is a single entry's
