@@ -40,6 +40,9 @@ abstract contract EEZBase is IEEZ {
     uint8 internal constant NESTED_END = 4;
     uint8 internal constant CALL_NOT_FOUND = 5;
 
+    /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on non-static (call) paths.
+    bool internal constant NOT_STATIC_CALL = false;
+
     // ──────────────────────────────────────────────
     //  Storage shared with children
     // ──────────────────────────────────────────────
@@ -176,23 +179,26 @@ abstract contract EEZBase is IEEZ {
     /// @notice Computes the cross-chain call hash from individual fields. Public so off-chain
     ///         tooling can derive the hash for a planned cross-chain call. Identical formula on
     ///         L1 and L2 so a single off-chain helper can target either chain.
-    /// @dev Formula: `keccak256(abi.encode(targetRollupId, targetAddress, value, data,
-    ///      sourceAddress, sourceRollupId))`. Field order MUST match the call struct field order
-    ///      plus the source pair appended; reordering would break every on-chain hash check
-    ///      and every off-chain tool that pre-computes the hash.
+    /// @dev Formula: `keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress,
+    ///      targetRollupId, value, data))` — ordered isStatic → FROM (source pair) → TO (target pair)
+    ///      → value → data, matching the `L2ToL1Call` struct field order. Reordering would break every
+    ///      on-chain hash check and every off-chain tool that pre-computes the hash. `isStatic` makes a
+    ///      read-only call hash distinctly from an otherwise-identical state-changing one.
     function computeCrossChainCallHash(
-        uint64 targetRollupId,
-        address targetAddress,
-        uint256 value,
-        bytes memory data,
+        bool isStatic,
         address sourceAddress,
-        uint64 sourceRollupId
+        uint64 sourceRollupId,
+        address targetAddress,
+        uint64 targetRollupId,
+        uint256 value,
+        bytes memory data
     )
         public
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
+        return
+            keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
     }
 
     // ──────────────────────────────────────────────
@@ -217,6 +223,17 @@ abstract contract EEZBase is IEEZ {
             reentrantConsumed := mload(add(ptr, 32))
             callsProcessed := mload(add(ptr, 64))
         }
+    }
+
+    /// @notice Content-addressed position key for an `ExpectedL1ToL2Call`: the call's identity hash
+    ///         (which already folds `isStatic` and the routed rollup) bound to the live `_rollingHash`
+    ///         at the instant it fires. One comparison replaces the old (hash, rollingHash, isStatic) triple.
+    function _computeExpectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(crossChainCallHash, rollingHash));
     }
 
     // ──────────────────────────────────────────────

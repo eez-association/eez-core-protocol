@@ -711,7 +711,7 @@ contract EEZ is EEZBase {
         }
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            destRid, destAddress, msg.value, callData, sourceAddress, MAINNET_ROLLUP_ID
+            NOT_STATIC_CALL, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, msg.value, callData
         );
 
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
@@ -769,32 +769,30 @@ contract EEZ is EEZBase {
 
     /// @notice Resolves a reentrant (L1→L2) CALL: a plain-success entry consumed from
     ///         `expectedL1ToL2Calls`, or a reverted entry run as a sub-execution.
-    /// @dev Entries are content-addressed by `(crossChainCallHash, expectedRollingHash)`, where
-    ///      `expectedRollingHash` is the live `_rollingHash` — it folds every prior call and nesting
-    ///      boundary, so it uniquely pins the execution point. The scan walks STRICT FORWARD from
-    ///      `_lastL1ToL2CallConsumed` (calls are consumed in order, never before the cursor); the first
-    ///      non-`isStatic` match IS the entry, and its `success` flag selects the path in
-    ///      `_resolveNestedReentrant` (commit vs run-and-revert). The key is unique per position, so a
-    ///      success and a reverted entry can never share one. `isStatic` entries are skipped here — the
-    ///      proxy routes reentrant STATICCALLs to `staticCallLookup`. On no match,
-    ///      `_rollingHashCallNotFound` folds CALL_NOT_FOUND so the entry reverts at its rolling-hash
-    ///      check (`RollingHashMismatch`). Completeness of the success entries rests on that hash, not a
-    ///      table-length check: a skipped success entry omits its NESTED frame, diverging the hash; an
-    ///      unconsumed entry is inert.
+    /// @dev Entries are content-addressed by `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`,
+    ///      where `_rollingHash` folds every prior call and nesting boundary, so it uniquely pins the
+    ///      execution point. The scan walks STRICT FORWARD from `_lastL1ToL2CallConsumed` (calls are
+    ///      consumed in order, never before the cursor); the first match IS the entry, and its `success`
+    ///      flag selects the path in `_resolveNestedReentrant` (commit vs run-and-revert). The key is
+    ///      unique per position, so a success and a reverted entry can never share one. Static entries
+    ///      can't match here — their `crossChainCallHash` folds `isStatic = true`, while this lookup is
+    ///      keyed with `isStatic = false`; the proxy routes reentrant STATICCALLs to `staticCallLookup`.
+    ///      On no match, `_rollingHashCallNotFound` folds CALL_NOT_FOUND so the entry reverts at its
+    ///      rolling-hash check (`RollingHashMismatch`). Completeness of the success entries rests on that
+    ///      hash, not a table-length check: a skipped success entry omits its NESTED frame, diverging the
+    ///      hash; an unconsumed entry is inert.
     function _consumeNestedCall(uint64 destRid, bytes32 crossChainCallHash) internal returns (bytes memory) {
         // Proxy protection: the reentrant call's target rollup must be in the entry's proven set.
         if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
 
         // Host table is the current entry's `expectedL1ToL2Calls`; a reverted sub-execution shares it
-        // for its own reentrant calls, disambiguated by `expectedRollingHash`.
+        // for its own reentrant calls, disambiguated by the `_rollingHash` folded into the key.
         ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
+        bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
 
         for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
             ExpectedL1ToL2Call storage nested = expectedCalls[i];
-            if (
-                !nested.isStatic && nested.crossChainCallHash == crossChainCallHash
-                    && nested.expectedRollingHash == _rollingHash
-            ) {
+            if (nested.expectedL1toL2Hash == expectedL1toL2Hash) {
                 return _resolveNestedReentrant(i, crossChainCallHash, nested.success);
             }
         }
@@ -1016,12 +1014,13 @@ contract EEZ is EEZBase {
                 // Fold the call's identity (target on L1 = MAINNET, source = its rollup) into CALL_BEGIN.
                 _rollingHashCallBegin(
                     computeCrossChainCallHash(
-                        MAINNET_ROLLUP_ID,
-                        l2ToL1Call.targetAddress,
-                        l2ToL1Call.value,
-                        l2ToL1Call.data,
+                        l2ToL1Call.isStatic,
                         l2ToL1Call.sourceAddress,
-                        l2ToL1Call.sourceRollupId
+                        l2ToL1Call.sourceRollupId,
+                        l2ToL1Call.targetAddress,
+                        MAINNET_ROLLUP_ID,
+                        l2ToL1Call.value,
+                        l2ToL1Call.data
                     )
                 );
 
@@ -1124,18 +1123,19 @@ contract EEZ is EEZBase {
     // The flat call array driving execution is passed to `_processNCalls` explicitly by `memory`
     // (the entry's top-level calls, or a reentrant sub-frame's own). The reentrant (L1→L2) table is
     // always the current entry's `expectedL1ToL2Calls` (read off `_getCurrentEntry()` where needed);
-    // a sub-frame's own reentrant calls live in that SAME table, disambiguated by the seeded /
-    // continued `expectedRollingHash`.
+    // a sub-frame's own reentrant calls live in that SAME table, disambiguated by the live
+    // `_rollingHash` folded into each entry's `expectedL1toL2Hash`.
 
     // ──────────────────────────────────────────────
     //  Static lookup
     // ──────────────────────────────────────────────
 
     /// @notice Looks up a pre-computed lookup result.
-    /// @dev Inside an execution: scans the active host's unified `expectedL1ToL2Calls` for an
-    ///      `isStatic` entry matching `(crossChainCallHash, expectedRollingHash)` — the same
-    ///      content-addressed key the reentrant CALLs use, with `expectedRollingHash` read from the
-    ///      live `_rollingHash`. Outside: while a batch is mid-flight, ONLY its transient pool (the
+    /// @dev Inside an execution: scans the active host's unified `expectedL1ToL2Calls` for an entry
+    ///      whose `expectedL1toL2Hash` matches `keccak256(crossChainCallHash, _rollingHash)` — the same
+    ///      content-addressed key the reentrant CALLs use. The `crossChainCallHash` here folds
+    ///      `isStatic = true`, so only static entries can match. Outside: while a batch is mid-flight,
+    ///      ONLY its transient pool (the
     ///      transient phase is self-contained — see docs/CAVEATS.md); otherwise the routed rollup's
     ///      persistent `staticLookupQueue`. Match: a top-level `StaticLookup` with `proxyEntryHash` and
     ///      every state-root pin live (full scan — a non-matching candidate is skipped). tload works
@@ -1157,25 +1157,23 @@ contract EEZ is EEZBase {
         uint64 destRid = proxyInfo.originalRollupId;
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            destRid, destAddress, 0, callData, sourceAddress, MAINNET_ROLLUP_ID
+            true, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, callData
         );
 
-        // Nested: the active host's unified reentrant table, content-addressed by
-        // (crossChainCallHash, expectedRollingHash). A STATICCALL cannot mutate the cursor, so a
-        // static read is always position-pinned by the rolling hash rather than consumed.
+        // Nested: the active host's unified reentrant table, content-addressed by `expectedL1toL2Hash`.
+        // `crossChainCallHash` was computed with `isStatic = true`, so it can only match a static
+        // entry. A STATICCALL cannot mutate the cursor, so a static read is position-pinned by the
+        // rolling hash rather than consumed.
         if (_insideExecution()) {
             // Proxy protection: the read's target rollup must be in the entry's proven set.
             if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
-            bytes32 roll = _rollingHash;
+            bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
             // Forward scan from the cursor — same strict-forward window as `_consumeNestedCall`
             // (a static read cannot advance the cursor, but it still only matches at/after it).
             ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
                 ExpectedL1ToL2Call storage expectedCall = expectedCalls[i];
-                if (
-                    expectedCall.isStatic && expectedCall.crossChainCallHash == crossChainCallHash
-                        && expectedCall.expectedRollingHash == roll
-                ) {
+                if (expectedCall.expectedL1toL2Hash == expectedL1toL2Hash) {
                     return _resolveStaticLookup(
                         expectedCall.l2ToL1Calls,
                         expectedCall.revertedOrStaticRollingHash,

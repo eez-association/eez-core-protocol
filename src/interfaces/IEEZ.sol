@@ -75,43 +75,39 @@ struct StateDelta {
 ///      the state of the next N calls (this one included) — see `revertNextNCalls` handling in `EEZ`.
 struct L2ToL1Call {
     bool isStatic;
+    address sourceAddress;
+    uint64 sourceRollupId;
     address targetAddress;
     uint256 value;
     bytes data;
-    address sourceAddress;
-    uint64 sourceRollupId;
     uint256 revertNextNCalls;
 }
 
 /// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) fired during execution.
 ///         One unified `expectedL1ToL2Calls[]` table holds every flavour — plain SUCCESS, read-only
-///         STATIC (`isStatic`), and try/catch'd REVERTED (`!success`) — each content-addressed by
-///         `(crossChainCallHash, expectedRollingHash)`. `expectedRollingHash` is `_rollingHash` at
+///         STATIC, and try/catch'd REVERTED (`!success`) — each content-addressed by a single
+///         `expectedL1toL2Hash == keccak256(crossChainCallHash, expectedRollingHash)`. `crossChainCallHash`
+///         folds `isStatic` (a static read keys distinctly from a state-changing call) plus the
+///         routed rollup, so neither needs its own field; `expectedRollingHash` is `_rollingHash` at
 ///         the instant the call fires, which uniquely pins the execution point (the hash folds every
 ///         prior call / nesting boundary).
 /// @dev Every flavour carries its OWN `l2ToL1Calls[]` sub-array, run to completion (no shared
 ///      partition). Resolution:
-///        - SUCCESS  (`!isStatic && success`): `_resolveNestedReentrant` runs the sub-array as a
+///        - SUCCESS  (call key, `success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
-///        - STATIC   (`isStatic`): `staticCallLookup` runs the sub-array via STATICCALL (untagged
+///        - STATIC   (static key): `staticCallLookup` runs the sub-array via STATICCALL (untagged
 ///          hash vs `rollingHash`) and returns `returnData` (reverts with it if `!success`).
-///        - REVERTED (`!success && !isStatic`): `_resolveNestedReentrant` runs the sub-array as a
+///        - REVERTED (call key, `!success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          mini-entry (tagged hash vs `rollingHash`) then reverts.
 /// @dev A reverted sub-execution reuses the host table for its own reentrant calls (Solidity forbids
 ///      recursive structs). Both flavours open the frame with NESTED_BEGIN(crossChainCallHash);
 ///      SUCCESS closes it with NESTED_END into the host's continuous hash, REVERTED's frame is rolled
 ///      back by its terminal revert.
-/// @dev `destinationRollupId`: the rollup this call targets. Bound at `postAndVerifyBatch` (∈ host's
-///      verified set) and re-checked at resolution (== the calling proxy's rollup).
-// TODO we can add isStatic, crosschainCallHahs and expectedRollingHahs in the same hash, drop destinationRollupID
 struct ExpectedL1ToL2Call {
-    bytes32 crossChainCallHash;
-    uint64 destinationRollupId;
-    /// `_rollingHash` at the instant this call fires — the content-addressed position key.
-    bytes32 expectedRollingHash;
-    /// Read-only STATICCALL mode (resolved through `staticCallLookup`).
-    bool isStatic;
-    /// false ⇒ reverting mode (caller try/catches); on an `isStatic` entry, a static read that itself reverts.
+    /// keccak256(crossChainCallHash, expectedRollingHash) — content-addressed position key.
+    /// `expectedRollingHash` is `_rollingHash` at the instant the call fires.
+    bytes32 expectedL1toL2Hash;
+    /// false ⇒ reverting mode (caller try/catches); on a static key, a static read that itself reverts.
     bool success;
     bytes returnData;
     /// The reentrant frame's own sub-calls, run to completion (success commits, reverted rolls back,

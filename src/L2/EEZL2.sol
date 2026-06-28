@@ -216,7 +216,7 @@ contract EEZL2 is EEZBase {
         }
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            proxyInfo.originalRollupId, destAddress, msg.value, callData, sourceAddress, ROLLUP_ID
+            NOT_STATIC_CALL, sourceAddress, ROLLUP_ID, destAddress, proxyInfo.originalRollupId, msg.value, callData
         );
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
 
@@ -272,7 +272,7 @@ contract EEZL2 is EEZBase {
 
         // 2. Compute and emit the action hash binding this top-level call
         bytes32 crossChainCallHash =
-            computeCrossChainCallHash(ROLLUP_ID, destination, value, data, sourceAddress, sourceRollup);
+            computeCrossChainCallHash(NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, data);
         emit IncomingCrossChainCallExecuted(crossChainCallHash, destination, value, data, sourceAddress, sourceRollup);
 
         // 3. No entry-context preamble needed: `_currentEntryIndex`, `_rollingHash`,
@@ -475,7 +475,7 @@ contract EEZL2 is EEZBase {
                 // L2 mechanical update (full L2 pass deferred): bind the call's identity into CALL_BEGIN.
                 _rollingHashCallBegin(
                     computeCrossChainCallHash(
-                        ROLLUP_ID, cc.targetAddress, cc.value, cc.data, cc.sourceAddress, cc.sourceRollupId
+                        cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, ROLLUP_ID, cc.value, cc.data
                     )
                 );
 
@@ -639,12 +639,13 @@ contract EEZL2 is EEZBase {
         address destAddress = proxyInfo.originalAddress;
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            proxyInfo.originalRollupId,
-            destAddress,
-            0, // value is always 0 in static context
-            callData,
+            true,
             sourceAddress,
-            ROLLUP_ID
+            ROLLUP_ID,
+            destAddress,
+            proxyInfo.originalRollupId,
+            0, // value is always 0 in static context
+            callData
         );
 
         // Nested: entry-scoped table of the active host, keyed by the live cursors.

@@ -31,11 +31,11 @@ pragma solidity ^0.8.28;
 /// @dev isStatic dispatches the call via STATICCALL — read-only, carries no value, reverts on any state write
 struct CrossChainCall {
     bool isStatic;
+    address sourceAddress;
+    uint64 sourceRollupId;
     address targetAddress;
     uint256 value;
     bytes data;
-    address sourceAddress;
-    uint64 sourceRollupId;
     uint256 revertNextNCalls;
 }
 
