@@ -81,7 +81,7 @@ Each `postAndVerifyBatch` call carries a single batch struct (NOT an array):
 struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries;
     LookupCall[] l1ToL2lookupCalls;
-    uint256 transientExecutionEntryCount;
+    uint256 immediateEntryCount;
     uint256 transientLookupCallCount;
     address[] proofSystems;                              // sorted asc, no duplicates, no zero
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly ascending by rollupId
@@ -196,7 +196,7 @@ consumers gate on `lastVerifiedBlock == block.number`.
 
 ### Transient phase (intra-tx)
 
-During `postAndVerifyBatch`, the leading `batch.transientExecutionEntryCount` entries from the
+During `postAndVerifyBatch`, the leading `batch.immediateEntryCount` entries from the
 batch are copied into the global `_transientExecutions` array. Same for lookup calls (with
 `transientLookupCallCount`). The transient stream is consumed via `_transientExecutionIndex`
 cursor.
@@ -229,7 +229,7 @@ consumers — they just fail their own state-root check if they depended on it.
    the rollup's queues and resets its cursor on every verify — a same-block re-verify
    REPLACES (does not append to) the prior batch's entries for that rollup. Sets the read
    gate for `executeCrossChainCall` / `executeL2TX`.
-5. **Load transient stream** via `_loadTransientExecutions(batch)`: copy `entries[0..transientExecutionEntryCount)`
+5. **Load transient stream** via `_loadTransientExecutions(batch)`: copy `entries[0..immediateEntryCount)`
    into `_transientExecutions` and `l1ToL2lookupCalls[0..transientLookupCallCount)` into
    `_transientLookupCalls`.
 6. **Drain leading immediate entries inline**: while `_transientExecutions[idx].proxyEntryHash == 0`,
