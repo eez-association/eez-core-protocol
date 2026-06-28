@@ -203,7 +203,8 @@ contract EEZL2 is EEZBase {
         returns (bytes memory result)
     {
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-        if (proxyInfo.originalAddress == address(0)) revert UnauthorizedProxy();
+        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
+        address destAddress = proxyInfo.originalAddress;
 
         // Executions can only be consumed in the same block they were loaded
         if (lastLoadBlock != block.number) revert ExecutionNotInCurrentBlock();
@@ -215,7 +216,7 @@ contract EEZL2 is EEZBase {
         }
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            proxyInfo.originalRollupId, proxyInfo.originalAddress, msg.value, callData, sourceAddress, ROLLUP_ID
+            proxyInfo.originalRollupId, destAddress, msg.value, callData, sourceAddress, ROLLUP_ID
         );
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
 
@@ -479,7 +480,7 @@ contract EEZL2 is EEZBase {
                 );
 
                 address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
-                if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
+                if (!authorizedProxies[sourceProxy].isProxy) {
                     _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollupId);
                 }
 
@@ -634,11 +635,12 @@ contract EEZL2 is EEZBase {
     /// @return The pre-computed return data
     function staticCallLookup(address sourceAddress, bytes calldata callData) external view returns (bytes memory) {
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-        if (proxyInfo.originalAddress == address(0)) revert UnauthorizedProxy();
+        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
+        address destAddress = proxyInfo.originalAddress;
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
             proxyInfo.originalRollupId,
-            proxyInfo.originalAddress,
+            destAddress,
             0, // value is always 0 in static context
             callData,
             sourceAddress,

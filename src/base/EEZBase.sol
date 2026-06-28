@@ -148,7 +148,7 @@ abstract contract EEZBase is IEEZ {
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
         proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-        authorizedProxies[proxy] = ProxyInfo(originalAddress, originalRollupId);
+        authorizedProxies[proxy] = ProxyInfo(true, originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
