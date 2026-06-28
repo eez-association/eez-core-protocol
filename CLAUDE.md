@@ -231,10 +231,11 @@ A batch carries a global strictly-increasing `proofSystems[]` and one `proofs[k]
 A single `bytes32 rollingHash` per entry covers every call result and every nesting boundary. Four tagged events update the accumulator (EEZBase):
 
 ```
-CALL_BEGIN   (1)   keccak256(prev, 0x01, callNumber)
-CALL_END     (2)   keccak256(prev, 0x02, callNumber, success, retData)
-NESTED_BEGIN (3)   keccak256(prev, 0x03, nestedNumber)
-NESTED_END   (4)   keccak256(prev, 0x04, nestedNumber)
+CALL_BEGIN     (1)   keccak256(prev, 0x01, callNumber)
+CALL_END       (2)   keccak256(prev, 0x02, callNumber, success, retData)
+NESTED_BEGIN   (3)   keccak256(prev, 0x03, nestedNumber)
+NESTED_END     (4)   keccak256(prev, 0x04, nestedNumber)
+CALL_NOT_FOUND (5)   keccak256(prev, 0x05, crossChainCallHash)   // reentrant no-match (L1); diverges the hash so the entry reverts — replaces a side flag
 ```
 
 One mismatch anywhere — wrong return data, wrong success flag, missing/extra calls, wrong nesting — changes the final hash and is caught with one comparison. End-of-entry checks: rolling hash, flat-call cursor == flat array length, reentrant cursor == reentrant table length, and (L1) the ether-delta invariant. Static lookup sub-calls use a simpler untagged accumulator (`keccak256(prev, success, retData)`) verified against `LookupCall.rollingHash`. See `docs/CORE_PROTOCOL_SPEC.md` §E.

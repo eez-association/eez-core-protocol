@@ -13,7 +13,7 @@ pragma solidity ^0.8.28;
 /// @dev `proofSystemIndexes[]`: strictly-increasing indices into the batch's `proofSystems[]`,
 ///      resolved to PS addresses and handed to the rollup's `checkProofSystemsAndGetVkeys`.
 struct RollupIdWithProofSystems {
-    uint256 rollupId;
+    uint64 rollupId;
     uint64[] proofSystemIndexes;
 }
 
@@ -64,7 +64,7 @@ struct RollupVerification {
 ///      — content-addressing the entry to the proven trajectory, which is what lets the per-rollup
 ///      queues interleave safely.
 struct StateDelta {
-    uint256 rollupId;
+    uint64 rollupId;
     bytes32 currentState;
     bytes32 newState;
     int256 etherDelta;
@@ -79,7 +79,7 @@ struct L2ToL1Call {
     uint256 value;
     bytes data;
     address sourceAddress;
-    uint256 sourceRollupId;
+    uint64 sourceRollupId;
     uint256 revertNextNCalls;
 }
 
@@ -106,7 +106,7 @@ struct L2ToL1Call {
 // TODO we can add isStatic, crosschainCallHahs and expectedRollingHahs in the same hash, drop destinationRollupID
 struct ExpectedL1ToL2Call {
     bytes32 crossChainCallHash;
-    uint256 destinationRollupId;
+    uint64 destinationRollupId;
     /// `_rollingHash` at the instant this call fires — the content-addressed position key.
     bytes32 expectedRollingHash;
     /// Read-only STATICCALL mode (resolved through `staticCallLookup`).
@@ -122,16 +122,16 @@ struct ExpectedL1ToL2Call {
     bytes32 revertedOrStaticRollingHash;
 }
 
-/// @notice A pre-computed TOP-LEVEL execution entry. Always SUCCEEDS at the top level
-///         (`executeCrossChainCall` returns `returnData`); reverting REENTRANT calls are `success == false`
-///         `ExpectedL1ToL2Call`s and a top-level reverting read is a `StaticLookup`.
-/// @dev TODO @claude we currently do not support calling L1→L2 and reverting at the top level.
-/// Maybe we can skip entries that are success == false
+/// @notice A pre-computed TOP-LEVEL execution entry. When `success` is true the top-level call returns
+///         `returnData` (`executeCrossChainCall`); when false the entry is run, verified, then reverted with
+///         `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT
+///         calls are `success == false` `ExpectedL1ToL2Call`s and a top-level reverting read is a `StaticLookup`.
 struct ExecutionEntry {
     StateDelta[] stateDeltas; // true state transition ≥1 enforced on-chain
     bytes32 proxyEntryHash; // inbound proxy-entry call hash; bytes32(0) for L2 txs
-    uint256 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
-    bytes returnData; // pre-computed top-level return value
+    uint64 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
+    bool success; // false ⇒ run + verify, then revert with `returnData` (top-level call fails, state rolled back)
+    bytes returnData; // pre-computed top-level return value (revert payload when !success)
     L2ToL1Call[] l2ToL1Calls; // the entry's TOP-LEVEL calls (reentrant frames carry their own)
     ExpectedL1ToL2Call[] expectedL1ToL2Calls; // unified reentrant (L1→L2) table; see `ExpectedL1ToL2Call`
     bytes32 rollingHash; // expected rolling hash over all calls + nestings
@@ -141,7 +141,7 @@ struct ExecutionEntry {
 /// @dev A candidate MATCHES only when every pin equals the live `rollups[rollupId].stateRoot`
 ///      (full scan — a mismatch skips the candidate, no revert). L1-only.
 struct ExpectedStateRootPerRollup {
-    uint256 rollupId;
+    uint64 rollupId;
     bytes32 stateRoot;
 }
 
@@ -155,7 +155,7 @@ struct ExpectedStateRootPerRollup {
 struct StaticLookup {
     ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH predicate
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
-    uint256 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
+    uint64 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
     bool success; // false ⇒ resolution reverts with `returnData` instead of returning it
     bytes returnData; // pre-computed return value (revert payload when !success)
     L2ToL1Call[] l2ToL1Calls; // read-only sub-calls run via STATICCALL during resolution
@@ -184,8 +184,8 @@ interface IEEZ {
         external
         view
         returns (bytes memory result);
-    function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address proxy);
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId)
+    function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy);
+    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
         external
         view
         returns (address);

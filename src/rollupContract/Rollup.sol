@@ -8,7 +8,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)
 ///         to keep `Rollup.sol` decoupled from the cross-chain execution model.
 interface IEEZRegistry {
-    function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
+    function setStateRoot(uint64 rollupId, bytes32 newStateRoot) external;
 }
 
 /// @title Rollup
@@ -25,7 +25,7 @@ contract Rollup is IRollupContract, Ownable {
     address public immutable ROLLUPS;
 
     /// @notice The rollupId this contract manages. Written once on registration.
-    uint256 public rollupId;
+    uint64 public rollupId;
 
     /// @notice Minimum number of proof systems that must attest per batch (M of N). Owner is
     ///         free to set this to any value, including above the current PS count (which
@@ -155,7 +155,7 @@ contract Rollup is IRollupContract, Ownable {
 
     /// @notice One-shot registration callback fired by the central registry.
     /// @dev `rollupId == 0` is the unset sentinel (registry assigns ids starting at 1).
-    function rollupContractRegistered(uint256 _rollupId) external {
+    function rollupContractRegistered(uint64 _rollupId) external {
         if (msg.sender != ROLLUPS) revert NotEEZRegistry();
         if (rollupId != 0) revert AlreadyRegistered();
         rollupId = _rollupId;

@@ -22,7 +22,7 @@ import {EEZBase} from "../base/EEZBase.sol";
 ///      results of reentrant calls fired FROM this L2 during execution. See `IEEZL2.sol`.
 contract EEZL2 is EEZBase {
     /// @notice The rollup ID this L2 belongs to
-    uint256 public immutable ROLLUP_ID;
+    uint64 public immutable ROLLUP_ID;
 
     /// @notice The system address authorized for admin operations (load/replace execution table).
     /// @dev TRUST ASSUMPTION: node-controlled system address with no private key — never adversarial
@@ -114,7 +114,7 @@ contract EEZL2 is EEZBase {
         uint256 value,
         bytes data,
         address sourceAddress,
-        uint256 sourceRollup
+        uint64 sourceRollup
     );
 
     /// @notice Emitted after each call completes in `_processNCalls`.
@@ -132,7 +132,7 @@ contract EEZL2 is EEZBase {
 
     /// @param _rollupId Non-zero; 0 is reserved as the mainnet sentinel in call hashes.
     /// @param _systemAddress The privileged address allowed to load execution tables
-    constructor(uint256 _rollupId, address _systemAddress) {
+    constructor(uint64 _rollupId, address _systemAddress) {
         if (_rollupId == 0) revert InvalidRollupId();
         ROLLUP_ID = _rollupId;
         SYSTEM_ADDRESS = _systemAddress;
@@ -185,7 +185,7 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice This L2's own network — `createCrossChainProxy` may not proxy a local address.
-    function _getRollupId() internal view override returns (uint256) {
+    function _getRollupId() internal view override returns (uint64) {
         return ROLLUP_ID;
     }
 
@@ -249,7 +249,7 @@ contract EEZL2 is EEZBase {
         uint256 value,
         bytes calldata data,
         address sourceAddress,
-        uint256 sourceRollup,
+        uint64 sourceRollup,
         ExecutionEntry[] calldata entries,
         LookupCall[] calldata _lookupCalls
     )

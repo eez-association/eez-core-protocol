@@ -69,7 +69,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice Emitted when a new CrossChainProxy is deployed and registered
     event CrossChainProxyCreated(
-        address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId
+        address indexed proxy, address indexed originalAddress, uint64 indexed originalRollupId
     );
 
     /// @notice Emitted when a cross-chain call is executed via proxy
@@ -121,7 +121,7 @@ abstract contract EEZBase is IEEZ {
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own
     ///      `ROLLUP_ID`. Enforced in `_createCrossChainProxyInternal`, so it also blocks the
     ///      auto-creation path during execution, not just the external entry point.
-    error SameNetworkProxy(uint256 rollupId);
+    error SameNetworkProxy(uint64 rollupId);
 
     // ──────────────────────────────────────────────
     //  Proxy creation
@@ -129,18 +129,18 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice This manager's own network rollup id — a proxy may NOT be created for it.
     /// @dev L1 (EEZ) returns `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) returns its own `ROLLUP_ID`.
-    function _getRollupId() internal view virtual returns (uint256);
+    function _getRollupId() internal view virtual returns (uint64);
 
     /// @notice Creates a new CrossChainProxy for an address on another rollup
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
     /// @return proxy The deployed proxy address
-    function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address proxy) {
+    function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy) {
         return _createCrossChainProxyInternal(originalAddress, originalRollupId);
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint256 originalRollupId)
+    function _createCrossChainProxyInternal(address originalAddress, uint64 originalRollupId)
         internal
         returns (address proxy)
     {
@@ -148,14 +148,14 @@ abstract contract EEZBase is IEEZ {
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
         proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-        authorizedProxies[proxy] = ProxyInfo(originalAddress, uint64(originalRollupId));
+        authorizedProxies[proxy] = ProxyInfo(originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId)
+    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
         public
         view
         returns (address)
@@ -181,12 +181,12 @@ abstract contract EEZBase is IEEZ {
     ///      plus the source pair appended; reordering would break every on-chain hash check
     ///      and every off-chain tool that pre-computes the hash.
     function computeCrossChainCallHash(
-        uint256 targetRollupId,
+        uint64 targetRollupId,
         address targetAddress,
         uint256 value,
         bytes memory data,
         address sourceAddress,
-        uint256 sourceRollupId
+        uint64 sourceRollupId
     )
         public
         pure
