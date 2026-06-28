@@ -23,14 +23,14 @@ struct RollupIdWithProofSystems {
 ///      from verifying a rollup twice. Each rollup's `proofSystemIndexes[]` is strictly increasing in
 ///      `[0, proofSystems.length)` and must meet that rollup's threshold (checked by its manager).
 /// @dev `blobIndices` picks the tx-level EIP-4844 blobs; `callData` is batch-scoped.
-///      `transientExecutionEntryCount` / `transientStaticLookupCount` are unproven dispatch params
-///      (tune the transient/persistent split without re-proving). `blockNumber` binds the whole batch
+///      `immediateEntryCount` / `immediateStaticLookupCount` are unproven dispatch params
+///      (tune the immediate/persistent split without re-proving). `blockNumber` binds the whole batch
 ///      to one L1 block (0 = none, type(uint64).max = latest).
 struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries; // execution entries
     StaticLookup[] staticLookups; // top-level static-lookup
-    uint256 transientExecutionEntryCount; // leading entries loaded transiently
-    uint256 transientStaticLookupCount; // leading static lookups loaded transiently
+    uint256 immediateEntryCount; // leading prefix executed this tx: immediate L2Txs (run directly) + meta-hook (AA) entries (not queued)
+    uint256 immediateStaticLookupCount; // leading static lookups resolvable this tx via the meta hook (not queued)
     address[] proofSystems; // strictly increasing, no address(0)
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly increasing by rollupId
     uint256[] blobIndices; // tx-level EIP-4844 blobs this batch consumes
@@ -50,7 +50,7 @@ struct RollupConfig {
 /// @notice Per-rollup verification record (`verificationByRollup[rollupId]`): the batch's entries
 ///         awaiting consumption, a cursor tracking how far the queue has been consumed, and the block
 ///         the rollup was last verified in. A verified batch leaves its entries here to be pulled later
-///         in the SAME block by proxy calls / `executeL2Txs`, rather than executing them inline.
+///         in the SAME block by proxy calls / `executeL2Txs`, rather than executing them immediately.
 /// @dev `lastVerifiedBlock`:
 ///      (a) reset marker — every batch touching this rollup first wipes its queues + cursor, so a
 ///          same-block re-verify REPLACES the prior batch instead of appending to it;
