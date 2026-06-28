@@ -215,7 +215,7 @@ scan continues; no dedicated error). Replaces the old `expectedQueueIndices` cur
 with three concrete wins:
 
 - **Split-independent** — roots don't depend on the transient/persistent split
-  (`transientExecutionEntryCount` stays an unproven dispatch parameter, as documented).
+  (`immediateEntryCount` stays an unproven dispatch parameter, as documented).
 - **Transient-phase capable** — roots advance entry-by-entry during the batch; the old
   cursor pins were blind there (all per-rollup cursors are 0).
 - **Re-verify robust** — a same-block re-verify resets cursors but the root trajectory
