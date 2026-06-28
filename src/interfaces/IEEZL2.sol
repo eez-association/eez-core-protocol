@@ -30,13 +30,13 @@ pragma solidity ^0.8.28;
 /// @dev revertNextNCalls > 0 opens an isolated revert context spanning the next revertNextNCalls calls (including this one)
 /// @dev isStatic dispatches the call via STATICCALL — read-only, carries no value, reverts on any state write
 struct CrossChainCall {
+    uint16 revertNextNCalls;
     bool isStatic;
     address sourceAddress;
     uint64 sourceRollupId;
     address targetAddress;
     uint256 value;
     bytes data;
-    uint256 revertNextNCalls;
 }
 
 /// @notice Pre-computed result for a successful reentrant outgoing cross-chain call triggered during execution

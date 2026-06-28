@@ -647,7 +647,7 @@ contract EEZ is EEZBase {
     ///      safety one.
     function _markVerifiedBlockAndDeletePreviousEntries(uint64 rid) internal {
         RollupVerification storage rec = verificationByRollup[rid];
-        rec.lastVerifiedBlock = block.number;
+        rec.lastVerifiedBlock = uint64(block.number);
         // Wipe on every verify: a same-block verify replaces the queue.
         delete rec.executionQueue;
         delete rec.staticLookupQueue;
@@ -706,7 +706,7 @@ contract EEZ is EEZBase {
         uint64 destRid = proxyInfo.originalRollupId;
 
         // Entries can only be consumed in the block they were posted
-        if (verificationByRollup[destRid].lastVerifiedBlock != block.number) {
+        if (verificationByRollup[destRid].lastVerifiedBlock != uint64(block.number)) {
             revert ExecutionNotInCurrentBlock(destRid);
         }
 
@@ -736,7 +736,7 @@ contract EEZ is EEZBase {
     /// @dev The next entry must have `proxyEntryHash == bytes32(0)`.
     ///      Cannot run while reentrantly inside another cross-chain execution.
     function executeL2Txs(uint64 rollupId) external returns (bytes memory result) {
-        if (verificationByRollup[rollupId].lastVerifiedBlock != block.number) {
+        if (verificationByRollup[rollupId].lastVerifiedBlock != uint64(block.number)) {
             revert ExecutionNotInCurrentBlock(rollupId);
         }
 
@@ -873,7 +873,7 @@ contract EEZ is EEZBase {
         } else {
             RollupVerification storage rec = verificationByRollup[destRid];
             idx = _findMatchingEntry(rec.executionQueue, rec.executionQueueIndex, crossChainCallHash, destRid);
-            rec.executionQueueIndex = idx + 1;
+            rec.executionQueueIndex = uint64(idx + 1);
             entry = rec.executionQueue[idx];
             _currentEntryRollupId = destRid;
         }
@@ -1291,7 +1291,7 @@ contract EEZ is EEZBase {
     function setStateRoot(uint64 rollupId, bytes32 newStateRoot) external {
         if (msg.sender != rollups[rollupId].rollupContract) revert NotRollupContract();
         if (_insideExecution()) revert SetStateRootNotAllowedDuringExecution();
-        if (verificationByRollup[rollupId].lastVerifiedBlock == block.number) {
+        if (verificationByRollup[rollupId].lastVerifiedBlock == uint64(block.number)) {
             revert RollupBatchActiveThisBlock(rollupId);
         }
         rollups[rollupId].stateRoot = newStateRoot;

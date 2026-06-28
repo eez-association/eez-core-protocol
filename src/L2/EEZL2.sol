@@ -511,7 +511,7 @@ contract EEZL2 is EEZBase {
                     (_rollingHash, _lastOutgoingCallConsumed, _currentIncomingCall) = _decodeContextResult(revertData);
                 }
 
-                calls[savedCallNumber].revertNextNCalls = revertNextNCalls;
+                calls[savedCallNumber].revertNextNCalls = uint16(revertNextNCalls);
                 emit CallsReverted(_currentEntryIndex, savedCallNumber, revertNextNCalls);
                 processed += revertNextNCalls;
             }

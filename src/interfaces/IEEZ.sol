@@ -53,10 +53,11 @@ struct RollupConfig {
 ///      `lastVerifiedBlock(rid) == block.number`, so a stale queue is never read; (c) lockout for
 ///      `setStateRoot` (reverts `RollupBatchActiveThisBlock` when == block.number).
 struct RollupVerification {
-    uint256 lastVerifiedBlock;
+    // Packed into one slot.
+    uint64 lastVerifiedBlock;
+    uint64 executionQueueIndex;
     ExecutionEntry[] executionQueue;
     StaticLookup[] staticLookupQueue;
-    uint256 executionQueueIndex;
 }
 
 /// @notice A rollup's state transition for one entry.
@@ -74,13 +75,13 @@ struct StateDelta {
 /// @dev `isStatic` dispatches via STATICCALL (read-only, no value). `revertNextNCalls > 0` force-reverts
 ///      the state of the next N calls (this one included) — see `revertNextNCalls` handling in `EEZ`.
 struct L2ToL1Call {
+    uint16 revertNextNCalls;
     bool isStatic;
     address sourceAddress;
     uint64 sourceRollupId;
     address targetAddress;
     uint256 value;
     bytes data;
-    uint256 revertNextNCalls;
 }
 
 /// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) fired during execution.
