@@ -34,9 +34,9 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///
 ///      The batch's leading `transientExecutionEntryCount` entries are loaded into
 ///      `_transientExecutions` (semantically transient, cleared at end of every batch). The
-///      leading run of those entries with `proxyEntryHash == 0` runs inline as "immediate"
-///      entries (state deltas + flat calls + rolling hash, one `_executeEntry` cycle per
-///      entry). Then `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`
+///      leading run of L2Tx entries (`proxyEntryHash == 0`) runs inline immediately (state deltas +
+///      flat calls + rolling hash, one `_executeEntry` cycle per entry). Then
+///      `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`
 ///      is invoked (when msg.sender has code) so the caller can drive the remaining transient
 ///      entries via cross-chain proxy calls within the same transaction.
 ///
@@ -130,13 +130,13 @@ contract EEZ is EEZBase {
     );
 
     /// @notice Emitted when a precomputed L2 transaction is executed
-    event L2TXExecuted(uint64 indexed rollupId, uint256 indexed executionQueueIndex);
+    event L2TXExecuted(uint64 indexed rollupId);
 
     /// @notice Emitted when a batch is posted, carrying the number of rollups verified
     event BatchPosted(uint256 indexed rollupCount);
 
     /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
-    ///         immediate-drain step. The entry's state changes are rolled back; the cursor advances
+    ///         inline L2Tx run. The entry's state changes are rolled back; the cursor advances
     ///         and the loop continues with the next L2 tx. `revertData` carries the inner
     ///         revert payload (custom error or message) for off-chain debugging.
     event L2TxSkipped(uint256 indexed transientIdx, bytes revertData);
@@ -206,7 +206,7 @@ contract EEZ is EEZBase {
     error TransientStaticLookupCountExceedsStaticLookups();
 
     /// @notice Error when transient lookup calls come without transient entries (unreachable —
-    ///         no entries means no immediate drain and no meta hook, so nothing can consume them)
+    ///         no entries means no inline L2Tx run and no meta hook, so nothing can consume them)
     error TransientStaticLookupsWithoutTransientEntries();
 
     /// @notice Error when batch validation fails for malformed inputs
@@ -295,10 +295,11 @@ contract EEZ is EEZBase {
     /// @notice Posts a batch attested by ≥ threshold proof systems per rollup, then runs / queues
     ///         its execution entries.
     /// @dev Steps: (1) validate structure, (2) fetch per-rollup vkeys, (3) verify all proofs
-    ///      atomically, (4) mark rollups verified-this-block, (5) load the transient prefix,
-    ///      (6) drain immediate (`proxyEntryHash == 0`) entries, (7) fire the meta hook, (8) clear
-    ///      transient tables, (9) publish the remainder to per-rollup queues. See the inline
-    ///      comments for the per-step rationale.
+    ///      atomically, (4) mark rollups verified-this-block, (5) load the transient executions,
+    ///      (6) immediately run the leading L2Tx (`proxyEntryHash == 0`) entries, (7) fire the meta
+    ///      hook — trigger `msg.sender`'s hook (if it has code) to consume the remaining transient
+    ///      entries, presumably via account abstraction, (8) clear transient tables, (9) publish the
+    ///      remainder executions to per-rollup queues. See the inline comments for the per-step rationale.
     /// @param batch entries, static lookups, per-rollup PS subsets, proofs, transient prefix bounds,
     ///        and the L1 `blockNumber` the batch binds to.
     function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external {
@@ -370,8 +371,8 @@ contract EEZ is EEZBase {
     //  postAndVerifyBatch internals
     // ──────────────────────────────────────────────
 
-    /// @notice Self-call wrapper that runs `_executeEntry` for one immediate entry
-    ///         in an isolated frame. Used by `postAndVerifyBatch` step 5 to make immediate-entry
+    /// @notice Self-call wrapper that runs `_executeEntry` for one L2Tx entry
+    ///         in an isolated frame. Used by `postAndVerifyBatch` step 6 to make the inline L2Tx
     ///         execution revertible: if this frame reverts, the surrounding `try/catch`
     ///         in postAndVerifyBatch catches and skips to the next entry instead of aborting the
     ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner
@@ -384,7 +385,7 @@ contract EEZ is EEZBase {
         if (msg.sender != address(this)) revert NotSelf();
         _currentEntryIndex = transientIdx;
         _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
-        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // immediate entries receive no inbound value
+        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // L2Tx entries receive no inbound value
         _executeEntry();
     }
 
@@ -745,12 +746,7 @@ contract EEZ is EEZBase {
         // Non-payable and non mid-entry — a dirty _entryEtherDelta here is a bug.
         if (_entryEtherDelta != 0) revert ResidualEntryEtherIn();
 
-        // During the transient phase consumption comes from the transient table — emit that cursor.
-        uint256 idx = _transientExecutions.length != 0
-            ? _transientExecutionIndex
-            : verificationByRollup[rollupId].executionQueueIndex;
-
-        emit L2TXExecuted(rollupId, idx);
+        emit L2TXExecuted(rollupId);
         return _consumeAndExecuteEntry(rollupId, bytes32(0));
     }
 
@@ -924,7 +920,7 @@ contract EEZ is EEZBase {
     ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
     ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
     ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
-    ///      immediate-L2TX path that doesn't pass through here.
+    ///      inline L2Tx path that doesn't pass through here.
     function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint64 destRid)
         internal
         view
