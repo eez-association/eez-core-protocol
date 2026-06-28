@@ -32,15 +32,16 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///      attested by ≥ threshold proof systems per rollup. Atomic verification: if any single
 ///      proof fails, the whole batch reverts.
 ///
-///      The batch's leading `transientExecutionEntryCount` entries are loaded into
-///      `_transientExecutions` (semantically transient, cleared at end of every batch). The
-///      leading run of L2Tx entries (`proxyEntryHash == 0`) runs inline immediately (state deltas +
-///      flat calls + rolling hash, one `_executeEntry` cycle per entry). Then
-///      `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`
-///      is invoked (when msg.sender has code) so the caller can drive the remaining transient
-///      entries via cross-chain proxy calls within the same transaction.
+///      The batch's leading `immediateEntryCount` entries are the IMMEDIATE prefix — entries executed
+///      within this transaction rather than queued. It has two parts: (a) the leading run of L2Tx
+///      entries (`proxyEntryHash == 0`) runs immediately straight from calldata (state deltas + flat calls +
+///      rolling hash, one `_executeEntry` cycle per entry; never SSTOREd); (b) the rest are loaded into
+///      `_transientExecutions` (semantically transient, cleared at end of every batch) and
+///      `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` is invoked (when
+///      msg.sender has code) so the caller — e.g. an account-abstraction entrypoint — can drive them
+///      via cross-chain proxy calls within the same transaction.
 ///
-///      The batch remainder (entries past `transientExecutionEntryCount`) is published into
+///      The batch remainder (entries past `immediateEntryCount`) is published into
 ///      per-rollup queues keyed by `destinationRollupId` UNCONDITIONALLY — even if the meta
 ///      hook left transient entries unconsumed. Soundness backstop: every entry's
 ///      `StateDelta.currentState` is checked at consumption time, so any persistent entry
@@ -76,13 +77,30 @@ contract EEZ is EEZBase {
 
     // ── Transient-BACKED storage (semantically transient, but plain storage) ──
     //
-    // The batch's leading prefix lives here (not the persistent queues) to save storage gas during
-    // intra-tx meta-hook consumption. Plain storage, since Solidity 0.8.34 lacks `transient` for
-    // nested-dynamic reference types; both are `delete`d at the end of every postAndVerifyBatch (SSTORE
-    // refunds). `_transientExecutions.length != 0` also flags the re-entry window (no `_inPostBatch`).
+    // The meta-hook remainder of the batch's leading prefix lives here (not the persistent queues) to
+    // save storage gas during intra-tx meta-hook consumption. Plain storage, since Solidity 0.8.34 lacks
+    // `transient` for nested-dynamic reference types; all are `delete`d at the end of every
+    // postAndVerifyBatch (SSTORE refunds). `_transientExecutions.length != 0` flags the meta-hook re-entry
+    // window (see the `postAndVerifyBatch` guard); the leading L2Tx run executes entries straight from
+    // calldata, so it stays empty until (and unless) the meta-hook remainder is loaded — the immediate L2Tx run's
+    // own re-entry window is covered by `_insideExecution()` instead.
     // TODO: promote to real `transient` once Solidity supports it for these types.
     ExecutionEntry[] public _transientExecutions;
     StaticLookup[] public _transientStaticLookups;
+
+    /// @notice The reentrant (L1→L2) table of the ONE immediate L2Tx entry currently executing —
+    ///         the FIRST source `getExpectedL1toL2Calls()` consults, so it holds only the in-flight
+    ///         entry's table (one at a time, not all the L2Txs at once) and is empty at every other time.
+    /// @dev The immediate L2Tx run executes its entries straight from calldata and never SSTOREs them
+    ///      whole (the point of the immediate L2Tx path); their other fields stay in memory. But a proxy re-entry
+    ///      crosses an external boundary and can't see `_executeEntry`'s memory, so this one array is
+    ///      parked in storage for the duration of the entry. Lifecycle (in `_attemptExecuteImmediateL2Txs`): pushed
+    ///      from the calldata entry before `_executeEntry`, `delete`d right after it — so it never carries
+    ///      more than the current entry's table. Commonly empty (most L2Txs make no reentrant call). A
+    ///      skipped (reverting) entry's pushes roll back with its self-call, so it is never observed
+    ///      non-empty outside the immediate L2Tx run. The meta-hook and persistent phases route their reentrant
+    ///      tables to `_transientExecutions` / the per-rollup queue instead, never here.
+    ExpectedL1ToL2Call[] internal _expectedL1toL2CallsForImmediateL2Txs;
 
     /// @notice The rollups an entry may drive proxies for (its `stateDeltas` rollupIds): pushed at
     ///         execution start, `delete`d at the end. Doubles as `_insideExecution()` (non-empty ⇔
@@ -98,8 +116,11 @@ contract EEZ is EEZBase {
     ///         `_transientExecutions.length != 0`).
     uint256 transient _transientExecutionIndex;
 
-    /// @notice Rollup whose persistent queue supplies the entry being processed (0 = transient phase);
-    ///         disambiguates the queue in `_getCurrentEntry()`.
+    /// @notice Rollup whose persistent queue supplies the entry currently in `_executeEntry`, naming the
+    ///         queue `getExpectedL1toL2Calls()` reads its reentrant table from. Set ONLY by
+    ///         `_consumeAndExecuteEntry`'s persistent branch (to `destRid`) and cleared back to 0 there
+    ///         once the entry finishes; 0 everywhere else (immediate L2Tx run and meta-hook phase, which route
+    ///         their reentrant tables elsewhere).
     uint64 transient _currentEntryRollupId;
 
     /// @notice Forward-scan position into the entry's `expectedL1ToL2Calls`. MUST be transient —
@@ -136,7 +157,7 @@ contract EEZ is EEZBase {
     event BatchPosted(uint256 indexed rollupCount);
 
     /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
-    ///         inline L2Tx run. The entry's state changes are rolled back; the cursor advances
+    ///         immediate L2Tx run. The entry's state changes are rolled back; the cursor advances
     ///         and the loop continues with the next L2 tx. `revertData` carries the inner
     ///         revert payload (custom error or message) for off-chain debugging.
     event L2TxSkipped(uint256 indexed transientIdx, bytes revertData);
@@ -199,15 +220,15 @@ contract EEZ is EEZBase {
     ///         tries to re-escape mid-flow).
     error SetStateRootNotAllowedDuringExecution();
 
-    /// @notice Error when `transientExecutionEntryCount` exceeds the entry count
-    error TransientCountExceedsEntries();
+    /// @notice Error when `immediateEntryCount` exceeds the entry count
+    error ImmediateCountExceedsEntries();
 
-    /// @notice Error when `transientStaticLookupCount` exceeds the lookup call count
-    error TransientStaticLookupCountExceedsStaticLookups();
+    /// @notice Error when `immediateStaticLookupCount` exceeds the lookup call count
+    error ImmediateStaticLookupCountExceedsStaticLookups();
 
-    /// @notice Error when transient lookup calls come without transient entries (unreachable —
-    ///         no entries means no inline L2Tx run and no meta hook, so nothing can consume them)
-    error TransientStaticLookupsWithoutTransientEntries();
+    /// @notice Error when immediate static lookups come without any immediate entries (unreachable —
+    ///         no entries means no immediate L2Tx run and no meta hook, so nothing can consume them)
+    error ImmediateStaticLookupsWithoutImmediateEntries();
 
     /// @notice Error when batch validation fails for malformed inputs
     error InvalidProofSystemConfig();
@@ -295,18 +316,23 @@ contract EEZ is EEZBase {
     /// @notice Posts a batch attested by ≥ threshold proof systems per rollup, then runs / queues
     ///         its execution entries.
     /// @dev Steps: (1) validate structure, (2) fetch per-rollup vkeys, (3) verify all proofs
-    ///      atomically, (4) mark rollups verified-this-block, (5) load the transient executions,
-    ///      (6) immediately run the leading L2Tx (`proxyEntryHash == 0`) entries, (7) fire the meta
-    ///      hook — trigger `msg.sender`'s hook (if it has code) to consume the remaining transient
-    ///      entries, presumably via account abstraction, (8) clear transient tables, (9) publish the
-    ///      remainder executions to per-rollup queues. See the inline comments for the per-step rationale.
+    ///      atomically, (4) mark rollups verified-this-block, (5+6) run the leading L2Tx
+    ///      (`proxyEntryHash == 0`) entries immediately, straight from calldata, (7) fire the meta hook —
+    ///      load the remaining transient-prefix entries and trigger `msg.sender`'s hook (if it has code)
+    ///      to consume them, presumably via account abstraction, (8) clear transient tables, (9) publish
+    ///      the remainder executions to per-rollup queues. See the inline comments for the per-step rationale.
     /// @param batch entries, static lookups, per-rollup PS subsets, proofs, transient prefix bounds,
     ///        and the L1 `blockNumber` the batch binds to.
     function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external {
-        // Reentrancy guard: `_transientExecutions.length != 0` holds from load through cleanup — the
-        // whole reentry window — so a nested call (e.g. a disjoint-rollup call from the meta hook)
-        // can't corrupt the shared transient tables. (`_insideExecution()` would miss this path.)
-        if (_transientExecutions.length != 0) revert PostBatchReentry();
+        // Reentrancy guard: block a nested `postAndVerifyBatch` (e.g. from the meta hook, or from an
+        // immediate L2Tx's proxy target) so it can't corrupt the shared transient tables. The two flags
+        // cover every window in which a STATE-MUTATING external call is in flight: `_insideExecution()`
+        // during the immediate L2Tx run AND any executing entry, `_transientExecutions.length != 0` during
+        // the meta hook. The remaining external calls before the immediate L2Tx run
+        // (`checkProofSystemsAndGetVkeys`, `getCustomData`, `verify`) are all `view`/STATICCALL, so a
+        // reentrant batch (which SSTOREs immediately) can't survive there regardless — DO NOT add a
+        // state-mutating external call before the immediate L2Tx run without re-adding a whole-span flag.
+        if (_insideExecution() || _transientExecutions.length != 0) revert PostBatchReentry();
 
         // 1. Structural validation (sorting, registration, membership, bounds). No external calls.
         _validateBatchStructure(batch);
@@ -326,43 +352,51 @@ contract EEZ is EEZBase {
             _markVerifiedBlockAndDeletePreviousEntries(batch.rollupIdsWithProofSystems[r].rollupId);
         }
 
-        // 5. Load the transient executions
-        _loadTransientExecutions(batch);
-
-        // 6. Drain the L2 txs entries. Each runs in a `try/catch` self-call so a revert rolls
+        // 5+6. Drain the LEADING run of L2Tx entries (`proxyEntryHash == 0`) straight from the batch
+        //    calldata — no full-entry SSTORE; only each entry's reentrant table is parked transiently
+        //    (see `_attemptExecuteImmediateL2Txs`). Each runs in a `try/catch` self-call so a revert rolls
         //    back only that entry and the loop continues, emitting `L2TxSkipped`. If a later entry
         //    depended on a skipped one, it will fail its own `StateRootMismatch` check at consumption
-        //    (its expected pre-state no longer holds).
-        while (
-            _transientExecutionIndex < _transientExecutions.length
-                && _transientExecutions[_transientExecutionIndex].proxyEntryHash == bytes32(0)
-        ) {
-            uint256 idx = _transientExecutionIndex;
-            try this.attemptExecuteL2Txs(idx) {}
+        //    (its expected pre-state no longer holds). Stop at the first non-L2Tx entry.
+        uint256 immediateEntryCount = batch.immediateEntryCount;
+        uint256 i = 0;
+        for (; i < immediateEntryCount; i++) {
+            // Check if next entry is a l2Tx
+            if (batch.entries[i].proxyEntryHash != bytes32(0)) break;
+
+            // Attempt to execute L2txs (the loop index `i` still labels the L2TxSkipped event)
+            try this._attemptExecuteImmediateL2Txs(batch.entries[i]) {}
             catch (bytes memory revertData) {
-                emit L2TxSkipped(idx, revertData);
+                emit L2TxSkipped(i, revertData);
             }
-            // advance OUTSIDE the try frame so the loop survives a failed entry
-            _transientExecutionIndex = idx + 1;
         }
 
-        // 7. Meta hook — caller drives the rest of the transient entries via proxy calls.
-        if (_transientExecutionIndex < _transientExecutions.length && msg.sender.code.length > 0) {
+        // 7. Meta hook — if transient-prefix entries remain past the leading L2Tx run and the caller has
+        //    code, load the remainder (entries[i..immediateEntryCount] plus the static-lookup
+        //    pool) into the transient tables and let the caller drive them via proxy calls.
+        if (i < immediateEntryCount && msg.sender.code.length > 0) {
+            for (uint256 j = i; j < immediateEntryCount; j++) {
+                _transientExecutions.push(batch.entries[j]);
+            }
+            for (uint256 j = 0; j < batch.immediateStaticLookupCount; j++) {
+                _transientStaticLookups.push(batch.staticLookups[j]);
+            }
             IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions();
         }
 
-        // 8. Clear transient tables before saving the remainder execution entries to storage. Unconsumed
-        //    leftovers are dropped.
-        delete _transientExecutions;
-        delete _transientStaticLookups;
-        _transientExecutionIndex = 0;
-
-        // 9. Save the remaining executions to their per-rollup queues, unconditionally. Each entry
+        // 8. Save the remaining executions to their per-rollup queues, unconditionally. Each entry
         //    records its expected pre-state in `StateDelta.currentState`, which is re-checked when the
         //    entry is consumed. So even if an entry is queued whose preconditions no longer hold (e.g.
         //    its dependency was a transient leftover that got dropped), it simply reverts with
         //    `StateRootMismatch` at consumption instead of executing incorrectly.
         _saveRemainderExecutions(batch);
+
+        // 9. Clear the transient tables. Emptying `_transientExecutions` also closes the re-entry window
+        //    (the guard keys off its length). Unconsumed transient leftovers are dropped (they were never
+        //    persisted — the remainder saved above is a separate set of entries).
+        delete _transientExecutions;
+        delete _transientStaticLookups;
+        _transientExecutionIndex = 0;
 
         emit BatchPosted(batch.rollupIdsWithProofSystems.length);
     }
@@ -371,22 +405,32 @@ contract EEZ is EEZBase {
     //  postAndVerifyBatch internals
     // ──────────────────────────────────────────────
 
-    /// @notice Self-call wrapper that runs `_executeEntry` for one L2Tx entry
-    ///         in an isolated frame. Used by `postAndVerifyBatch` step 6 to make the inline L2Tx
-    ///         execution revertible: if this frame reverts, the surrounding `try/catch`
-    ///         in postAndVerifyBatch catches and skips to the next entry instead of aborting the
-    ///         whole batch. Unlike `executeInContextAndRevert`, this propagates the inner
-    ///         result — succeeds when `_executeEntry` succeeds, reverts when it reverts.
-    /// @dev Sets `_currentEntryIndex` / `_currentEntryRollupId` here so transient state for
-    ///      the entry being processed is set within the same frame as `_executeEntry`.
-    ///      On revert those writes roll back too, which is fine — the next iteration sets
-    ///      them fresh. The cursor advance in postAndVerifyBatch happens OUTSIDE this frame.
-    function attemptExecuteL2Txs(uint256 transientIdx) public {
+    /// @notice Self-call wrapper that runs ONE leading immediate L2Tx entry, straight from the batch
+    ///         calldata, in an isolated frame. Used by `postAndVerifyBatch` step 5+6 to make the immediate
+    ///         L2Tx execution revertible: if this frame reverts, the surrounding `try/catch` in
+    ///         postAndVerifyBatch catches and skips to the next entry instead of aborting the whole batch.
+    ///         Unlike `executeInContextAndRevert`, this propagates the inner result — succeeds when
+    ///         `_executeEntry` succeeds, reverts when it reverts.
+    /// @dev The full entry is NEVER SSTOREd. Only its reentrant table is parked in
+    ///      `_expectedL1toL2CallsForImmediateL2Txs` (commonly empty) so a proxy re-entry during this entry can
+    ///      resolve against it via `getExpectedL1toL2Calls()`; it is cleared on success and rolls back
+    ///      with the frame on a skip. Neither `_currentEntryIndex` nor `_currentEntryRollupId` is set
+    ///      here: the immediate L2Tx run precedes any `_consumeAndExecuteEntry` (which leaves both 0 on exit), so
+    ///      both are already 0 — the immediate L2Tx reentrant table comes from
+    ///      `_expectedL1toL2CallsForImmediateL2Txs`, not an index into a queue. Consequence: this entry's
+    ///      events (`EntryExecuted` / `CallResult`) log `entryIndex == 0`.
+    function _attemptExecuteImmediateL2Txs(ExecutionEntry calldata entry) public {
         if (msg.sender != address(this)) revert NotSelf();
-        _currentEntryIndex = transientIdx;
-        _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
         if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // L2Tx entries receive no inbound value
-        _executeEntry();
+
+        // Park the reentrant table while `_transientExecutions` stays empty (the signal that the immediate L2Tx run is active).
+        for (uint256 k = 0; k < entry.expectedL1ToL2Calls.length; k++) {
+            _expectedL1toL2CallsForImmediateL2Txs.push(entry.expectedL1ToL2Calls[k]);
+        }
+
+        _executeEntry(entry);
+
+        delete _expectedL1toL2CallsForImmediateL2Txs;
     }
 
     /// @notice Structural validation of the batch — no external calls, no vkey reads.
@@ -453,13 +497,13 @@ contract EEZ is EEZBase {
             // Route only into a proven rollup's queue — else `_saveRemainderExecutions` could park the
             // entry in a non-participating queue. (Mirrors the lookup `destinationRollupId ∈ pins` check.)
             uint64 destRid = entry.destinationRollupId;
-            if (!_contains(verifiedRollups, destRid)) revert EntryDestinationNotInStateDeltas(destRid);
+            if (!_containsRollupInList(verifiedRollups, destRid)) revert EntryDestinationNotInStateDeltas(destRid);
 
             // Every call SOURCE proven — top-level calls + each reentrant frame's sub-calls. Flat
             // double-loop: reverted frames reuse the host table, so there's no deeper nesting to recurse.
             L2ToL1Call[] calldata topCalls = entry.l2ToL1Calls;
             for (uint256 j = 0; j < topCalls.length; j++) {
-                if (!_contains(verifiedRollups, topCalls[j].sourceRollupId)) {
+                if (!_containsRollupInList(verifiedRollups, topCalls[j].sourceRollupId)) {
                     revert CallSourceNotVerified(topCalls[j].sourceRollupId);
                 }
             }
@@ -467,7 +511,7 @@ contract EEZ is EEZBase {
             for (uint256 j = 0; j < reentrant.length; j++) {
                 L2ToL1Call[] calldata subCalls = reentrant[j].l2ToL1Calls;
                 for (uint256 k = 0; k < subCalls.length; k++) {
-                    if (!_contains(verifiedRollups, subCalls[k].sourceRollupId)) {
+                    if (!_containsRollupInList(verifiedRollups, subCalls[k].sourceRollupId)) {
                         revert CallSourceNotVerified(subCalls[k].sourceRollupId);
                     }
                 }
@@ -489,12 +533,12 @@ contract EEZ is EEZBase {
                 verifiedRollups[j] = prid;
                 prevPinRid = prid;
             }
-            if (!_contains(verifiedRollups, staticLookup.destinationRollupId)) {
+            if (!_containsRollupInList(verifiedRollups, staticLookup.destinationRollupId)) {
                 revert LookupDestinationNotPinned(staticLookup.destinationRollupId);
             }
             L2ToL1Call[] calldata lcCalls = staticLookup.l2ToL1Calls;
             for (uint256 j = 0; j < lcCalls.length; j++) {
-                if (!_contains(verifiedRollups, lcCalls[j].sourceRollupId)) {
+                if (!_containsRollupInList(verifiedRollups, lcCalls[j].sourceRollupId)) {
                     revert CallSourceNotVerified(lcCalls[j].sourceRollupId);
                 }
             }
@@ -502,12 +546,12 @@ contract EEZ is EEZBase {
 
         // Transient prefix bounds. Reject the dead-weight shape (lookups without entries) — the
         // transient lookup pool is only reachable while transient entries are mid-flight.
-        if (batch.transientExecutionEntryCount > batch.entries.length) revert TransientCountExceedsEntries();
-        if (batch.transientStaticLookupCount > batch.staticLookups.length) {
-            revert TransientStaticLookupCountExceedsStaticLookups();
+        if (batch.immediateEntryCount > batch.entries.length) revert ImmediateCountExceedsEntries();
+        if (batch.immediateStaticLookupCount > batch.staticLookups.length) {
+            revert ImmediateStaticLookupCountExceedsStaticLookups();
         }
-        if (batch.transientExecutionEntryCount == 0 && batch.transientStaticLookupCount != 0) {
-            revert TransientStaticLookupsWithoutTransientEntries();
+        if (batch.immediateEntryCount == 0 && batch.immediateStaticLookupCount != 0) {
+            revert ImmediateStaticLookupsWithoutImmediateEntries();
         }
     }
 
@@ -654,26 +698,15 @@ contract EEZ is EEZBase {
         rec.executionQueueIndex = 0;
     }
 
-    /// @notice Builds the transient stream from the batch's leading prefix
-    /// @dev The bounds are validated in `_validateBatchStructure` so we don't re-check here.
-    function _loadTransientExecutions(ProofSystemBatchPerVerificationEntries calldata batch) internal {
-        for (uint256 i = 0; i < batch.transientExecutionEntryCount; i++) {
-            _transientExecutions.push(batch.entries[i]);
-        }
-        for (uint256 i = 0; i < batch.transientStaticLookupCount; i++) {
-            _transientStaticLookups.push(batch.staticLookups[i]);
-        }
-    }
-
-    /// @notice Publishes the batch remainder (entries past `transientExecutionEntryCount`)
+    /// @notice Publishes the batch remainder (entries past `immediateEntryCount`)
     ///         into per-rollup queues keyed by `destinationRollupId`
     function _saveRemainderExecutions(ProofSystemBatchPerVerificationEntries calldata batch) internal {
-        for (uint256 i = batch.transientExecutionEntryCount; i < batch.entries.length; i++) {
+        for (uint256 i = batch.immediateEntryCount; i < batch.entries.length; i++) {
             uint64 destRid = batch.entries[i].destinationRollupId;
             verificationByRollup[destRid].executionQueue.push(batch.entries[i]);
         }
 
-        for (uint256 i = batch.transientStaticLookupCount; i < batch.staticLookups.length; i++) {
+        for (uint256 i = batch.immediateStaticLookupCount; i < batch.staticLookups.length; i++) {
             uint64 destRid = batch.staticLookups[i].destinationRollupId;
             // A static lookup is queued under its own `destinationRollupId` — coherent by
             // construction: the `staticCallLookup` scan targets the proxy's `originalRollupId`, which
@@ -699,7 +732,7 @@ contract EEZ is EEZBase {
         // Get EEZ proxy info from msg.sender
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
 
-         // Check msg.sender is EEZ proxy
+        // Check msg.sender is EEZ proxy
         if (!proxyInfo.isProxy) revert UnauthorizedProxy();
 
         address destAddress = proxyInfo.originalAddress;
@@ -754,17 +787,26 @@ contract EEZ is EEZBase {
     //  Internal execution
     // ──────────────────────────────────────────────
 
-    /// @notice Resolves the entry currently being processed.
-    /// @dev While the transient table is non-empty, `_currentEntryIndex` indexes into it.
-    ///      Otherwise we route into `verificationByRollup[_currentEntryRollupId].executionQueue` —
-    ///      the rollup whose queue supplied the entry being executed (set by
-    ///      `_consumeAndExecuteEntry` before entering the inner flow).
-    function _getCurrentEntry() internal view returns (ExecutionEntry storage entry) {
-        if (_transientExecutions.length != 0) {
-            entry = _transientExecutions[_currentEntryIndex];
-        } else {
-            entry = verificationByRollup[_currentEntryRollupId].executionQueue[_currentEntryIndex];
+    /// @notice The reentrant (L1→L2) table of the entry currently being processed — the storage source a
+    ///         proxy re-entry resolves against (it crosses an external boundary and can't see the
+    ///         executing `_executeEntry`'s memory entry).
+    /// @dev Three sources, in priority order:
+    ///      (a) immediate L2Tx run — its entry never lands in storage, so only the table is parked in
+    ///          `_expectedL1toL2CallsForImmediateL2Txs` (non-empty ONLY while such an entry runs);
+    ///      (b) meta-hook — a batch is mid-flight, so the transient entry at `_currentEntryIndex`;
+    ///      (c) normal proxy consumption (outside any batch) — the persistent queue entry of
+    ///          `_currentEntryRollupId` at `_currentEntryIndex`.
+    function getExpectedL1toL2Calls() internal view returns (ExpectedL1ToL2Call[] storage) {
+        // (a) immediate L2Tx run
+        if (_expectedL1toL2CallsForImmediateL2Txs.length != 0) {
+            return _expectedL1toL2CallsForImmediateL2Txs;
         }
+        // (b) meta-hook: batch mid-flight
+        if (_transientExecutions.length != 0) {
+            return _transientExecutions[_currentEntryIndex].expectedL1ToL2Calls;
+        }
+        // (c) normal proxy consumption: persistent queue
+        return verificationByRollup[_currentEntryRollupId].executionQueue[_currentEntryIndex].expectedL1ToL2Calls;
     }
 
     /// @notice Resolves a reentrant (L1→L2) CALL: a plain-success entry consumed from
@@ -787,13 +829,15 @@ contract EEZ is EEZBase {
 
         // Host table is the current entry's `expectedL1ToL2Calls`; a reverted sub-execution shares it
         // for its own reentrant calls, disambiguated by the `_rollingHash` folded into the key.
-        ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
+        ExpectedL1ToL2Call[] storage expectedCalls = getExpectedL1toL2Calls();
         bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
 
         for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
-            ExpectedL1ToL2Call storage nested = expectedCalls[i];
-            if (nested.expectedL1toL2Hash == expectedL1toL2Hash) {
-                return _resolveNestedReentrant(i, crossChainCallHash, nested.success);
+            ExpectedL1ToL2Call storage expectedL1ToL2Call = expectedCalls[i];
+            if (expectedL1ToL2Call.expectedL1toL2Hash == expectedL1toL2Hash) {
+                // Advance the cursor PAST this match before resolving it
+                _lastL1ToL2CallConsumed = i + 1;
+                return _resolveNestedReentrant(expectedL1ToL2Call, crossChainCallHash);
             }
         }
 
@@ -806,25 +850,23 @@ contract EEZ is EEZBase {
     }
 
     /// @notice Resolves a matched reentrant (L1→L2) CALL by running its OWN `l2ToL1Calls[]` sub-array.
-    /// @dev SUCCESS commits the sub-execution into the host's continuous `_rollingHash` (NESTED_END)
-    ///      and returns `returnData`. REVERTED checks the sub-hash against `expectedL1toL2Call.revertedOrStaticRollingHash`
-    ///      and reverts with `returnData`; the terminal revert rolls back the frame's state, hash, and
-    ///      cursor (no save needed). The cursor is advanced PAST `index` BEFORE the sub-calls run so it
-    ///      stays monotonic: the sub-frame scans strictly forward from here and a success needs no restore.
-    function _resolveNestedReentrant(uint256 index, bytes32 crossChainCallHash, bool success)
+    /// @dev Takes the matched entry by `storage` pointer (the caller already resolved + indexed it, and
+    ///      advanced `_lastL1ToL2CallConsumed` past it). SUCCESS commits the sub-execution into the host's
+    ///      continuous `_rollingHash` (NESTED_END) and returns `returnData`. REVERTED checks the sub-hash
+    ///      against `expectedL1toL2Call.revertedOrStaticRollingHash` and reverts with `returnData`; the
+    ///      terminal revert rolls back the frame's state, hash, and cursor (no save needed).
+    function _resolveNestedReentrant(ExpectedL1ToL2Call storage expectedL1toL2Call, bytes32 crossChainCallHash)
         internal
         returns (bytes memory)
     {
-        ExpectedL1ToL2Call storage expectedL1toL2Call = _getCurrentEntry().expectedL1ToL2Calls[index];
         L2ToL1Call[] memory l2ToL1Calls = expectedL1toL2Call.l2ToL1Calls;
 
-        // Open the frame and run the sub-array. Advancing the cursor past this entry first keeps it
-        // monotonic — the sub-frame's own reentrant calls scan strictly forward from `index + 1`
+        // Open the frame and run the sub-array (cursor already advanced by the caller, so the sub-frame's
+        // own reentrant calls scan strictly forward).
         _rollingHashNestedBegin(crossChainCallHash);
-        _lastL1ToL2CallConsumed = index + 1;
         _processNCalls(l2ToL1Calls);
 
-        if (success) {
+        if (expectedL1toL2Call.success) {
             // Updates the rolling hash closing the nested call
             _rollingHashNestedEnd();
             return expectedL1toL2Call.returnData;
@@ -869,19 +911,25 @@ contract EEZ is EEZBase {
             idx = _findMatchingEntry(_transientExecutions, _transientExecutionIndex, crossChainCallHash, destRid);
             _transientExecutionIndex = idx + 1;
             entry = _transientExecutions[idx];
-            _currentEntryRollupId = 0; // marker: transient phase (storage routes via length)
         } else {
             RollupVerification storage rec = verificationByRollup[destRid];
             idx = _findMatchingEntry(rec.executionQueue, rec.executionQueueIndex, crossChainCallHash, destRid);
             rec.executionQueueIndex = uint64(idx + 1);
             entry = rec.executionQueue[idx];
-            _currentEntryRollupId = destRid;
+            _currentEntryRollupId = destRid; // the queue getExpectedL1toL2Calls() reads this
         }
 
         emit ExecutionConsumed(crossChainCallHash, destRid, idx);
 
         _currentEntryIndex = idx;
-        _executeEntry();
+        _executeEntry(entry);
+
+        // Reset the entry pointers now the entry is done. `_currentEntryRollupId = 0` is load-bearing
+        // (the immediate L2Tx path relies on it being 0); `_currentEntryIndex = 0` is hygiene/symmetry —
+        // it's only read mid-`_executeEntry` and always re-set before the next read. On a revert both
+        // transient writes roll back to 0 anyway.
+        _currentEntryRollupId = 0;
+        _currentEntryIndex = 0;
 
         return entry.returnData;
     }
@@ -918,7 +966,7 @@ contract EEZ is EEZBase {
     ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
     ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
     ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
-    ///      inline L2Tx path that doesn't pass through here.
+    ///      immediate L2Tx path that doesn't pass through here.
     function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint64 destRid)
         internal
         view
@@ -942,9 +990,13 @@ contract EEZ is EEZBase {
     ///      its own sub-calls); `_processNCalls` runs the whole array, so completeness is structural
     ///      (no cursor-vs-length check). `_verifiedRollupInCurrentExecutingEntry` is non-empty for the whole span (backs
     ///      `_insideExecution()`), so a reentrant call is routed correctly.
-    // review TODO how we can execute entry without saving it first?¿
-    function _executeEntry() internal {
-        ExecutionEntry storage entry = _getCurrentEntry();
+    /// @dev The entry is taken by `memory` so a leading L2Tx can be executed straight from calldata
+    ///      without SSTOREing the whole struct (see `_attemptExecuteImmediateL2Txs`). `entry.expectedL1ToL2Calls`
+    ///      is NOT read here — proxy re-entries cross an external boundary and resolve the reentrant
+    ///      table from storage via `getExpectedL1toL2Calls()`.
+    /// @param entry The execution entry to run; the caller is responsible for routing
+    ///        `getExpectedL1toL2Calls()` to the matching live storage table.
+    function _executeEntry(ExecutionEntry memory entry) internal {
         StateDelta[] memory deltas = entry.stateDeltas;
 
         // Redundant ≥1-delta guard (also enforced at validation): a non-empty `_verifiedRollupInCurrentExecutingEntry` is
@@ -994,6 +1046,7 @@ contract EEZ is EEZBase {
 
         delete _verifiedRollupInCurrentExecutingEntry; // clears the allowed set AND resets _insideExecution() to false
         _entryEtherDelta = 0; // reset for the next top-level entry in this tx
+        _rollingHash = bytes32(0); // reset so the next entry's `_rollingHashEntryBegin` zero-guard passes
     }
 
     /// @notice Processes the WHOLE `calls` array (the entry's top-level calls, a reentrant sub-frame's
@@ -1122,7 +1175,7 @@ contract EEZ is EEZBase {
 
     // The flat call array driving execution is passed to `_processNCalls` explicitly by `memory`
     // (the entry's top-level calls, or a reentrant sub-frame's own). The reentrant (L1→L2) table is
-    // always the current entry's `expectedL1ToL2Calls` (read off `_getCurrentEntry()` where needed);
+    // always the current entry's `expectedL1ToL2Calls` (read off `getExpectedL1toL2Calls()` where needed);
     // a sub-frame's own reentrant calls live in that SAME table, disambiguated by the live
     // `_rollingHash` folded into each entry's `expectedL1toL2Hash`.
 
@@ -1156,9 +1209,8 @@ contract EEZ is EEZBase {
         address destAddress = proxyInfo.originalAddress;
         uint64 destRid = proxyInfo.originalRollupId;
 
-        bytes32 crossChainCallHash = computeCrossChainCallHash(
-            true, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, callData
-        );
+        bytes32 crossChainCallHash =
+            computeCrossChainCallHash(IS_STATIC, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, callData);
 
         // Nested: the active host's unified reentrant table, content-addressed by `expectedL1toL2Hash`.
         // `crossChainCallHash` was computed with `isStatic = true`, so it can only match a static
@@ -1170,7 +1222,7 @@ contract EEZ is EEZBase {
             bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
             // Forward scan from the cursor — same strict-forward window as `_consumeNestedCall`
             // (a static read cannot advance the cursor, but it still only matches at/after it).
-            ExpectedL1ToL2Call[] storage expectedCalls = _getCurrentEntry().expectedL1ToL2Calls;
+            ExpectedL1ToL2Call[] storage expectedCalls = getExpectedL1toL2Calls();
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
                 ExpectedL1ToL2Call storage expectedCall = expectedCalls[i];
                 if (expectedCall.expectedL1toL2Hash == expectedL1toL2Hash) {
@@ -1188,8 +1240,9 @@ contract EEZ is EEZBase {
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue.
-        StaticLookup[] storage staticLookups =
-            _transientExecutions.length != 0 ? _transientStaticLookups : verificationByRollup[destRid].staticLookupQueue;
+        StaticLookup[] storage staticLookups = _transientExecutions.length != 0
+            ? _transientStaticLookups
+            : verificationByRollup[destRid].staticLookupQueue;
         for (uint256 i = 0; i < staticLookups.length; i++) {
             StaticLookup storage lookup = staticLookups[i];
             // Proxy protection: fold the declared destination into the match. The transient pool
@@ -1325,9 +1378,9 @@ contract EEZ is EEZBase {
 
     /// @notice Binary-search membership check on the batch's `rollupIdsWithProofSystems[]`,
     ///         which is sorted strictly ascending by `.rollupId`.
-    /// @dev Binary (vs `_contains`'s linear): a whole batch can carry many rollups, and this list is
+    /// @dev Binary (vs `_containsRollupInList`'s linear): a whole batch can carry many rollups, and this list is
     ///      kept sorted, so the log(n) lookup is worth it. Per-entry / per-lookup sets are small, so
-    ///      they use a linear scan instead — see `_contains`.
+    ///      they use a linear scan instead — see `_containsRollupInList`.
     function _containsRollupInBatch(ProofSystemBatchPerVerificationEntries calldata batch, uint64 rollupId)
         internal
         pure
@@ -1356,7 +1409,7 @@ contract EEZ is EEZBase {
     ///      `stateDeltas` rollups or one lookup's `expectedStateRoots` pins — usually only a handful, and the
     ///      lookup set isn't sorted — so a linear scan is the simpler, general fit. A whole batch can
     ///      hold many rollups, which is why the batch-wide check is sorted + binary instead.
-    function _contains(uint64[] memory ids, uint64 rollupId) internal pure returns (bool) {
+    function _containsRollupInList(uint64[] memory ids, uint64 rollupId) internal pure returns (bool) {
         for (uint256 i = 0; i < ids.length; i++) {
             if (ids[i] == rollupId) return true;
         }

@@ -271,8 +271,9 @@ contract EEZL2 is EEZBase {
         _loadExecutionTable(entries, _lookupCalls);
 
         // 2. Compute and emit the action hash binding this top-level call
-        bytes32 crossChainCallHash =
-            computeCrossChainCallHash(NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, data);
+        bytes32 crossChainCallHash = computeCrossChainCallHash(
+            NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, data
+        );
         emit IncomingCrossChainCallExecuted(crossChainCallHash, destination, value, data, sourceAddress, sourceRollup);
 
         // 3. No entry-context preamble needed: `_currentEntryIndex`, `_rollingHash`,
@@ -639,7 +640,7 @@ contract EEZL2 is EEZBase {
         address destAddress = proxyInfo.originalAddress;
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            true,
+            IS_STATIC,
             sourceAddress,
             ROLLUP_ID,
             destAddress,

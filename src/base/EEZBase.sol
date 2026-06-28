@@ -23,7 +23,8 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///        - The call cursors — absolute-directional on L1 (`_currentL2ToL1Call` /
 ///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
 ///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
-///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`, `_getCurrentEntry`,
+///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`, the active reentrant-table
+///          accessor (L1: `getExpectedL1toL2Calls`; L2: `_getCurrentEntry`),
 ///          `_resolveStaticLookup`, `_processNStaticCalls`, the reentrant resolver (L1:
 ///          `_resolveNestedReentrant`; L2: `_consumeSuccessfulReentrant` / `_executeRevertedNestedLookup`),
 ///          `staticCallLookup` — plus any per-side sub-frame / reverted-lookup transient pointers
@@ -42,6 +43,9 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on non-static (call) paths.
     bool internal constant NOT_STATIC_CALL = false;
+
+    /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on static (read-only) paths.
+    bool internal constant IS_STATIC = true;
 
     // ──────────────────────────────────────────────
     //  Storage shared with children
@@ -88,7 +92,7 @@ abstract contract EEZBase is IEEZ {
     error UnauthorizedProxy();
 
     /// @notice Error when a self-call-only entry point (`executeInContextAndRevert`,
-    ///         L1's `attemptExecuteL2Txs`) is called by an external address
+    ///         L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
     error NotSelf();
 
     /// @notice Error when no matching execution entry exists for the action hash
@@ -197,8 +201,9 @@ abstract contract EEZBase is IEEZ {
         pure
         returns (bytes32)
     {
-        return
-            keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data)
+        );
     }
 
     // ──────────────────────────────────────────────
