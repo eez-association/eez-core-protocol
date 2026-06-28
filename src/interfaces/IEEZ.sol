@@ -166,6 +166,7 @@ struct StaticLookup {
 /// @dev Direction-neutral — shared by the L1 (`EEZ`) and L2 (`EEZL2`) managers via the
 ///      `EEZBase` proxy registry.
 struct ProxyInfo {
+    bool isProxy;
     address originalAddress;
     uint64 originalRollupId;
 }

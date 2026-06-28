@@ -686,6 +686,7 @@ contract EEZ is EEZBase {
     // ──────────────────────────────────────────────
 
     /// @notice Executes a cross-chain call initiated by an authorized proxy
+    /// @dev only callable by EEZ proxies
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return result The return data from the execution
@@ -694,19 +695,22 @@ contract EEZ is EEZBase {
         payable
         returns (bytes memory result)
     {
-        // Only PROXY
+        // Get EEZ proxy info from msg.sender
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-        if (proxyInfo.originalAddress == address(0)) revert UnauthorizedProxy();
 
+         // Check msg.sender is EEZ proxy
+        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
+
+        address destAddress = proxyInfo.originalAddress;
         uint64 destRid = proxyInfo.originalRollupId;
 
-        // Block-scoped read gate — entries can only be consumed in the block they were posted
+        // Entries can only be consumed in the block they were posted
         if (verificationByRollup[destRid].lastVerifiedBlock != block.number) {
             revert ExecutionNotInCurrentBlock(destRid);
         }
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            destRid, proxyInfo.originalAddress, msg.value, callData, sourceAddress, MAINNET_ROLLUP_ID
+            destRid, destAddress, msg.value, callData, sourceAddress, MAINNET_ROLLUP_ID
         );
 
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
@@ -717,7 +721,7 @@ contract EEZ is EEZBase {
             return _consumeNestedCall(destRid, crossChainCallHash);
         }
 
-        // Top-level — SET (not add): a fresh entry starts from exactly its own msg.value,
+        // Top-level: a fresh entry starts from exactly its own msg.value,
         // so residue can never leak across entries.
         _entryEtherDelta = int256(msg.value);
         return _consumeAndExecuteEntry(destRid, crossChainCallHash);
@@ -865,14 +869,8 @@ contract EEZ is EEZBase {
         ExecutionEntry storage entry;
         uint256 idx;
 
-        // Scan FORWARD from the cursor to the first entry that matches identity (`proxyEntryHash`),
-        // routing (`destinationRollupId`), AND state preconditions (every `currentState` == live root) —
-        // see `_entryMatches`. Non-matching entries in between are skipped; running off the end with no
-        // match reverts `ExecutionNotFound`. The cursor is advanced to `idx + 1` here, but a matched entry
-        // with `success == false` makes `_executeEntry` revert with its `returnData`, which rolls THIS
-        // advance back too — so a failed top-level call is re-callable and only drops out once a later
-        // SUCCESSFUL consumption advances the cursor past it. (The only pooled top-level shape is the
-        // read-only `StaticLookup` via `staticCallLookup`.)
+        // Scan forward from the cursor to the first matching entry (skipping non-matches; see
+        // `_entryMatches`).
         if (_transientExecutions.length != 0) {
             idx = _findMatchingEntry(_transientExecutions, _transientExecutionIndex, crossChainCallHash, destRid);
             _transientExecutionIndex = idx + 1;
@@ -910,9 +908,11 @@ contract EEZ is EEZBase {
         view
         returns (uint256)
     {
-        uint256 len = executionQueue.length;
-        for (uint256 i = startIndex; i < len; i++) {
-            if (_entryMatches(executionQueue[i], crossChainCallHash, destRid)) return i;
+        uint256 queueLen = executionQueue.length;
+        for (uint256 i = startIndex; i < queueLen; i++) {
+            if (_entryMatches(executionQueue[i], crossChainCallHash, destRid)) {
+                return i;
+            }
         }
         revert ExecutionNotFound();
     }
@@ -1032,7 +1032,7 @@ contract EEZ is EEZBase {
                 // No source check here: every executed call's `sourceRollupId` was already validated
                 // ∈ `stateDeltas` in `_validateBatchStructure` (entry + reentrant sub-call walk).
                 address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
-                if (authorizedProxies[sourceProxy].originalAddress == address(0)) {
+                if (!authorizedProxies[sourceProxy].isProxy) {
                     _createCrossChainProxyInternal(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
                 }
 
@@ -1151,12 +1151,17 @@ contract EEZ is EEZBase {
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
     function staticCallLookup(address sourceAddress, bytes calldata callData) external view returns (bytes memory) {
+        // Get EEZ proxy info from msg.sender
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-        if (proxyInfo.originalAddress == address(0)) revert UnauthorizedProxy();
 
+        // Check msg.sender is EEZ proxy
+        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
+
+        address destAddress = proxyInfo.originalAddress;
         uint64 destRid = proxyInfo.originalRollupId;
+
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            destRid, proxyInfo.originalAddress, 0, callData, sourceAddress, MAINNET_ROLLUP_ID
+            destRid, destAddress, 0, callData, sourceAddress, MAINNET_ROLLUP_ID
         );
 
         // Nested: the active host's unified reentrant table, content-addressed by
