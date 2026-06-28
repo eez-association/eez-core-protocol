@@ -35,7 +35,7 @@ struct CrossChainCall {
     uint256 value;
     bytes data;
     address sourceAddress;
-    uint256 sourceRollupId;
+    uint64 sourceRollupId;
     uint256 revertNextNCalls;
 }
 

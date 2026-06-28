@@ -116,7 +116,7 @@ struct ExecutionEntry {
 }
 ```
 
-Top-level entries always succeed: `executeCrossChainCall` returns `entry.returnData`. Reverting cross-chain results at the top level are expressed via a top-level `LookupCall { failed: true }` in the storage pool, executed via `_tryRevertedTopLevelLookup` (or resolved via `staticCallLookup` outside an execution). There is no `entry.failed` flag.
+A top-level entry carries a `success` flag. When `success == true`, `executeCrossChainCall` runs the entry and returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. (Read-only reverting top-level results are still expressed via a top-level `StaticLookup` resolved by `staticCallLookup` outside an execution.)
 
 Partition invariant: `entry.callCount + Σ expectedL1ToL2Calls[i].callCount == l2ToL1Calls.length` (L2: `expectedOutgoingCalls` / `incomingCalls`) — see §D.2.
 
@@ -259,7 +259,7 @@ Inherited from `EEZBase`:
 
 The per-side call cursors live in the children, not the base: L1 declares `_currentL2ToL1Call` / `_lastL1ToL2CallConsumed`, L2 declares `_currentIncomingCall` / `_lastOutgoingCallConsumed` — same mechanics, per-side directional names.
 
-`MAINNET_ROLLUP_ID = 0` is a constant. The four rolling-hash tag constants `CALL_BEGIN=1, CALL_END=2, NESTED_BEGIN=3, NESTED_END=4` are internal constants on `EEZBase`. There is no `_inPostBatch` flag — reentry is detected via `_transientExecutions.length != 0` instead.
+`MAINNET_ROLLUP_ID = 0` is a constant. The five rolling-hash tag constants `CALL_BEGIN=1, CALL_END=2, NESTED_BEGIN=3, NESTED_END=4, CALL_NOT_FOUND=5` are internal constants on `EEZBase`. There is no `_inPostBatch` flag — reentry is detected via `_transientExecutions.length != 0` instead.
 
 `_transientExecutions` and `_transientLookupCalls` are declared as regular storage arrays (not Solidity `transient`) because the `transient` data location does not yet support reference types with nested dynamic arrays. They are cleared at the end of every `postAndVerifyBatch` via `delete`, recovering most of the gas cost via SSTORE-to-zero refunds.
 
@@ -562,7 +562,7 @@ _applyAndExecute(entry.stateDeltas, entry.callCount, entry.rollingHash)
 return entry.returnData
 ```
 
-Inside an active `postAndVerifyBatch`, `_transientExecutions.length != 0` routes **all** consumption through the transient stream — running off the end falls back to `_tryRevertedTopLevelLookup` (top-level reverted-lookup scan), then `ExecutionNotFound`. Per-rollup queues are empty until step 8 of `postAndVerifyBatch`. Top-level execution always succeeds; reverting top-level results are expressed via `LookupCall { failed: true }`.
+Inside an active `postAndVerifyBatch`, `_transientExecutions.length != 0` routes **all** consumption through the transient stream — running off the end falls back to `_tryRevertedTopLevelLookup` (top-level reverted-lookup scan), then `ExecutionNotFound`. Per-rollup queues are empty until step 8 of `postAndVerifyBatch`. Consumption forward-scans the stream to the first matching entry; a matched entry with `success == false` runs, verifies, then reverts with its `returnData` (rolling back the cursor advance), so it is re-callable and only drops out once a later successful consumption advances past it.
 
 ##### `_consumeNestedAction(bytes32 crossChainCallHash) → bytes`
 
@@ -941,6 +941,14 @@ When the destination contract called by `_processNCalls` calls back into a proxy
 
 **Why a `failed=false` nested lookup here is invalid.** A successful reentrant call in a normal CALL frame is expressed as an `ExpectedL1ToL2Call`; a successful read-only call is in a STATICCALL frame and routed to `staticCallLookup` (§F) instead. A `failed=false` nested lookup matching this fallback path is a prover bug — the loop simply doesn't match it, so it falls through to `ExecutionNotFound`.
 
+#### D.3.1 Nested children must be laid out after their parent (forward-cursor layout)
+
+Reentrant entries in `expectedL1ToL2Calls[]` are content-addressed by `(crossChainCallHash, expectedRollingHash)` and located by a **strict forward scan** from `_lastL1ToL2CallConsumed`: a call only ever matches an entry at or after the cursor, never one before it. The match is the rolling hash, not the array position — but the cursor governs *which slice of the table is still visible*.
+
+When a reentrant entry at index `i` is resolved (`_resolveNestedReentrant`), the cursor is advanced to `i + 1` **before** the entry's own sub-calls run, not after. This keeps the cursor monotonic: any reentrant call the sub-frame fires scans strictly forward from `i + 1`, and a successful frame leaves the cursor at its high-water mark with no restore step. (On revert the whole frame's writes — including this advance — roll back with the EVM, so the cursor returns to the parent's value automatically.)
+
+**Layout rule for provers/builders.** A nested frame's own reentrant children must be placed in `expectedL1ToL2Calls[]` at indices **strictly greater than their parent entry's index** — i.e. the table must be in depth-first / execution order. A child placed at an index `≤` its parent is below the cursor when the sub-frame scans, so it is never found: the reentrant call folds `CALL_NOT_FOUND` into the rolling hash and the entry reverts at its boundary (`RollingHashMismatch` / `ExecutionNotFound`). This is purely a *findability* constraint; it never produces a wrong match, because the rolling-hash key is unique per call position. Sibling entries at the same nesting level are already forward-ordered by the same cursor discipline.
+
 ### D.4 Revert Span
 
 `revertSpan > 0` opens an isolated EVM context for the next `revertSpan` calls. Mechanism:
@@ -982,13 +990,16 @@ The off-chain prover emits a flat `l2ToL1Calls[]` array plus a parallel `Expecte
 A single `bytes32 rollingHash` per entry covers every call result and every nesting boundary. The four tag constants and the fold helpers (`_rollingHashCallBegin` / `_rollingHashCallEnd` / `_rollingHashNestedBegin` / `_rollingHashNestedEnd`) live on `EEZBase` and are **protocol constants shared by both chains** — the `CALL_*` / `NESTED_*` tags are the neutral rolling-hash frame vocabulary, not a direction. The accumulator starts at `bytes32(0)` and is updated at four tagged events:
 
 ```
-CALL_BEGIN   = uint8(1)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN,   callNumber))
-CALL_END     = uint8(2)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END,     callNumber, success, retData))
-NESTED_BEGIN = uint8(3)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber))
-NESTED_END   = uint8(4)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END,   nestedNumber))
+CALL_BEGIN     = uint8(1)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN,     callNumber))
+CALL_END       = uint8(2)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END,       callNumber, success, retData))
+NESTED_BEGIN   = uint8(3)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN,   nestedNumber))
+NESTED_END     = uint8(4)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END,     nestedNumber))
+CALL_NOT_FOUND = uint8(5)   _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_NOT_FOUND, crossChainCallHash))
 ```
 
 `callNumber` is the per-side global call cursor (`_currentL2ToL1Call` on L1, `_currentIncomingCall` on L2) — 1-indexed and incremented before `CALL_BEGIN` is hashed. `nestedNumber` is the reentrant cursor (`_lastL1ToL2CallConsumed` / `_lastOutgoingCallConsumed`) after the advance that consumed the reentrant call — also 1-indexed.
+
+`CALL_NOT_FOUND` is folded (L1) when a reentrant call finds no matching expected entry in `expectedL1ToL2Calls`. The dedicated tag is distinct from `CALL_END(true, "")` (what the caller folds for a normal empty return), so a no-match can never be forged as one. The divergence is caught at the entry's rolling-hash check (surviving any intermediate try/catch and riding the `ContextResult` payload across a revert-span boundary), so no side flag is needed; a prover that deliberately pre-hashes the tag commits to a not-found at that exact position — a faithful outcome, not an attack.
 
 After all calls and nestings complete:
 

@@ -19,8 +19,7 @@ import {Vm} from "forge-std/Vm.sol";
 ///       BatchPosted, RollupCreated, StateUpdated,
 ///       L2ExecutionPerformed, ImmediateEntrySkipped, ExecutionConsumed,
 ///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted, CallResult,
-///       L1ToL2CallConsumed (L1) / OutgoingCallConsumed (L2), RevertSpanExecuted,
-///       CrossChainProxyCreated,
+///       RevertSpanExecuted, CrossChainProxyCreated,
 ///       and the L2-only ExecutionTableLoaded / IncomingCrossChainCallExecuted.
 ///       For a full pre-execution dump of entries, decode the postAndVerifyBatch tx
 ///       input off-chain (e.g. with `cast calldata-decode`).
@@ -42,8 +41,6 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");
-    bytes32 constant SIG_L1_TO_L2_CALL_CONSUMED = keccak256("L1ToL2CallConsumed(uint256,uint256,bytes32,uint256)");
-    bytes32 constant SIG_OUTGOING_CALL_CONSUMED = keccak256("OutgoingCallConsumed(uint256,uint256,bytes32,uint256)");
     bytes32 constant SIG_REVERT_SPAN = keccak256("RevertSpanExecuted(uint256,uint256,uint256)");
     bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint256)");
     // L2-only:
@@ -135,10 +132,6 @@ contract DecodeExecutions is Script {
             _printCrossChainCallExecuted(topics, data, p);
         } else if (sig == SIG_CALL_RESULT) {
             _printCallResult(topics, data, p);
-        } else if (sig == SIG_L1_TO_L2_CALL_CONSUMED) {
-            _printNestedCallConsumed(topics, data, p, "L1ToL2CallConsumed");
-        } else if (sig == SIG_OUTGOING_CALL_CONSUMED) {
-            _printNestedCallConsumed(topics, data, p, "OutgoingCallConsumed");
         } else if (sig == SIG_REVERT_SPAN) {
             _printRevertSpan(topics, data, p);
         } else if (sig == SIG_PROXY_CREATED) {
@@ -310,32 +303,6 @@ contract DecodeExecutions is Script {
                 success ? "ok" : "FAILED",
                 ", ret=",
                 _shortBytes(ret),
-                ")"
-            )
-        );
-    }
-
-    function _printNestedCallConsumed(bytes32[] memory topics, bytes memory data, string memory p, string memory name)
-        internal
-        pure
-    {
-        // L1: L1ToL2CallConsumed(uint256 indexed entryIndex, uint256 indexed l1ToL2CallNumber, bytes32 cchash, uint256 callCount)
-        // L2: OutgoingCallConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 cchash, uint256 callCount)
-        uint256 entryIndex = uint256(topics[1]);
-        uint256 nestedNumber = uint256(topics[2]);
-        (bytes32 cchash, uint256 callCount) = abi.decode(data, (bytes32, uint256));
-        console.log(
-            string.concat(
-                p,
-                name,
-                "(entry=",
-                vm.toString(entryIndex),
-                ", nested#=",
-                vm.toString(nestedNumber),
-                ", hash=",
-                _shortHash(cchash),
-                ", callCount=",
-                vm.toString(callCount),
                 ")"
             )
         );
