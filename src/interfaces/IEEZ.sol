@@ -150,10 +150,10 @@ struct StaticLookup {
     ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH predicate
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
     uint64 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
-    bool success; // indicates whether resolution returns or reverts (false ⇒ reverts with `returnData`)
-    bytes returnData; // pre-computed return value (revert payload when !success)
     L2ToL1Call[] l2ToL1Calls; // read-only sub-calls run via STATICCALL during resolution
     bytes32 rollingHash; // expected rolling hash of the sub-calls (untagged static schema: keccak(prev, success, retData))
+    bool success; // indicates whether resolution returns or reverts (false ⇒ reverts with `returnData`)
+    bytes returnData; // pre-computed return value (revert payload when !success)
 }
 
 /// @notice Stores the identity of an authorized CrossChainProxy
