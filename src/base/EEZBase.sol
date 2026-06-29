@@ -20,17 +20,18 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///
 ///      What lives in the children (`EEZ` / `EEZL2`) instead, because it names the per-side
 ///      execution structs or a per-side cursor:
-///        - The call cursors — absolute-directional on L1 (`_currentL2ToL1Call` /
-///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
-///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
-///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`, the active reentrant-table
-///          accessor (L1: `getExpectedL1toL2Calls`; L2: `_getCurrentEntry`),
-///          `_resolveStaticLookup`, `_processNStaticCalls`, the reentrant resolver (L1:
-///          `_resolveNestedReentrant`; L2: `_consumeSuccessfulReentrant` / `_executeRevertedNestedLookup`),
-///          `staticCallLookup` — plus any per-side sub-frame / reverted-lookup transient pointers
-///          (e.g. L2's `_inReentrantSubFrame` / `_revertedLookupTopLevel`).
-///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
-///          L2: `OutgoingCallConsumed`, `UnconsumedIncomingCalls`, …).
+///        - The reentrant-table cursor — `_lastL1ToL2CallConsumed` on L1, `_lastOutgoingCallConsumed`
+///          on L2 — and `_insideExecution()` (L1 derives it from its proxy-protection array, L2 from
+///          a dedicated `_executing` flag). The flat-call position is a plain local index in
+///          `_processNCalls` on both sides (no transient cursor).
+///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
+///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
+///          `getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
+///          (`_resolveNestedReentrant`), `_resolveStaticLookup`, `_processNStaticCalls`,
+///          `staticCallLookup`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
+///          `_sliceCrossChainCalls`).
+///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
+///          L2: `EntryExecuted`, `CallResult`, …).
 abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
     //  Rolling-hash tag constants

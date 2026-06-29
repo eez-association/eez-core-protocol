@@ -5,15 +5,12 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {
-    ExecutionEntry,
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    LookupCall,
-    ExpectedLookup
-} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateDelta, StaticLookup} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
+import {crossChainCallHash, noStaticLookups, noNestedActions, noCalls, RollingHashBuilder} from "../e2e/shared/E2EHelpers.sol";
+
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 contract MockProofSystem is IProofSystem {
     function verify(bytes calldata, bytes32) external pure override returns (bool) {
@@ -27,9 +24,9 @@ contract Batcher {
     function execute(
         EEZ rollups,
         address proofSystem,
-        uint256 rollupId,
+        uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticLookup[] calldata staticLookups,
         CounterAndProxy cap
     )
         external
@@ -42,19 +39,19 @@ contract Batcher {
         uint64[] memory psIdx = new uint64[](1);
         psIdx[0] = 0;
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
+        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: 0,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
         cap.incrementProxy();
@@ -111,41 +108,35 @@ contract E2EExecute is Script {
         bytes memory incrementCallData = abi.encodeWithSelector(Counter.increment.selector);
 
         // Cross-chain call hash: CounterAndProxy → CounterProxy → counterL2 (rollupId=1).
-        bytes32 callHash = keccak256(
-            abi.encode(
-                uint256(1), // targetRollupId (L2)
-                counterL2Addr, // targetAddress
-                uint256(0), // value
-                incrementCallData, // data
-                counterAndProxyAddr, // sourceAddress
-                uint256(0) // sourceRollupId (MAINNET)
-            )
-        );
+        bytes32 callHash =
+            crossChainCallHash(L2_ROLLUP_ID, counterL2Addr, 0, incrementCallData, counterAndProxyAddr, MAINNET_ROLLUP_ID);
 
         StateDelta[] memory stateDeltas = new StateDelta[](1);
         stateDeltas[0] = StateDelta({
-            rollupId: 1,
+            rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-scenario1"),
             etherDelta: 0
         });
 
+        // No L1 top-level calls; rolling hash is just the entry-begin seed.
+        bytes32 rh = RollingHashBuilder.entryBegin(stateDeltas, callHash);
+
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
             stateDeltas: stateDeltas,
             proxyEntryHash: callHash,
-            destinationRollupId: 1,
-            l2ToL1Calls: new L2ToL1Call[](0),
-            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: abi.encode(uint256(1)),
-            rollingHash: bytes32(0)
+            destinationRollupId: L2_ROLLUP_ID,
+            l2ToL1Calls: noCalls(),
+            expectedL1ToL2Calls: noNestedActions(),
+            rollingHash: rh,
+            success: true,
+            returnData: abi.encode(uint256(1))
         });
 
-        LookupCall[] memory noLookups = new LookupCall[](0);
-
-        batcher.execute(rollups, proofSystemAddr, 1, entries, noLookups, CounterAndProxy(counterAndProxyAddr));
+        batcher.execute(
+            rollups, proofSystemAddr, L2_ROLLUP_ID, entries, noStaticLookups(), CounterAndProxy(counterAndProxyAddr)
+        );
 
         console.log("done");
         console.log("counter=%s", CounterAndProxy(counterAndProxyAddr).counter());

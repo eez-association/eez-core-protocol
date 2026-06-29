@@ -69,7 +69,7 @@ deploy_infra() {
         echo "====== Deploy EEZL2 (L2) ======"
         output=$(forge script script/e2e/shared/DeployInfra.s.sol:DeployManagerL2 \
             --rpc-url "$l2_rpc" --broadcast --private-key "$pk" \
-            --sig "run(uint256,address)" "$l2_rollup_id" "$system_address" 2>&1)
+            --sig "run(uint64,address)" "$l2_rollup_id" "$system_address" 2>&1)
         MANAGER_L2=$(extract "$output" "MANAGER_L2")
         echo "MANAGER_L2=$MANAGER_L2"
     fi

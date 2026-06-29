@@ -46,7 +46,7 @@ contract DeployEEZL1 is Script {
 
 /// @title DeployManagerL2 — Deploy EEZL2
 contract DeployManagerL2 is Script {
-    function run(uint256 rollupId, address systemAddress) external {
+    function run(uint64 rollupId, address systemAddress) external {
         vm.startBroadcast();
         EEZL2 manager = new EEZL2(rollupId, systemAddress);
         console.log("MANAGER_L2=%s", address(manager));

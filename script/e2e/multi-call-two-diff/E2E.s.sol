@@ -4,18 +4,10 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    ExecutionEntry,
-    LookupCall,
-    ExpectedLookup
-} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -24,8 +16,8 @@ import {CallTwoDifferent} from "../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noLookupCalls,
-    noL2LookupCalls,
+    noStaticLookups,
+    noL2StaticLookups,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -51,8 +43,8 @@ import {
 //  Pattern C.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint256 constant L2_ROLLUP_ID = 1;
-uint256 constant MAINNET_ROLLUP_ID = 0;
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract TwoDiffActions {
     function _incrementCallData() internal pure returns (bytes memory) {
@@ -92,6 +84,8 @@ abstract contract TwoDiffActions {
             etherDelta: 0
         });
 
+        // No L1 top-level calls (the real increments run on L2 and return cached values), so each
+        // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
             stateDeltas: deltas1,
@@ -99,10 +93,9 @@ abstract contract TwoDiffActions {
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: abi.encode(uint256(1)),
-            rollingHash: bytes32(0)
+            rollingHash: RollingHashBuilder.entryBegin(deltas1, hA),
+            success: true,
+            returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
             stateDeltas: deltas2,
@@ -110,10 +103,9 @@ abstract contract TwoDiffActions {
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: abi.encode(uint256(1)),
-            rollingHash: bytes32(0)
+            rollingHash: RollingHashBuilder.entryBegin(deltas2, hB),
+            success: true,
+            returnData: abi.encode(uint256(1))
         });
     }
 
@@ -143,28 +135,30 @@ abstract contract TwoDiffActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: target,
-            value: 0,
-            data: _incrementCallData(),
             sourceAddress: l2Caller,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: target,
+            value: 0,
+            data: _incrementCallData()
         });
 
         bytes memory retData = abi.encode(uint256(1));
-        bytes32 rh = bytes32(0);
-        rh = RollingHashBuilder.appendCallBegin(rh, 1);
-        rh = RollingHashBuilder.appendCallEnd(rh, 1, true, retData);
+        // PENDING EEZL2: L2-execution CALL_BEGIN folds the incoming call hashed with the L2's own id
+        // as targetRollupId (the chain it runs on), mirroring L1 folding MAINNET. Re-verify once EEZL2 lands.
+        bytes32 ccHash = crossChainCallHash(L2_ROLLUP_ID, target, 0, _incrementCallData(), l2Caller, MAINNET_ROLLUP_ID);
+        bytes32 rh = RollingHashBuilder.entryBeginL2(entryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, retData);
 
         return L2ExecutionEntry({
             proxyEntryHash: entryHash,
             incomingCalls: calls,
             expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
-            expectedLookups: new L2ExpectedLookup[](0),
-            callCount: 1,
-            returnData: retData,
-            rollingHash: rh
+            rollingHash: rh,
+            success: true,
+            returnData: retData
         });
     }
 }
@@ -236,7 +230,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticLookup[] calldata staticLookups,
         CallTwoDifferent caller,
         address pA,
         address pB
@@ -246,7 +240,7 @@ contract Batcher {
     {
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
-        uint256[] memory rids = new uint256[](1);
+        uint64[] memory rids = new uint64[](1);
         rids[0] = L2_ROLLUP_ID;
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = "proof";
@@ -256,20 +250,20 @@ contract Batcher {
         }
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
         for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndex: psIdx});
+            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: 0,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
         (a, b) = caller.callBothCounters(pA, pB);
@@ -289,7 +283,7 @@ contract ExecuteL2 is Script, TwoDiffActions {
         address callerL2 = vm.envAddress("CALL_TWO_DIFF_L2");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterA, counterB, callerL2), noL2LookupCalls());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterA, counterB, callerL2), noL2StaticLookups());
         CallTwoDifferent(callerL2).callBothCounters(triggerA, triggerB);
 
         console.log("done");
@@ -315,7 +309,7 @@ contract Execute is Script, TwoDiffActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterA, counterB, callerAddr),
-            noLookupCalls(),
+            noStaticLookups(),
             CallTwoDifferent(callerAddr),
             proxyA,
             proxyB

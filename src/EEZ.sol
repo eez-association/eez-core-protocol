@@ -114,6 +114,7 @@ contract EEZ is EEZBase {
 
     /// @notice Cursor for the next transient entry to consume (meaningful while
     ///         `_transientExecutions.length != 0`).
+    // One GLOBAL cursor across all rollups. Meta-hook entries must be consumed in array order.
     uint256 transient _transientExecutionIndex;
 
     /// @notice Rollup whose persistent queue supplies the entry currently in `_executeEntry`, naming the
@@ -246,6 +247,10 @@ contract EEZ is EEZBase {
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
 
+    /// @notice A reentrant call resolved with no host entry: an immediate L2Tx with an empty parked table
+    ///         reaches `getExpectedL1toL2Calls()` with `_currentEntryRollupId == 0`. Cannot match — graceful revert.
+    error NoExpectedL1ToL2CallFound();
+
     /// @notice Proxy protection (postAndVerifyBatch): a top-level lookup's `destinationRollupId` is
     ///         not among its own `expectedStateRoots` pins — the routing target must be pinned to
     ///         proven state (mirrors the entry `destination ∈ stateDeltas` rule).
@@ -330,8 +335,8 @@ contract EEZ is EEZBase {
         // during the immediate L2Tx run AND any executing entry, `_transientExecutions.length != 0` during
         // the meta hook. The remaining external calls before the immediate L2Tx run
         // (`checkProofSystemsAndGetVkeys`, `getCustomData`, `verify`) are all `view`/STATICCALL, so a
-        // reentrant batch (which SSTOREs immediately) can't survive there regardless — DO NOT add a
-        // state-mutating external call before the immediate L2Tx run without re-adding a whole-span flag.
+        // reentrant batch (which SSTOREs immediately) can't survive there regardless
+        // If in a future there are allowed reentranat calls, e.g making getCustomData non-view, we might need an explicit mutex
         if (_insideExecution() || _transientExecutions.length != 0) revert PostBatchReentry();
 
         // 1. Structural validation (sorting, registration, membership, bounds). No external calls.
@@ -374,6 +379,12 @@ contract EEZ is EEZBase {
         // 7. Meta hook — if transient-prefix entries remain past the leading L2Tx run and the caller has
         //    code, load the remainder (entries[i..immediateEntryCount] plus the static-lookup
         //    pool) into the transient tables and let the caller drive them via proxy calls.
+        // TODO(review): EOA poster silently drops middle immediate-prefix entries. When the caller has
+        //   NO code, this block is skipped, so entries[i..immediateEntryCount) are neither executed
+        //   here NOR queued by _saveRemainderExecutions (which starts at immediateEntryCount) — they
+        //   are dropped. Proven entries should not vanish based on whether msg.sender is a contract.
+        //   Decide: revert when (i < immediateEntryCount && code.length == 0), or fall back to queuing
+        //   the unconsumed slice.
         if (i < immediateEntryCount && msg.sender.code.length > 0) {
             for (uint256 j = i; j < immediateEntryCount; j++) {
                 _transientExecutions.push(batch.entries[j]);
@@ -805,7 +816,10 @@ contract EEZ is EEZBase {
         if (_transientExecutions.length != 0) {
             return _transientExecutions[_currentEntryIndex].expectedL1ToL2Calls;
         }
-        // (c) normal proxy consumption: persistent queue
+        // (c) normal proxy consumption: persistent queue. An immediate L2Tx whose parked table (a) is EMPTY
+        // yet still makes a reentrant call reaches here with `_currentEntryRollupId == 0` (never a real queue);
+        // the call could not have matched, so revert gracefully instead of OOB-panicking on the empty queue.
+        if (_currentEntryRollupId == 0) revert NoExpectedL1ToL2CallFound();
         return verificationByRollup[_currentEntryRollupId].executionQueue[_currentEntryIndex].expectedL1ToL2Calls;
     }
 
@@ -1099,6 +1113,7 @@ contract EEZ is EEZBase {
                         value: l2ToL1Call.value
                     }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.data)));
                     if (l2ToL1Call.value > 0 && success) {
+                        // Safe int to uint conversion since is a value that we just transfer in the above line, i cannot be >=2^255 ether
                         _entryEtherDelta -= int256(l2ToL1Call.value);
                     }
                 }
@@ -1240,6 +1255,7 @@ contract EEZ is EEZBase {
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue.
+        // Note that static calls do not obsolete after a block passes. As long as the state roots matches it can be execute
         StaticLookup[] storage staticLookups = _transientExecutions.length != 0
             ? _transientStaticLookups
             : verificationByRollup[destRid].staticLookupQueue;
@@ -1305,6 +1321,7 @@ contract EEZ is EEZBase {
     /// @notice True while inside a cross-chain call execution — backed by the allowed-rollups array
     ///         (non-empty ⇔ executing, since every entry has ≥1 delta and the array is `delete`d at the
     ///         end of `_executeEntry`).
+    // review we could check rolling hash instead too
     function _insideExecution() internal view returns (bool) {
         return _verifiedRollupInCurrentExecutingEntry.length != 0;
     }

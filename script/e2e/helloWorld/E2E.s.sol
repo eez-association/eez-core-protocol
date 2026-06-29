@@ -4,11 +4,10 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -16,7 +15,7 @@ import {HelloWorldL1, HelloWorldL2, IHelloWorldL2} from "../../../test/mocks/hel
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noLookupCalls,
+    noStaticLookups,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -28,7 +27,8 @@ import {
 //  L1 side (Execute):
 //    HelloWorldL1.helloL2World() → HelloWorldProxy@L1 → EEZ.executeCrossChainCall
 //    consumes the L1 entry whose returnData == abi.encode("World"); helloL2World
-//    returns that string back to the caller.
+//    returns that string back to the caller. No L1 top-level calls, so the rolling
+//    hash is just the entry-begin seed (state deltas + proxyEntryHash).
 //
 //  L2 side (ExecuteL2):
 //    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(...) which
@@ -36,18 +36,24 @@ import {
 //    and the rolling hash commits to that retdata.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint256 constant L2_ROLLUP_ID = 1;
-uint256 constant MAINNET_ROLLUP_ID = 0;
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract HelloActions {
     function _getWordCallData() internal pure returns (bytes memory) {
         return abi.encodeWithSelector(IHelloWorldL2.getWord.selector);
     }
 
+    /// @dev The proxy-entry hash: the inbound cross-chain call (HelloWorldL1 L1 -> HelloWorldL2 L2).
+    ///      Same on both sides — both `executeCrossChainCall` and `executeIncomingCrossChainCall`
+    ///      fold targetRollupId = L2_ROLLUP_ID into `computeCrossChainCallHash`.
     function _callHash(address helloL2, address helloL1) internal pure returns (bytes32) {
         return crossChainCallHash(L2_ROLLUP_ID, helloL2, 0, _getWordCallData(), helloL1, MAINNET_ROLLUP_ID);
     }
 
+    /// @dev Single L1 entry — the cross-chain call returns precomputed abi.encode("World"); the real
+    ///      getWord() runs on L2. No L1 top-level calls, so the rolling hash is just the entry-begin
+    ///      seed (state deltas + proxyEntryHash).
     function _l1Entries(address helloL2, address helloL1) internal pure returns (ExecutionEntry[] memory entries) {
         StateDelta[] memory deltas = new StateDelta[](1);
         deltas[0] = StateDelta({
@@ -57,45 +63,52 @@ abstract contract HelloActions {
             etherDelta: 0
         });
 
+        bytes32 proxyEntryHash = _callHash(helloL2, helloL1);
+        bytes32 rh = RollingHashBuilder.entryBegin(deltas, proxyEntryHash);
+
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
             stateDeltas: deltas,
-            proxyEntryHash: _callHash(helloL2, helloL1),
+            proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: abi.encode("World"),
-            rollingHash: bytes32(0)
+            rollingHash: rh,
+            success: true,
+            returnData: abi.encode("World")
         });
     }
 
+    /// @dev Single L2 entry — drives the real HelloWorldL2.getWord() through the source proxy.
+    /// NOTE: L2 rolling-hash seed (`entryBeginL2`) is pending the EEZL2 migration; re-verify when EEZL2.sol lands.
     function _l2Entries(address helloL2, address helloL1) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: helloL2,
-            value: 0,
-            data: _getWordCallData(),
             sourceAddress: helloL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: helloL2,
+            value: 0,
+            data: _getWordCallData()
         });
 
-        bytes32 rh = bytes32(0);
-        rh = RollingHashBuilder.appendCallBegin(rh, 1);
-        rh = RollingHashBuilder.appendCallEnd(rh, 1, true, abi.encode("World"));
+        bytes32 proxyEntryHash = _callHash(helloL2, helloL1);
+        // L2-side cross-chain call hash: targetRollupId folded as the L2's own id (ROLLUP_ID).
+        bytes32 ccHash = _callHash(helloL2, helloL1);
+        // PENDING EEZL2: L2 rolling-hash schema can't be verified until EEZL2.sol lands.
+        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode("World"));
 
         entries = new L2ExecutionEntry[](1);
         entries[0] = L2ExecutionEntry({
-            proxyEntryHash: _callHash(helloL2, helloL1),
+            proxyEntryHash: proxyEntryHash,
             incomingCalls: calls,
             expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
-            expectedLookups: new L2ExpectedLookup[](0),
-            callCount: 1,
-            returnData: abi.encode("World"),
-            rollingHash: rh
+            rollingHash: rh,
+            success: true,
+            returnData: abi.encode("World")
         });
     }
 }
@@ -137,7 +150,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticLookup[] calldata staticLookups,
         HelloWorldL1 h1
     )
         external
@@ -145,7 +158,7 @@ contract Batcher {
     {
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
-        uint256[] memory rids = new uint256[](1);
+        uint64[] memory rids = new uint64[](1);
         rids[0] = L2_ROLLUP_ID;
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = "proof";
@@ -155,20 +168,20 @@ contract Batcher {
         }
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
         for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndex: psIdx});
+            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: 0,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
         greeting = h1.helloL2World();
@@ -192,7 +205,7 @@ contract ExecuteL2 is Script, HelloActions {
                 helloL1Addr,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(helloL2Addr, helloL1Addr),
-                new L2LookupCall[](0)
+                new L2StaticLookup[](0)
             );
 
         console.log("done");
@@ -211,7 +224,7 @@ contract Execute is Script, HelloActions {
         vm.startBroadcast();
         Batcher batcher = new Batcher();
         string memory greeting = batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, _l1Entries(helloL2Addr, h1Addr), noLookupCalls(), HelloWorldL1(h1Addr)
+            EEZ(rollupsAddr), proofSystemAddr, _l1Entries(helloL2Addr, h1Addr), noStaticLookups(), HelloWorldL1(h1Addr)
         );
         console.log("done");
         console.log("greeting=%s", greeting);

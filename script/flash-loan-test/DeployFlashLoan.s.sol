@@ -47,7 +47,7 @@ contract DeployTokenAndBridgeL1 is Script {
 ///     --rpc-url $L2_RPC --broadcast --private-key $PK \
 ///     --sig "run(address,uint256,bytes32)" $MANAGER_L2 $L2_ROLLUP_ID $SALT
 contract DeployBridgeL2 is Script {
-    function run(address managerL2, uint256 rollupId, bytes32 salt) external {
+    function run(address managerL2, uint64 rollupId, bytes32 salt) external {
         vm.startBroadcast();
 
         address bridge = _deployBridge(salt);
@@ -64,7 +64,7 @@ contract DeployBridgeL2 is Script {
 ///     --rpc-url $L1_RPC \
 ///     --sig "run(address,address,uint256)" $BRIDGE_L2 $TOKEN $TOKEN_ORIGIN_ROLLUP_ID
 contract ComputeWrappedTokenAddress is Script {
-    function run(address bridgeL2, address token, uint256 tokenOriginRollupId) external view {
+    function run(address bridgeL2, address token, uint64 tokenOriginRollupId) external view {
         string memory name = ERC20(token).name();
         string memory symbol = ERC20(token).symbol();
         uint8 tokenDecimals = ERC20(token).decimals();
@@ -117,7 +117,7 @@ contract DeployFlashLoanL1 is Script {
         address wrappedTokenL2,
         address flashLoanersNFT,
         address bridgeL2,
-        uint256 l2RollupId,
+        uint64 l2RollupId,
         address token
     )
         external

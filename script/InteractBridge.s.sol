@@ -9,9 +9,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// @dev Usage:
 ///   forge script script/InteractBridge.s.sol:BridgeEtherScript \
 ///     --rpc-url $RPC --broadcast --private-key $PK \
-///     --sig "run(address,uint256,address,uint256)" $BRIDGE $ROLLUP_ID $DESTINATION $AMOUNT_WEI
+///     --sig "run(address,uint64,address,uint256)" $BRIDGE $ROLLUP_ID $DESTINATION $AMOUNT_WEI
 contract BridgeEtherScript is Script {
-    function run(address bridge, uint256 rollupId, address destination, uint256 amount) external {
+    function run(address bridge, uint64 rollupId, address destination, uint256 amount) external {
         vm.startBroadcast();
 
         Bridge(bridge).bridgeEther{value: amount}(rollupId, destination);
@@ -25,9 +25,9 @@ contract BridgeEtherScript is Script {
 /// @dev Usage:
 ///   forge script script/InteractBridge.s.sol:BridgeTokensScript \
 ///     --rpc-url $RPC --broadcast --private-key $PK \
-///     --sig "run(address,address,uint256,uint256)" $BRIDGE $TOKEN $AMOUNT $ROLLUP_ID
+///     --sig "run(address,address,uint256,uint64)" $BRIDGE $TOKEN $AMOUNT $ROLLUP_ID
 contract BridgeTokensScript is Script {
-    function run(address bridge, address token, uint256 amount, uint256 rollupId) external {
+    function run(address bridge, address token, uint256 amount, uint64 rollupId) external {
         vm.startBroadcast();
 
         IERC20(token).approve(bridge, amount);
