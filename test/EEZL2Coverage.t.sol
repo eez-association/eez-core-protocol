@@ -9,8 +9,7 @@ import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    ExpectedLookup,
-    LookupCall
+    StaticLookup
 } from "../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 
@@ -45,9 +44,9 @@ contract EEZL2CoverageTest is Test {
     EEZL2 public manager;
     ViewTargetL2 public target;
 
-    uint256 constant TEST_ROLLUP_ID = 42;
-    uint256 constant REMOTE_ROLLUP_ID = 1;
-    uint256 constant MAINNET = 0;
+    uint64 constant TEST_ROLLUP_ID = 42;
+    uint64 constant REMOTE_ROLLUP_ID = 1;
+    uint64 constant MAINNET = 0;
     address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
 
     uint8 constant CALL_BEGIN = 1;
@@ -62,26 +61,56 @@ contract EEZL2CoverageTest is Test {
 
     // ── helpers ──
 
-    function _hash(
-        uint256 rollupId,
-        address destination,
+    /// Cross-chain call hash, mirroring `EEZBase.computeCrossChainCallHash`.
+    function _ccHash(
+        bool isStatic,
+        address src,
+        uint64 srcRollup,
+        address tgt,
+        uint64 tgtRollup,
         uint256 value_,
-        bytes memory data,
-        address sourceAddress,
-        uint256 sourceRollup
+        bytes memory data
     )
         internal
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode(rollupId, destination, value_, data, sourceAddress, sourceRollup));
+        return keccak256(abi.encode(isStatic, src, srcRollup, tgt, tgtRollup, value_, data));
     }
 
-    function _rollingHashSingleCall(bytes memory retData) internal pure returns (bytes32) {
-        bytes32 h = bytes32(0);
-        h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
-        h = keccak256(abi.encodePacked(h, CALL_END, uint256(1), true, retData));
-        return h;
+    /// Position key for a unified `expectedOutgoingCalls` element: `keccak(crossChainCallHash, rollingHashAtFire)`.
+    function _expectedOutgoingHash(bytes32 cch, bytes32 rollingHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(cch, rollingHash));
+    }
+
+    /// Entry seed: `keccak(bytes32(0), proxyEntryHash)` (L2 has no state deltas).
+    function _seed(bytes32 proxyEntryHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes32(0), proxyEntryHash));
+    }
+
+    function _hCallBegin(bytes32 h, bytes32 cch) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(h, CALL_BEGIN, cch));
+    }
+
+    function _hCallEnd(bytes32 h, bool success, bytes memory retData) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(h, CALL_END, success, retData));
+    }
+
+    function _hNestedBegin(bytes32 h, bytes32 cch) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(h, NESTED_BEGIN, cch));
+    }
+
+    function _hNestedEnd(bytes32 h) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(h, NESTED_END));
+    }
+
+    /// Rolling hash for an entry with a single top-level call: seed → CALL_BEGIN(cch) → CALL_END(success, retData).
+    function _rhSingle(bytes32 proxyEntryHash, bytes32 cch, bool success, bytes memory retData)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return _hCallEnd(_hCallBegin(_seed(proxyEntryHash), cch), success, retData);
     }
 
     /// Untagged static rolling hash of a single successful sub-call returning `ret`.
@@ -89,35 +118,35 @@ contract EEZL2CoverageTest is Test {
         return keccak256(abi.encodePacked(bytes32(0), true, ret));
     }
 
-    function _cc(address tgt, uint256 value_, bytes memory data, address src, uint256 srcRollup)
+    function _cc(address tgt, uint256 value_, bytes memory data, address src, uint64 srcRollup)
         internal
         pure
         returns (CrossChainCall memory)
     {
         return CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: tgt,
-            value: value_,
-            data: data,
             sourceAddress: src,
             sourceRollupId: srcRollup,
-            revertSpan: 0
+            targetAddress: tgt,
+            value: value_,
+            data: data
         });
     }
 
-    function _loadEntries(ExecutionEntry[] memory entries, LookupCall[] memory lookups) internal {
+    function _loadEntries(ExecutionEntry[] memory entries, StaticLookup[] memory lookups) internal {
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, lookups);
     }
 
-    function _loadSingle(ExecutionEntry memory entry, LookupCall[] memory lookups) internal {
+    function _loadSingle(ExecutionEntry memory entry, StaticLookup[] memory lookups) internal {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
         _loadEntries(entries, lookups);
     }
 
     // ──────────────────────────────────────────────
-    //  msg.value forwarding to SYSTEM_ADDRESS (197-199)
+    //  msg.value forwarding to SYSTEM_ADDRESS
     // ──────────────────────────────────────────────
 
     function test_ExecuteCrossChainCall_ForwardsValueToSystem() public {
@@ -127,21 +156,25 @@ contract EEZL2CoverageTest is Test {
         // The proxy forwards msg.value to the manager; the manager forwards it to SYSTEM_ADDRESS.
         // The cross-chain call hash is computed with msg.value = 5 (it's part of the hash).
         uint256 sentValue = 5;
+        // Inbound call: source = (this caller, this L2), target = (target, remote proxy rollup).
         bytes32 crossChainCallHash =
-            _hash(REMOTE_ROLLUP_ID, address(target), sentValue, callData, address(this), TEST_ROLLUP_ID);
+            _ccHash(false, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, sentValue, callData);
 
         // Inner forwarded call still carries cc.value (independent of the inbound msg.value).
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
+        // The top-level call executes on this L2: target rollup = ROLLUP_ID, source = the call's own pair.
+        bytes32 callHash = _ccHash(false, address(this), REMOTE_ROLLUP_ID, address(target), TEST_ROLLUP_ID, 0, callData);
+
         ExecutionEntry memory entry;
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = cc;
         entry.proxyEntryHash = crossChainCallHash;
         entry.incomingCalls = calls;
         entry.expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        entry.callCount = 1;
+        entry.success = true;
         entry.returnData = "";
-        entry.rollingHash = _rollingHashSingleCall("");
-        _loadSingle(entry, new LookupCall[](0));
+        entry.rollingHash = _rhSingle(crossChainCallHash, callHash, true, "");
+        _loadSingle(entry, new StaticLookup[](0));
 
         uint256 sysBefore = SYSTEM_ADDRESS.balance;
         (bool success,) = proxy.call{value: sentValue}(callData);
@@ -157,19 +190,20 @@ contract EEZL2CoverageTest is Test {
         address proxy = mgr2.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(ViewTargetL2.setValue, (1));
 
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 3, callData, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _ccHash(false, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 3, callData);
+        bytes32 callHash = _ccHash(false, address(this), REMOTE_ROLLUP_ID, address(target), TEST_ROLLUP_ID, 0, callData);
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
         ExecutionEntry memory entry;
         entry.proxyEntryHash = h;
         entry.incomingCalls = calls;
         entry.expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        entry.callCount = 1;
-        entry.rollingHash = _rollingHashSingleCall("");
+        entry.success = true;
+        entry.rollingHash = _rhSingle(h, callHash, true, "");
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
         vm.prank(address(rejecter));
-        mgr2.loadExecutionTable(entries, new LookupCall[](0));
+        mgr2.loadExecutionTable(entries, new StaticLookup[](0));
 
         // The EtherTransferFailed error bubbles up through the proxy as a revert.
         (bool ok,) = proxy.call{value: 3}(callData);
@@ -177,14 +211,14 @@ contract EEZL2CoverageTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  executeIncomingCrossChainCall (232-288)
+    //  executeIncomingCrossChainCall
     // ──────────────────────────────────────────────
 
     function test_IncomingCrossChainCall_EmptyEntries() public {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EmptyEntries.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, new ExecutionEntry[](0), new LookupCall[](0)
+            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, new ExecutionEntry[](0), new StaticLookup[](0)
         );
     }
 
@@ -196,14 +230,14 @@ contract EEZL2CoverageTest is Test {
         vm.expectRevert(EEZL2.ValueMismatch.selector);
         manager.executeIncomingCrossChainCall{
             value: 1
-        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new LookupCall[](0));
+        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0));
     }
 
     function test_IncomingCrossChainCall_NotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         vm.expectRevert(EEZL2.Unauthorized.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, entries, new LookupCall[](0)
+            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0)
         );
     }
 
@@ -218,43 +252,44 @@ contract EEZL2CoverageTest is Test {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EntryHashMismatch.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID, entries, new LookupCall[](0)
+            address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0)
         );
     }
 
     function test_IncomingCrossChainCall_Success() public {
         address sourceAddr = address(0xABCD);
-        uint256 sourceRollup = REMOTE_ROLLUP_ID;
+        uint64 sourceRollup = REMOTE_ROLLUP_ID;
         bytes memory data = abi.encodeCall(ViewTargetL2.setValue, (123));
         uint256 value = 0; // setValue is non-payable; keep the forwarded value at 0
 
         // entries[0].incomingCalls[0] is the inbound call delivered via the source proxy.
-        // The inbound call's hash binding is ROLLUP_ID/destination/value/data/sourceAddr/sourceRollup.
-        bytes32 inboundHash = _hash(TEST_ROLLUP_ID, address(target), value, data, sourceAddr, sourceRollup);
+        // The inbound call's hash binds source = (sourceAddr, sourceRollup), target = (destination, ROLLUP_ID).
+        bytes32 inboundHash = _ccHash(false, sourceAddr, sourceRollup, address(target), TEST_ROLLUP_ID, value, data);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: address(target),
-            value: value,
-            data: data,
             sourceAddress: sourceAddr,
             sourceRollupId: sourceRollup,
-            revertSpan: 0
+            targetAddress: address(target),
+            value: value,
+            data: data
         });
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0].proxyEntryHash = inboundHash;
         entries[0].incomingCalls = calls;
         entries[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        entries[0].callCount = 1;
+        entries[0].success = true;
         entries[0].returnData = abi.encode(uint256(777));
-        entries[0].rollingHash = _rollingHashSingleCall("");
+        // The inbound call executes on this L2 with the same identity as the entry's proxyEntryHash.
+        entries[0].rollingHash = _rhSingle(inboundHash, inboundHash, true, "");
 
         vm.prank(SYSTEM_ADDRESS);
         bytes memory ret = manager.executeIncomingCrossChainCall{
             value: value
-        }(address(target), value, data, sourceAddr, sourceRollup, entries, new LookupCall[](0));
+        }(address(target), value, data, sourceAddr, sourceRollup, entries, new StaticLookup[](0));
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
@@ -262,7 +297,7 @@ contract EEZL2CoverageTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  Reentrant ExpectedOutgoing success path (354-361)
+    //  Reentrant ExpectedOutgoing success path
     // ──────────────────────────────────────────────
 
     /// An entry whose call reenters the manager via a proxy, matched against
@@ -277,38 +312,45 @@ contract EEZL2CoverageTest is Test {
         bytes memory outerCd = abi.encodeCall(CounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
 
-        bytes32 outerHash = _hash(REMOTE_ROLLUP_ID, address(cap), 0, outerCd, address(this), TEST_ROLLUP_ID);
-        // L2 forces sourceRollupId = ROLLUP_ID for reentrant calls it issues.
-        bytes32 innerHash = _hash(MAINNET, counterL1, 0, innerCd, address(cap), TEST_ROLLUP_ID);
+        // Outer call: invoked via outerProxy by address(this) → source = (this, this L2), target = (cap, remote).
+        bytes32 outerHash = _ccHash(false, address(this), TEST_ROLLUP_ID, address(cap), REMOTE_ROLLUP_ID, 0, outerCd);
+        // Top-level outer call executed on this L2 carries its own source pair, target rollup = ROLLUP_ID.
+        bytes32 outerCallHash = _ccHash(false, address(this), REMOTE_ROLLUP_ID, address(cap), TEST_ROLLUP_ID, 0, outerCd);
+        // Reentrant call leaving this L2: L2 forces sourceRollupId = ROLLUP_ID, target = (counterL1, MAINNET).
+        bytes32 innerHash = _ccHash(false, address(cap), TEST_ROLLUP_ID, counterL1, MAINNET, 0, innerCd);
+        // The sub-call run inside the reentrant frame executes on this L2 (target rollup = ROLLUP_ID).
+        bytes32 subHash = _ccHash(false, address(cap), MAINNET, counterL1, TEST_ROLLUP_ID, 0, innerCd);
 
-        // incomingCalls: [0] = outer call, [1] = inner reentrant call.
-        CrossChainCall[] memory calls = new CrossChainCall[](2);
-        calls[0] = _cc(address(cap), 0, outerCd, address(this), REMOTE_ROLLUP_ID);
-        calls[1] = _cc(counterL1, 0, innerCd, address(cap), MAINNET);
-
-        // incomingCalls[1] targets the codeless `counterL1` address (it just records the
-        // reentrant frame); a call to a codeless address succeeds returning "". The reentrant
-        // caller (`cap`) gets `expectedOutgoingCalls[0].returnData` = abi.encode(1).
-        bytes memory innerActualRet = "";
+        // The reentrant frame's own sub-call targets the codeless `counterL1` address; a call to a
+        // codeless address succeeds returning "". The reentrant caller (`cap`) gets
+        // `expectedOutgoingCalls[0].returnData` = abi.encode(1).
         bytes memory outgoingRet = abi.encode(uint256(1));
 
-        // Rolling hash: CALL_BEGIN(1), [reentrant frame: NESTED_BEGIN(1), CALL_BEGIN(2),
-        // CALL_END(2,true,""), NESTED_END(1)], CALL_END(2,true,"").
-        // The outer CALL_END uses call number 2, not 1: `_rollingHashCallEnd` reads
-        // `_currentIncomingCall` *after* the call returns, and the reentrant frame already
-        // advanced the cursor to 2 (matching L1's post-bump convention in `EEZ._processNCalls`).
-        bytes32 h = bytes32(0);
-        h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
-        h = keccak256(abi.encodePacked(h, NESTED_BEGIN, uint256(1)));
-        h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(2)));
-        h = keccak256(abi.encodePacked(h, CALL_END, uint256(2), true, innerActualRet));
-        h = keccak256(abi.encodePacked(h, NESTED_END, uint256(1)));
-        h = keccak256(abi.encodePacked(h, CALL_END, uint256(2), true, bytes("")));
+        // entry.incomingCalls holds ONLY the top-level outer call; the reentrant frame carries its own.
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = _cc(address(cap), 0, outerCd, address(this), REMOTE_ROLLUP_ID);
+
+        // The reentrant frame's sub-array (run by `_resolveNestedReentrant`).
+        CrossChainCall[] memory frameCalls = new CrossChainCall[](1);
+        frameCalls[0] = _cc(counterL1, 0, innerCd, address(cap), MAINNET);
+
+        // Rolling hash: seed, CALL_BEGIN(outer), [NESTED_BEGIN(inner), CALL_BEGIN(sub),
+        // CALL_END(true,""), NESTED_END], CALL_END(true,"").
+        bytes32 h = _seed(outerHash);
+        h = _hCallBegin(h, outerCallHash);
+        bytes32 rhAtFire = h; // `_rollingHash` at the instant the reentrant call fires
+        h = _hNestedBegin(h, innerHash);
+        h = _hCallBegin(h, subHash);
+        h = _hCallEnd(h, true, "");
+        h = _hNestedEnd(h);
+        h = _hCallEnd(h, true, "");
 
         ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
         outgoing[0] = ExpectedOutgoingCrossChainCall({
-            crossChainCallHash: innerHash,
-            callCount: 1, // consumes incomingCalls[1]
+            expectedOutgoingHash: _expectedOutgoingHash(innerHash, rhAtFire),
+            incomingCalls: frameCalls,
+            revertedOrStaticRollingHash: bytes32(0), // unused on the success path
+            success: true,
             returnData: outgoingRet
         });
 
@@ -316,10 +358,10 @@ contract EEZL2CoverageTest is Test {
         entry.proxyEntryHash = outerHash;
         entry.incomingCalls = calls;
         entry.expectedOutgoingCalls = outgoing;
-        entry.callCount = 1; // outer frame runs calls[0]
+        entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new LookupCall[](0));
+        _loadSingle(entry, new StaticLookup[](0));
 
         (bool ok,) = outerProxy.call(outerCd);
         assertTrue(ok, "outer reentrant call must succeed");
@@ -328,7 +370,7 @@ contract EEZL2CoverageTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  staticCallLookup — top-level pool (506-522, 588-596, 644-652)
+    //  staticCallLookup — top-level pool
     // ──────────────────────────────────────────────
 
     function test_StaticLookup_Unauthorized() public {
@@ -340,15 +382,14 @@ contract EEZL2CoverageTest is Test {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes memory payload = abi.encode(uint256(123));
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        // Static lookup key: isStatic = true, source = (this caller, this L2), target = (target, remote).
+        bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0].crossChainCallHash = h;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
-        lookups[0].failed = false;
+        lookups[0].success = true;
         lookups[0].incomingCalls = new CrossChainCall[](0);
-        lookups[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        lookups[0].expectedLookups = new ExpectedLookup[](0);
         lookups[0].rollingHash = bytes32(0);
         _loadEntries(new ExecutionEntry[](0), lookups);
 
@@ -361,15 +402,13 @@ contract EEZL2CoverageTest is Test {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes memory payload = hex"deadbeef";
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0].crossChainCallHash = h;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
-        lookups[0].failed = true;
+        lookups[0].success = false;
         lookups[0].incomingCalls = new CrossChainCall[](0);
-        lookups[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        lookups[0].expectedLookups = new ExpectedLookup[](0);
         lookups[0].rollingHash = bytes32(0);
         _loadEntries(new ExecutionEntry[](0), lookups);
 
@@ -381,15 +420,13 @@ contract EEZL2CoverageTest is Test {
     function test_StaticLookup_TopLevelHashMismatch() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0].crossChainCallHash = h;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
-        lookups[0].failed = false;
+        lookups[0].success = true;
         lookups[0].incomingCalls = new CrossChainCall[](0);
-        lookups[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        lookups[0].expectedLookups = new ExpectedLookup[](0);
         lookups[0].rollingHash = keccak256("wrong"); // no sub-calls → computed 0 != wrong
         _loadEntries(new ExecutionEntry[](0), lookups);
 
@@ -400,14 +437,14 @@ contract EEZL2CoverageTest is Test {
 
     function test_StaticLookup_TopLevelNoMatch() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
-        _loadEntries(new ExecutionEntry[](0), new LookupCall[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticLookup[](0));
 
         vm.prank(proxy);
         vm.expectRevert(EEZBase.ExecutionNotFound.selector);
         manager.staticCallLookup(address(this), abi.encodeCall(ViewTargetL2.getValue, ()));
     }
 
-    /// Top-level lookup carrying a real static sub-call: `_processNStaticCalls` runs it (588-596)
+    /// Top-level lookup carrying a real static sub-call: `_processNStaticCalls` runs it
     /// and folds its result into the verified rolling hash.
     function test_StaticLookup_TopLevelWithSubCall() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
@@ -419,26 +456,24 @@ contract EEZL2CoverageTest is Test {
 
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes memory payload = abi.encode(uint256(999));
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
         CrossChainCall[] memory subCalls = new CrossChainCall[](1);
         subCalls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: true,
-            targetAddress: address(target),
-            value: 0,
-            data: subData,
             sourceAddress: address(target),
             sourceRollupId: REMOTE_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: address(target),
+            value: 0,
+            data: subData
         });
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0].crossChainCallHash = h;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
-        lookups[0].failed = false;
+        lookups[0].success = true;
         lookups[0].incomingCalls = subCalls;
-        lookups[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        lookups[0].expectedLookups = new ExpectedLookup[](0);
         lookups[0].rollingHash = subHash;
         _loadEntries(new ExecutionEntry[](0), lookups);
 
@@ -447,32 +482,30 @@ contract EEZL2CoverageTest is Test {
         assertEq(res, payload);
     }
 
-    /// Static sub-call whose source proxy was never deployed reverts LookupCallProxyNotDeployed (593).
+    /// Static sub-call whose source proxy was never deployed reverts LookupCallProxyNotDeployed.
     function test_StaticLookup_SubCallProxyNotDeployed() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
-        bytes32 h = _hash(REMOTE_ROLLUP_ID, address(target), 0, cd, address(this), TEST_ROLLUP_ID);
+        bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
         address undeployedSource = address(0xDEAD);
         address undeployedProxy = manager.computeCrossChainProxyAddress(undeployedSource, REMOTE_ROLLUP_ID);
 
         CrossChainCall[] memory subCalls = new CrossChainCall[](1);
         subCalls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: true,
-            targetAddress: address(target),
-            value: 0,
-            data: cd,
             sourceAddress: undeployedSource,
             sourceRollupId: REMOTE_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: address(target),
+            value: 0,
+            data: cd
         });
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0].crossChainCallHash = h;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
-        lookups[0].failed = false;
+        lookups[0].success = true;
         lookups[0].incomingCalls = subCalls;
-        lookups[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        lookups[0].expectedLookups = new ExpectedLookup[](0);
         lookups[0].rollingHash = bytes32(0);
         _loadEntries(new ExecutionEntry[](0), lookups);
 
@@ -482,11 +515,12 @@ contract EEZL2CoverageTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  staticCallLookup — nested inside execution (627-641)
+    //  staticCallLookup — nested inside execution
     // ──────────────────────────────────────────────
 
-    /// An entry whose call performs a cross-chain STATICCALL resolves through the entry-scoped
-    /// `expectedLookups` (failed=false) via the proxy's static-context detection.
+    /// An entry whose call performs a cross-chain STATICCALL resolves through the active entry's
+    /// unified `expectedOutgoingCalls` (a static-keyed `success == true` element) via the proxy's
+    /// static-context detection.
     function test_StaticLookup_NestedInsideExecution() public {
         StaticReaderL2 reader = new StaticReaderL2();
 
@@ -496,42 +530,43 @@ contract EEZL2CoverageTest is Test {
         bytes memory innerData = abi.encodeWithSignature("getValue()");
         uint256 innerResult = 77;
         bytes memory payload = abi.encode(innerResult);
-        // Nested lookup key: source = reader (msg.sender to innerProxy), at call #1.
-        bytes32 innerHash = _hash(MAINNET, innerRemote, 0, innerData, address(reader), TEST_ROLLUP_ID);
+        // Nested static read key: isStatic = true, source = (reader, this L2), target = (innerRemote, MAINNET).
+        bytes32 innerHash = _ccHash(true, address(reader), TEST_ROLLUP_ID, innerRemote, MAINNET, 0, innerData);
 
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
         bytes memory outerData = abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
-        bytes32 outerHash = _hash(REMOTE_ROLLUP_ID, address(reader), 0, outerData, address(0xD00D), TEST_ROLLUP_ID);
+        bytes32 outerHash =
+            _ccHash(false, address(0xD00D), TEST_ROLLUP_ID, address(reader), REMOTE_ROLLUP_ID, 0, outerData);
+        // Top-level outer call executed on this L2 (target rollup = ROLLUP_ID).
+        bytes32 outerCallHash =
+            _ccHash(false, address(0xD00D), REMOTE_ROLLUP_ID, address(reader), TEST_ROLLUP_ID, 0, outerData);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = _cc(address(reader), 0, outerData, address(0xD00D), REMOTE_ROLLUP_ID);
 
-        ExpectedLookup[] memory lookups = new ExpectedLookup[](1);
-        lookups[0] = ExpectedLookup({
-            crossChainCallHash: innerHash,
-            returnData: payload,
-            failed: false,
-            callNumber: 1,
-            lastOutgoingCallConsumed: 0,
-            executingLookupIndex: 0,
-            incomingCalls: new CrossChainCall[](0),
-            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
-            callCount: 0,
-            rollingHash: bytes32(0)
+        // The static read fires while inside the outer call: `_rollingHash` = seed → CALL_BEGIN(outer).
+        bytes32 rhAtRead = _hCallBegin(_seed(outerHash), outerCallHash);
+
+        ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
+        outgoing[0] = ExpectedOutgoingCrossChainCall({
+            expectedOutgoingHash: _expectedOutgoingHash(innerHash, rhAtRead),
+            incomingCalls: new CrossChainCall[](0), // no sub-calls; the read returns the pre-computed payload
+            revertedOrStaticRollingHash: bytes32(0), // untagged static hash of an empty sub-array
+            success: true,
+            returnData: payload
         });
 
         // Outer call returns abi.encode(uint256(77)).
-        bytes32 h = _rollingHashSingleCall(abi.encode(innerResult));
+        bytes32 h = _rhSingle(outerHash, outerCallHash, true, abi.encode(innerResult));
 
         ExecutionEntry memory entry;
         entry.proxyEntryHash = outerHash;
         entry.incomingCalls = calls;
-        entry.expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        entry.expectedLookups = lookups;
-        entry.callCount = 1;
+        entry.expectedOutgoingCalls = outgoing;
+        entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new LookupCall[](0));
+        _loadSingle(entry, new StaticLookup[](0));
 
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
         // Invoke from 0xD00D so the consumed hash matches the entry's proxyEntryHash, whose
@@ -541,16 +576,20 @@ contract EEZL2CoverageTest is Test {
         assertTrue(ok, "entry with nested static read must commit");
     }
 
-    /// Nested staticCallLookup with no matching ExpectedLookup reverts ExecutionNotFound (641).
+    /// Nested staticCallLookup with no matching outgoing entry reverts ExecutionNotFound,
+    /// surfacing as the outer call failing.
     function test_StaticLookup_NestedNoMatch() public {
         StaticReaderL2 reader = new StaticReaderL2();
         address innerRemote = address(0xC0FFEE);
         address innerProxy = manager.createCrossChainProxy(innerRemote, MAINNET);
         bytes memory innerData = abi.encodeWithSignature("getValue()");
 
-        // Outer call performs the static read but NO expectedLookup is provided → revert inside.
+        // Outer call performs the static read but NO expectedOutgoing entry is provided → revert inside.
         bytes memory outerData = abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
-        bytes32 outerHash = _hash(REMOTE_ROLLUP_ID, address(reader), 0, outerData, address(0xD00D), TEST_ROLLUP_ID);
+        bytes32 outerHash =
+            _ccHash(false, address(0xD00D), TEST_ROLLUP_ID, address(reader), REMOTE_ROLLUP_ID, 0, outerData);
+        bytes32 outerCallHash =
+            _ccHash(false, address(0xD00D), REMOTE_ROLLUP_ID, address(reader), TEST_ROLLUP_ID, 0, outerData);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = _cc(address(reader), 0, outerData, address(0xD00D), REMOTE_ROLLUP_ID);
@@ -559,19 +598,16 @@ contract EEZL2CoverageTest is Test {
         entry.proxyEntryHash = outerHash;
         entry.incomingCalls = calls;
         entry.expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
-        entry.expectedLookups = new ExpectedLookup[](0);
-        entry.callCount = 1;
+        entry.success = true;
         entry.returnData = "";
         // The outer call's static read reverts (ExecutionNotFound), so reader's require fails →
-        // the outer call returns (false, ...). Rolling hash captures a failed call.
-        bytes32 h = bytes32(0);
-        h = keccak256(abi.encodePacked(h, CALL_BEGIN, uint256(1)));
-        // We don't know the exact revert data; assert the entry reverts overall via mismatch is
-        // brittle, so instead just confirm the proxy call reverts.
-        entry.rollingHash = h;
-        _loadSingle(entry, new LookupCall[](0));
+        // the outer call returns (false, ...). We set an incomplete rolling hash (seed + CALL_BEGIN
+        // only) so the entry fails its rolling-hash check and the whole call reverts.
+        entry.rollingHash = _hCallBegin(_seed(outerHash), outerCallHash);
+        _loadSingle(entry, new StaticLookup[](0));
 
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
+        vm.prank(address(0xD00D));
         (bool ok,) = outerProxy.call(outerData);
         assertFalse(ok, "nested static read with no lookup match must surface as failure");
     }
@@ -579,5 +615,4 @@ contract EEZL2CoverageTest is Test {
 
 contract RejectEther {
     // No payable receive/fallback → any value transfer reverts.
-
     }

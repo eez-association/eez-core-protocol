@@ -54,11 +54,11 @@ contract MockManager {
         proxy = _proxy;
     }
 
-    function computeCrossChainProxyAddress(address, uint256) external view returns (address) {
+    function computeCrossChainProxyAddress(address, uint64) external view returns (address) {
         return proxy;
     }
 
-    function createCrossChainProxy(address, uint256) external returns (address) {
+    function createCrossChainProxy(address, uint64) external returns (address) {
         return proxy;
     }
 }
@@ -73,8 +73,8 @@ contract BridgeTest is Test {
     address internal alice = makeAddr("alice");
     address internal dest = makeAddr("dest");
 
-    uint256 internal constant THIS_ROLLUP = 7;
-    uint256 internal constant DEST_ROLLUP = 9;
+    uint64 internal constant THIS_ROLLUP = 7;
+    uint64 internal constant DEST_ROLLUP = 9;
 
     function setUp() public {
         proxy = new AcceptingProxy();

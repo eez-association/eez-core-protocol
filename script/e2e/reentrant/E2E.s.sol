@@ -4,24 +4,22 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    ExecutionEntry,
-    LookupCall,
-    ExpectedLookup
-} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
 import {ReentrantCounter} from "../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {
+    crossChainCallHash,
+    noStaticLookups,
+    noCalls,
+    expectedL1toL2Hash,
+    RollingHashBuilder
+} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Reentrant — 4-hop cross-chain reentrant chain via deepCall(3)
@@ -32,119 +30,86 @@ import {crossChainCallHash, noLookupCalls, RollingHashBuilder} from "../shared/E
 //    if N > 0: peer.deepCall(N-1)   // cross-chain via proxy
 //    return ++count
 //
-//  On L1 (1 entry, 2 calls, 2 expectedL1ToL2Calls):
-//    calls[0]: rcL1.dC(3) from batcher
-//      -> calls rcL2ProxyOnL1.dC(2) -> expectedL1ToL2Calls[0] consumed (callCount=1)
-//        calls[1]: rcL1.dC(1) from rcL2 (inside expectedL1ToL2Calls[0])
-//          -> calls rcL2ProxyOnL1.dC(0) -> expectedL1ToL2Calls[1] consumed (callCount=0)
-//          -> rcL1.count++ -> 1, returns 1
-//      -> rcL1.count++ -> 2, returns 2
+//  NEW (flatten) model — L1 (1 entry, 1 top-level call, 2 expectedL1ToL2Calls):
+//    l2ToL1Calls[0]: rcL1.dC(3) from batcher (top-level, executed ON L1)
+//      -> reenters rcL2Proxy.dC(2)  => expectedL1ToL2Calls[0] (Frame A), keyed at rhFireA
+//         Frame A sub-array = [ rcL1.dC(1) from rcL2 ]
+//           -> reenters rcL2Proxy.dC(0)  => expectedL1ToL2Calls[1] (Frame B), keyed at rhFireB
+//              Frame B sub-array = [] (rcL2.dC(0) makes no further peer call)
+//              -> rcL1.count++ -> 1, dC(1) returns 1
+//      -> rcL1.count++ -> 2, dC(3) returns 2
 //
-//  On L2 (1 entry, 2 incomingCalls, 1 expectedOutgoingCall):
-//    incomingCalls[0]: rcL2.dC(2) from rcL1
-//      -> calls rcL1ProxyOnL2.dC(1) -> expectedOutgoingCalls[0] consumed (callCount=1)
-//        incomingCalls[1]: rcL2.dC(0) from rcL1 (inside expectedOutgoingCalls[0])
-//          -> no peer call (remainingCalls=0)
-//          -> rcL2.count++ -> 1, returns 1
-//      -> rcL2.count++ -> 2, returns 2
+//  NEW model — L2 (1 entry, 1 top-level incomingCall, 1 expectedOutgoingCall):
+//    incomingCalls[0]: rcL2.dC(2) from rcL1 (top-level, executed ON L2)
+//      -> reenters rcL1Proxy.dC(1)  => expectedOutgoingCalls[0] (Frame), keyed at rhFire
+//         Frame sub-array (incomingCalls) = [ rcL2.dC(0) from rcL1 ]
+//           -> rcL2.count++ -> 1, dC(0) returns 1
+//      -> rcL2.count++ -> 2, dC(2) returns 2
 //
 //  After execution: rcL1.count=2, rcL2.count=2
 // ═══════════════════════════════════════════════════════════════════════
 
-uint256 constant L2_ROLLUP_ID = 1;
-uint256 constant MAINNET_ROLLUP_ID = 0;
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract ReentrantActions {
-    using RollingHashBuilder for bytes32;
+    // ── calldata ──
 
-    // ── Action hash builders ──
-
-    /// @dev L1 outer: batcher calls rcL1Proxy(rcL1@L2) on L1 with dC(3)
-    function _l1OuterActionHash(address rcL1, address batcher) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            L2_ROLLUP_ID,
-            rcL1,
-            0,
-            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)),
-            batcher,
-            MAINNET_ROLLUP_ID
-        );
+    function _dc(uint256 n) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(ReentrantCounter.deepCall.selector, n);
     }
 
-    /// @dev L1 expectedL1ToL2Calls[0]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(2)
-    function _l1NestedHash0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            L2_ROLLUP_ID,
-            rcL2,
-            0,
-            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
-            rcL1,
-            MAINNET_ROLLUP_ID
-        );
+    // ── L1 cross-chain call hashes ──
+
+    /// @dev L1 proxy-entry identity: batcher -> rcL1.dC(3). The proxy for (rcL1, L2) folds
+    ///      source=batcher MAINNET, target=rcL1 L2.
+    function _l1ProxyEntryHash(address rcL1, address batcher) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, rcL1, 0, _dc(3), batcher, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev L1 expectedL1ToL2Calls[1]: rcL1 calls rcL2Proxy(rcL2@L2) on L1 with dC(0)
-    function _l1NestedHash1(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            L2_ROLLUP_ID,
-            rcL2,
-            0,
-            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(0)),
-            rcL1,
-            MAINNET_ROLLUP_ID
-        );
+    /// @dev L1 top-level call dC(3): executed ON L1 (target rcL1 MAINNET), sourced from batcher L2
+    ///      (the call's `sourceRollupId` must be in the entry's stateDeltas).
+    function _cchTop3(address rcL1, address batcher) internal pure returns (bytes32) {
+        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(3), batcher, L2_ROLLUP_ID);
     }
 
-    /// @dev L2 outer: alice calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(2)
-    function _l2OuterActionHash(address rcL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            MAINNET_ROLLUP_ID,
-            rcL1,
-            0,
-            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
-            alice,
-            L2_ROLLUP_ID
-        );
+    /// @dev L1 reentry dC(2): rcL1 -> rcL2Proxy.dC(2). executeCrossChainCall folds source=rcL1 MAINNET,
+    ///      target=rcL2 L2.
+    function _cchReentry2(address rcL2, address rcL1) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(2), rcL1, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev L2 expectedOutgoingCalls[0]: rcL2 calls rcL1Proxy(rcL1@MAINNET) on L2 with dC(1)
-    function _l2NestedHash0(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            MAINNET_ROLLUP_ID,
-            rcL1,
-            0,
-            abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(1)),
-            rcL2,
-            L2_ROLLUP_ID
-        );
+    /// @dev L1 Frame-A sub-call dC(1): executed ON L1 (target rcL1 MAINNET), sourced from rcL2 L2.
+    function _cchSub1(address rcL1, address rcL2) internal pure returns (bytes32) {
+        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(1), rcL2, L2_ROLLUP_ID);
     }
 
-    // ── Rolling hashes ──
-
-    /// @dev L1: CALL_BEGIN(1) NESTED_BEGIN(1) CALL_BEGIN(2) NESTED_BEGIN(2) NESTED_END(2)
-    ///          CALL_END(2,true,enc(1)) NESTED_END(1) CALL_END(2,true,enc(2))
-    function _l1RollingHash() internal pure returns (bytes32 h) {
-        h = bytes32(0);
-        h = h.appendCallBegin(1);
-        h = h.appendNestedBegin(1);
-        h = h.appendCallBegin(2);
-        h = h.appendNestedBegin(2);
-        h = h.appendNestedEnd(2);
-        h = h.appendCallEnd(2, true, abi.encode(uint256(1)));
-        h = h.appendNestedEnd(1);
-        h = h.appendCallEnd(2, true, abi.encode(uint256(2)));
+    /// @dev L1 reentry dC(0): rcL1 -> rcL2Proxy.dC(0). Source=rcL1 MAINNET, target=rcL2 L2.
+    function _cchReentry0(address rcL2, address rcL1) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(0), rcL1, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev L2: CALL_BEGIN(1) NESTED_BEGIN(1) CALL_BEGIN(2)
-    ///          CALL_END(2,true,enc(1)) NESTED_END(1) CALL_END(2,true,enc(2))
-    function _l2RollingHash() internal pure returns (bytes32 h) {
-        h = bytes32(0);
-        h = h.appendCallBegin(1);
-        h = h.appendNestedBegin(1);
-        h = h.appendCallBegin(2);
-        h = h.appendCallEnd(2, true, abi.encode(uint256(1)));
-        h = h.appendNestedEnd(1);
-        h = h.appendCallEnd(2, true, abi.encode(uint256(2)));
+    // ── L2 cross-chain call hashes (self = L2_ROLLUP_ID). PENDING EEZL2. ──
+
+    /// @dev L2 proxy-entry identity: alice -> rcL1Proxy.dC(2). The L2 manager forces source rollup =
+    ///      ROLLUP_ID (L2); target=rcL1 MAINNET.
+    function _l2ProxyEntryHash(address rcL1, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(2), alice, L2_ROLLUP_ID);
+    }
+
+    /// @dev L2 top-level incoming dC(2): executed ON L2 (target rcL2 L2), sourced from rcL1 MAINNET.
+    function _cchL2Top2(address rcL2, address rcL1) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(2), rcL1, MAINNET_ROLLUP_ID);
+    }
+
+    /// @dev L2 outgoing reentry dC(1): rcL2 -> rcL1Proxy.dC(1). Source rollup forced to L2; target=rcL1 MAINNET.
+    function _cchL2Out1(address rcL1, address rcL2) internal pure returns (bytes32) {
+        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(1), rcL2, L2_ROLLUP_ID);
+    }
+
+    /// @dev L2 Frame incoming sub-call dC(0): executed ON L2 (target rcL2 L2), sourced from rcL1 MAINNET.
+    function _cchL2Sub0(address rcL2, address rcL1) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(0), rcL1, MAINNET_ROLLUP_ID);
     }
 
     // ── Entry builders ──
@@ -162,95 +127,150 @@ abstract contract ReentrantActions {
             etherDelta: 0
         });
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
-        calls[0] = L2ToL1Call({
+        bytes32 proxyEntryHash = _l1ProxyEntryHash(rcL1, batcher);
+
+        // Top-level calls: just rcL1.dC(3).
+        L2ToL1Call[] memory topCalls = new L2ToL1Call[](1);
+        topCalls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: rcL1,
-            value: 0,
-            data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)),
             sourceAddress: batcher,
             sourceRollupId: L2_ROLLUP_ID,
-            revertSpan: 0
-        });
-        calls[1] = L2ToL1Call({
-            isStatic: false,
             targetAddress: rcL1,
             value: 0,
-            data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(1)),
+            data: _dc(3)
+        });
+
+        // Frame A's own sub-array: rcL1.dC(1) sourced from rcL2.
+        L2ToL1Call[] memory frameASub = new L2ToL1Call[](1);
+        frameASub[0] = L2ToL1Call({
+            revertNextNCalls: 0,
+            isStatic: false,
             sourceAddress: rcL2,
             sourceRollupId: L2_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: rcL1,
+            value: 0,
+            data: _dc(1)
         });
+
+        // Rolling hash — thread `rh`, capturing the fire-time value at each reentry so the
+        // expectedL1toL2Hash keys use the exact running hash the contract sees.
+        bytes32 cch3 = _cchTop3(rcL1, batcher);
+        bytes32 cch2 = _cchReentry2(rcL2, rcL1);
+        bytes32 cch1 = _cchSub1(rcL1, rcL2);
+        bytes32 cch0 = _cchReentry0(rcL2, rcL1);
+
+        bytes32 rh = RollingHashBuilder.entryBegin(deltas, proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, cch3); // top-level dC(3) begins
+        bytes32 rhFireA = rh; // reentry dC(2) fires here
+        rh = RollingHashBuilder.appendNestedBegin(rh, cch2);
+        rh = RollingHashBuilder.appendCallBegin(rh, cch1); // Frame A sub-call dC(1) begins
+        bytes32 rhFireB = rh; // reentry dC(0) fires here
+        rh = RollingHashBuilder.appendNestedBegin(rh, cch0);
+        rh = RollingHashBuilder.appendNestedEnd(rh); // Frame B sub-array empty
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1))); // dC(1) returns 1
+        rh = RollingHashBuilder.appendNestedEnd(rh);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(2))); // dC(3) returns 2
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](2);
         nested[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: _l1NestedHash0(rcL2, rcL1),
-            destinationRollupId: L2_ROLLUP_ID,
-            callCount: 1,
+            expectedL1toL2Hash: expectedL1toL2Hash(cch2, rhFireA),
+            l2ToL1Calls: frameASub,
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            // rcL2.dC(2) returns ++count == 2.
             returnData: abi.encode(uint256(2))
         });
         nested[1] = ExpectedL1ToL2Call({
-            crossChainCallHash: _l1NestedHash1(rcL2, rcL1),
-            destinationRollupId: L2_ROLLUP_ID,
-            callCount: 0,
+            expectedL1toL2Hash: expectedL1toL2Hash(cch0, rhFireB),
+            l2ToL1Calls: noCalls(),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            // rcL2.dC(0) returns ++count == 1.
             returnData: abi.encode(uint256(1))
         });
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
             stateDeltas: deltas,
-            proxyEntryHash: _l1OuterActionHash(rcL1, batcher),
+            proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
-            l2ToL1Calls: calls,
+            l2ToL1Calls: topCalls,
             expectedL1ToL2Calls: nested,
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 1,
+            rollingHash: rh,
+            success: true,
             // Top-level rcL1.deepCall(3) returns ++count == 2 after the chain.
-            returnData: abi.encode(uint256(2)),
-            rollingHash: _l1RollingHash()
+            returnData: abi.encode(uint256(2))
         });
     }
 
+    /// @dev L2-side mirror. NOTE: L2 rolling-hash + key schema is pending the EEZL2 migration; re-verify
+    ///      when EEZL2.sol lands.
     function _l2Entries(address rcL1, address rcL2, address alice)
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
     {
-        CrossChainCall[] memory calls = new CrossChainCall[](2);
-        calls[0] = CrossChainCall({
+        bytes32 proxyEntryHash = _l2ProxyEntryHash(rcL1, alice);
+
+        // Top-level incoming call: rcL2.dC(2) from rcL1.
+        CrossChainCall[] memory topCalls = new CrossChainCall[](1);
+        topCalls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: rcL2,
-            value: 0,
-            data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)),
             sourceAddress: rcL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
-        });
-        calls[1] = CrossChainCall({
-            isStatic: false,
             targetAddress: rcL2,
             value: 0,
-            data: abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(0)),
+            data: _dc(2)
+        });
+
+        // Outgoing frame's own incoming sub-array: rcL2.dC(0) from rcL1.
+        CrossChainCall[] memory frameSub = new CrossChainCall[](1);
+        frameSub[0] = CrossChainCall({
+            revertNextNCalls: 0,
+            isStatic: false,
             sourceAddress: rcL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: rcL2,
+            value: 0,
+            data: _dc(0)
         });
+
+        // PENDING EEZL2: rolling-hash + expectedOutgoingHash schema mirrors the L1 model; can't be
+        // verified until EEZL2.sol lands.
+        bytes32 cch2 = _cchL2Top2(rcL2, rcL1);
+        bytes32 cch1 = _cchL2Out1(rcL1, rcL2);
+        bytes32 cch0 = _cchL2Sub0(rcL2, rcL1);
+
+        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, cch2); // top-level incoming dC(2) begins
+        bytes32 rhFire = rh; // outgoing reentry dC(1) fires here
+        rh = RollingHashBuilder.appendNestedBegin(rh, cch1);
+        rh = RollingHashBuilder.appendCallBegin(rh, cch0); // incoming sub-call dC(0) begins
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1))); // dC(0) returns 1
+        rh = RollingHashBuilder.appendNestedEnd(rh);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(2))); // dC(2) returns 2
 
         ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
         nested[0] = ExpectedOutgoingCrossChainCall({
-            crossChainCallHash: _l2NestedHash0(rcL1, rcL2), callCount: 1, returnData: abi.encode(uint256(1))
+            expectedOutgoingHash: expectedL1toL2Hash(cch1, rhFire),
+            incomingCalls: frameSub,
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            // rcL1.dC(1) returns ++count == 1.
+            returnData: abi.encode(uint256(1))
         });
 
         entries = new L2ExecutionEntry[](1);
         entries[0] = L2ExecutionEntry({
-            proxyEntryHash: _l2OuterActionHash(rcL1, alice),
-            incomingCalls: calls,
+            proxyEntryHash: proxyEntryHash,
+            incomingCalls: topCalls,
             expectedOutgoingCalls: nested,
-            expectedLookups: new L2ExpectedLookup[](0),
-            callCount: 1,
+            rollingHash: rh,
+            success: true,
             // Top-level rcL2.deepCall(2) returns ++count == 2 after the chain.
-            returnData: abi.encode(uint256(2)),
-            rollingHash: _l2RollingHash()
+            returnData: abi.encode(uint256(2))
         });
     }
 }
@@ -341,7 +361,7 @@ contract ExecuteL2 is Script, ReentrantActions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), new L2LookupCall[](0));
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(rcL1Addr, rcL2Addr, alice), new L2StaticLookup[](0));
 
         // Trigger: alice calls rcL1ProxyOnL2.deepCall(2)
         (bool ok,) = rcL1ProxyOnL2.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(2)));
@@ -362,14 +382,14 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticLookup[] calldata staticLookups,
         address rcL1ProxyOnL1
     )
         external
     {
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
-        uint256[] memory rids = new uint256[](1);
+        uint64[] memory rids = new uint64[](1);
         rids[0] = L2_ROLLUP_ID;
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = "proof";
@@ -379,20 +399,20 @@ contract Batcher {
         }
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
         for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndex: psIdx});
+            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: 0,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
         (bool ok,) = rcL1ProxyOnL1.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)));
@@ -415,7 +435,7 @@ contract Execute is Script, ReentrantActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(rcL1Addr, rcL2Addr, address(batcher)),
-            noLookupCalls(),
+            noStaticLookups(),
             rcL1ProxyOnL1
         );
 
@@ -464,10 +484,10 @@ contract ComputeExpected is ComputeExpectedBase, ReentrantActions {
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
         console.log("");
-        console.log("=== EXPECTED L1 TABLE (1 entry, 2 calls, 2 nested - reentrant) ===");
+        console.log("=== EXPECTED L1 TABLE (1 entry, 1 call, 2 nested - reentrant) ===");
         _logEntry(0, l1[0]);
         console.log("");
-        console.log("=== EXPECTED L2 TABLE (1 entry, 2 calls, 1 nested - reentrant) ===");
+        console.log("=== EXPECTED L2 TABLE (1 entry, 1 call, 1 nested - reentrant) ===");
         _logL2Entry(0, l2[0]);
     }
 }

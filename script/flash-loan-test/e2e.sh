@@ -56,7 +56,7 @@ echo ""
 echo "====== Deploy EEZL2 (L2) ======"
 MANAGER_OUTPUT=$(forge script "$SCRIPT_DIR/DeployInfra.s.sol:DeployManagerL2" \
     --rpc-url "$L2_RPC" --broadcast --private-key "$PK" \
-    --sig "run(uint256,address)" "$L2_ROLLUP_ID" "$SYSTEM_ADDRESS" 2>&1)
+    --sig "run(uint64,address)" "$L2_ROLLUP_ID" "$SYSTEM_ADDRESS" 2>&1)
 MANAGER_L2=$(extract "$MANAGER_OUTPUT" "MANAGER_L2")
 echo "MANAGER_L2=$MANAGER_L2"
 
