@@ -90,6 +90,57 @@ contract BadVkeyManager is IRollupContract {
     }
 }
 
+/// @notice Calls a proxy and bubbles up its raw revert data, so a reverting reentrant call's error
+///         surfaces verbatim to the calling entry frame (used to exercise `ReentrantDestinationNotVerified`).
+contract CrossReenter {
+    function reenter(address proxy, bytes calldata data) external {
+        (bool ok, bytes memory ret) = proxy.call(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+    }
+}
+
+/// @notice Fires one reentrant cross-chain call through a proxy, requires it to succeed, returns a
+///         constant — drives a successful reentrant frame from inside an entry.
+contract ReentrantForwarder {
+    function forward(address proxy, bytes calldata data) external returns (uint256) {
+        (bool ok,) = proxy.call(data);
+        require(ok, "reentrant forward failed");
+        return 7;
+    }
+}
+
+/// @notice Meta hook that drives one proxy call during `executeMetaCrossChainTransactions`, so a
+///         transient (meta-hook) entry can be consumed within `postAndVerifyBatch`.
+contract MetaProxyCaller is IMetaCrossChainReceiver {
+    EEZ public immutable eez;
+    address public proxyAddr;
+    bytes public proxyCallData;
+    bool public hookRan;
+    bool public callSuccess;
+
+    constructor(EEZ _eez) {
+        eez = _eez;
+    }
+
+    function setProxyCall(address _proxy, bytes calldata _cd) external {
+        proxyAddr = _proxy;
+        proxyCallData = _cd;
+    }
+
+    function post(ProofSystemBatchPerVerificationEntries calldata b) external {
+        eez.postAndVerifyBatch(b);
+    }
+
+    function executeMetaCrossChainTransactions() external override {
+        hookRan = true;
+        (callSuccess,) = proxyAddr.call(proxyCallData);
+    }
+}
+
 /// @notice Coverage-focused tests for `EEZ` validation guards and execution-path branches not
 ///         already exercised by `EEZ.t.sol`.
 contract EEZCoverageTest is Base {
@@ -455,8 +506,10 @@ contract EEZCoverageTest is Base {
         idxOne[0] = 0;
 
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(idLo), proofSystemIndexes: idLo == rAll.id ? idxAll : idxOne});
-        rps[1] = RollupIdWithProofSystems({rollupId: uint64(idHi), proofSystemIndexes: idHi == rAll.id ? idxAll : idxOne});
+        rps[0] =
+            RollupIdWithProofSystems({rollupId: uint64(idLo), proofSystemIndexes: idLo == rAll.id ? idxAll : idxOne});
+        rps[1] =
+            RollupIdWithProofSystems({rollupId: uint64(idHi), proofSystemIndexes: idHi == rAll.id ? idxAll : idxOne});
 
         ProofSystemBatchPerVerificationEntries memory b =
             _raw(_emptyEntries(), _emptyStaticLookups(), psSorted, proofs, rps, 0, 0);
@@ -526,7 +579,8 @@ contract EEZCoverageTest is Base {
             data: cd
         });
         StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), uint64(r.id), address(target), uint64(MAINNET), 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -555,7 +609,8 @@ contract EEZCoverageTest is Base {
             data: cd
         });
         StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
         bytes32 cch = _ccHash(IS_STATIC, address(this), uint64(r.id), address(target), uint64(MAINNET), 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -583,7 +638,8 @@ contract EEZCoverageTest is Base {
             data: cd
         });
         StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), uint64(r.id), address(reenter), uint64(MAINNET), 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -606,7 +662,8 @@ contract EEZCoverageTest is Base {
         bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), uint64(MAINNET), address(target), uint64(r.id), 0, cd);
 
         StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
 
         // Declared hash folds a NESTED frame for a reentrant call the entry never fires (it has no
         // top-level call that re-enters EEZ), so the actual hash stays at the entry-begin seed.
@@ -674,8 +731,268 @@ contract EEZCoverageTest is Base {
     }
 
     // ──────────────────────────────────────────────
+    //  Execution-path branches: more coverage
+    // ──────────────────────────────────────────────
+
+    /// @notice A `revertNextNCalls` span overrunning its call array reverts `RevertSpanOutOfBounds`.
+    ///         Deferred entry so the revert surfaces through the proxy (an immediate entry would be
+    ///         swallowed into `L2TxSkipped`).
+    function test_Execution_RevertSpanOutOfBounds() public {
+        Base.RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+        bytes memory cd = abi.encodeCall(SimpleTarget.setValue, (1));
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), uint64(MAINNET), address(target), uint64(r.id), 0, cd);
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
+        calls[0] = L2ToL1Call({
+            revertNextNCalls: 2, // span of 2 overruns the single-element array
+            isStatic: false,
+            sourceAddress: address(this),
+            sourceRollupId: uint64(r.id),
+            targetAddress: address(target),
+            value: 0,
+            data: cd
+        });
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(r.id, deltas);
+        entries[0].proxyEntryHash = ah;
+        entries[0].l2ToL1Calls = calls;
+        entries[0].rollingHash = bytes32(0); // unreached — reverts before the hash check
+        _postBatchOne(r, entries, _emptyStaticLookups(), 0, 0);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        bytes4 sel;
+        assembly {
+            sel := mload(add(ret, 32))
+        }
+        assertEq(sel, EEZ.RevertSpanOutOfBounds.selector);
+    }
+
+    /// @notice A reentrant call whose destination rollup is verified this block but is NOT among the
+    ///         executing entry's `stateDeltas` trips the runtime proxy-protection check
+    ///         (`ReentrantDestinationNotVerified`). The entry's top-level call captures that revert as its
+    ///         `CALL_END` result; pinning the rolling hash to that exact error data proves the path.
+    function test_Reentrant_DestinationNotVerified() public {
+        // rA runs the entry; rB is verified in the same batch but absent from the entry's deltas.
+        Base.RollupHandle memory rA = _makeRollup(bytes32(0));
+        Base.RollupHandle memory rB = _makeRollup(bytes32(0));
+        (uint256 rLo, uint256 rHi) = rA.id < rB.id ? (rA.id, rB.id) : (rB.id, rA.id);
+
+        CrossReenter reenter = new CrossReenter();
+        address rBproxy = rollups.createCrossChainProxy(address(target), uint64(rB.id));
+        bytes memory innerData = abi.encodeCall(SimpleTarget.setValue, (5));
+
+        bytes memory outerData = abi.encodeCall(CrossReenter.reenter, (rBproxy, innerData));
+        address topProxy = rollups.createCrossChainProxy(address(reenter), uint64(rA.id));
+
+        // Built in a sub-frame to keep this test under the stack-depth limit under coverage instrumentation.
+        ExecutionEntry[] memory entries = _reentrantDestEntry(rA.id, address(reenter), outerData, uint64(rB.id));
+
+        ProofSystemBatchPerVerificationEntries memory b =
+            _twoRollupBatch(rLo, rHi, entries, _emptyStaticLookups(), 0, 0);
+        rollups.postAndVerifyBatch(b);
+
+        (bool ok,) = topProxy.call(outerData);
+        assertTrue(ok, "entry commits; the reentrant call reverted ReentrantDestinationNotVerified(rB)");
+        assertEq(_getRollupState(rA.id), keccak256("s1"));
+    }
+
+    /// @notice A top-level `StaticLookup` carrying TWO `expectedStateRoots` pins (strictly increasing)
+    ///         exercises the multi-pin validation loop and the multi-pin `_stateRootsMatch` scan, then
+    ///         resolves successfully.
+    function test_Validate_TopLevelStaticLookup_TwoPins() public {
+        Base.RollupHandle memory rA = _makeRollup(bytes32(0));
+        Base.RollupHandle memory rB = _makeRollup(bytes32(0));
+        (uint256 rLo, uint256 rHi) = rA.id < rB.id ? (rA.id, rB.id) : (rB.id, rA.id);
+
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(rLo));
+        bytes memory cd = abi.encodeCall(SimpleTarget.getValue, ());
+        bytes memory payload = abi.encode(uint256(321));
+        bytes32 h = _ccHash(IS_STATIC, alice, uint64(MAINNET), address(target), uint64(rLo), 0, cd);
+
+        StaticLookup memory lk;
+        lk.proxyEntryHash = h;
+        lk.destinationRollupId = uint64(rLo);
+        lk.l2ToL1Calls = new L2ToL1Call[](0);
+        lk.rollingHash = bytes32(0);
+        lk.success = true;
+        lk.returnData = payload;
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](2);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(rLo), stateRoot: _getRollupState(rLo)});
+        pins[1] = ExpectedStateRootPerRollup({rollupId: uint64(rHi), stateRoot: _getRollupState(rHi)});
+        lk.expectedStateRoots = pins;
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0] = lk;
+
+        ProofSystemBatchPerVerificationEntries memory b = _twoRollupBatch(rLo, rHi, _emptyEntries(), lookups, 0, 0);
+        rollups.postAndVerifyBatch(b);
+
+        vm.prank(proxyAddr);
+        bytes memory res = rollups.staticCallLookup(alice, cd);
+        assertEq(res, payload);
+    }
+
+    /// @notice A batch carrying a non-empty `blobIndices` exercises the `blobhash(...)` loop in
+    ///         `_verifyProofSystemBatch`. With no real blobs `blobhash(0)` returns 0; the line still runs
+    ///         and the batch verifies (MockProofSystem accepts by default).
+    function test_PostBatch_NonEmptyBlobIndices() public {
+        Base.RollupHandle memory r = _makeRollup(bytes32(0));
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        uint256[] memory blobs = new uint256[](1);
+        blobs[0] = 0;
+        b.blobIndices = blobs;
+        rollups.postAndVerifyBatch(b);
+        assertEq(rollups.lastVerifiedBlock(uint64(r.id)), block.number);
+    }
+
+    /// @notice Meta-hook path: an immediate static lookup is loaded into the transient pool
+    ///         (`immediateStaticLookupCount > 0`), and a transient (meta-hook) entry consumed during the
+    ///         hook fires a reentrant call resolved against the TRANSIENT `expectedL1ToL2Calls` table.
+    function test_MetaHook_ImmediateStaticLookupAndTransientReentrant() public {
+        Base.RollupHandle memory r = _makeRollup(bytes32(0));
+        MetaProxyCaller caller = new MetaProxyCaller(rollups);
+        ReentrantForwarder fwd = new ReentrantForwarder();
+
+        address innerTarget = address(0xBEEF);
+        address reentrantProxy = rollups.createCrossChainProxy(innerTarget, uint64(r.id));
+        bytes memory innerData = "";
+
+        bytes memory outerData = abi.encodeCall(ReentrantForwarder.forward, (reentrantProxy, innerData));
+        address topProxy = rollups.createCrossChainProxy(address(fwd), uint64(r.id));
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
+        calls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
+            isStatic: false,
+            sourceAddress: address(caller),
+            sourceRollupId: uint64(r.id),
+            targetAddress: address(fwd),
+            value: 0,
+            data: outerData
+        });
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] =
+            StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+
+        bytes32 ah =
+            _ccHash(NOT_STATIC_CALL, address(caller), uint64(MAINNET), address(fwd), uint64(r.id), 0, outerData);
+        bytes32 cchTop =
+            _ccHash(NOT_STATIC_CALL, address(caller), uint64(r.id), address(fwd), uint64(MAINNET), 0, outerData);
+        bytes32 reentrantCch =
+            _ccHash(NOT_STATIC_CALL, address(fwd), uint64(MAINNET), innerTarget, uint64(r.id), 0, innerData);
+
+        // Built in a sub-frame to keep this test under the stack-depth limit under coverage instrumentation.
+        (bytes32 h, ExpectedL1ToL2Call[] memory reentrant) =
+            _metaReentrantTableAndHash(deltas, ah, cchTop, reentrantCch);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(r.id, deltas);
+        entries[0].proxyEntryHash = ah; // != 0 → leading L2Tx run stops, meta hook fires
+        entries[0].l2ToL1Calls = calls;
+        entries[0].expectedL1ToL2Calls = reentrant;
+        entries[0].rollingHash = h;
+
+        StaticLookup[] memory lookups = new StaticLookup[](1);
+        lookups[0] = _shellLookup(r.id); // pushed into the transient pool (immediateStaticLookupCount = 1)
+
+        caller.setProxyCall(topProxy, outerData);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, lookups, 1, 1);
+        caller.post(b);
+
+        assertTrue(caller.hookRan(), "meta hook must run");
+        assertTrue(caller.callSuccess(), "transient entry consumed; reentrant resolved against the transient table");
+        assertEq(_getRollupState(r.id), keccak256("s1"));
+    }
+
+    // ──────────────────────────────────────────────
     //  Local helpers
     // ──────────────────────────────────────────────
+
+    /// @notice Two-rollup single-PS batch (both rollups list the default `ps`), sorted by rollupId.
+    function _twoRollupBatch(
+        uint256 rLo,
+        uint256 rHi,
+        ExecutionEntry[] memory entries,
+        StaticLookup[] memory lookups,
+        uint256 tc,
+        uint256 tlc
+    )
+        internal
+        view
+        returns (ProofSystemBatchPerVerificationEntries memory b)
+    {
+        address[] memory psList = new address[](1);
+        psList[0] = address(ps);
+        bytes[] memory proofs = new bytes[](1);
+        proofs[0] = "proof";
+        uint64[] memory idx = new uint64[](1);
+        idx[0] = 0;
+        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rLo), proofSystemIndexes: idx});
+        rps[1] = RollupIdWithProofSystems({rollupId: uint64(rHi), proofSystemIndexes: idx});
+        b = _raw(entries, lookups, psList, proofs, rps, tc, tlc);
+    }
+
+    /// @notice Single-entry builder for `test_Reentrant_DestinationNotVerified`: a top-level call into
+    ///         `reenter` whose reentrant call into `rB`'s proxy reverts `ReentrantDestinationNotVerified`.
+    ///         Pulled out for stack-depth headroom.
+    function _reentrantDestEntry(uint256 rAid, address reenter, bytes memory outerData, uint64 rBid)
+        internal
+        view
+        returns (ExecutionEntry[] memory entries)
+    {
+        StateDelta[] memory deltas = new StateDelta[](1);
+        deltas[0] =
+            StateDelta({rollupId: uint64(rAid), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
+        calls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
+            isStatic: false,
+            sourceAddress: address(this),
+            sourceRollupId: uint64(rAid),
+            targetAddress: reenter,
+            value: 0,
+            data: outerData
+        });
+
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), uint64(MAINNET), reenter, uint64(rAid), 0, outerData);
+        bytes32 cchTop = _ccHash(NOT_STATIC_CALL, address(this), uint64(rAid), reenter, uint64(MAINNET), 0, outerData);
+        bytes memory errData = abi.encodeWithSelector(EEZ.ReentrantDestinationNotVerified.selector, rBid);
+        bytes32 h = _hCallEnd(_hCallBegin(_hEntryBegin(deltas, ah), cchTop), false, errData);
+
+        entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(rAid, deltas);
+        entries[0].proxyEntryHash = ah;
+        entries[0].l2ToL1Calls = calls;
+        entries[0].rollingHash = h;
+    }
+
+    /// @notice Rolling hash + transient reentrant table for the meta-hook test (top-level call with one
+    ///         successful empty reentrant frame returning `7`). Pulled out for stack-depth headroom.
+    function _metaReentrantTableAndHash(StateDelta[] memory deltas, bytes32 ah, bytes32 cchTop, bytes32 reentrantCch)
+        internal
+        pure
+        returns (bytes32 h, ExpectedL1ToL2Call[] memory reentrant)
+    {
+        bytes32 hAtFire = _hCallBegin(_hEntryBegin(deltas, ah), cchTop);
+        h = _hNestedBegin(hAtFire, reentrantCch);
+        h = _hNestedEnd(h);
+        h = _hCallEnd(h, true, abi.encode(uint256(7)));
+
+        reentrant = new ExpectedL1ToL2Call[](1);
+        reentrant[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: _expectedL1toL2Hash(reentrantCch, hAtFire),
+            l2ToL1Calls: _emptyCalls(),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: ""
+        });
+    }
 
     /// @notice A "shell" entry: given deltas, default everything else; destination = deltas[0].rollupId.
     function _shellEntry(uint256 destRid, StateDelta[] memory deltas) internal pure returns (ExecutionEntry memory e) {

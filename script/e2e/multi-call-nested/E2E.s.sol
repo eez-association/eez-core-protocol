@@ -210,6 +210,15 @@ abstract contract MCNActions {
         pure
         returns (L2ExecutionEntry[] memory entries)
     {
+        // Two distinct hashes per L2 entry:
+        //  - proxyEntryHash (entry MATCH): what `executeCrossChainCall` computes when the trigger fires
+        //    through the L2 ingress proxy — source = l2App @ ROLLUP_ID (forced), target = the proxy's
+        //    original (cap2/counterL2 @ MAINNET). See EEZL2.executeCrossChainCall.
+        //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — target @
+        //    ROLLUP_ID (forced), source = l2App @ the call's `sourceRollupId` (MAINNET).
+        bytes32 entryHashCAP2 = crossChainCallHash(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
+        bytes32 entryHashCounterL2 =
+            crossChainCallHash(MAINNET_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, L2_ROLLUP_ID);
         bytes32 outerCAP2 = _l2HashCAP2(cap2L2, l2App);
         bytes32 outerCounterL2 = _l2HashCounterL2(counterL2, l2App);
         bytes32 innerCounterL1 = _l2InnerHashCounterL1(counterL1, cap2L2);
@@ -249,7 +258,7 @@ abstract contract MCNActions {
 
         // [0] / [1]: top-level CAP2 call wraps one nested (outgoing) reentry to CounterL1@MAINNET.
         // PENDING EEZL2: rolling-hash seed/append shape mirrors L1.
-        bytes32 rh0 = RollingHashBuilder.entryBeginL2(outerCAP2);
+        bytes32 rh0 = RollingHashBuilder.entryBeginL2(entryHashCAP2);
         rh0 = RollingHashBuilder.appendCallBegin(rh0, outerCAP2);
         bytes32 rhFire0 = rh0;
         rh0 = RollingHashBuilder.appendNestedBegin(rh0, innerCounterL1);
@@ -265,7 +274,7 @@ abstract contract MCNActions {
             returnData: abi.encode(uint256(1))
         });
         entries[0] = L2ExecutionEntry({
-            proxyEntryHash: outerCAP2,
+            proxyEntryHash: entryHashCAP2,
             incomingCalls: calls0,
             expectedOutgoingCalls: nested0,
             rollingHash: rh0,
@@ -273,7 +282,7 @@ abstract contract MCNActions {
             returnData: ""
         });
 
-        bytes32 rh1 = RollingHashBuilder.entryBeginL2(outerCAP2);
+        bytes32 rh1 = RollingHashBuilder.entryBeginL2(entryHashCAP2);
         rh1 = RollingHashBuilder.appendCallBegin(rh1, outerCAP2);
         bytes32 rhFire1 = rh1;
         rh1 = RollingHashBuilder.appendNestedBegin(rh1, innerCounterL1);
@@ -289,7 +298,7 @@ abstract contract MCNActions {
             returnData: abi.encode(uint256(2))
         });
         entries[1] = L2ExecutionEntry({
-            proxyEntryHash: outerCAP2,
+            proxyEntryHash: entryHashCAP2,
             incomingCalls: calls1,
             expectedOutgoingCalls: nested1,
             rollingHash: rh1,
@@ -298,11 +307,11 @@ abstract contract MCNActions {
         });
 
         // [2]: simple call to CounterL2 on L2, no nesting.
-        bytes32 rh2 = RollingHashBuilder.entryBeginL2(outerCounterL2);
+        bytes32 rh2 = RollingHashBuilder.entryBeginL2(entryHashCounterL2);
         rh2 = RollingHashBuilder.appendCallBegin(rh2, outerCounterL2);
         rh2 = RollingHashBuilder.appendCallEnd(rh2, true, abi.encode(uint256(1)));
         entries[2] = L2ExecutionEntry({
-            proxyEntryHash: outerCounterL2,
+            proxyEntryHash: entryHashCounterL2,
             incomingCalls: calls2,
             expectedOutgoingCalls: noL2OutgoingCalls(),
             rollingHash: rh2,

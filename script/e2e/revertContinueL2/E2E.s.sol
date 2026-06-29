@@ -20,6 +20,7 @@ import {
     noNestedActions,
     noL2Calls,
     noL2StaticLookups,
+    deferredSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -263,56 +264,32 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
 /// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs in one tx.
 /// @dev Pins immediateEntryCount=0 so the zero-hash entry stays in the deferred
 ///      queue and is drained by the subsequent executeL2Txs(rollupId) call.
-contract DeferredL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups
-    )
-        external
-    {
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            entries: entries,
-            staticLookups: staticLookups,
-            immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0
-        });
-        rollups.postAndVerifyBatch(batch);
-        rollups.executeL2Txs(rollupId);
+/// @dev Builds the L1 entry INTERNALLY (inherits `RevertContinueL2Actions`) so the caller never
+///      ABI-encodes the nested `ExecutionEntry[]` across the call boundary — only the single
+///      deferred-batch encode for `postAndVerifyBatch` remains, keeping clear of the via-ir stack
+///      limit. `immediateEntryCount` is 0 so the zero-hash entry stays in the deferred queue and is
+///      drained by `executeL2Txs`.
+contract DeferredL2TXBatcher is RevertContinueL2Actions {
+    function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
+        rollups.postAndVerifyBatch(
+            deferredSingleRollupBatch(
+                proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups()
+            )
+        );
+        rollups.executeL2Txs(L2_ROLLUP_ID);
     }
 }
 
 /// @title Execute - L1-side mirror. Deferred postBatch + executeL2Txs runs the actual
 ///        Counter.increment() on L1 (the destination of the L2-anchored inner reentrant call).
-contract Execute is Script, RevertContinueL2Actions {
+contract Execute is Script {
     function run() external {
-        address rollupsAddr = vm.envAddress("ROLLUPS");
-        address proofSystemAddr = vm.envAddress("PROOF_SYSTEM");
         address counterL1 = vm.envAddress("COUNTER_L1");
-        address selfCallerL2 = vm.envAddress("SELF_CALLER");
 
         vm.startBroadcast();
         DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
         batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups()
+            EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("SELF_CALLER")
         );
 
         console.log("Execute: done");

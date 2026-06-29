@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {StateDelta, L2ToL1Call, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
@@ -20,6 +20,7 @@ import {
     noL2Calls,
     noL2OutgoingCalls,
     noL2StaticLookups,
+    deferredSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -29,7 +30,7 @@ import {
 //  L2 side (ExecuteL2):
 //    1. SYSTEM loads ONE entry on L2 with precomputed return=uint256(1)
 //    2. User calls CAP.incrementProxy() on L2
-//    3. CAP calls CounterProxy (L2 proxy for Counter on L1) → managerL2.executeCrossChainCall
+//    3. CAP calls CounterProxy (L2 proxy for Counter on L1) -> managerL2.executeCrossChainCall
 //    4. Entry consumed, returns abi.encode(1); CAP (L2): counter=1, targetCounter=1
 //
 //  L1 side (Execute):
@@ -171,25 +172,19 @@ contract DeployL2 is Script {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// @title ExecuteL2 — local mode: loadExecutionTable (system) + incrementProxy (user) in same block
-/// @dev Runs on L2. SYSTEM_ADDRESS is the local deployer (anvil account 0),
-///      so the deployer can call loadExecutionTable directly. The run-local.sh
-///      `execute_l2_same_block` wrapper disables automine, lets both txs queue,
-///      then mines them together — same-block guarantee satisfied.
+/// @dev Runs on L2. SYSTEM_ADDRESS is the local deployer (anvil account 0), so the deployer can call
+///      loadExecutionTable directly. The run-local.sh `execute_l2_same_block` wrapper disables
+///      automine, lets both txs queue, then mines them together — same-block guarantee satisfied.
 /// Env: MANAGER_L2, COUNTER_L1, COUNTER_AND_PROXY_L2
 contract ExecuteL2 is Script, CounterL2Actions {
     function run() external {
-        address managerAddr = vm.envAddress("MANAGER_L2");
-        address counterL1Addr = vm.envAddress("COUNTER_L1");
         address capAddr = vm.envAddress("COUNTER_AND_PROXY_L2");
 
-        console.log("ExecuteL2: manager=%s counterL1=%s cap=%s", managerAddr, counterL1Addr, capAddr);
-
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr), noL2StaticLookups());
-        console.log("ExecuteL2: loadExecutionTable done");
-
+        EEZL2(vm.envAddress("MANAGER_L2")).loadExecutionTable(
+            _l2Entries(vm.envAddress("COUNTER_L1"), capAddr), noL2StaticLookups()
+        );
         CounterAndProxy(capAddr).incrementProxy();
-        console.log("ExecuteL2: incrementProxy done");
 
         console.log("done");
         console.log("counter=%s", CounterAndProxy(capAddr).counter());
@@ -199,68 +194,36 @@ contract ExecuteL2 is Script, CounterL2Actions {
 }
 
 /// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs in one tx.
-/// @dev We override `immediateEntryCount=0` so the zero-hash entry stays in the
-///      deferred queue and is drained by the subsequent `executeL2Txs(rollupId)` call.
-///      The shared `L2TXBatcher` auto-detects leading zero-hash entries as transient,
-///      which would consume the entry inline during postBatch and leave nothing for
-///      executeL2Txs to drain.
-contract DeferredL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups
-    )
-        external
-    {
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            entries: entries,
-            staticLookups: staticLookups,
-            immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0
-        });
-        rollups.postAndVerifyBatch(batch);
-        rollups.executeL2Txs(rollupId);
+/// @dev Builds the L1 entry INTERNALLY (inherits `CounterL2Actions`) so the caller never ABI-encodes
+///      the nested `ExecutionEntry[]` across the call boundary — only the single deferred-batch encode
+///      for `postAndVerifyBatch` remains, keeping clear of the via-ir stack limit. `immediateEntryCount`
+///      is 0 so the zero-hash entry stays in the deferred queue and is drained by `executeL2Txs`.
+contract DeferredL2TXBatcher is CounterL2Actions {
+    function execute(EEZ rollups, address proofSystem, address counterL1, address capL2) external {
+        rollups.postAndVerifyBatch(
+            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticLookups())
+        );
+        rollups.executeL2Txs(L2_ROLLUP_ID);
     }
 }
 
 /// @title Execute — local mode: postBatch (deferred) + executeL2Txs on L1.
-/// @dev Drives the L1-side simulation of the L2-originated cross-chain call.
-///      The lazily-created source proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1
-///      and is created inside `_processNCalls` during executeL2Txs.
+/// @dev Drives the L1-side simulation of the L2-originated cross-chain call. The lazily-created source
+///      proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1 and is created inside `_processNCalls` during
+///      executeL2Txs.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L1, COUNTER_AND_PROXY_L2
-contract Execute is Script, CounterL2Actions {
+contract Execute is Script {
     function run() external {
-        address rollupsAddr = vm.envAddress("ROLLUPS");
-        address proofSystemAddr = vm.envAddress("PROOF_SYSTEM");
-        address counterL1Addr = vm.envAddress("COUNTER_L1");
-        address capL2Addr = vm.envAddress("COUNTER_AND_PROXY_L2");
+        address counterL1 = vm.envAddress("COUNTER_L1");
 
         vm.startBroadcast();
         DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
         batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1Addr, capL2Addr), noStaticLookups()
+            EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("COUNTER_AND_PROXY_L2")
         );
 
         console.log("done");
-        console.log("L1 counterL1=%s", Counter(counterL1Addr).counter());
+        console.log("L1 counterL1=%s", Counter(counterL1).counter());
         vm.stopBroadcast();
     }
 }

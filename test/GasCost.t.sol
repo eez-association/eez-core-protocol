@@ -115,7 +115,7 @@ contract GasCost is Base {
     bytes internal incrementProxyCalldata; // CounterAndProxy.incrementProxy()
     bytes internal uniswapCalldata; // realistic swapExactTokensForTokens(...)
 
-    function setUp() public {
+    function setUp() public virtual {
         setUpBase();
 
         rA = _makeRollup(keccak256("rA-init")); // id 1
