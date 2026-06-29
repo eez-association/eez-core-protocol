@@ -209,6 +209,41 @@ contract L2TXBatcher {
     }
 }
 
+/// @notice Builds a single-rollup batch with NO immediate entries (everything deferred to the
+///         per-rollup queue). Kept as a free function so its array-building locals live in their
+///         own stack frame — callers that inline this construction can trip the via-ir ABI-encoder
+///         stack limit when encoding the nested `ExecutionEntry[]`.
+function deferredSingleRollupBatch(
+    address proofSystem,
+    uint64 rollupId,
+    ExecutionEntry[] memory entries,
+    StaticLookup[] memory staticLookups
+)
+    pure
+    returns (ProofSystemBatchPerVerificationEntries memory batch)
+{
+    address[] memory psList = new address[](1);
+    psList[0] = proofSystem;
+    bytes[] memory proofs = new bytes[](1);
+    proofs[0] = "proof";
+    uint64[] memory psIdx = new uint64[](1);
+    psIdx[0] = 0;
+    RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
+    rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
+    batch = ProofSystemBatchPerVerificationEntries({
+        entries: entries,
+        staticLookups: staticLookups,
+        immediateEntryCount: 0,
+        immediateStaticLookupCount: 0,
+        proofSystems: psList,
+        rollupIdsWithProofSystems: rps,
+        blobIndices: new uint256[](0),
+        callData: "",
+        proofs: proofs,
+        blockNumber: 0
+    });
+}
+
 // ══════════════════════════════════════════════════════════════════════
 //  Common empty helpers (saves boilerplate in E2E scripts)
 // ══════════════════════════════════════════════════════════════════════
