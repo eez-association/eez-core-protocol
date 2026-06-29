@@ -22,7 +22,7 @@ Each type's exact byte layout is defined inline with the type in §2.
 These conventions apply across the per-type layouts in §2:
 
 * All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64` as written,
-  `bool` is one byte, `address` is 20 bytes, `uint256` is 32 bytes. Chain ids are `u64`.
+  `bool` is one byte, `address` is 20 bytes, `uint256` is 32 bytes.
 * A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is a
   single leading byte that either holds the length directly or announces how many following
   little-endian bytes do:
@@ -41,6 +41,18 @@ These conventions apply across the per-type layouts in §2:
   self-describing, variable-length encoding (1–33 bytes) defined in
   [`U256_COMPRESSED_CODEC.md`](./U256_COMPRESSED_CODEC.md). The codec is self-delimiting, so no separate length prefix is
   needed.
+* A `chain_id` field reuses a similar **leading-byte length-prefix** as `bytes`: the leading byte gives the byte length of the little-endian value that follows, and
+  its range also picks whether or not `CHAIN_ID_OFFSET` is applied:
+
+  | leading byte | the chain id is… |
+  |---|---|
+  | `1`–`16` | the next `leading` bytes, little-endian (**raw**) |
+  | `17`–`24` | `CHAIN_ID_OFFSET +` the next `leading − 16` bytes, little-endian (**offset**) |
+  | `0`, `25`–`255` | reserved |
+
+  Self-delimiting, so no separate length prefix is needed (2–17 bytes total). `CHAIN_ID_OFFSET`
+  is a protocol constant (`2^32`) — the base auto-assigned ids start from, so a large id like
+  `2^32 + 5` collapses to one payload byte (`11 05`).
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
@@ -58,18 +70,21 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 
 | type | name | fields (in wire order) |
 |---|---|---|
-| `1` | `ChainOperation` | `u8 message_type` · `u64 chain_id` · `bytes operations` |
-| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `u64 chain_id` · `bytes tx_data` |
-| `3` | `Call` | `u8 message_type` · `u64 to_chain` · `bool is_static` · `address fromAddress` · `address toAddress` · `u256 value` (compressed) · `bytes data` |
-| `4` | `Result` | `u8 message_type` · `bool success` · `bytes return_data` |
-| `5` | `Snapshot` | `u8 message_type` |
-| `6` | `Revert` | `u8 message_type` |
-| `7` | `FinishCrossChainTransaction` | `u8 message_type` |
+| `1` | `ChainOperation` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes operations` |
+| `2` | `InitiateCrossChainTransaction` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes tx_data` |
+| `3` | `Call` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `u256 value` (compressed) · `bytes data` |
+| `4` | `Call_static` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `bytes data` |
+| `5` | `return_success` | `u8 message_type` · `bytes return_data` |
+| `6` | `return_fail` | `u8 message_type` · `bytes return_data` |
+| `7` | `Snapshot` | `u8 message_type` |
+| `8` | `Revert` | `u8 message_type` |
+| `9` | `FinishCrossChainTransaction` | `u8 message_type` |
 | `0xFF` | `CloseBlob` | `u8 message_type` |
 
-> **Pairing.** Three pairs always come matched: every `Call` has a `Result`, every
-> `Snapshot` a `Revert`, and every `InitiateCrossChainTransaction` a
-> `FinishCrossChainTransaction`. `ChainOperation` and `CloseBlob` stand alone.
+> **Pairing.** Three pairs always come matched: every `Call` / `Call_static` has a result —
+> `return_success` (`5`) or `return_fail` (`6`); every `Snapshot` a `Revert`; and every
+> `InitiateCrossChainTransaction` a `FinishCrossChainTransaction`. `ChainOperation` and
+> `CloseBlob` stand alone.
 
 ### 2.1 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
@@ -78,9 +93,9 @@ operations list can be large, but its length prefix scales to a 4-byte size when
 
 ```c
 struct ChainOperation {          // type 1
-    u8     message_type;         // = 1
-    u64    chain_id;             // the executing chain
-    bytes  operations;           // opaque to the protocol; the chain interprets it (length-prefixed)
+    u8       message_type;       // = 1
+    chain_id chain_id;           // the executing chain, compressed (§1.1)
+    bytes    operations;         // opaque to the protocol; the chain interprets it (length-prefixed)
 }
 ```
 
@@ -119,7 +134,7 @@ Opens one cross-chain transaction. `chain_id` is where the originating tx lives.
 ```c
 struct InitiateCrossChainTransaction {   // type 2
     u8       message_type;   // = 2
-    u64      chain_id;       // where the originating tx lives
+    chain_id chain_id;       // where the originating tx lives, compressed (§1.1)
     bytes    tx_data;        // opaque — the chain decides what goes here; trailing, length-prefixed
 }
 ```
@@ -132,18 +147,28 @@ paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by
 `FinishCrossChainTransaction`, a `FinishCrossChainTransaction` requires an open transaction,
 and everything the transaction produces lives between the two.
 
-### 2.3 `Call`
-A cross-chain call:
+### 2.3 `Call` / `Call_static`
+A cross-chain call. Instead of an `is_static` flag, read-only calls are a **distinct message
+type** — `Call_static` (`4`), a `STATICCALL` that carries no value and reverts on state
+write. A value-bearing `Call` (`3`) and a static `Call_static` (`4`) differ only by the
+absence of `value`:
 
 ```c
 struct Call {                // type 3
     u8       message_type;   // = 3
-    u64      to_chain;       // target chain (from_chain is implicit — the executing chain)
-    bool     is_static;      // true = read-only STATICCALL (no value; reverts on state write)
+    chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
     address  fromAddress;
     address  toAddress;
-    u256     value;          // compressed uint256 (see U256_COMPRESSED_CODEC.md); 0 when is_static
+    u256     value;          // compressed uint256 (see U256_COMPRESSED_CODEC.md)
     bytes    data;           // the call's exact calldata; last, length-prefixed
+}
+
+struct Call_static {         // type 4 — read-only STATICCALL
+    u8       message_type;   // = 4
+    chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
+    address  fromAddress;
+    address  toAddress;
+    bytes    data;           // the call's exact calldata; last, length-prefixed (no value)
 }
 ```
 
@@ -151,26 +176,32 @@ Unlike `operations` / `tx_data`, `data` is **not** chain-defined: it is exactly 
 calldata of the cross-chain call.
 
 `from_chain` is **not encoded** — it is the chain whose context is currently executing,
-established by the most recent `InitiateCrossChainTransaction` or `Call`.
+established by the most recent `InitiateCrossChainTransaction` or `Call` / `Call_static`.
 
-### 2.4 `Result` (a.k.a. Return)
-The outcome of a finished `Call`, flowing back to the caller — a successful **return**
-(`success = true`) or the call's own **revert** (`success = false`). It pairs with the last
-outstanding `Call`, so **both** chains (`from` and `to`) are implicit.
+### 2.4 `return_success` / `return_fail` (the Call's result)
+The outcome of a finished `Call`, flowing back to the caller. Instead of one `Result` with a
+`success` flag, the outcome is carried by **two distinct message types** — `return_success`
+(`5`) for a successful **return** and `return_fail` (`6`) for the call's own **revert**.
+Either pairs with the last outstanding `Call` / `Call_static`, so **both** chains (`from`
+and `to`) are implicit. The payload layout is identical for both:
 
 ```c
-struct Result {              // type 4
-    u8       message_type;   // = 4
-    bool     success;        // false = the call itself reverted on the callee chain
-    bytes    return_data;    // the call's exact return value (or revert data); last, length-prefixed
+struct return_success {      // type 5
+    u8       message_type;   // = 5
+    bytes    return_data;    // the call's exact return value; last, length-prefixed
+}
+
+struct return_fail {         // type 6
+    u8       message_type;   // = 6
+    bytes    return_data;    // the call's exact revert data; last, length-prefixed
 }
 ```
 
 Like `Call.data`, `return_data` is **not** chain-defined: it is exactly the call's return
-data.
+(or revert) data.
 
-`success = false` means the call **finished by reverting** on the callee: the caller
-receives the failure and handles it like a same-chain contract revert. That differs from a
+`return_fail` means the call **finished by reverting** on the callee: the caller receives
+the failure and handles it like a same-chain contract revert. That differs from a
 `Snapshot`/`Revert` region (§2.5–2.6), which force-reverts calls that already *succeeded*.
 
 ### 2.5 `Snapshot`
@@ -178,7 +209,7 @@ Opens a revertable region — a forced-revert bracket. A **bare marker** (§1.1)
 `message_type` byte, no length and no params.
 
 ```c
-struct Snapshot { u8 message_type; }          // = 5
+struct Snapshot { u8 message_type; }          // = 7
 ```
 
 Everything executed after it (native ops, cross-chain `Call`s, nested regions) is rolled
@@ -192,21 +223,21 @@ Closes the region opened by the matching `Snapshot` (§2.5), rolling back every 
 including any cross-chain `Call`s — executed since it. A **bare marker** (§1.1):
 
 ```c
-struct Revert { u8 message_type; }            // = 6
+struct Revert { u8 message_type; }            // = 8
 ```
 
 The region is delimited by the bracket, so no chain id, count, or call identifier is
-needed. A `Revert` is **not** a failed `Result`: a call that fails by itself reports
-`Result { success: false }` (§2.4). `Revert` is used when calls inside the region completed
-with `success = true`, but the chain that initiated them, later reverts that context —
-forcing those already-succeeded effects to roll back.
+needed. A `Revert` is **not** a failed result: a call that fails by itself reports a
+`return_fail` (§2.4). `Revert` is used when calls inside the region completed with a
+`return_success`, but the chain that initiated them, later reverts that context — forcing
+those already-succeeded effects to roll back.
 
 ### 2.7 `FinishCrossChainTransaction`
 Closes the cross-chain transaction opened by `InitiateCrossChainTransaction` (§2.2). A
 **bare marker** (§1.1); the tx ends on the currently-executing chain, which is implicit.
 
 ```c
-struct FinishCrossChainTransaction { u8 message_type; }   // = 7
+struct FinishCrossChainTransaction { u8 message_type; }   // = 9
 ```
 
 ### 2.8 `CloseBlob`
@@ -239,8 +270,8 @@ ChainOperation (chain_id: L2_B, operations: [ NewBlock{ts}, Tx, Tx ])
 
 # 3. process the cross-chain transaction(s) between the open blocks
 InitiateCrossChainTransaction (chain_id: L2_A, TxData)
-    Call   (to L2_B, ...)                       # from L2_A (implicit)
-    Result (success: true, return_data)         # pairs with the Call
+    Call           (to L2_B, ...)               # from L2_A (implicit)
+    return_success (return_data)                # pairs with the Call
 FinishCrossChainTransaction                     # ends on L2_A (implicit)
 
 # 4. all cross-chain done — close both blocks (a fresh NewBlock auto-closes the open one)
@@ -263,8 +294,8 @@ A `Snapshot` … `Revert` bracket forces everything inside it to roll back:
 
 ```
 Snapshot                                       # open revertable region
-Call   (to L2_B, is_static: false, ...)        # from L2_A (implicit)
-Result (success: true, return_data)            # pairs with the Call
+Call           (to L2_B, ...)                  # from L2_A (implicit)
+return_success (return_data)                    # pairs with the Call
 Revert                                         # close region → the call's effects roll back
 ```
 
@@ -274,11 +305,11 @@ Brackets nest; each `Revert` closes the innermost open `Snapshot`:
 
 ```
 Snapshot                         # outer region opens
-Call   (to L2_B, ...)            # from L2_A
-Result (success: true)
+Call           (to L2_B, ...)    # from L2_A
+return_success
     Snapshot                     # inner region opens (nested)
-    Call   (to L2_C, ...)        # from L2_B
-    Result (success: true)
+    Call           (to L2_C, ...) # from L2_B
+    return_success
     Revert                       # inner closes → the L2_B → L2_C call rolls back
 Revert                           # outer closes → the L2_A → L2_B call (and all nested) rolls back
 ```
