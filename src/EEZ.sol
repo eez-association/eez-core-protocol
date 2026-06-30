@@ -231,6 +231,19 @@ contract EEZ is EEZBase {
     ///         no entries means no immediate L2Tx run and no meta hook, so nothing can consume them)
     error ImmediateStaticLookupsWithoutImmediateEntries();
 
+    /// @notice Error when the first entry left OUT of the immediate prefix is itself an L2Tx
+    ///         (`proxyEntryHash == 0`) — the poster truncated `immediateEntryCount` and stranded a
+    ///         proven leading L2Tx into the queue instead of running it this tx.
+    error ImmediateCountStrandsLeadingL2Tx();
+
+    /// @notice Error when the leading run of immediate L2Txs was non-empty and EVERY one reverted —
+    ///         the whole post is unwound rather than proceeding on a fully-failed immediate prefix.
+    error AllImmediateL2TxsFailed();
+
+    /// @notice Error when a composer-supplied `expectedStateRootPerRollup` pin doesn't equal the
+    ///         rollup's live state root.
+    error ExpectedStateRootMismatch(uint64 rollupId);
+
     /// @notice Error when batch validation fails for malformed inputs
     error InvalidProofSystemConfig();
 
@@ -339,6 +352,14 @@ contract EEZ is EEZBase {
         // If in a future there are allowed reentranat calls, e.g making getCustomData non-view, we might need an explicit mutex
         if (_insideExecution() || _transientExecutions.length != 0) revert PostBatchReentry();
 
+        // 1a. OPTIONAL composer assertion: every `expectedStateRootPerRollup` pin must equal the live root.
+        ExpectedStateRootPerRollup[] calldata stateRootPins = batch.expectedStateRootPerRollup;
+        for (uint256 p = 0; p < stateRootPins.length; p++) {
+            if (rollups[stateRootPins[p].rollupId].stateRoot != stateRootPins[p].stateRoot) {
+                revert ExpectedStateRootMismatch(stateRootPins[p].rollupId);
+            }
+        }
+
         // 1. Structural validation (sorting, registration, membership, bounds). No external calls.
         _validateBatchStructure(batch);
 
@@ -365,26 +386,27 @@ contract EEZ is EEZBase {
         //    (its expected pre-state no longer holds). Stop at the first non-L2Tx entry.
         uint256 immediateEntryCount = batch.immediateEntryCount;
         uint256 i = 0;
+        bool anyExecuted; // did any leading L2Tx succeed
         for (; i < immediateEntryCount; i++) {
             // Check if next entry is a l2Tx
             if (batch.entries[i].proxyEntryHash != bytes32(0)) break;
 
             // Attempt to execute L2txs (the loop index `i` still labels the L2TxSkipped event)
-            try this._attemptExecuteImmediateL2Txs(batch.entries[i]) {}
-            catch (bytes memory revertData) {
+            try this._attemptExecuteImmediateL2Txs(batch.entries[i]) {
+                anyExecuted = true;
+            } catch (bytes memory revertData) {
                 emit L2TxSkipped(i, revertData);
             }
         }
 
+        // A non-empty leading L2Tx run where none succeeded is dead on arrival — unwind the whole post.
+        // The boundary check makes this run the COMPLETE set of leading L2Txs, so "none ran" can't be a
+        // poster executing a smaller slice. `i != 0` ⇔ at least one L2Tx was attempted.
+        if (i != 0 && !anyExecuted) revert AllImmediateL2TxsFailed();
+
         // 7. Meta hook — if transient-prefix entries remain past the leading L2Tx run and the caller has
         //    code, load the remainder (entries[i..immediateEntryCount] plus the static-lookup
         //    pool) into the transient tables and let the caller drive them via proxy calls.
-        // TODO(review): EOA poster silently drops middle immediate-prefix entries. When the caller has
-        //   NO code, this block is skipped, so entries[i..immediateEntryCount) are neither executed
-        //   here NOR queued by _saveRemainderExecutions (which starts at immediateEntryCount) — they
-        //   are dropped. Proven entries should not vanish based on whether msg.sender is a contract.
-        //   Decide: revert when (i < immediateEntryCount && code.length == 0), or fall back to queuing
-        //   the unconsumed slice.
         if (i < immediateEntryCount && msg.sender.code.length > 0) {
             for (uint256 j = i; j < immediateEntryCount; j++) {
                 _transientExecutions.push(batch.entries[j]);
@@ -563,6 +585,17 @@ contract EEZ is EEZBase {
         }
         if (batch.immediateEntryCount == 0 && batch.immediateStaticLookupCount != 0) {
             revert ImmediateStaticLookupsWithoutImmediateEntries();
+        }
+
+        // Protect honest composers against a poster who under-counts `immediateEntryCount` (an unproven
+        // dispatch param). The immediate loop drains the LEADING run of
+        // `proxyEntryHash == 0` entries and STOPS at the first non-L2Tx one — so an honest prefix is
+        // "all leading L2Txs, then the rest".
+        if (
+            batch.immediateEntryCount < batch.entries.length
+                && batch.entries[batch.immediateEntryCount].proxyEntryHash == bytes32(0)
+        ) {
+            revert ImmediateCountStrandsLeadingL2Tx();
         }
     }
 
@@ -1256,9 +1289,8 @@ contract EEZ is EEZBase {
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue.
         // Note that static calls do not obsolete after a block passes. As long as the state roots matches it can be execute
-        StaticLookup[] storage staticLookups = _transientExecutions.length != 0
-            ? _transientStaticLookups
-            : verificationByRollup[destRid].staticLookupQueue;
+        StaticLookup[] storage staticLookups =
+            _transientExecutions.length != 0 ? _transientStaticLookups : verificationByRollup[destRid].staticLookupQueue;
         for (uint256 i = 0; i < staticLookups.length; i++) {
             StaticLookup storage lookup = staticLookups[i];
             // Proxy protection: fold the declared destination into the match. The transient pool

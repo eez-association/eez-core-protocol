@@ -5,7 +5,12 @@ import {Test} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
 import {ECDSAProofSystem} from "../src/proofSystems/ECDSAProofSystem.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {ExecutionEntry, StaticLookup} from "../src/interfaces/IEEZ.sol";
 
 contract ECDSAProofSystemTest is Test {
@@ -138,6 +143,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: psIdx});
 
         batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: _emptyStaticLookups(),

@@ -2,7 +2,13 @@
 pragma solidity ^0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
-import {EEZ, RollupConfig, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    EEZ,
+    RollupConfig,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
@@ -158,6 +164,7 @@ contract IntegrationTest is Test {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: staticLookups,
@@ -191,7 +198,9 @@ contract IntegrationTest is Test {
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data)
+        );
     }
 
     /// @notice Mirror of L1 `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
@@ -408,7 +417,13 @@ contract IntegrationTest is Test {
         // L2 rolling hash: seed (entry identity) + one top-level call (A.incrementProxy via A').
         // The call's identity folds source=(A, MAINNET) and target=this L2 (ROLLUP_ID).
         bytes32 callHash = _ccHash(
-            false, address(counterAndProxy), MAINNET_ROLLUP_ID, address(counterAndProxy), L2_ROLLUP_ID, 0, incrementProxyCallData
+            false,
+            address(counterAndProxy),
+            MAINNET_ROLLUP_ID,
+            address(counterAndProxy),
+            L2_ROLLUP_ID,
+            0,
+            incrementProxyCallData
         );
         bytes32 rollingHash = _hCallBegin(_l2EntrySeed(l2ActionHash), callHash);
         rollingHash = _hCallEnd(rollingHash, true, "");
@@ -539,8 +554,9 @@ contract IntegrationTest is Test {
 
             // L1 rolling hash: entry seed (state + identity) + one top-level call (D.incrementProxy via D').
             // The call's identity folds source=(alice, L2) and target on L1 (MAINNET).
-            bytes32 callHash =
-                _ccHash(false, alice, L2_ROLLUP_ID, address(counterAndProxyL2), MAINNET_ROLLUP_ID, 0, incrementProxyCallData);
+            bytes32 callHash = _ccHash(
+                false, alice, L2_ROLLUP_ID, address(counterAndProxyL2), MAINNET_ROLLUP_ID, 0, incrementProxyCallData
+            );
             bytes32 rollingHash = _hCallBegin(_hEntryBegin(stateDeltas, l1ActionHash), callHash);
             rollingHash = _hCallEnd(rollingHash, true, "");
 

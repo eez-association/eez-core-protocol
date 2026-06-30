@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../src/interfaces/IEEZ.sol";
 import {
@@ -216,7 +221,8 @@ abstract contract MCNActions {
         //    original (cap2/counterL2 @ MAINNET). See EEZL2.executeCrossChainCall.
         //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — target @
         //    ROLLUP_ID (forced), source = l2App @ the call's `sourceRollupId` (MAINNET).
-        bytes32 entryHashCAP2 = crossChainCallHash(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
+        bytes32 entryHashCAP2 =
+            crossChainCallHash(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
         bytes32 entryHashCounterL2 =
             crossChainCallHash(MAINNET_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, L2_ROLLUP_ID);
         bytes32 outerCAP2 = _l2HashCAP2(cap2L2, l2App);
@@ -354,6 +360,7 @@ contract Batcher {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,

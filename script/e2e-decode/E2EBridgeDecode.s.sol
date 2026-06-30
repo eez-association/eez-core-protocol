@@ -2,13 +2,24 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
 import {ExecutionEntry, StateDelta, StaticLookup} from "../../src/interfaces/IEEZ.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
-import {crossChainCallHash, noStaticLookups, noNestedActions, noCalls, RollingHashBuilder} from "../e2e/shared/E2EHelpers.sol";
+import {
+    crossChainCallHash,
+    noStaticLookups,
+    noNestedActions,
+    noCalls,
+    RollingHashBuilder
+} from "../e2e/shared/E2EHelpers.sol";
 
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
@@ -43,6 +54,7 @@ contract BridgeBatcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,

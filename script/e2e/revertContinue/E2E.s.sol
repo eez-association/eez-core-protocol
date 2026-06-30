@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {
     StateDelta,
@@ -19,12 +24,7 @@ import {
 } from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {
-    crossChainCallHash,
-    expectedL1toL2Hash,
-    noStaticLookups,
-    RollingHashBuilder
-} from "../shared/E2EHelpers.sol";
+import {crossChainCallHash, expectedL1toL2Hash, noStaticLookups, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  RevertContinue scenario — revert inside try/catch then continue
@@ -210,8 +210,7 @@ abstract contract RevertContinueActions {
         bytes32 proxyEntryHash = _outerActionHash(selfCaller, batcher);
         // CALL_BEGIN identity of the top-level `execute()` call executed ON L1 (targetRollupId = MAINNET),
         // sourced from (batcher, L2) per the call's struct fields.
-        bytes32 ccOuter =
-            crossChainCallHash(MAINNET_ROLLUP_ID, selfCaller, 0, calls[0].data, batcher, L2_ROLLUP_ID);
+        bytes32 ccOuter = crossChainCallHash(MAINNET_ROLLUP_ID, selfCaller, 0, calls[0].data, batcher, L2_ROLLUP_ID);
         bytes32 ccInner = _innerActionHash(counterL2, selfCaller);
         (bytes32 rollingHash, bytes32 rhFire) =
             _foldRevertContinue(RollingHashBuilder.entryBegin(deltas, proxyEntryHash), ccOuter, ccInner);
@@ -349,6 +348,7 @@ contract Batcher {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,

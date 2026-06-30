@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {
     StateDelta,
@@ -92,7 +97,12 @@ abstract contract DeepNestedActions {
     /// @dev outer trigger (proxyEntryHash): alice calls nestedCallerProxy -> callNested()
     function _outerActionHash(address nestedCaller, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID, nestedCaller, 0, abi.encodeWithSelector(NestedCaller.callNested.selector), alice, MAINNET_ROLLUP_ID
+            L2_ROLLUP_ID,
+            nestedCaller,
+            0,
+            abi.encodeWithSelector(NestedCaller.callNested.selector),
+            alice,
+            MAINNET_ROLLUP_ID
         );
     }
 
@@ -463,6 +473,7 @@ contract Batcher {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,

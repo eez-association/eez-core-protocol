@@ -2,7 +2,13 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    StaticLookup
+} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticLookup as L2StaticLookup,

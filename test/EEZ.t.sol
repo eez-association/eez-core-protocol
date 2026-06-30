@@ -192,6 +192,7 @@ contract EEZTest is Base {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: staticLookups,
@@ -210,6 +211,62 @@ contract EEZTest is Base {
     function _postBatch(uint256 rid, ExecutionEntry[] memory entries) internal {
         uint256 ic = (entries.length > 0 && entries[0].proxyEntryHash == bytes32(0)) ? 1 : 0;
         _postBatchSingle(rid, entries, ic);
+    }
+
+    /// @notice Single-PS batch carrying optional `expectedStateRootPerRollup` pins.
+    function _postBatchWithPins(uint256 rid, ExecutionEntry[] memory entries, ExpectedStateRootPerRollup[] memory pins)
+        internal
+    {
+        address[] memory psList = new address[](1);
+        psList[0] = address(ps);
+        bytes[] memory proofs = new bytes[](1);
+        proofs[0] = "proof";
+        uint64[] memory psIdx = new uint64[](1);
+        psIdx[0] = 0;
+        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rid), proofSystemIndexes: psIdx});
+
+        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: pins,
+            blockNumber: 0,
+            entries: entries,
+            staticLookups: _emptyStaticLookups(),
+            immediateEntryCount: entries.length,
+            immediateStaticLookupCount: 0,
+            proofSystems: psList,
+            rollupIdsWithProofSystems: rps,
+            blobIndices: new uint256[](0),
+            callData: "",
+            proofs: proofs
+        });
+        rollups.postAndVerifyBatch(batch);
+    }
+
+    /// @notice Appends a no-op SUCCESSFUL immediate L2Tx (`root → same root`, no ether) to `entries`.
+    ///         Used by skip tests: the intended-bad immediate entry stays at index 0 (still skipped +
+    ///         rolled back), and this surviving entry keeps the leading run from being 100% failed —
+    ///         otherwise `AllImmediateL2TxsFailed` would unwind the whole post. The no-op leaves state
+    ///         and ether untouched, so the test's post-conditions are unchanged.
+    function _withNoopImmediate(ExecutionEntry[] memory entries, uint256 rid, bytes32 root)
+        internal
+        pure
+        returns (ExecutionEntry[] memory out)
+    {
+        out = new ExecutionEntry[](entries.length + 1);
+        for (uint256 k = 0; k < entries.length; k++) {
+            out[k] = entries[k];
+        }
+        out[entries.length] = _immediateEntry(rid, root, root);
+    }
+
+    /// @notice A non-L2Tx queued entry (`proxyEntryHash != 0`). Occupies the boundary slot past the
+    ///         immediate prefix so a queued L2Tx can legally sit behind it (the
+    ///         `ImmediateCountStrandsLeadingL2Tx` guard forbids a leading L2Tx at the boundary). Never
+    ///         consumed by these tests, so its state values are placeholders.
+    function _boundaryEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
+        entry = _immediateEntry(rid, bytes32(0), bytes32(0));
+        entry.proxyEntryHash = keccak256("boundary"); // non-zero ⇒ not an L2Tx
+        entry.rollingHash = _hEntryBegin(entry.stateDeltas, entry.proxyEntryHash);
     }
 
     /// @notice Builds a reverting top-level entry (`success == false`): runs, verifies its rolling
@@ -339,6 +396,26 @@ contract EEZTest is Base {
         assertEq(_getRollupState(rid), newState);
     }
 
+    function test_PostBatch_ExpectedStateRootPin_Match() public {
+        (uint64 rid,) = _makeRollupLocal(keccak256("root"), alice);
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: keccak256("root")});
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _immediateEntry(rid, keccak256("root"), keccak256("next"));
+        _postBatchWithPins(rid, entries, pins);
+        assertEq(_getRollupState(rid), keccak256("next"));
+    }
+
+    function test_PostBatch_ExpectedStateRootPin_Mismatch_Reverts() public {
+        (uint64 rid,) = _makeRollupLocal(keccak256("root"), alice);
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: keccak256("WRONG")});
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _immediateEntry(rid, keccak256("root"), keccak256("next"));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.ExpectedStateRootMismatch.selector, rid));
+        _postBatchWithPins(rid, entries, pins);
+    }
+
     function test_PostBatch_StateRootMismatch_ImmediateSkipped() public {
         (uint64 rid,) = _makeRollupLocal(keccak256("real"), alice);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
@@ -346,9 +423,12 @@ contract EEZTest is Base {
         // Immediate L2Tx entries run inside a try/catch self-call: the StateRootMismatch revert is
         // swallowed and the entry is reported as `L2TxSkipped`.
         entries[0] = _immediateEntry(rid, bytes32(0), keccak256("new"));
+        // Pair the bad entry with a surviving no-op so the run isn't 100% failed (else the whole post
+        // unwinds with AllImmediateL2TxsFailed); the bad one at index 0 is still skipped.
+        entries = _withNoopImmediate(entries, rid, keccak256("real"));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
         // State unchanged because the immediate entry was skipped.
         assertEq(_getRollupState(rid), keccak256("real"));
     }
@@ -485,6 +565,7 @@ contract EEZTest is Base {
         rps[0] = RollupIdWithProofSystems({rollupId: rid, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: new ExecutionEntry[](0),
             staticLookups: new StaticLookup[](0),
@@ -625,10 +706,13 @@ contract EEZTest is Base {
     function test_ExecuteL2TX() public {
         (uint64 rid,) = _makeRollupLocal(bytes32(0), alice);
 
-        // Two entries: first is immediate (transient), second is a pure L2Tx in the persistent queue
-        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        // Three entries: [0] immediate (transient), [1] a non-L2Tx boundary entry (so the queued L2Tx
+        // isn't a *leading* one — ImmediateCountStrandsLeadingL2Tx forbids that), [2] a pure L2Tx in the
+        // persistent queue. executeL2Txs scans past the boundary entry to consume the queued L2Tx.
+        ExecutionEntry[] memory entries = new ExecutionEntry[](3);
         entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s1"));
-        entries[1] = _immediateEntry(rid, keccak256("s1"), keccak256("s2"));
+        entries[1] = _boundaryEntry(rid);
+        entries[2] = _immediateEntry(rid, keccak256("s1"), keccak256("s2"));
         _postBatchSingle(rid, entries, 1);
 
         assertEq(_getRollupState(rid), keccak256("s1"));
@@ -703,9 +787,11 @@ contract EEZTest is Base {
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
         entries[0].success = true;
         // EtherDeltaMismatch raised inside the immediate L2Tx run → caught → L2TxSkipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
         assertEq(_getRollupState(rid), bytes32(0));
         assertEq(_getRollupEtherBalance(rid), 5 ether);
     }
@@ -724,9 +810,11 @@ contract EEZTest is Base {
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
         entries[0].success = true;
         // InsufficientRollupBalance raised inside the immediate L2Tx run → caught → L2TxSkipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
         assertEq(_getRollupState(rid), bytes32(0));
         assertEq(_getRollupEtherBalance(rid), 0);
     }
@@ -816,9 +904,11 @@ contract EEZTest is Base {
         // Delta pretends the reentrant 1.5 ether never came back → EtherDeltaMismatch
         // inside the immediate L2Tx run → caught → L2TxSkipped, all rolled back.
         (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _reentrantValueEntry(rid, -2 ether);
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
 
         assertEq(_getRollupState(rid), bytes32(0));
         assertEq(_getRollupEtherBalance(rid), 2 ether);
@@ -895,11 +985,15 @@ contract EEZTest is Base {
 
         // Extracted into a sub-frame to keep this builder under the stack-depth limit.
         (bytes32 h, bytes32 fireHash) = _nestedOutflowRollingHash(
-            deltas, cchTop, nestedHash, _ccHash(NOT_STATIC_CALL, address(0xD00D), rid, sink, MAINNET_ROLLUP_ID, 1 ether, "")
+            deltas,
+            cchTop,
+            nestedHash,
+            _ccHash(NOT_STATIC_CALL, address(0xD00D), rid, sink, MAINNET_ROLLUP_ID, 1 ether, "")
         );
 
         // Assembled in a sub-frame to keep this builder under the stack-depth limit.
-        entries = _assembleNestedOutflowEntry(rid, deltas, calls, subCalls, _expectedL1toL2Hash(nestedHash, fireHash), h);
+        entries =
+            _assembleNestedOutflowEntry(rid, deltas, calls, subCalls, _expectedL1toL2Hash(nestedHash, fireHash), h);
     }
 
     /// @notice Final entry assembly for `_nestedOutflowEntry`, in a sub-frame for stack-depth headroom.
@@ -962,9 +1056,11 @@ contract EEZTest is Base {
         TestTarget sink = new TestTarget();
 
         (ExecutionEntry[] memory entries,) = _nestedOutflowEntry(rid, address(sink), -0.5 ether);
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
 
         assertEq(_getRollupState(rid), bytes32(0), "unsound entry must not apply");
         assertEq(_getRollupEtherBalance(rid), 2 ether);
@@ -1487,9 +1583,11 @@ contract EEZTest is Base {
         entries[0].returnData = "";
 
         // No reentrant match → CALL_NOT_FOUND → RollingHashMismatch → the immediate entry is skipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
         emit EEZ.L2TxSkipped(0, "");
-        _postBatch(rid, entries);
+        _postBatchSingle(rid, entries, 2);
         assertEq(_getRollupState(rid), bytes32(0), "entry must not commit");
     }
 }

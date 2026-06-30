@@ -85,7 +85,9 @@ contract EEZL2Test is Test {
     ///         rollup is this L2 (`ROLLUP_ID`), the source is the call's remote `(sourceAddress, sourceRollupId)`.
     function _incomingCallHash(CrossChainCall memory cc) internal pure returns (bytes32) {
         return keccak256(
-            abi.encode(cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, TEST_ROLLUP_ID, cc.value, cc.data)
+            abi.encode(
+                cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, TEST_ROLLUP_ID, cc.value, cc.data
+            )
         );
     }
 
@@ -114,7 +116,12 @@ contract EEZL2Test is Test {
 
     /// @notice Rolling hash for an entry whose single top-level call resolves to `(success, retData)`:
     ///         seed with the entry's `proxyEntryHash`, fold CALL_BEGIN(cch) / CALL_END(success, retData).
-    function _rollingHashSingleCall(bytes32 proxyEntryHash, CrossChainCall memory cc, bool success, bytes memory retData)
+    function _rollingHashSingleCall(
+        bytes32 proxyEntryHash,
+        CrossChainCall memory cc,
+        bool success,
+        bytes memory retData
+    )
         internal
         pure
         returns (bytes32 h)

@@ -168,6 +168,7 @@ abstract contract Base is Test {
         rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: psIdx});
 
         batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: staticLookups,
@@ -191,8 +192,9 @@ abstract contract Base is Test {
     )
         internal
     {
-        ProofSystemBatchPerVerificationEntries memory batch =
-            _singleSubBatch(r, entries, staticLookups, immediateEntryCount, immediateStaticLookupCount);
+        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(
+            r, entries, staticLookups, immediateEntryCount, immediateStaticLookupCount
+        );
         rollups.postAndVerifyBatch(batch);
     }
 
@@ -283,8 +285,9 @@ abstract contract Base is Test {
         pure
         returns (bytes32)
     {
-        return
-            keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data));
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data)
+        );
     }
 
     /// @notice Mirror of `EEZBase._computeExpectedL1toL2Hash`: position key for a reentrant call.

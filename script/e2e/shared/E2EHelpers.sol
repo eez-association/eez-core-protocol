@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {
     IEEZ,
     StateDelta,
@@ -193,6 +198,7 @@ contract L2TXBatcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: ic,
@@ -231,6 +237,7 @@ function deferredSingleRollupBatch(
     RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
     rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
     batch = ProofSystemBatchPerVerificationEntries({
+        expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
         entries: entries,
         staticLookups: staticLookups,
         immediateEntryCount: 0,

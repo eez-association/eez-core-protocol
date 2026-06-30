@@ -80,10 +80,7 @@ abstract contract VerifyHelpers is Script {
         );
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      success=%s  calls=%s  nested=%s",
-            e.success,
-            e.l2ToL1Calls.length,
-            e.expectedL1ToL2Calls.length
+            "      success=%s  calls=%s  nested=%s", e.success, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
         );
         for (uint256 d = 0; d < e.stateDeltas.length; d++) {
             StateDelta memory sd = e.stateDeltas[d];
@@ -101,7 +98,9 @@ abstract contract VerifyHelpers is Script {
         for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
             L2ToL1Call memory cc = e.l2ToL1Calls[c];
             console.log("      call[%s]: target=%s", c, cc.targetAddress);
-            console.log("        isStatic=%s  value=%s  revertNextNCalls=%s", cc.isStatic, cc.value, cc.revertNextNCalls);
+            console.log(
+                "        isStatic=%s  value=%s  revertNextNCalls=%s", cc.isStatic, cc.value, cc.revertNextNCalls
+            );
             console.log("        from=%s @ rollup %s", cc.sourceAddress, cc.sourceRollupId);
             console.log("        data=%s", _shortBytes(cc.data));
         }
@@ -132,15 +131,14 @@ abstract contract VerifyHelpers is Script {
         );
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      success=%s  calls=%s  nested=%s",
-            e.success,
-            e.incomingCalls.length,
-            e.expectedOutgoingCalls.length
+            "      success=%s  calls=%s  nested=%s", e.success, e.incomingCalls.length, e.expectedOutgoingCalls.length
         );
         for (uint256 c = 0; c < e.incomingCalls.length; c++) {
             CrossChainCall memory cc = e.incomingCalls[c];
             console.log("      call[%s]: target=%s", c, cc.targetAddress);
-            console.log("        isStatic=%s  value=%s  revertNextNCalls=%s", cc.isStatic, cc.value, cc.revertNextNCalls);
+            console.log(
+                "        isStatic=%s  value=%s  revertNextNCalls=%s", cc.isStatic, cc.value, cc.revertNextNCalls
+            );
             console.log("        from=%s @ rollup %s", cc.sourceAddress, cc.sourceRollupId);
             console.log("        data=%s", _shortBytes(cc.data));
         }

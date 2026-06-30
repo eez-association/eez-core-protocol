@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {StateDelta, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
@@ -146,7 +151,8 @@ abstract contract MultiCallActions {
 
         // PENDING EEZL2: L2-execution CALL_BEGIN folds the incoming call hashed with the L2's own id
         // as targetRollupId (the chain it runs on), mirroring L1 folding MAINNET. Re-verify once EEZL2 lands.
-        bytes32 ccHash = crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, MAINNET_ROLLUP_ID);
+        bytes32 ccHash =
+            crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, MAINNET_ROLLUP_ID);
         bytes32 rh = RollingHashBuilder.entryBeginL2(ah);
         rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
         rh = RollingHashBuilder.appendCallEnd(rh, true, retData);
@@ -240,6 +246,7 @@ contract Batcher {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,
