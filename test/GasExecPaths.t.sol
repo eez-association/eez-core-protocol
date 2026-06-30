@@ -4,7 +4,12 @@ pragma solidity ^0.8.28;
 import {console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {GasCost} from "./GasCost.t.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 
@@ -139,6 +144,7 @@ contract GasExecPaths is GasCost {
         rps[1] = RollupIdWithProofSystems({rollupId: uint64(rB.id), proofSystemIndexes: psIdx});
 
         batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
@@ -175,8 +181,18 @@ contract GasExecPaths is GasCost {
 
     /// PATH 3a / 4a — SAVE the entry to the persistent queue (immediateCount = 0, deferred). `peh == 0`
     ///                makes it an executeL2Txs target; a real hash makes it a proxy target.
+    /// @dev A deferred L2Tx (`peh == 0`) can't sit at the queue head — `ImmediateCountStrandsLeadingL2Tx`
+    ///      guards the boundary slot. Park it behind a non-L2Tx boundary entry so executeL2Txs reaches
+    ///      it by scanning. The proxy-target case (`peh != 0`) is itself a valid boundary entry.
     function _runSave(bytes32 proxyEntryHash) internal {
-        ExecutionEntry[] memory entries = _one(_sharedEntry(proxyEntryHash));
+        ExecutionEntry[] memory entries;
+        if (proxyEntryHash == bytes32(0)) {
+            entries = new ExecutionEntry[](2);
+            entries[0] = _sharedEntry(_proxyEntryHashFrom(address(driver))); // non-L2Tx boundary
+            entries[1] = _sharedEntry(bytes32(0)); // the deferred L2Tx
+        } else {
+            entries = _one(_sharedEntry(proxyEntryHash));
+        }
         ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(entries, 0);
         vm.prank(alice);
         rollups.postAndVerifyBatch(batch);
@@ -336,8 +352,9 @@ contract GasExecPaths is GasCost {
         h = seed;
         for (uint256 k = 0; k < calls.length; k++) {
             L2ToL1Call memory c = calls[k];
-            bytes32 cch =
-                _ccHash(c.isStatic, c.sourceAddress, c.sourceRollupId, c.targetAddress, MAINNET_ROLLUP_ID, c.value, c.data);
+            bytes32 cch = _ccHash(
+                c.isStatic, c.sourceAddress, c.sourceRollupId, c.targetAddress, MAINNET_ROLLUP_ID, c.value, c.data
+            );
             h = _hCallBegin(h, cch);
             if (reentrant[k]) {
                 bytes32 fireHash = h;
@@ -398,10 +415,7 @@ contract GasExecPaths is GasCost {
     {
         StateDelta[] memory d = new StateDelta[](1);
         d[0] = StateDelta({
-            rollupId: uint64(dest),
-            currentState: _getRollupState(dest),
-            newState: bytes32(uint256(0x50)),
-            etherDelta: 0
+            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
         });
         L2ToL1Call[] memory calls = new L2ToL1Call[](nCalls);
         for (uint256 i = 0; i < nCalls; i++) {

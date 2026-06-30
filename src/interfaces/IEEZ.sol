@@ -17,6 +17,13 @@ struct RollupIdWithProofSystems {
     uint64[] proofSystemIndexes; // strictly-increasing indices into the batch's `proofSystems[]`
 }
 
+/// @notice A rollup's expected state root.
+/// @dev A candidate matches when every pin equals the live `rollups[rollupId].stateRoot`.
+struct ExpectedStateRootPerRollup {
+    uint64 rollupId; // the pinned rollup
+    bytes32 stateRoot; // must equal live `rollups[rollupId].stateRoot` for the match
+}
+
 /// @notice One batch's payload — proof systems jointly attesting a set of rollups' state transitions.
 /// @dev `rollupIdsWithProofSystems` and `proofSystems` are both strictly increasing (sorted, deduped,
 ///      rejects address(0)); together with the once-per-block-per-rollup invariant this stops a batch
@@ -27,6 +34,7 @@ struct RollupIdWithProofSystems {
 ///      (tune the immediate/persistent split without re-proving). `blockNumber` binds the whole batch
 ///      to one L1 block (0 = none, type(uint64).max = latest).
 struct ProofSystemBatchPerVerificationEntries {
+    ExpectedStateRootPerRollup[] expectedStateRootPerRollup; // optional composer-supplied state-root assertions, if assertion fails, transaction reverts
     ExecutionEntry[] entries; // execution entries
     StaticLookup[] staticLookups; // top-level static-lookup
     uint256 immediateEntryCount; // leading prefix executed this tx: immediate L2Txs (run directly) + meta-hook (AA) entries (not queued)
@@ -123,20 +131,12 @@ struct ExpectedL1ToL2Call {
 struct ExecutionEntry {
     StateDelta[] stateDeltas; // the entry's true state transition (≥1, enforced on-chain)
     bytes32 proxyEntryHash; // inbound proxy-entry call hash; bytes32(0) for L2 txs
-    uint64 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
     L2ToL1Call[] l2ToL1Calls; // the entry's TOP-LEVEL calls (reentrant frames carry their own)
     ExpectedL1ToL2Call[] expectedL1ToL2Calls; // unified reentrant (L1→L2) table; see `ExpectedL1ToL2Call`
     bytes32 rollingHash; // expected rolling hash over all calls + nestings
+    uint64 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
     bool success; // indicates whether the entry returns or reverts
     bytes returnData; // pre-computed top-level return value (revert payload when !success)
-}
-
-/// @notice A rollup's expected state root, pinning a `StaticLookup` to a trajectory point.
-/// @dev A candidate MATCHES only when every pin equals the live `rollups[rollupId].stateRoot`
-///      (full scan — a mismatch skips the candidate, no revert). L1-only.
-struct ExpectedStateRootPerRollup {
-    uint64 rollupId; // the pinned rollup
-    bytes32 stateRoot; // must equal live `rollups[rollupId].stateRoot` for the match
 }
 
 /// @notice A pre-computed TOP-LEVEL static lookup: a read-only cross-chain call resolved via
@@ -149,9 +149,9 @@ struct ExpectedStateRootPerRollup {
 struct StaticLookup {
     ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH predicate
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
-    uint64 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
     L2ToL1Call[] l2ToL1Calls; // read-only sub-calls run via STATICCALL during resolution
     bytes32 rollingHash; // expected rolling hash of the sub-calls (untagged static schema: keccak(prev, success, retData))
+    uint64 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
     bool success; // indicates whether resolution returns or reverts (false ⇒ reverts with `returnData`)
     bytes returnData; // pre-computed return value (revert payload when !success)
 }

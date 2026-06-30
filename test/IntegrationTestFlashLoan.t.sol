@@ -2,17 +2,17 @@
 pragma solidity ^0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
-import {EEZ, RollupConfig, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    EEZ,
+    RollupConfig,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
-import {
-    ExecutionEntry,
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    StaticLookup
-} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, StaticLookup} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticLookup as L2StaticLookup,
@@ -173,8 +173,9 @@ contract IntegrationTestFlashLoan is Test {
         pure
         returns (bytes32)
     {
-        return
-            keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data)
+        );
     }
 
     /// @dev Mirror of `EEZBase._rollingHashEntryBegin` (L1): folds each delta's
@@ -218,6 +219,7 @@ contract IntegrationTestFlashLoan is Test {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
@@ -437,7 +439,13 @@ contract IntegrationTestFlashLoan is Test {
         );
 
         bytes32 l1Entry1ActionHash = _ccHash(
-            false, address(executorL1), MAINNET_ROLLUP_ID, address(executorL2), L2_ROLLUP_ID, 0, claimAndBridgeBackCalldata
+            false,
+            address(executorL1),
+            MAINNET_ROLLUP_ID,
+            address(executorL2),
+            L2_ROLLUP_ID,
+            0,
+            claimAndBridgeBackCalldata
         );
 
         // L2 Entry #0: consumed by bridgeL2.bridgeTokens inside claimAndBridgeBack
@@ -528,7 +536,13 @@ contract IntegrationTestFlashLoan is Test {
             bytes32 entry1RollingHash;
             {
                 bytes32 cch0 = _ccHash(
-                    false, address(executorL2), L2_ROLLUP_ID, address(executorL2), MAINNET_ROLLUP_ID, 0, claimAndBridgeBackCalldata
+                    false,
+                    address(executorL2),
+                    L2_ROLLUP_ID,
+                    address(executorL2),
+                    MAINNET_ROLLUP_ID,
+                    0,
+                    claimAndBridgeBackCalldata
                 );
                 bytes32 cch1 = _ccHash(
                     false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retReceiveCalldata

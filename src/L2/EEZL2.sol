@@ -2,12 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {CrossChainProxy} from "../base/CrossChainProxy.sol";
-import {
-    CrossChainCall,
-    ExpectedOutgoingCrossChainCall,
-    ExecutionEntry,
-    StaticLookup
-} from "../interfaces/IEEZL2.sol";
+import {CrossChainCall, ExpectedOutgoingCrossChainCall, ExecutionEntry, StaticLookup} from "../interfaces/IEEZL2.sol";
 import {ProxyInfo} from "../interfaces/IEEZ.sol";
 import {EEZBase} from "../base/EEZBase.sol";
 
@@ -325,7 +320,10 @@ contract EEZL2 is EEZBase {
     ///      host's continuous `_rollingHash` (NESTED_END) and returns `returnData`. REVERTED checks the
     ///      sub-hash against `revertedOrStaticRollingHash` and reverts with `returnData`; the terminal
     ///      revert rolls back the frame's state, hash, and cursor (no save needed).
-    function _resolveNestedReentrant(ExpectedOutgoingCrossChainCall storage expectedOutgoing, bytes32 crossChainCallHash)
+    function _resolveNestedReentrant(
+        ExpectedOutgoingCrossChainCall storage expectedOutgoing,
+        bytes32 crossChainCallHash
+    )
         internal
         returns (bytes memory)
     {

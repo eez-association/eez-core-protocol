@@ -181,9 +181,8 @@ contract ExecuteL2 is Script, CounterL2Actions {
         address capAddr = vm.envAddress("COUNTER_AND_PROXY_L2");
 
         vm.startBroadcast();
-        EEZL2(vm.envAddress("MANAGER_L2")).loadExecutionTable(
-            _l2Entries(vm.envAddress("COUNTER_L1"), capAddr), noL2StaticLookups()
-        );
+        EEZL2(vm.envAddress("MANAGER_L2"))
+            .loadExecutionTable(_l2Entries(vm.envAddress("COUNTER_L1"), capAddr), noL2StaticLookups());
         CounterAndProxy(capAddr).incrementProxy();
 
         console.log("done");
@@ -219,7 +218,10 @@ contract Execute is Script {
         vm.startBroadcast();
         DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
         batcher.execute(
-            EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("COUNTER_AND_PROXY_L2")
+            EEZ(vm.envAddress("ROLLUPS")),
+            vm.envAddress("PROOF_SYSTEM"),
+            counterL1,
+            vm.envAddress("COUNTER_AND_PROXY_L2")
         );
 
         console.log("done");

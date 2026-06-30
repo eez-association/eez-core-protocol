@@ -2,7 +2,13 @@
 pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
-import {EEZ, RollupConfig, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    EEZ,
+    RollupConfig,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
@@ -209,6 +215,7 @@ contract IntegrationTestBridge is Test {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
             staticLookups: _noStaticLookups(),
@@ -319,8 +326,7 @@ contract IntegrationTestBridge is Test {
 
         // Rolling hash: seed with the trigger identity, then the single call.
         // Call sends 1 ETH to alice (EOA) → success=true, retData="". Target runs on this L2 (ROLLUP_ID).
-        bytes32 l2Cch =
-            _ccHash(false, address(bridgeL1), MAINNET_ROLLUP_ID, alice, L2_ROLLUP_ID, 1 ether, "");
+        bytes32 l2Cch = _ccHash(false, address(bridgeL1), MAINNET_ROLLUP_ID, alice, L2_ROLLUP_ID, 1 ether, "");
         bytes32 l2RollingHash = _hEntryBeginL2(l2TriggerHash);
         l2RollingHash = _hCallBegin(l2RollingHash, l2Cch);
         l2RollingHash = _hCallEnd(l2RollingHash, true, "");
@@ -448,8 +454,9 @@ contract IntegrationTestBridge is Test {
         });
 
         // Rolling hash: receiveTokens returns void → success=true, retData="". Target runs on this L2.
-        bytes32 l2Cch =
-            _ccHash(false, address(bridgeL1), MAINNET_ROLLUP_ID, address(bridgeL2), L2_ROLLUP_ID, 0, receiveTokensCalldata);
+        bytes32 l2Cch = _ccHash(
+            false, address(bridgeL1), MAINNET_ROLLUP_ID, address(bridgeL2), L2_ROLLUP_ID, 0, receiveTokensCalldata
+        );
         bytes32 l2RollingHash = _hEntryBeginL2(l2TriggerHash);
         l2RollingHash = _hCallBegin(l2RollingHash, l2Cch);
         l2RollingHash = _hCallEnd(l2RollingHash, true, "");
@@ -665,7 +672,8 @@ contract IntegrationTestBridge is Test {
         stateDeltas[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
 
         // Rolling hash: receiveTokens returns void → success=true, retData="". Target runs on L1 (MAINNET).
-        bytes32 retCch = _ccHash(false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retCalldata);
+        bytes32 retCch =
+            _ccHash(false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retCalldata);
         bytes32 retRollingHash = _hEntryBeginL1(stateDeltas, bytes32(0));
         retRollingHash = _hCallBegin(retRollingHash, retCch);
         retRollingHash = _hCallEnd(retRollingHash, true, "");

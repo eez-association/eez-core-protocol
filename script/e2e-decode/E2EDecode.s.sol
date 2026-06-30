@@ -2,12 +2,23 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
 import {ExecutionEntry, StateDelta, StaticLookup} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
-import {crossChainCallHash, noStaticLookups, noNestedActions, noCalls, RollingHashBuilder} from "../e2e/shared/E2EHelpers.sol";
+import {
+    crossChainCallHash,
+    noStaticLookups,
+    noNestedActions,
+    noCalls,
+    RollingHashBuilder
+} from "../e2e/shared/E2EHelpers.sol";
 
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
@@ -42,6 +53,7 @@ contract Batcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: 0,
@@ -108,8 +120,9 @@ contract E2EExecute is Script {
         bytes memory incrementCallData = abi.encodeWithSelector(Counter.increment.selector);
 
         // Cross-chain call hash: CounterAndProxy → CounterProxy → counterL2 (rollupId=1).
-        bytes32 callHash =
-            crossChainCallHash(L2_ROLLUP_ID, counterL2Addr, 0, incrementCallData, counterAndProxyAddr, MAINNET_ROLLUP_ID);
+        bytes32 callHash = crossChainCallHash(
+            L2_ROLLUP_ID, counterL2Addr, 0, incrementCallData, counterAndProxyAddr, MAINNET_ROLLUP_ID
+        );
 
         StateDelta[] memory stateDeltas = new StateDelta[](1);
         stateDeltas[0] = StateDelta({

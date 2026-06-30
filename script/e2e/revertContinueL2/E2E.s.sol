@@ -109,7 +109,8 @@ abstract contract RevertContinueL2Actions {
             etherDelta: 0
         });
 
-        bytes32 ccTop = crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCallerL2, L2_ROLLUP_ID);
+        bytes32 ccTop =
+            crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCallerL2, L2_ROLLUP_ID);
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
         rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1)));
@@ -272,9 +273,7 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
 contract DeferredL2TXBatcher is RevertContinueL2Actions {
     function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
         rollups.postAndVerifyBatch(
-            deferredSingleRollupBatch(
-                proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups()
-            )
+            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups())
         );
         rollups.executeL2Txs(L2_ROLLUP_ID);
     }
