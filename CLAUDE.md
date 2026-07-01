@@ -272,6 +272,7 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 - `docs/MULTI_PROVER_SPEC.md` — design rationale for the multi-prover model.
 - `docs/EXECUTION_ENTRY_SPEC.md` — how to build execution entries.
 - `docs/LOOKUP_SPEC.md` — lookup semantics, nested + top-level (static vs reverted modes).
+- `docs/BLOB_FORMAT_SPEC.md` — wire format for the blobs publishing cross-chain activity.
 - `docs/CAVEATS.md` — edge cases.
 
 ## Testing
