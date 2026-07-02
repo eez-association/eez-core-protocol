@@ -26,7 +26,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///          `_processNCalls` on both sides (no transient cursor).
 ///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
 ///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
-///          `getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
+///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
 ///          (`_resolveNestedReentrant`), `_resolveStaticLookup`, `_processNStaticCalls`,
 ///          `staticCallLookup`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
 ///          `_sliceCrossChainCalls`).
