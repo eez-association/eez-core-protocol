@@ -3,7 +3,11 @@ pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
-import {ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../src/EEZ.sol";
 import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -71,6 +75,10 @@ contract GasCost is Base {
     RollupHandle internal rS2; // queue seeded BARE in setUp → control: call/expected NOT pre-filled
     RollupHandle internal rS3; // queue seeded 2-StateDelta full in setUp → marginal per-StateDelta
 
+    // L1 mainnet rollup id — the rollup an L1-executed call's target lives on, and the source
+    // rollup of any reentrant L1→L2 call (EEZ forces it via `executeCrossChainCall`).
+    uint64 internal constant MAINNET_ROLLUP_ID = 0;
+
     GasTestToken internal token;
     Sink internal sink;
 
@@ -111,7 +119,7 @@ contract GasCost is Base {
     bytes internal incrementProxyCalldata; // CounterAndProxy.incrementProxy()
     bytes internal uniswapCalldata; // realistic swapExactTokensForTokens(...)
 
-    function setUp() public {
+    function setUp() public virtual {
         setUpBase();
 
         rA = _makeRollup(keccak256("rA-init")); // id 1
@@ -121,15 +129,15 @@ contract GasCost is Base {
         sink = new Sink();
 
         counterReal = new Counter();
-        counterProxy = rollups.createCrossChainProxy(address(counterReal), rB.id);
+        counterProxy = rollups.createCrossChainProxy(address(counterReal), uint64(rB.id));
         actor = new CounterAndProxy(Counter(counterProxy));
-        counterProxyA = rollups.createCrossChainProxy(address(counterReal), rA.id);
+        counterProxyA = rollups.createCrossChainProxy(address(counterReal), uint64(rA.id));
         actorA = new CounterAndProxy(Counter(counterProxyA));
 
-        triggerProxy = rollups.createCrossChainProxy(triggerTarget, rA.id);
+        triggerProxy = rollups.createCrossChainProxy(triggerTarget, uint64(rA.id));
 
         // Fund the source proxy that dispatches the erc20 transfer (it is msg.sender to the token).
-        tokenHolderProxy = rollups.createCrossChainProxy(tokenHolder, rA.id);
+        tokenHolderProxy = rollups.createCrossChainProxy(tokenHolder, uint64(rA.id));
         token.transfer(tokenHolderProxy, 1_000_000e18);
 
         incrementCalldata = abi.encodeWithSelector(Counter.increment.selector);
@@ -138,17 +146,16 @@ contract GasCost is Base {
         address[] memory path = new address[](2);
         path[0] = address(token);
         path[1] = address(token);
-        uniswapCalldata =
-            abi.encodeCall(IUniswapV2Router.swapExactTokensForTokens, (AMT, 0, path, bob, 1_000_000_000));
+        uniswapCalldata = abi.encodeCall(IUniswapV2Router.swapExactTokensForTokens, (AMT, 0, path, bob, 1_000_000_000));
 
         // Scenario-1 graph: A calls B' (proxy for B on rB).
-        s1ProxyB = rollups.createCrossChainProxy(s1B, rB.id);
+        s1ProxyB = rollups.createCrossChainProxy(s1B, uint64(rB.id));
         s1A = new CounterAndProxy(Counter(s1ProxyB));
 
         // Scenario-3-on-L1 graph: D calls C' (proxy for C on rA); alice enters via D' (proxy for D on rB).
-        s4ProxyC = rollups.createCrossChainProxy(s4C, rA.id);
+        s4ProxyC = rollups.createCrossChainProxy(s4C, uint64(rA.id));
         s4D = new CounterAndProxy(Counter(s4ProxyC));
-        s4ProxyD = rollups.createCrossChainProxy(address(s4D), rB.id);
+        s4ProxyD = rollups.createCrossChainProxy(address(s4D), uint64(rB.id));
 
         // Committed in setUp (a separate tx): its slots are non-zero ORIGINAL in every test.
         seeded = new ArrayStore();
@@ -172,83 +179,92 @@ contract GasCost is Base {
     }
 
     /// @notice One entry routed to `dest` of a given shape (deferred, never executed). Values only
-    ///         need to pass postAndVerifyBatch validation, which requires call sources / expected
-    ///         destinations to be in the attested set {rB, dest}.
+    ///         need to pass postAndVerifyBatch validation, which requires call sources to be in the
+    ///         attested set {rB, dest}; the unified reentrant table carries no routing of its own.
     function _steadyShapedFor(uint256 dest, bool withCall, bool withExpected)
         internal
         view
         returns (ExecutionEntry memory e)
     {
-        // ONE StateDelta (single rollup). Deferred (never executed), so the reentrant expected may
-        // point at the entry's own rollup — that satisfies post-validation (dest ∈ stateDeltas)
-        // without a second StateDelta; the execution-time same-rollup rule never applies here.
+        // ONE StateDelta (single rollup). The flat call's source is `dest` itself, so a single delta
+        // satisfies post-validation; deferred entries are never executed, so the rolling hash and the
+        // reentrant table's position keys are placeholders.
         StateDelta[] memory d = new StateDelta[](1);
-        d[0] =
-            StateDelta({rollupId: dest, currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0});
+        d[0] = StateDelta({
+            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
+        });
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](withCall ? 1 : 0);
         if (withCall) {
             calls[0] = L2ToL1Call({
+                revertNextNCalls: 0,
                 isStatic: false,
+                sourceAddress: genericSource,
+                sourceRollupId: uint64(dest),
                 targetAddress: address(sink),
                 value: 0,
-                data: hex"deadbeef",
-                sourceAddress: genericSource,
-                sourceRollupId: dest,
-                revertSpan: 0
+                data: hex"deadbeef"
             });
         }
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](withExpected ? 1 : 0);
         if (withExpected) {
-            exp[0] = ExpectedL1ToL2Call({
-                crossChainCallHash: keccak256("steady-nested"),
-                destinationRollupId: dest,
-                callCount: 0,
-                returnData: abi.encode(uint256(1))
-            });
+            exp[0] = _deferredExpected();
         }
 
         e.stateDeltas = d;
         e.proxyEntryHash = keccak256("steady");
-        e.destinationRollupId = dest;
+        e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
         e.expectedL1ToL2Calls = exp;
-        e.callCount = withCall ? 1 : 0;
+        e.success = true;
     }
 
     /// @notice Same full shape as _steadyShapedFor(dest,true,true) but with TWO StateDeltas
     ///         (rB + dest), so the marginal cost of one extra StateDelta can be measured.
     function _steadyShaped2(uint256 dest) internal view returns (ExecutionEntry memory e) {
         StateDelta[] memory d = new StateDelta[](2);
-        d[0] =
-            StateDelta({rollupId: rB.id, currentState: _getRollupState(rB.id), newState: bytes32(uint256(0xB0)), etherDelta: 0});
-        d[1] =
-            StateDelta({rollupId: dest, currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0});
+        d[0] = StateDelta({
+            rollupId: uint64(rB.id),
+            currentState: _getRollupState(rB.id),
+            newState: bytes32(uint256(0xB0)),
+            etherDelta: 0
+        });
+        d[1] = StateDelta({
+            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
+        });
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: genericSource,
+            sourceRollupId: uint64(dest),
             targetAddress: address(sink),
             value: 0,
-            data: hex"deadbeef",
-            sourceAddress: genericSource,
-            sourceRollupId: dest,
-            revertSpan: 0
+            data: hex"deadbeef"
         });
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
-        exp[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: keccak256("steady-nested"),
-            destinationRollupId: rB.id,
-            callCount: 0,
-            returnData: abi.encode(uint256(1))
-        });
+        exp[0] = _deferredExpected();
 
         e.stateDeltas = d;
         e.proxyEntryHash = keccak256("steady2");
-        e.destinationRollupId = dest;
+        e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
         e.expectedL1ToL2Calls = exp;
-        e.callCount = 1;
+        e.success = true;
+    }
+
+    /// @notice A single placeholder reentrant table entry for DEFERRED (never-executed) entries.
+    ///         Carries no sub-calls, so post-validation sees nothing to prove; its position key is
+    ///         arbitrary because consumption (and the rolling-hash match) never happens.
+    function _deferredExpected() internal pure returns (ExpectedL1ToL2Call memory) {
+        return ExpectedL1ToL2Call({
+            expectedL1toL2Hash: keccak256("steady-nested"),
+            l2ToL1Calls: new L2ToL1Call[](0),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: abi.encode(uint256(1))
+        });
     }
 
     function _steadyShaped(bool withCall, bool withExpected) internal view returns (ExecutionEntry memory) {
@@ -285,7 +301,7 @@ contract GasCost is Base {
     // ──────────────────────────────────────────────
 
     /// @notice Posts a batch attesting both rA and rB (so both are verified this block), with all
-    ///         entries deferred to rA's queue. Mirrors Base._singleSubBatch but with two rollups.
+    ///         entries deferred to rA's queue.
     function _postTwoRollups(ExecutionEntry[] memory entries) internal {
         _postBatchTwo(rA.id, rB.id, entries);
     }
@@ -295,12 +311,10 @@ contract GasCost is Base {
         _postBatchTwoT(r1, r2, entries, 0);
     }
 
-    /// @notice Like _postBatchTwo but with an explicit transientExecutionEntryCount — the leading
-    ///         prefix loaded into the transient table (and, where proxyEntryHash==0, run inline via
+    /// @notice Like _postBatchTwo but with an explicit immediateEntryCount — the leading prefix
+    ///         loaded into the transient table (and, where proxyEntryHash==0, run inline via
     ///         attemptApplyImmediate during the post itself).
-    function _postBatchTwoT(uint256 r1, uint256 r2, ExecutionEntry[] memory entries, uint256 transientCount)
-        internal
-    {
+    function _postBatchTwoT(uint256 r1, uint256 r2, ExecutionEntry[] memory entries, uint256 immediateCount) internal {
         address[] memory psList = new address[](1);
         psList[0] = address(ps);
         bytes[] memory proofs = new bytes[](1);
@@ -309,15 +323,16 @@ contract GasCost is Base {
         psIdx[0] = 0;
 
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] = RollupIdWithProofSystems({rollupId: r1, proofSystemIndex: psIdx});
-        rps[1] = RollupIdWithProofSystems({rollupId: r2, proofSystemIndex: psIdx});
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(r1), proofSystemIndexes: psIdx});
+        rps[1] = RollupIdWithProofSystems({rollupId: uint64(r2), proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
             entries: entries,
-            l1ToL2lookupCalls: _emptyLookupCalls(),
-            transientExecutionEntryCount: transientCount,
-            transientLookupCallCount: 0,
+            staticLookups: _emptyStaticLookups(),
+            immediateEntryCount: immediateCount,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -331,25 +346,25 @@ contract GasCost is Base {
     function _twoDeltas(bytes32 newA, bytes32 newB) internal view returns (StateDelta[] memory deltas) {
         deltas = new StateDelta[](2);
         deltas[0] =
-            StateDelta({rollupId: rA.id, currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            StateDelta({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
         deltas[1] =
-            StateDelta({rollupId: rB.id, currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
+            StateDelta({rollupId: uint64(rB.id), currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
     }
 
     /// @notice One StateDelta (rA) — touches a single rollup.
     function _oneDelta(bytes32 newA) internal view returns (StateDelta[] memory deltas) {
         deltas = new StateDelta[](1);
         deltas[0] =
-            StateDelta({rollupId: rA.id, currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            StateDelta({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
     }
 
-    /// @notice Assembles a single entry routed to rA, with the given calls/expected/hash.
+    /// @notice Assembles a single entry routed to rA, with the given calls/expected/hash. `success`
+    ///         is always true (these entries return their `returnData`).
     function _entry(
         StateDelta[] memory deltas,
         bytes32 proxyEntryHash,
         L2ToL1Call[] memory calls,
         ExpectedL1ToL2Call[] memory expected,
-        uint256 callCount,
         bytes memory returnData,
         bytes32 rollingHash
     )
@@ -359,78 +374,68 @@ contract GasCost is Base {
     {
         entry.stateDeltas = deltas;
         entry.proxyEntryHash = proxyEntryHash;
-        entry.destinationRollupId = rA.id;
+        entry.destinationRollupId = uint64(rA.id);
         entry.l2ToL1Calls = calls;
         entry.expectedL1ToL2Calls = expected;
-        entry.callCount = callCount;
-        entry.returnData = returnData;
         entry.rollingHash = rollingHash;
+        entry.success = true;
+        entry.returnData = returnData;
     }
 
     /// @notice The proxyEntryHash for the top-level trigger: alice calls triggerProxy with "".
+    ///         Source = alice on L1 (MAINNET), target = triggerTarget on rA.
     function _triggerHash() internal view returns (bytes32) {
-        return _hashCall(rA.id, triggerTarget, 0, "", alice, 0);
+        return _ccHash(NOT_STATIC_CALL, alice, MAINNET_ROLLUP_ID, triggerTarget, uint64(rA.id), 0, "");
     }
 
     // ── flat-call builders ──
 
     function _sinkCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: genericSource,
+            sourceRollupId: uint64(rA.id),
             targetAddress: address(sink),
             value: 0,
-            data: hex"deadbeef",
-            sourceAddress: genericSource,
-            sourceRollupId: rA.id,
-            revertSpan: 0
+            data: hex"deadbeef"
         });
     }
 
     function _erc20Call() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: tokenHolder,
+            sourceRollupId: uint64(rA.id),
             targetAddress: address(token),
             value: 0,
-            data: abi.encodeCall(IERC20.transfer, (bob, AMT)),
-            sourceAddress: tokenHolder,
-            sourceRollupId: rA.id,
-            revertSpan: 0
+            data: abi.encodeCall(IERC20.transfer, (bob, AMT))
         });
     }
 
     function _uniswapCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: genericSource,
+            sourceRollupId: uint64(rA.id),
             targetAddress: address(sink),
             value: 0,
-            data: uniswapCalldata,
-            sourceAddress: genericSource,
-            sourceRollupId: rA.id,
-            revertSpan: 0
+            data: uniswapCalldata
         });
     }
 
     /// @notice Flat call whose target (actor) re-enters EEZ once, consuming one ExpectedL1ToL2Call.
     function _reentrantCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: actorCaller,
+            sourceRollupId: uint64(rA.id),
             targetAddress: address(actor),
             value: 0,
-            data: incrementProxyCalldata,
-            sourceAddress: actorCaller,
-            sourceRollupId: rA.id,
-            revertSpan: 0
-        });
-    }
-
-    /// @notice The single reentrant ExpectedL1ToL2Call: actor -> counterProxy.increment() on rB.
-    function _reentrantExpected() internal view returns (ExpectedL1ToL2Call[] memory expected) {
-        expected = new ExpectedL1ToL2Call[](1);
-        expected[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: _hashCall(rB.id, address(counterReal), 0, incrementCalldata, address(actor), 0),
-            destinationRollupId: rB.id,
-            callCount: 0,
-            returnData: abi.encode(uint256(1))
+            data: incrementProxyCalldata
         });
     }
 
@@ -438,22 +443,26 @@ contract GasCost is Base {
     ///         so the entry needs only ONE StateDelta (rA).
     function _reentrantCallA() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: actorCaller,
+            sourceRollupId: uint64(rA.id),
             targetAddress: address(actorA),
             value: 0,
-            data: incrementProxyCalldata,
-            sourceAddress: actorCaller,
-            sourceRollupId: rA.id,
-            revertSpan: 0
+            data: incrementProxyCalldata
         });
     }
 
-    function _reentrantExpectedA() internal view returns (ExpectedL1ToL2Call[] memory expected) {
+    /// @notice A single placeholder reentrant table entry for a DEFERRED cross-rollup reentry
+    ///         (actor -> counterProxy.increment() on rB). Never executed, so its position key is
+    ///         a placeholder; the only post-validated content is the (empty) sub-call array.
+    function _reentrantExpected() internal view returns (ExpectedL1ToL2Call[] memory expected) {
         expected = new ExpectedL1ToL2Call[](1);
         expected[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: _hashCall(rA.id, address(counterReal), 0, incrementCalldata, address(actorA), 0),
-            destinationRollupId: rA.id,
-            callCount: 0,
+            expectedL1toL2Hash: _expectedL1toL2Hash(_nestedCch(_reentrantCall()), bytes32(0)),
+            l2ToL1Calls: new L2ToL1Call[](0),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
             returnData: abi.encode(uint256(1))
         });
     }
@@ -467,21 +476,73 @@ contract GasCost is Base {
         arr[0] = c0;
     }
 
-    // ── rolling-hash fragments (mirror EEZBase fold order) ──
-
-    /// @notice Folds one plain top-level call: CALL_BEGIN(n) ... CALL_END(n, true, ret).
-    function _foldCall(bytes32 h, uint256 n, bytes memory ret) internal pure returns (bytes32) {
-        h = _hCallBegin(h, n);
-        return _hCallEnd(h, n, true, ret);
+    function _rets(bytes memory r0) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = r0;
     }
 
-    /// @notice Folds one top-level call that re-enters once with no inner calls:
-    ///         CALL_BEGIN(n), NESTED_BEGIN(1), NESTED_END(1), CALL_END(n, true, ret).
-    function _foldReentrantCall(bytes32 h, uint256 n, bytes memory ret) internal pure returns (bytes32) {
-        h = _hCallBegin(h, n);
-        h = _hNestedBegin(h, 1);
-        h = _hNestedEnd(h, 1);
-        return _hCallEnd(h, n, true, ret);
+    // ── rolling-hash builders (mirror EEZBase fold order) ──
+
+    /// @notice The reentrant cross-chain call hash for a flat reentrant call: the actor re-enters via
+    ///         its proxy to call counterReal. Source is the actor on L1 (MAINNET — EEZ forces this),
+    ///         target is counterReal on the actor's paired rollup (rB for `actor`, rA for `actorA`).
+    function _nestedCch(L2ToL1Call memory c) internal view returns (bytes32) {
+        if (c.targetAddress == address(actorA)) {
+            return _ccHash(
+                NOT_STATIC_CALL,
+                address(actorA),
+                MAINNET_ROLLUP_ID,
+                address(counterReal),
+                uint64(rA.id),
+                0,
+                incrementCalldata
+            );
+        }
+        return _ccHash(
+            NOT_STATIC_CALL,
+            address(actor),
+            MAINNET_ROLLUP_ID,
+            address(counterReal),
+            uint64(rB.id),
+            0,
+            incrementCalldata
+        );
+    }
+
+    /// @notice Folds an executed entry's rolling hash AND builds the matching reentrant table.
+    /// @dev `seed` is `_hEntryBegin(deltas, proxyEntryHash)`. Each top-level call k folds
+    ///      CALL_BEGIN(cch_k) / CALL_END(true, rets[k]); when `reentrant`, the LAST call additionally
+    ///      opens a no-sub-call NESTED success frame, and its `ExpectedL1ToL2Call` is position-keyed on
+    ///      the rolling hash at the instant it fires (after CALL_BEGIN, before NESTED_BEGIN).
+    function _foldExec(bytes32 seed, L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant)
+        internal
+        view
+        returns (bytes32 h, ExpectedL1ToL2Call[] memory expected)
+    {
+        h = seed;
+        expected = new ExpectedL1ToL2Call[](reentrant ? 1 : 0);
+        for (uint256 k = 0; k < calls.length; k++) {
+            L2ToL1Call memory c = calls[k];
+            // CALL_BEGIN folds the call's identity (target on L1 = MAINNET, source on its rollup).
+            bytes32 cch = _ccHash(
+                c.isStatic, c.sourceAddress, c.sourceRollupId, c.targetAddress, MAINNET_ROLLUP_ID, c.value, c.data
+            );
+            h = _hCallBegin(h, cch);
+            if (reentrant && k == calls.length - 1) {
+                bytes32 fireHash = h;
+                bytes32 nestedCch = _nestedCch(c);
+                h = _hNestedBegin(h, nestedCch);
+                h = _hNestedEnd(h);
+                expected[0] = ExpectedL1ToL2Call({
+                    expectedL1toL2Hash: _expectedL1toL2Hash(nestedCch, fireHash),
+                    l2ToL1Calls: new L2ToL1Call[](0),
+                    revertedOrStaticRollingHash: bytes32(0),
+                    success: true,
+                    returnData: abi.encode(uint256(1))
+                });
+            }
+            h = _hCallEnd(h, true, rets[k]);
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -509,8 +570,8 @@ contract GasCost is Base {
         vm.cool(address(counterReal));
         vm.cool(tokenHolderProxy);
         vm.cool(counterProxy);
-        vm.cool(rollups.computeCrossChainProxyAddress(genericSource, rA.id));
-        vm.cool(rollups.computeCrossChainProxyAddress(actorCaller, rA.id));
+        vm.cool(rollups.computeCrossChainProxyAddress(genericSource, uint64(rA.id)));
+        vm.cool(rollups.computeCrossChainProxyAddress(actorCaller, uint64(rA.id)));
     }
 
     /// @notice Posts the given entries; the same batch is meant to be posted twice (caller posts a
@@ -523,51 +584,29 @@ contract GasCost is Base {
         gasUsed = g - gasleft();
     }
 
-    /// @notice Builds + posts one deferred entry routed to rA with `nDeltas` StateDeltas (1 = one
+    /// @notice Builds + posts one EXECUTED entry routed to rA with `nDeltas` StateDeltas (1 = one
     ///         rollup, 2 = two rollups). Reads live roots, safe across blocks. The batch always
     ///         attests both rA and rB so a reentrant nested call into rB passes its verified gate,
-    ///         independent of how many StateDeltas the entry carries.
-    function _postEntryN(
-        uint8 nDeltas,
-        L2ToL1Call[] memory calls,
-        ExpectedL1ToL2Call[] memory expected,
-        uint256 callCount,
-        bytes32 rollingHash
-    )
-        internal
-    {
+    ///         independent of how many StateDeltas the entry carries. Computes the entry's rolling
+    ///         hash and reentrant table from the actual calls (seeded with `_hEntryBegin`).
+    function _postEntryN(uint8 nDeltas, L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant) internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
         StateDelta[] memory deltas = nDeltas == 2 ? _twoDeltas(newA, newB) : _oneDelta(newA);
+        bytes32 ph = _triggerHash();
+        (bytes32 h, ExpectedL1ToL2Call[] memory expected) = _foldExec(_hEntryBegin(deltas, ph), calls, rets, reentrant);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _entry(deltas, _triggerHash(), calls, expected, callCount, "", rollingHash);
+        entries[0] = _entry(deltas, ph, calls, expected, "", h);
         _postTwoRollups(entries);
-    }
-
-    function _postEntry(
-        L2ToL1Call[] memory calls,
-        ExpectedL1ToL2Call[] memory expected,
-        uint256 callCount,
-        bytes32 rollingHash
-    )
-        internal
-    {
-        _postEntryN(1, calls, expected, callCount, rollingHash);
     }
 
     /// @notice Posts one entry (`nDeltas` rollups touched) then measures alice's trigger call that
     ///         executes it — with cold slots (the realistic "separate user tx" cost).
-    function _measureExecN(
-        uint8 nDeltas,
-        L2ToL1Call[] memory calls,
-        ExpectedL1ToL2Call[] memory expected,
-        uint256 callCount,
-        bytes32 rollingHash
-    )
+    function _measureExecN(uint8 nDeltas, L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant)
         internal
         returns (uint256 gasUsed)
     {
-        _postEntryN(nDeltas, calls, expected, callCount, rollingHash);
+        _postEntryN(nDeltas, calls, rets, reentrant);
         _coolForExec(); // entry was loaded by the (prior) post tx → all its slots are cold to the user
 
         uint256 g = gasleft();
@@ -578,20 +617,15 @@ contract GasCost is Base {
     }
 
     /// @notice Default execution measurement. Touches a single rollup (1 StateDelta) unless the
-    ///         entry has a reentrant call: a reentrant L1→L2 destination must be in the entry's own
-    ///         stateDeltas (src/EEZ.sol `ReentrantDestinationNotVerified`), so reentrant entries
-    ///         necessarily touch 2 rollups.
-    function _measureExec(
-        L2ToL1Call[] memory calls,
-        ExpectedL1ToL2Call[] memory expected,
-        uint256 callCount,
-        bytes32 rollingHash
-    )
+    ///         entry is `reentrant`: a reentrant L1→L2 destination must be in the entry's own
+    ///         stateDeltas (src/EEZ.sol `ReentrantDestinationNotVerified`), so a cross-rollup
+    ///         reentrant entry necessarily touches 2 rollups.
+    function _measureExec(L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant)
         internal
         returns (uint256 gasUsed)
     {
-        uint8 nDeltas = expected.length > 0 ? 2 : 1;
-        return _measureExecN(nDeltas, calls, expected, callCount, rollingHash);
+        uint8 nDeltas = reentrant ? 2 : 1;
+        return _measureExecN(nDeltas, calls, rets, reentrant);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -604,15 +638,15 @@ contract GasCost is Base {
 
         // P0: bare entry (no calls, no expected)
         ExecutionEntry[] memory p0 = new ExecutionEntry[](1);
-        p0[0] = _entry(_twoDeltas("a", "b"), ph, new L2ToL1Call[](0), _noExpected(), 0, "", bytes32(0));
+        p0[0] = _entry(_twoDeltas("a", "b"), ph, new L2ToL1Call[](0), _noExpected(), "", bytes32(0));
 
         // P1: +1 L2ToL1Call
         ExecutionEntry[] memory p1 = new ExecutionEntry[](1);
-        p1[0] = _entry(_twoDeltas("a", "b"), ph, _calls(_sinkCall()), _noExpected(), 1, "", bytes32(0));
+        p1[0] = _entry(_twoDeltas("a", "b"), ph, _calls(_sinkCall()), _noExpected(), "", bytes32(0));
 
         // P2: +1 L2ToL1Call +1 reentrant ExpectedL1ToL2Call
         ExecutionEntry[] memory p2 = new ExecutionEntry[](1);
-        p2[0] = _entry(_twoDeltas("a", "b"), ph, _calls(_reentrantCall()), _reentrantExpected(), 1, "", bytes32(0));
+        p2[0] = _entry(_twoDeltas("a", "b"), ph, _calls(_reentrantCall()), _reentrantExpected(), "", bytes32(0));
 
         // Warm-up posts (block N), then measured posts (block N+1).
         _postTwoRollups(p0);
@@ -644,13 +678,18 @@ contract GasCost is Base {
     function test_PostCost_1vs2Entries() public {
         bytes32 ph = keccak256("deferred-trigger");
 
-        // 1 StateDelta, deferred (never executed) → the reentrant expected may point at rA itself.
+        // 1 StateDelta, deferred (never executed). The reentrant flat call's source is rA, so a
+        // single delta passes post-validation; the reentrant table carries no routing.
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
         exp[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: keccak256("x"), destinationRollupId: rA.id, callCount: 0, returnData: abi.encode(uint256(1))
+            expectedL1toL2Hash: keccak256("x"),
+            l2ToL1Calls: new L2ToL1Call[](0),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: abi.encode(uint256(1))
         });
         ExecutionEntry memory shaped =
-            _entry(_oneDelta(bytes32("b")), ph, _calls(_reentrantCall()), exp, 1, "", bytes32(0));
+            _entry(_oneDelta(bytes32("b")), ph, _calls(_reentrantCall()), exp, "", bytes32(0));
 
         ExecutionEntry[] memory one = new ExecutionEntry[](1);
         one[0] = shaped;
@@ -679,18 +718,16 @@ contract GasCost is Base {
 
     function test_ExecCost_Incremental() public {
         // (a) entry with one plain L2ToL1Call (no expected)
-        bytes32 hA = _foldCall(bytes32(0), 1, "");
-        _measureExec(_calls(_sinkCall()), _noExpected(), 1, hA); // warm-up
+        _measureExec(_calls(_sinkCall()), _rets(""), false); // warm-up
         vm.roll(block.number + 1);
-        uint256 gA = _measureExec(_calls(_sinkCall()), _noExpected(), 1, hA);
+        uint256 gA = _measureExec(_calls(_sinkCall()), _rets(""), false);
 
-        // (b) entry with one L2ToL1Call that re-enters + one ExpectedL1ToL2Call — SAME-rollup
-        //     reentry, so still a single StateDelta (1 rollup). Uses _measureExecN(1, ...).
-        bytes32 hB = _foldReentrantCall(bytes32(0), 1, "");
+        // (b) entry whose single L2ToL1Call re-enters once — SAME-rollup reentry, so still a single
+        //     StateDelta (1 rollup). Uses _measureExecN(1, ...).
         vm.roll(block.number + 1);
-        _measureExecN(1, _calls(_reentrantCallA()), _reentrantExpectedA(), 1, hB); // warm-up
+        _measureExecN(1, _calls(_reentrantCallA()), _rets(""), true); // warm-up
         vm.roll(block.number + 1);
-        uint256 gB = _measureExecN(1, _calls(_reentrantCallA()), _reentrantExpectedA(), 1, hB);
+        uint256 gB = _measureExecN(1, _calls(_reentrantCallA()), _rets(""), true);
 
         console.log("exec_entry_1call          ", gA);
         console.log("exec_entry_1call_reentrant", gB);
@@ -705,16 +742,14 @@ contract GasCost is Base {
     // entry executed with 1 vs 2 StateDeltas. The delta is the read of the extra delta + the
     // SSTORE of that rollup's state root at consumption.
     function test_ExecCost_PerRollupDelta() public {
-        bytes32 h = _foldCall(bytes32(0), 1, "");
-
-        _measureExecN(1, _calls(_sinkCall()), _noExpected(), 1, h); // warm-up
+        _measureExecN(1, _calls(_sinkCall()), _rets(""), false); // warm-up
         vm.roll(block.number + 1);
-        uint256 oneRollup = _measureExecN(1, _calls(_sinkCall()), _noExpected(), 1, h);
+        uint256 oneRollup = _measureExecN(1, _calls(_sinkCall()), _rets(""), false);
 
         vm.roll(block.number + 1);
-        _measureExecN(2, _calls(_sinkCall()), _noExpected(), 1, h); // warm-up
+        _measureExecN(2, _calls(_sinkCall()), _rets(""), false); // warm-up
         vm.roll(block.number + 1);
-        uint256 twoRollup = _measureExecN(2, _calls(_sinkCall()), _noExpected(), 1, h);
+        uint256 twoRollup = _measureExecN(2, _calls(_sinkCall()), _rets(""), false);
 
         console.log("exec_1rollup", oneRollup);
         console.log("exec_2rollup", twoRollup);
@@ -725,10 +760,9 @@ contract GasCost is Base {
     // the per-call-frame gas (proxy hop, EEZ.executeCrossChainCall, sink call), or --gas-report for
     // per-function gas.
     function test_GasProfile_Entry1Call() public {
-        bytes32 h = _foldCall(bytes32(0), 1, "");
-        _measureExecN(1, _calls(_sinkCall()), _noExpected(), 1, h); // warm-up (creates source proxies)
+        _measureExecN(1, _calls(_sinkCall()), _rets(""), false); // warm-up (creates source proxies)
         vm.roll(block.number + 1);
-        _postEntryN(1, _calls(_sinkCall()), _noExpected(), 1, h);
+        _postEntryN(1, _calls(_sinkCall()), _rets(""), false);
         _coolForExec();
         uint256 g = gasleft();
         vm.prank(alice);
@@ -738,18 +772,16 @@ contract GasCost is Base {
     }
 
     function test_ExecCost_Erc20() public {
-        bytes32 h = _foldCall(bytes32(0), 1, abi.encode(true)); // transfer returns true
-        _measureExec(_calls(_erc20Call()), _noExpected(), 1, h); // warm-up
+        _measureExec(_calls(_erc20Call()), _rets(abi.encode(true)), false); // warm-up (transfer returns true)
         vm.roll(block.number + 1);
-        uint256 g = _measureExec(_calls(_erc20Call()), _noExpected(), 1, h);
+        uint256 g = _measureExec(_calls(_erc20Call()), _rets(abi.encode(true)), false);
         console.log("exec_erc20_transfer", g);
     }
 
     function test_ExecCost_Uniswap() public {
-        bytes32 h = _foldCall(bytes32(0), 1, ""); // sink returns empty
-        _measureExec(_calls(_uniswapCall()), _noExpected(), 1, h); // warm-up
+        _measureExec(_calls(_uniswapCall()), _rets(""), false); // warm-up (sink returns empty)
         vm.roll(block.number + 1);
-        uint256 g = _measureExec(_calls(_uniswapCall()), _noExpected(), 1, h);
+        uint256 g = _measureExec(_calls(_uniswapCall()), _rets(""), false);
         console.log("exec_uniswap_swap", g);
     }
 
@@ -764,14 +796,14 @@ contract GasCost is Base {
         calls[2] = _reentrantCall();
 
         // call1 erc20 (ret=true), call2 uniswap->sink (ret=""), call3 reentrant (ret="")
-        bytes32 h = bytes32(0);
-        h = _foldCall(h, 1, abi.encode(true));
-        h = _foldCall(h, 2, "");
-        h = _foldReentrantCall(h, 3, "");
+        bytes[] memory rets = new bytes[](3);
+        rets[0] = abi.encode(true);
+        rets[1] = "";
+        rets[2] = "";
 
-        _measureExec(calls, _reentrantExpected(), 3, h); // warm-up
+        _measureExec(calls, rets, true); // warm-up
         vm.roll(block.number + 1);
-        uint256 g = _measureExec(calls, _reentrantExpected(), 3, h);
+        uint256 g = _measureExec(calls, rets, true);
         console.log("exec_erc20_uniswap_reentrant", g);
     }
 
@@ -784,36 +816,36 @@ contract GasCost is Base {
     //  execution cost via the transient path (no persistent queue write).
     // ══════════════════════════════════════════════════════════════════════════
 
-    function _postImmediate(bool execute, bytes32 rollingHash) internal {
+    function _postImmediate(bool execute) internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
         bytes32 peh = execute ? bytes32(0) : keccak256("not-immediate");
-        ExecutionEntry memory e =
-            _entry(_twoDeltas(newA, newB), peh, _calls(_reentrantCall()), _reentrantExpected(), 1, "", rollingHash);
+        StateDelta[] memory deltas = _twoDeltas(newA, newB);
+        L2ToL1Call[] memory calls = _calls(_reentrantCall());
+        (bytes32 h, ExpectedL1ToL2Call[] memory exp) = _foldExec(_hEntryBegin(deltas, peh), calls, _rets(""), true);
+        ExecutionEntry memory e = _entry(deltas, peh, calls, exp, "", h);
         // Post as an EOA: a contract sender would get the meta-hook callback when an unexecuted
         // transient entry remains (the !execute case), which the test contract doesn't implement.
         vm.prank(alice);
-        _postBatchTwoT(rA.id, rB.id, _one(e), 1); // transientExecutionEntryCount = 1
+        _postBatchTwoT(rA.id, rB.id, _one(e), 1); // immediateEntryCount = 1
     }
 
     function test_Transient_ImmediateExecCost() public {
-        bytes32 h = _foldReentrantCall(bytes32(0), 1, "");
-
         // WITH inline execution (proxyEntryHash == 0)
-        _postImmediate(true, h); // warm-up
+        _postImmediate(true); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
         uint256 g1 = gasleft();
-        _postImmediate(true, h);
+        _postImmediate(true);
         uint256 withExec = g1 - gasleft();
 
         // WITHOUT inline execution (entry loaded transiently but not run)
         vm.roll(block.number + 1);
-        _postImmediate(false, h); // warm-up
+        _postImmediate(false); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
         uint256 g2 = gasleft();
-        _postImmediate(false, h);
+        _postImmediate(false);
         uint256 withoutExec = g2 - gasleft();
 
         console.log("transient_batch_with_exec   ", withExec);
@@ -823,10 +855,13 @@ contract GasCost is Base {
 
     // Same-rollup (1 StateDelta) reentrant entry loaded into the transient table; proxyEntryHash==0
     // → executed inline. Posted as an EOA (no meta-hook).
-    function _postImmediateA(bytes32 rollingHash) internal {
+    function _postImmediateA() internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
-        ExecutionEntry memory e =
-            _entry(_oneDelta(newA), bytes32(0), _calls(_reentrantCallA()), _reentrantExpectedA(), 1, "", rollingHash);
+        StateDelta[] memory deltas = _oneDelta(newA);
+        L2ToL1Call[] memory calls = _calls(_reentrantCallA());
+        (bytes32 h, ExpectedL1ToL2Call[] memory exp) =
+            _foldExec(_hEntryBegin(deltas, bytes32(0)), calls, _rets(""), true);
+        ExecutionEntry memory e = _entry(deltas, bytes32(0), calls, exp, "", h);
         vm.prank(alice);
         _postBatchTwoT(rA.id, rB.id, _one(e), 1);
     }
@@ -837,8 +872,6 @@ contract GasCost is Base {
     // postBatch execution is measured by gasleft(); each transaction additionally pays the 21k base
     // (added in the report). Storage is two transactions, so it pays the base twice.
     function test_FullCost_StorageVsTransient() public {
-        bytes32 h = _foldReentrantCall(bytes32(0), 1, "");
-
         _emptyBatch(); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
@@ -846,11 +879,11 @@ contract GasCost is Base {
         _emptyBatch();
         uint256 base = gb - gasleft();
 
-        _postImmediateA(h); // warm-up
+        _postImmediateA(); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
         uint256 gt = gasleft();
-        _postImmediateA(h);
+        _postImmediateA();
         uint256 transientFull = gt - gasleft();
 
         console.log("full_postbatch_base          ", base);
@@ -864,12 +897,17 @@ contract GasCost is Base {
         _postBatchTwoT(rA.id, rB.id, new ExecutionEntry[](0), 0);
     }
 
-    // Save one entry to the PERSISTENT queue (deferred, transientCount=0) — never executed here.
-    function _saveDeferred(bytes32 rollingHash) internal {
+    // Save one entry to the PERSISTENT queue (deferred, immediateCount=0) — never executed here.
+    function _saveDeferred() internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
         ExecutionEntry memory e = _entry(
-            _twoDeltas(newA, newB), keccak256("deferred-save"), _calls(_reentrantCall()), _reentrantExpected(), 1, "", rollingHash
+            _twoDeltas(newA, newB),
+            keccak256("deferred-save"),
+            _calls(_reentrantCall()),
+            _reentrantExpected(),
+            "",
+            bytes32(0)
         );
         vm.prank(alice);
         _postBatchTwoT(rA.id, rB.id, _one(e), 0);
@@ -880,8 +918,6 @@ contract GasCost is Base {
     //   - STORAGE: save it to the persistent queue (it lives on, to be executed later)
     //   - TRANSIENT: load it to the transient table and execute it inline, never persisting it
     function test_StorageVsTransient_HandleEntry() public {
-        bytes32 h = _foldReentrantCall(bytes32(0), 1, "");
-
         _emptyBatch(); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
@@ -889,18 +925,18 @@ contract GasCost is Base {
         _emptyBatch();
         uint256 baseline = gb - gasleft();
 
-        _saveDeferred(h); // warm-up
+        _saveDeferred(); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
         uint256 gs = gasleft();
-        _saveDeferred(h);
+        _saveDeferred();
         uint256 storageSave = gs - gasleft();
 
-        _postImmediate(true, h); // warm-up
+        _postImmediate(true); // warm-up
         vm.roll(block.number + 1);
         _coolForExec();
         uint256 gt = gasleft();
-        _postImmediate(true, h);
+        _postImmediate(true);
         uint256 transientExec = gt - gasleft();
 
         console.log("storage_save_entry      ", storageSave - baseline);
@@ -1094,7 +1130,7 @@ contract GasCost is Base {
     function test_PostCost_FirstVsSteady() public {
         ExecutionEntry[] memory e = new ExecutionEntry[](1);
         e[0] = _entry(
-            _twoDeltas("a", "b"), keccak256("deferred"), _calls(_reentrantCall()), _reentrantExpected(), 1, "", bytes32(0)
+            _twoDeltas("a", "b"), keccak256("deferred"), _calls(_reentrantCall()), _reentrantExpected(), "", bytes32(0)
         );
 
         uint256 first = _measurePost(e); // first ever post — slots zero-initialized
@@ -1113,18 +1149,16 @@ contract GasCost is Base {
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_ExecCost_WarmVsCold() public {
-        bytes32 h = _foldReentrantCall(bytes32(0), 1, "");
-
         // Warm-up cycle: deploys the source proxies (CREATE2) and brings every slot to its
         // steady-state non-zero VALUE, so the two measurements below differ ONLY by access warmth.
-        _postEntryN(2, _calls(_reentrantCall()), _reentrantExpected(), 1, h);
+        _postEntryN(2, _calls(_reentrantCall()), _rets(""), true);
         vm.prank(alice);
         (bool ok0,) = triggerProxy.call("");
         require(ok0, "warm-up exec failed");
         vm.roll(block.number + 1);
 
         // WARM: post then execute in the same context — entry slots warm from the post.
-        _postEntryN(2, _calls(_reentrantCall()), _reentrantExpected(), 1, h);
+        _postEntryN(2, _calls(_reentrantCall()), _rets(""), true);
         uint256 g1 = gasleft();
         vm.prank(alice);
         (bool ok1,) = triggerProxy.call("");
@@ -1133,7 +1167,7 @@ contract GasCost is Base {
 
         // COLD: post, cool every touched slot (fresh-tx model), then execute.
         vm.roll(block.number + 1);
-        _postEntryN(2, _calls(_reentrantCall()), _reentrantExpected(), 1, h);
+        _postEntryN(2, _calls(_reentrantCall()), _rets(""), true);
         _coolForExec();
         uint256 g2 = gasleft();
         vm.prank(alice);
@@ -1172,21 +1206,23 @@ contract GasCost is Base {
     }
 
     function _scenario1Post() internal {
-        bytes32 ph = _hashCall(rB.id, s1B, 0, incrementCalldata, address(s1A), 0);
+        bytes32 ph = _ccHash(NOT_STATIC_CALL, address(s1A), MAINNET_ROLLUP_ID, s1B, uint64(rB.id), 0, incrementCalldata);
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0x1)));
 
         StateDelta[] memory d = new StateDelta[](1);
         d[0] =
-            StateDelta({rollupId: rB.id, currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
+            StateDelta({rollupId: uint64(rB.id), currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
 
         ExecutionEntry[] memory e = new ExecutionEntry[](1);
         e[0].stateDeltas = d;
         e[0].proxyEntryHash = ph;
-        e[0].destinationRollupId = rB.id;
+        e[0].destinationRollupId = uint64(rB.id);
+        e[0].rollingHash = _hEntryBegin(d, ph);
+        e[0].success = true;
         e[0].returnData = abi.encode(uint256(1));
-        // l2ToL1Calls/expected empty, callCount 0, rollingHash 0
+        // l2ToL1Calls / expectedL1ToL2Calls empty
 
-        _postBatchOne(rB, e, _emptyLookupCalls(), 0, 0);
+        _postBatchOne(rB, e, _emptyStaticLookups(), 0, 0);
     }
 
     /// @notice Scenario 3 realized on L1 (mirror of scenario 4): alice -> D'(proxy) consumes an
@@ -1203,7 +1239,7 @@ contract GasCost is Base {
         _coolProtocol();
         vm.cool(address(s4D));
         vm.cool(s4ProxyC);
-        vm.cool(rollups.computeCrossChainProxyAddress(alice, rB.id)); // (alice, rB) source proxy
+        vm.cool(rollups.computeCrossChainProxyAddress(alice, uint64(rB.id))); // (alice, rB) source proxy
         // s4ProxyD is alice's tx.to → stays warm
         uint256 g = gasleft();
         vm.prank(alice);
@@ -1216,39 +1252,53 @@ contract GasCost is Base {
     }
 
     function _scenario4Post() internal {
-        bytes32 ph = _hashCall(rB.id, address(s4D), 0, incrementProxyCalldata, alice, 0);
-        bytes32 nestedHash = _hashCall(rA.id, s4C, 0, incrementCalldata, address(s4D), 0);
+        bytes32 ph =
+            _ccHash(NOT_STATIC_CALL, alice, MAINNET_ROLLUP_ID, address(s4D), uint64(rB.id), 0, incrementProxyCalldata);
+        bytes32 nestedHash =
+            _ccHash(NOT_STATIC_CALL, address(s4D), MAINNET_ROLLUP_ID, s4C, uint64(rA.id), 0, incrementCalldata);
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
+            sourceAddress: alice,
+            sourceRollupId: uint64(rB.id),
             targetAddress: address(s4D),
             value: 0,
-            data: incrementProxyCalldata,
-            sourceAddress: alice,
-            sourceRollupId: rB.id,
-            revertSpan: 0
-        });
-
-        ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
-        exp[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: nestedHash,
-            destinationRollupId: rA.id,
-            callCount: 0,
-            returnData: abi.encode(uint256(1))
+            data: incrementProxyCalldata
         });
 
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
+        StateDelta[] memory deltas = _twoDeltas(newA, newB);
+
+        // Top-level call's identity (target s4D on L1 = MAINNET, source alice on rB).
+        bytes32 cchTop =
+            _ccHash(NOT_STATIC_CALL, alice, uint64(rB.id), address(s4D), MAINNET_ROLLUP_ID, 0, incrementProxyCalldata);
+        bytes32 h = _hEntryBegin(deltas, ph);
+        h = _hCallBegin(h, cchTop);
+        bytes32 fireHash = h; // reentrant fires here, right after the top call's CALL_BEGIN
+        h = _hNestedBegin(h, nestedHash);
+        h = _hNestedEnd(h);
+        h = _hCallEnd(h, true, ""); // incrementProxy() returns void
+
+        ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
+        exp[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: _expectedL1toL2Hash(nestedHash, fireHash),
+            l2ToL1Calls: new L2ToL1Call[](0),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: abi.encode(uint256(1))
+        });
 
         ExecutionEntry[] memory e = new ExecutionEntry[](1);
-        e[0].stateDeltas = _twoDeltas(newA, newB);
+        e[0].stateDeltas = deltas;
         e[0].proxyEntryHash = ph;
-        e[0].destinationRollupId = rB.id;
+        e[0].destinationRollupId = uint64(rB.id);
         e[0].l2ToL1Calls = calls;
         e[0].expectedL1ToL2Calls = exp;
-        e[0].callCount = 1;
-        e[0].rollingHash = _foldReentrantCall(bytes32(0), 1, "");
+        e[0].rollingHash = h;
+        e[0].success = true;
 
         _postTwoRollups(e);
     }

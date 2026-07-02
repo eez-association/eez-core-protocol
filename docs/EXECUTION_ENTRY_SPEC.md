@@ -48,7 +48,7 @@ A leading run of the batch's transient stream may have `proxyEntryHash == 0`. Ea
 
 ### DEFERRED entries (`proxyEntryHash != 0`)
 
-Pushed to `_transientExecutions` (the leading `transientExecutionEntryCount` entries) or to per-rollup `verificationByRollup[rid].executionQueue` (the rest). Consumed in posted order by `executeCrossChainCall` or `executeL2TX(rollupId)`, and only in the block they were posted (`lastVerifiedBlock(rid) == block.number`; mismatch reverts `ExecutionNotInCurrentBlock`). Each call computes the expected cross-chain call hash from the proxy/call-site context (`executeL2TX` expects `bytes32(0)`, so zero-hash entries past the inline-drained leading run are consumed this way) and compares it to the entry at the matching rollup's `executionQueueIndex` (entry's `proxyEntryHash`); mismatch reverts with `ExecutionNotFound` (after the `_tryRevertedTopLevelLookup` fallback). Cursor advance is per-rollup.
+Pushed to `_transientExecutions` (the leading `immediateEntryCount` entries) or to per-rollup `verificationByRollup[rid].executionQueue` (the rest). Consumed in posted order by `executeCrossChainCall` or `executeL2TX(rollupId)`, and only in the block they were posted (`lastVerifiedBlock(rid) == block.number`; mismatch reverts `ExecutionNotInCurrentBlock`). Each call computes the expected cross-chain call hash from the proxy/call-site context (`executeL2TX` expects `bytes32(0)`, so zero-hash entries past the inline-drained leading run are consumed this way) and compares it to the entry at the matching rollup's `executionQueueIndex` (entry's `proxyEntryHash`); mismatch reverts with `ExecutionNotFound` (after the `_tryRevertedTopLevelLookup` fallback). Cursor advance is per-rollup.
 
 ---
 
@@ -336,7 +336,7 @@ On L1, `postAndVerifyBatch` itself can run user-driven cross-chain calls inline 
 
 ### transient / deferred split (L1 `postAndVerifyBatch`)
 
-`postAndVerifyBatch` takes a single `ProofSystemBatchPerVerificationEntries calldata batch` argument (NOT an array). The batch carries `entries[]`, `l1ToL2lookupCalls[]`, `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`, each row carrying a `proofSystemIndex[]` of indices into `proofSystems[]`), `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (the single L1 block the batch binds to; `0` = no block context, `type(uint64).max` = latest). See `MULTI_PROVER_SPEC.md` for the full struct shape and proof-public-inputs construction.
+`postAndVerifyBatch` takes a single `ProofSystemBatchPerVerificationEntries calldata batch` argument (NOT an array). The batch carries `entries[]`, `l1ToL2lookupCalls[]`, `immediateEntryCount`, `transientLookupCallCount`, `proofSystems[]` (sorted asc), `rollupIdsWithProofSystems[]` (strictly ascending by `rollupId`, each row carrying a `proofSystemIndex[]` of indices into `proofSystems[]`), `blobIndices[]`, `callData`, `proofs[]` (one per PS), and `blockNumber` (the single L1 block the batch binds to; `0` = no block context, `type(uint64).max` = latest). See `MULTI_PROVER_SPEC.md` for the full struct shape and proof-public-inputs construction.
 
 Flow:
 
@@ -344,12 +344,12 @@ Flow:
 2. **Structural validation** via `_validateStructure(batch)`: sorted `proofSystems[]`, strictly-ascending `rollupIdsWithProofSystems[].rollupId` (and `rollupId > MAINNET_ROLLUP_ID`), each rollup registered, each row's `proofSystemIndex[]` strictly ascending and in range, entry/stateDelta/lookupCall rollup ids ∈ batch's rollup set, transient prefix bounds.
 3. **Fetch vkMatrix + verify**: `_fetchVkMatrix` calls each rollup's manager via `IRollupContract.checkProofSystemsAndGetVkeys(subset)` (manager enforces threshold internally and reverts if not met). Then `_verifyProofSystemBatch` builds `sharedPublicInput` (folding each rollup's `customData` blob fetched via `getCustomData(batch.blockNumber)`, keyed by rollupId) plus per-PS `acc_k` and calls `IProofSystem.verify(proofs[k], publicInputsHash[k])` for each PS. All proofs must verify atomically.
 4. **Mark verified-this-block** (`_markVerifiedBlockPerRollup(rid)`): wipes the rollup's `executionQueue` / `lookupQueue` and resets `executionQueueIndex` on **every** verify — a same-block re-verify REPLACES (does not append to) the prior batch's entries. Sets the read gate for `executeCrossChainCall` / `executeL2TX(rollupId)` (`lastVerifiedBlock(rid) == block.number`).
-5. **Load transient stream** (`_loadTransientExecutions`): copy `entries[0..transientExecutionEntryCount)` into `_transientExecutions` and `l1ToL2lookupCalls[0..transientLookupCallCount)` into `_transientLookupCalls`.
+5. **Load transient stream** (`_loadTransientExecutions`): copy `entries[0..immediateEntryCount)` into `_transientExecutions` and `l1ToL2lookupCalls[0..transientLookupCallCount)` into `_transientLookupCalls`.
 6. **Drain leading immediate entries inline**: while `_transientExecutions[idx].proxyEntryHash == 0`, self-call `try this.attemptApplyImmediate(idx) catch { emit ImmediateEntrySkipped(idx, revertData); }` and advance — not a hard error.
 7. **Meta hook**: if `_transientExecutionIndex < _transientExecutions.length` AND `msg.sender.code.length > 0`, call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook can invoke `executeCrossChainCall` / `executeL2TX(rollupId)` to consume the rest of the transient stream.
-8. **Cleanup transient tables**, then `_publishRemainderExecutions(batch)` (**unconditionally** — even if the meta hook left transient entries unconsumed — pushes `entries[transientExecutionEntryCount..]` to `verificationByRollup[entry.destinationRollupId].executionQueue` and `l1ToL2lookupCalls[transientLookupCallCount..]` to the corresponding `lookupQueue`), then `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`. Soundness backstop: each entry's `StateDelta.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers — they fail their own state-root check if they depended on it.
+8. **Cleanup transient tables**, then `_publishRemainderExecutions(batch)` (**unconditionally** — even if the meta hook left transient entries unconsumed — pushes `entries[immediateEntryCount..]` to `verificationByRollup[entry.destinationRollupId].executionQueue` and `l1ToL2lookupCalls[transientLookupCallCount..]` to the corresponding `lookupQueue`), then `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`. Soundness backstop: each entry's `StateDelta.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers — they fail their own state-root check if they depended on it.
 
-A batch with `transientExecutionEntryCount == 0` means no immediate execution and no meta-hook consumption — all entries flow straight to per-rollup queues.
+A batch with `immediateEntryCount == 0` means no immediate execution and no meta-hook consumption — all entries flow straight to per-rollup queues.
 
 ### 1-to-1 rule
 
@@ -420,7 +420,7 @@ Alice on L2 calls a contract on L1.
     stateDeltas = [ { rollupId=L2, currentState=S0, newState=S1, etherDelta=0 } ]
 ```
 
-(Often the immediate entry on L1 is `entries[0]` with `transientExecutionEntryCount = 1`, executed inline by `postAndVerifyBatch`.)
+(Often the immediate entry on L1 is `entries[0]` with `immediateEntryCount = 1`, executed inline by `postAndVerifyBatch`.)
 
 **L2 execution table** (`loadExecutionTable`):
 ```
@@ -579,7 +579,7 @@ For sub-calls **within** a single entry (e.g., a contract on the destination sid
 
 | Aspect | L1 (`EEZ`) | L2 (`EEZL2`) |
 |---|---|---|
-| **How loaded** | `postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch)` — single struct (not array) carrying `entries[]`, `l1ToL2lookupCalls[]`, `transientExecutionEntryCount`, `transientLookupCallCount`, `proofSystems[]`, `rollupIdsWithProofSystems[]`, `blobIndices[]`, `callData`, `proofs[]`, `blockNumber` | `loadExecutionTable(entries, _lookupCalls)` by `SYSTEM_ADDRESS`; OR `executeIncomingCrossChainCall(...)` for inbound delivery from another rollup (system-only, atomically loads + executes `entries[0]`) |
+| **How loaded** | `postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch)` — single struct (not array) carrying `entries[]`, `l1ToL2lookupCalls[]`, `immediateEntryCount`, `transientLookupCallCount`, `proofSystems[]`, `rollupIdsWithProofSystems[]`, `blobIndices[]`, `callData`, `proofs[]`, `blockNumber` | `loadExecutionTable(entries, _lookupCalls)` by `SYSTEM_ADDRESS`; OR `executeIncomingCrossChainCall(...)` for inbound delivery from another rollup (system-only, atomically loads + executes `entries[0]`) |
 | **State deltas** | Required for entries that touch rollup state; `delta.currentState` checked against `rollups[id].stateRoot` (mismatch reverts `StateRootMismatch`); `etherDelta` accounted | No `stateDeltas` field at all — the L2 entry struct omits it (no rollup state on L2) |
 | **Matching logic** | Per-rollup `verificationByRollup[rid].executionQueueIndex++` (routing rollup = proxy's `originalRollupId` / the `executeL2TX` arg); entry's `proxyEntryHash` must equal the expected hash — no separate `destinationRollupId` check at consumption (the proof binds it into the entry hash, and the call hash already commits to the target rollup) | Sequential `executionIndex` over a single `executions` table. Top-level lookup matching is by `crossChainCallHash` alone (the L2 `LookupCall` has no `destinationRollupId` / `expectedStateRoots`). |
 | **Top-level reverted-lookup fallback** | `_tryRevertedTopLevelLookup(crossChainCallHash, destRid)` scans transient table + persistent `lookupQueue` for a `failed` lookup matching `crossChainCallHash` with live state-root pins | `_tryRevertedTopLevelLookup(crossChainCallHash)` scans persistent `lookupCalls` for a `failed` lookup matching `crossChainCallHash` (no transient on L2) |

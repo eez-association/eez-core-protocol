@@ -2,21 +2,26 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noLookupCalls,
+    noStaticLookups,
     noNestedActions,
+    noL2StaticLookups,
     noCalls,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
@@ -35,8 +40,8 @@ import {
 //    accepts the ETH via receive(). After: BridgeReceiver.balance == 1 ether.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint256 constant L2_ROLLUP_ID = 1;
-uint256 constant MAINNET_ROLLUP_ID = 0;
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 /// @notice Minimal user contract: receives a value-bearing call and forwards it to the L2 proxy.
 contract BridgeSender {
@@ -73,17 +78,19 @@ abstract contract BridgeActions {
             etherDelta: int256(1 ether)
         });
 
+        bytes32 proxyEntryHash = _callHash(l2Destination, sender);
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
             stateDeltas: deltas,
-            proxyEntryHash: _callHash(l2Destination, sender),
+            proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: "",
-            rollingHash: bytes32(0)
+            // No L1-side calls: the bridge is pure value transfer, so the rolling hash is just the
+            // entry-begin seed (state deltas + proxyEntryHash).
+            rollingHash: RollingHashBuilder.entryBegin(deltas, proxyEntryHash),
+            success: true,
+            returnData: ""
         });
     }
 
@@ -94,28 +101,31 @@ abstract contract BridgeActions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: l2Destination,
-            value: 1 ether,
-            data: "",
             sourceAddress: sender,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: l2Destination,
+            value: 1 ether,
+            data: ""
         });
 
-        bytes32 rh = bytes32(0);
-        rh = RollingHashBuilder.appendCallBegin(rh, 1);
-        rh = RollingHashBuilder.appendCallEnd(rh, 1, true, "");
+        bytes32 proxyEntryHash = _callHash(l2Destination, sender);
+        // L2-side cross-chain call hash: targetRollupId folded as the L2's own id (ROLLUP_ID).
+        bytes32 ccHash = _callHash(l2Destination, sender);
+        // PENDING EEZL2: rolling-hash seed/append shape mirrors L1; re-verify once EEZL2.sol lands.
+        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, "");
 
         entries = new L2ExecutionEntry[](1);
         entries[0] = L2ExecutionEntry({
-            proxyEntryHash: _callHash(l2Destination, sender),
+            proxyEntryHash: proxyEntryHash,
             incomingCalls: calls,
             expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
-            expectedLookups: new L2ExpectedLookup[](0),
-            callCount: 1,
-            returnData: "",
-            rollingHash: rh
+            rollingHash: rh,
+            success: true,
+            returnData: ""
         });
     }
 }
@@ -162,7 +172,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticLookup[] calldata staticLookups,
         BridgeSender sender
     )
         external
@@ -170,7 +180,7 @@ contract Batcher {
     {
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
-        uint256[] memory rids = new uint256[](1);
+        uint64[] memory rids = new uint64[](1);
         rids[0] = L2_ROLLUP_ID;
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = "proof";
@@ -180,20 +190,21 @@ contract Batcher {
         }
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
         for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndex: psIdx});
+            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: 0,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
         sender.bridge{value: msg.value}();
@@ -221,7 +232,7 @@ contract ExecuteL2 is Script, BridgeActions {
             senderAddr,
             MAINNET_ROLLUP_ID,
             _l2Entries(l2DestAddr, senderAddr),
-            new L2LookupCall[](0)
+            noL2StaticLookups()
         );
 
         console.log("done");
@@ -246,7 +257,7 @@ contract Execute is Script, BridgeActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(l2DestAddr, senderAddr),
-            noLookupCalls(),
+            noStaticLookups(),
             BridgeSender(senderAddr)
         );
         console.log("done");

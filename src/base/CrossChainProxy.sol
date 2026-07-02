@@ -17,7 +17,7 @@ contract CrossChainProxy {
     address internal immutable ORIGINAL_ADDRESS;
 
     /// @notice The original rollup ID
-    uint256 internal immutable ORIGINAL_ROLLUP_ID;
+    uint64 internal immutable ORIGINAL_ROLLUP_ID;
 
     /// @dev Dummy transient variable used to detect STATICCALL context.
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
@@ -26,7 +26,7 @@ contract CrossChainProxy {
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     /// @param _originalAddress The original address this proxy represents
     /// @param _originalRollupId The original rollup ID
-    constructor(address _eez, address _originalAddress, uint256 _originalRollupId) {
+    constructor(address _eez, address _originalAddress, uint64 _originalRollupId) {
         EEZ = _eez;
         ORIGINAL_ADDRESS = _originalAddress;
         ORIGINAL_ROLLUP_ID = _originalRollupId;

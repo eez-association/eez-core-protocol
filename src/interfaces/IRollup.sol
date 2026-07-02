@@ -18,7 +18,7 @@ interface IRollupContract {
     /// @dev The rollupId is stored so that subsequent calls from this contract back into the
     ///      registry (`EEZ.setStateRoot(rid, root)`) can pass the id explicitly — the
     ///      registry has no reverse-lookup mapping from contract address to rollupId.
-    function rollupContractRegistered(uint256 rollupId) external;
+    function rollupContractRegistered(uint64 rollupId) external;
 
     /// @notice Bulk vkey lookup used by `EEZ.postAndVerifyBatch` for the
     ///         subset of proof systems this rollup chose for the batch.

@@ -1,36 +1,43 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../../src/EEZ.sol";
 import {
     IEEZ,
+    StateDelta,
     ExecutionEntry,
-    LookupCall,
+    StaticLookup,
     L2ToL1Call,
-    ExpectedL1ToL2Call,
-    ExpectedLookup
+    ExpectedL1ToL2Call
 } from "../../../src/interfaces/IEEZ.sol";
 import {
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
 
 // ══════════════════════════════════════════════════════════════════════
-//  Rolling hash tag constants (must match EEZ.sol / EEZL2.sol)
+//  Rolling hash tag constants (must match EEZBase.sol)
 // ══════════════════════════════════════════════════════════════════════
 uint8 constant CALL_BEGIN = 1;
 uint8 constant CALL_END = 2;
 uint8 constant NESTED_BEGIN = 3;
 uint8 constant NESTED_END = 4;
+uint8 constant CALL_NOT_FOUND = 5;
+
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 // ══════════════════════════════════════════════════════════════════════
 //  Idempotent proxy creation helper
 // ══════════════════════════════════════════════════════════════════════
 
 /// @notice Returns existing proxy if already deployed, otherwise creates it.
-function getOrCreateProxy(IEEZ manager, address originalAddress, uint256 originalRollupId) returns (address proxy) {
+function getOrCreateProxy(IEEZ manager, address originalAddress, uint64 originalRollupId) returns (address proxy) {
     try manager.createCrossChainProxy(originalAddress, originalRollupId) returns (address p) {
         proxy = p;
     } catch {
@@ -38,8 +45,33 @@ function getOrCreateProxy(IEEZ manager, address originalAddress, uint256 origina
     }
 }
 
-/// @notice Cross-chain call hash builder matching `EEZ.computeCrossChainCallHash`.
-/// @dev Same formula on L1 and L2; off-chain tooling and on-chain code share this preimage.
+// ══════════════════════════════════════════════════════════════════════
+//  Cross-chain call hash — matches `EEZBase.computeCrossChainCallHash`:
+//    keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId,
+//                         targetAddress, targetRollupId, value, data))
+//  abi.encode left-pads every integer to 32 bytes, so passing uint256
+//  rollupIds here yields identical bytes to the contract's uint64 fields.
+// ══════════════════════════════════════════════════════════════════════
+
+/// @notice Full hash builder (state-changing OR static). `isStatic` is folded into the key, so a
+///         static read keys distinctly from a state-changing call to the same target.
+function crossChainCallHashFull(
+    bool isStatic,
+    address sourceAddress,
+    uint256 sourceRollupId,
+    address targetAddress,
+    uint256 targetRollupId,
+    uint256 value,
+    bytes memory data
+)
+    pure
+    returns (bytes32)
+{
+    return keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
+}
+
+/// @notice Convenience: non-static cross-chain call hash. Field order mirrors the legacy helper
+///         (target first) so existing call sites keep working; `isStatic` is fixed to false.
 function crossChainCallHash(
     uint256 targetRollupId,
     address targetAddress,
@@ -51,91 +83,108 @@ function crossChainCallHash(
     pure
     returns (bytes32)
 {
-    return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
+    return crossChainCallHashFull(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
-/// @notice **Backward-compatibility shim** for legacy E2E scripts.
-/// @dev The `Action` struct was removed from `IEEZ.sol`. E2E flow scripts
-///      pre-refactor used it heavily as an off-chain "tooling-side" record of the inputs
-///      that hash to `crossChainCallHash`. Re-defined here with the same field order so
-///      existing scripts can keep using `Action({...})` literals; computing the hash via
-///      `actionHash(...)` (also shimmed) routes to the canonical formula.
-///      New code should call `crossChainCallHash(...)` directly with individual fields.
-struct Action {
-    uint256 targetRollupId;
-    address targetAddress;
-    uint256 value;
-    bytes data;
-    address sourceAddress;
-    uint256 sourceRollupId;
-}
-
-/// @notice Backward-compat: `actionHash(Action)` → `crossChainCallHash(...)`.
-function actionHash(Action memory a) pure returns (bytes32) {
-    return crossChainCallHash(a.targetRollupId, a.targetAddress, a.value, a.data, a.sourceAddress, a.sourceRollupId);
-}
-
-/// @notice Backward-compat alias: `noStaticCalls()` returns an empty `LookupCall[]`.
-function noStaticCalls() pure returns (LookupCall[] memory) {
-    return new LookupCall[](0);
+/// @notice Convenience: STATIC cross-chain call hash (same field order as `crossChainCallHash`).
+function crossChainCallHashStatic(
+    uint256 targetRollupId,
+    address targetAddress,
+    uint256 value,
+    bytes memory data,
+    address sourceAddress,
+    uint256 sourceRollupId
+)
+    pure
+    returns (bytes32)
+{
+    return crossChainCallHashFull(true, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  RollingHashBuilder — reproduce the same tagged-hash sequence that
-//  EEZ._processNCalls / _consumeNestedAction produce on-chain.
+//  RollingHashBuilder — reproduce the tagged-hash sequence EEZ/EEZL2
+//  produce on-chain (EEZBase fold helpers). All folds use abi.encodePacked,
+//  so widths matter: tags are uint8 (1 byte), rollupId is uint64 (8 bytes).
 // ══════════════════════════════════════════════════════════════════════
 
 library RollingHashBuilder {
-    /// @notice keccak256(prev ++ CALL_BEGIN ++ callNumber)
-    function appendCallBegin(bytes32 prev, uint256 callNumber) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_BEGIN, callNumber));
+    /// @notice Entry-begin seed (L1): folds the ordered `(rollupId, currentState)` state context,
+    ///         then closes with the entry identity (`proxyEntryHash`).
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   _rollingHash = keccak(seed, proxyEntryHash)
+    function entryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+        bytes32 statesHash;
+        for (uint256 i = 0; i < deltas.length; i++) {
+            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
+        }
+        return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
     }
 
-    /// @notice keccak256(prev ++ CALL_END ++ callNumber ++ success ++ retData)
-    function appendCallEnd(bytes32 prev, uint256 callNumber, bool success, bytes memory retData)
-        internal
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encodePacked(prev, CALL_END, callNumber, success, retData));
+    /// @notice Entry-begin seed (L2): no state deltas, so the state fold collapses to keccak(0, ...) —
+    ///         i.e. the seed is keccak(bytes32(0), proxyEntryHash). Mirrors the L1 convention with an
+    ///         empty delta set. NOTE: pending the EEZL2 migration; re-verify once EEZL2.sol lands.
+    function entryBeginL2(bytes32 proxyEntryHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(bytes32(0), proxyEntryHash));
     }
 
-    /// @notice keccak256(prev ++ NESTED_BEGIN ++ nestedNumber)
-    function appendNestedBegin(bytes32 prev, uint256 nestedNumber) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_BEGIN, nestedNumber));
+    /// @notice keccak256(prev ++ CALL_BEGIN ++ crossChainCallHash)
+    function appendCallBegin(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, CALL_BEGIN, ccHash));
     }
 
-    /// @notice keccak256(prev ++ NESTED_END ++ nestedNumber)
-    function appendNestedEnd(bytes32 prev, uint256 nestedNumber) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_END, nestedNumber));
+    /// @notice keccak256(prev ++ CALL_END ++ success ++ retData)
+    function appendCallEnd(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, CALL_END, success, retData));
+    }
+
+    /// @notice keccak256(prev ++ NESTED_BEGIN ++ crossChainCallHash)
+    function appendNestedBegin(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, NESTED_BEGIN, ccHash));
+    }
+
+    /// @notice keccak256(prev ++ NESTED_END)
+    function appendNestedEnd(bytes32 prev) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, NESTED_END));
+    }
+
+    /// @notice keccak256(prev ++ CALL_NOT_FOUND ++ crossChainCallHash) — reentrant no-match divergence.
+    function appendCallNotFound(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, CALL_NOT_FOUND, ccHash));
+    }
+
+    /// @notice Static sub-call accumulator (untagged): keccak256(prev ++ success ++ retData).
+    function appendStatic(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, success, retData));
     }
 }
 
+/// @notice Position key for a unified reentrant (L1→L2) table entry:
+///         keccak256(crossChainCallHash, rollingHashAtFire). Matches `EEZBase._computeExpectedL1toL2Hash`.
+function expectedL1toL2Hash(bytes32 ccHash, bytes32 rollingHashAtFire) pure returns (bytes32) {
+    return keccak256(abi.encodePacked(ccHash, rollingHashAtFire));
+}
+
 // ══════════════════════════════════════════════════════════════════════
-//  L2TXBatcher — postAndVerifyBatch + executeL2TX in one tx (local mode).
-//  Satisfies the same-block requirement.
-//
-//  POST-REFACTOR: postAndVerifyBatch now takes `ProofSystemBatchPerVerificationEntries[]`. The batcher wraps the
-//  caller's entries into a single sub-batch with the supplied proofSystem + rollupId,
-//  then drains immediate entries (transientCount = leading-zero-actionHash run length)
-//  and finally calls executeL2TX(rollupId).
+//  L2TXBatcher — postAndVerifyBatch + executeL2Txs in one tx (local mode).
+//  Wraps the caller's entries into a single sub-batch with the supplied
+//  proofSystem + rollupId, marks the leading run of proxyEntryHash==0 entries
+//  as immediate, then drains via executeL2Txs(rollupId).
 // ══════════════════════════════════════════════════════════════════════
 
 contract L2TXBatcher {
     function execute(
         EEZ rollups,
         address proofSystem,
-        uint256 rollupId,
+        uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls
+        StaticLookup[] calldata staticLookups
     )
         external
     {
-        // Compute transientCount as the count of leading entries whose proxyEntryHash == 0
-        // (immediate entries — no source action to match, run inline during the batch call).
-        uint256 tc = 0;
-        while (tc < entries.length && entries[tc].proxyEntryHash == bytes32(0)) {
-            tc++;
+        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
+        uint256 ic = 0;
+        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
+            ic++;
         }
 
         address[] memory psList = new address[](1);
@@ -146,35 +195,72 @@ contract L2TXBatcher {
         uint64[] memory psIdx = new uint64[](1);
         psIdx[0] = 0;
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
+        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: tc,
-            transientLookupCallCount: 0,
+            staticLookups: staticLookups,
+            immediateEntryCount: ic,
+            immediateStaticLookupCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0
         });
         rollups.postAndVerifyBatch(batch);
-        rollups.executeL2TX(rollupId);
+        rollups.executeL2Txs(rollupId);
     }
+}
+
+/// @notice Builds a single-rollup batch with NO immediate entries (everything deferred to the
+///         per-rollup queue). Kept as a free function so its array-building locals live in their
+///         own stack frame — callers that inline this construction can trip the via-ir ABI-encoder
+///         stack limit when encoding the nested `ExecutionEntry[]`.
+function deferredSingleRollupBatch(
+    address proofSystem,
+    uint64 rollupId,
+    ExecutionEntry[] memory entries,
+    StaticLookup[] memory staticLookups
+)
+    pure
+    returns (ProofSystemBatchPerVerificationEntries memory batch)
+{
+    address[] memory psList = new address[](1);
+    psList[0] = proofSystem;
+    bytes[] memory proofs = new bytes[](1);
+    proofs[0] = "proof";
+    uint64[] memory psIdx = new uint64[](1);
+    psIdx[0] = 0;
+    RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
+    rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
+    batch = ProofSystemBatchPerVerificationEntries({
+        expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+        entries: entries,
+        staticLookups: staticLookups,
+        immediateEntryCount: 0,
+        immediateStaticLookupCount: 0,
+        proofSystems: psList,
+        rollupIdsWithProofSystems: rps,
+        blobIndices: new uint256[](0),
+        callData: "",
+        proofs: proofs,
+        blockNumber: 0
+    });
 }
 
 // ══════════════════════════════════════════════════════════════════════
 //  Common empty helpers (saves boilerplate in E2E scripts)
 // ══════════════════════════════════════════════════════════════════════
 
-/// @notice Returns an empty LookupCall[] (for flows that don't use lookup calls).
-function noLookupCalls() pure returns (LookupCall[] memory) {
-    return new LookupCall[](0);
+/// @notice Returns an empty StaticLookup[] (L1) — for flows with no top-level static lookups.
+function noStaticLookups() pure returns (StaticLookup[] memory) {
+    return new StaticLookup[](0);
 }
 
-/// @notice Returns an empty ExpectedL1ToL2Call[].
+/// @notice Returns an empty ExpectedL1ToL2Call[] (unified reentrant table).
 function noNestedActions() pure returns (ExpectedL1ToL2Call[] memory) {
     return new ExpectedL1ToL2Call[](0);
 }
@@ -184,17 +270,12 @@ function noCalls() pure returns (L2ToL1Call[] memory) {
     return new L2ToL1Call[](0);
 }
 
-/// @notice Returns an empty ExpectedLookup[] (nested lookups live inside entries).
-function noExpectedLookups() pure returns (ExpectedLookup[] memory) {
-    return new ExpectedLookup[](0);
-}
-
 // L2 (IEEZL2) variants — Solidity can't overload free functions by return type alone,
 // so the L2-typed empties get an `L2` infix.
 
-/// @notice Returns an empty L2 LookupCall[] (IEEZL2).
-function noL2LookupCalls() pure returns (L2LookupCall[] memory) {
-    return new L2LookupCall[](0);
+/// @notice Returns an empty StaticLookup[] (IEEZL2).
+function noL2StaticLookups() pure returns (L2StaticLookup[] memory) {
+    return new L2StaticLookup[](0);
 }
 
 /// @notice Returns an empty ExpectedOutgoingCrossChainCall[] (IEEZL2).
@@ -205,9 +286,4 @@ function noL2OutgoingCalls() pure returns (ExpectedOutgoingCrossChainCall[] memo
 /// @notice Returns an empty CrossChainCall[] (IEEZL2).
 function noL2Calls() pure returns (CrossChainCall[] memory) {
     return new CrossChainCall[](0);
-}
-
-/// @notice Returns an empty L2 ExpectedLookup[] (IEEZL2).
-function noL2ExpectedLookups() pure returns (L2ExpectedLookup[] memory) {
-    return new L2ExpectedLookup[](0);
 }

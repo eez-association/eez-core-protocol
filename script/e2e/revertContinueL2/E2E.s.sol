@@ -4,18 +4,10 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../../src/EEZ.sol";
-import {
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    ExecutionEntry,
-    LookupCall,
-    ExpectedLookup
-} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, L2ToL1Call, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticLookup as L2StaticLookup,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -23,9 +15,12 @@ import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContract
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noLookupCalls,
+    expectedL1toL2Hash,
+    noStaticLookups,
     noNestedActions,
-    noCalls,
+    noL2Calls,
+    noL2StaticLookups,
+    deferredSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -57,61 +52,39 @@ import {
 //    7. Nested call returns abi.encode(1) → lastResult=1
 // ═══════════════════════════════════════════════════════════════════════
 
-uint256 constant L2_ROLLUP_ID = 1;
-uint256 constant MAINNET_ROLLUP_ID = 0;
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract RevertContinueL2Actions {
-    using RollingHashBuilder for bytes32;
+    function _executeData() internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(SelfCallerWithRevert.execute.selector);
+    }
 
-    /// @dev Outer action hash: alice calls selfCallerProxy (SelfCallerWithRevert@MAINNET) on L2.
+    function _incrementData() internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Counter.increment.selector);
+    }
+
+    /// @dev Outer action hash (proxyEntryHash): alice calls selfCallerProxy (SelfCallerWithRevert MAINNET) on L2.
     function _outerActionHash(address selfCaller, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            MAINNET_ROLLUP_ID,
-            selfCaller,
-            0,
-            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
-            alice,
-            L2_ROLLUP_ID
-        );
+        return crossChainCallHash(MAINNET_ROLLUP_ID, selfCaller, 0, _executeData(), alice, L2_ROLLUP_ID);
     }
 
-    /// @dev Inner action hash: SelfCallerWithRevert calls counterProxy (Counter@L1) on L2.
+    /// @dev L2 incoming top-level CALL_BEGIN hash: alice -> selfCaller executed ON L2 (targetRollupId=L2).
+    function _l2IncomingHash(address selfCaller, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(L2_ROLLUP_ID, selfCaller, 0, _executeData(), alice, MAINNET_ROLLUP_ID);
+    }
+
+    /// @dev Inner action hash: SelfCallerWithRevert reentrant-calls counterProxy (Counter L1) on L2
+    ///      (outbound L2->L1, sourceRollupId=L2).
     function _innerActionHash(address counterL1, address selfCaller) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            MAINNET_ROLLUP_ID,
-            counterL1,
-            0,
-            abi.encodeWithSelector(Counter.increment.selector),
-            selfCaller,
-            L2_ROLLUP_ID
-        );
+        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCaller, L2_ROLLUP_ID);
     }
 
-    /// @dev Rolling hash: CALL_BEGIN(1) → NESTED_BEGIN(1) → NESTED_END(1) → CALL_END(1, true, "")
-    ///      innerCall()'s revert rolls back the rolling-hash and cursor writes
-    ///      from its successful reentrant consumption. The second target.increment()
-    ///      call re-consumes expectedOutgoingCalls[0] from the rolled-back cursor — that
-    ///      is the only consumption recorded in the surviving rolling hash.
-    function _expectedRollingHash() internal pure returns (bytes32 h) {
-        h = bytes32(0);
-        h = h.appendCallBegin(1);
-        h = h.appendNestedBegin(1);
-        h = h.appendNestedEnd(1);
-        h = h.appendCallEnd(1, true, "");
-    }
-
-    /// @dev Rolling hash for the L1 mirror entry: a single top-level call (Counter.increment()).
-    ///      The L2-side inner reentrant call surfaces on L1 as a plain top-level call (the
-    ///      destination of the cross-chain hop is Counter on MAINNET).
-    function _expectedRollingHashL1() internal pure returns (bytes32 h) {
-        h = bytes32(0);
-        h = h.appendCallBegin(1);
-        h = h.appendCallEnd(1, true, abi.encode(uint256(1)));
-    }
-
-    /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — drained by executeL2TX.
+    /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — drained by executeL2Txs.
     ///      `l2ToL1Calls[0]` is the inbound call from SelfCaller (on L2) to Counter on MAINNET,
     ///      delivered through the lazily-created source proxy for (SelfCaller, L2_ROLLUP_ID) on L1.
+    ///      The L2-side inner reentrant call surfaces on L1 as a plain top-level call; CALL_BEGIN
+    ///      folds targetRollupId=MAINNET.
     function _l1Entries(address counterL1, address selfCallerL2)
         internal
         pure
@@ -119,13 +92,13 @@ abstract contract RevertContinueL2Actions {
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: counterL1,
-            value: 0,
-            data: abi.encodeWithSelector(Counter.increment.selector),
             sourceAddress: selfCallerL2,
             sourceRollupId: L2_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: counterL1,
+            value: 0,
+            data: _incrementData()
         });
 
         StateDelta[] memory deltas = new StateDelta[](1);
@@ -136,20 +109,30 @@ abstract contract RevertContinueL2Actions {
             etherDelta: 0
         });
 
+        bytes32 ccTop =
+            crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCallerL2, L2_ROLLUP_ID);
+        bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
+        rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1)));
+
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
             stateDeltas: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
-            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 1,
-            returnData: abi.encode(uint256(1)),
-            rollingHash: _expectedRollingHashL1()
+            expectedL1ToL2Calls: noNestedActions(),
+            rollingHash: rh,
+            success: true,
+            returnData: abi.encode(uint256(1))
         });
     }
 
+    /// @dev L2 anchor entry. Rolling hash: entryBeginL2(seed) -> CALL_BEGIN(ccTop) -> NESTED_BEGIN(ccInner)
+    ///      -> NESTED_END -> CALL_END(true, ""). innerCall()'s revert rolls back the rolling-hash and cursor
+    ///      writes from its first successful reentrant consumption; the second target.increment() re-consumes
+    ///      expectedOutgoingCalls[0] from the rolled-back cursor — exactly ONE consumption survives.
+    /// NOTE: PENDING EEZL2 — L2 rolling-hash seed/fold convention unconfirmed; re-verify when EEZL2.sol lands.
     function _l2Entries(address selfCaller, address counterL1, address alice)
         internal
         pure
@@ -157,31 +140,42 @@ abstract contract RevertContinueL2Actions {
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            revertNextNCalls: 0,
             isStatic: false,
-            targetAddress: selfCaller,
-            value: 0,
-            data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
             sourceAddress: alice,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            revertSpan: 0
+            targetAddress: selfCaller,
+            value: 0,
+            data: _executeData()
         });
+
+        bytes32 proxyEntryHash = _outerActionHash(selfCaller, alice);
+        bytes32 ccInner = _innerActionHash(counterL1, selfCaller);
+
+        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, _l2IncomingHash(selfCaller, alice));
+        bytes32 rhFire = rh;
+        rh = RollingHashBuilder.appendNestedBegin(rh, ccInner);
+        rh = RollingHashBuilder.appendNestedEnd(rh);
+        rh = RollingHashBuilder.appendCallEnd(rh, true, "");
 
         ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
         nested[0] = ExpectedOutgoingCrossChainCall({
-            crossChainCallHash: _innerActionHash(counterL1, selfCaller),
-            callCount: 0,
+            expectedOutgoingHash: expectedL1toL2Hash(ccInner, rhFire),
+            incomingCalls: noL2Calls(),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
             returnData: abi.encode(uint256(1))
         });
 
         entries = new L2ExecutionEntry[](1);
         entries[0] = L2ExecutionEntry({
-            proxyEntryHash: _outerActionHash(selfCaller, alice),
+            proxyEntryHash: proxyEntryHash,
             incomingCalls: calls,
             expectedOutgoingCalls: nested,
-            expectedLookups: new L2ExpectedLookup[](0),
-            callCount: 1,
-            returnData: "",
-            rollingHash: _expectedRollingHash()
+            rollingHash: rh,
+            success: true,
+            returnData: ""
         });
     }
 }
@@ -254,7 +248,7 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s selfCaller=%s selfCallerProxy=%s", alice, selfCallerAddr, selfCallerProxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), new L2LookupCall[](0));
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), noL2StaticLookups());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls selfCallerProxy.execute()
@@ -268,59 +262,33 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2TX in one tx.
-/// @dev Pins transientExecutionEntryCount=0 so the zero-hash entry stays in the deferred
-///      queue and is drained by the subsequent executeL2TX(rollupId) call.
-contract DeferredL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint256 rollupId,
-        ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls
-    )
-        external
-    {
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
-            entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
-        rollups.postAndVerifyBatch(batch);
-        rollups.executeL2TX(rollupId);
+/// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs in one tx.
+/// @dev Pins immediateEntryCount=0 so the zero-hash entry stays in the deferred
+///      queue and is drained by the subsequent executeL2Txs(rollupId) call.
+/// @dev Builds the L1 entry INTERNALLY (inherits `RevertContinueL2Actions`) so the caller never
+///      ABI-encodes the nested `ExecutionEntry[]` across the call boundary — only the single
+///      deferred-batch encode for `postAndVerifyBatch` remains, keeping clear of the via-ir stack
+///      limit. `immediateEntryCount` is 0 so the zero-hash entry stays in the deferred queue and is
+///      drained by `executeL2Txs`.
+contract DeferredL2TXBatcher is RevertContinueL2Actions {
+    function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
+        rollups.postAndVerifyBatch(
+            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups())
+        );
+        rollups.executeL2Txs(L2_ROLLUP_ID);
     }
 }
 
-/// @title Execute - L1-side mirror. Deferred postBatch + executeL2TX runs the actual
+/// @title Execute - L1-side mirror. Deferred postBatch + executeL2Txs runs the actual
 ///        Counter.increment() on L1 (the destination of the L2-anchored inner reentrant call).
-contract Execute is Script, RevertContinueL2Actions {
+contract Execute is Script {
     function run() external {
-        address rollupsAddr = vm.envAddress("ROLLUPS");
-        address proofSystemAddr = vm.envAddress("PROOF_SYSTEM");
         address counterL1 = vm.envAddress("COUNTER_L1");
-        address selfCallerL2 = vm.envAddress("SELF_CALLER");
 
         vm.startBroadcast();
         DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
         batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noLookupCalls()
+            EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("SELF_CALLER")
         );
 
         console.log("Execute: done");

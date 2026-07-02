@@ -42,7 +42,7 @@ contract Bridge {
     IEEZ public manager;
 
     /// @notice This chain's rollup ID (0 for L1 mainnet)
-    uint256 public rollupId;
+    uint64 public rollupId;
 
     /// @notice Admin address that can set the canonical bridge address
     /// @dev Currently used for testing. Decentralized deployment strategy TBD.
@@ -74,7 +74,7 @@ contract Bridge {
     // ──────────────────────────────────────────────
 
     /// @dev Validates that msg.sender is the CrossChainProxy representing this bridge from `sourceRollupId`.
-    modifier onlyBridgeProxy(uint256 sourceRollupId) {
+    modifier onlyBridgeProxy(uint64 sourceRollupId) {
         address expectedProxy = manager.computeCrossChainProxyAddress(_bridgeAddress(), sourceRollupId);
         if (msg.sender != expectedProxy) revert UnauthorizedCaller();
         _;
@@ -89,14 +89,14 @@ contract Bridge {
     //  Events
     // ──────────────────────────────────────────────
 
-    event Initialized(address indexed manager, uint256 rollupId, address indexed admin);
+    event Initialized(address indexed manager, uint64 rollupId, address indexed admin);
     event CanonicalBridgeAddressSet(address indexed addr);
-    event EtherBridged(address indexed sender, uint256 indexed rollupId, uint256 amount);
-    event TokensBridged(address indexed token, address indexed sender, uint256 indexed rollupId, uint256 amount);
+    event EtherBridged(address indexed sender, uint64 indexed rollupId, uint256 amount);
+    event TokensBridged(address indexed token, address indexed sender, uint64 indexed rollupId, uint256 amount);
     event TokensReleased(address indexed token, address indexed to, uint256 amount);
     event WrappedTokensMinted(address indexed wrappedToken, address indexed to, uint256 amount);
     event WrappedTokenDeployed(
-        address indexed wrappedToken, address indexed originalToken, uint256 indexed originalRollupId
+        address indexed wrappedToken, address indexed originalToken, uint64 indexed originalRollupId
     );
 
     // ──────────────────────────────────────────────
@@ -107,7 +107,7 @@ contract Bridge {
     /// @param _manager The cross-chain manager address
     /// @param _rollupId This chain's rollup ID (0 = L1 mainnet)
     /// @param _admin The admin address that can set the canonical bridge address
-    function initialize(address _manager, uint256 _rollupId, address _admin) external {
+    function initialize(address _manager, uint64 _rollupId, address _admin) external {
         if (address(manager) != address(0)) revert AlreadyInitialized();
         if (_manager == address(0)) revert ZeroAddress();
         if (_admin == address(0)) revert ZeroAddress();
@@ -134,7 +134,7 @@ contract Bridge {
 
     /// @notice Bridge ETH to destinationAddress on the destination rollup
     /// @param _rollupId The destination rollup ID
-    function bridgeEther(uint256 _rollupId, address destinationAddress) external payable {
+    function bridgeEther(uint64 _rollupId, address destinationAddress) external payable {
         if (msg.value == 0) revert ZeroAmount();
 
         address proxy = _getOrDeployProxy(destinationAddress, _rollupId);
@@ -151,7 +151,7 @@ contract Bridge {
     /// @param amount The amount to bridge
     /// @param _rollupId The destination rollup ID
     /// @param destinationAddress The recipient address on the destination rollup
-    function bridgeTokens(address token, uint256 amount, uint256 _rollupId, address destinationAddress) external {
+    function bridgeTokens(address token, uint256 amount, uint64 _rollupId, address destinationAddress) external {
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
 
@@ -181,7 +181,7 @@ contract Bridge {
     function _receiveTokensPayload(
         address token,
         address originalToken,
-        uint256 originalRollupId,
+        uint64 originalRollupId,
         address destinationAddress,
         uint256 amount
     )
@@ -213,13 +213,13 @@ contract Bridge {
     /// @param sourceRollupId The rollup ID the call originates from
     function receiveTokens(
         address originalToken,
-        uint256 originalRollupId,
+        uint64 originalRollupId,
         address to,
         uint256 amount,
         string calldata name,
         string calldata symbol,
         uint8 tokenDecimals,
-        uint256 sourceRollupId
+        uint64 sourceRollupId
     )
         external
         onlyBridgeProxy(sourceRollupId)
@@ -242,7 +242,7 @@ contract Bridge {
 
     /// @notice Get the WrappedToken address for a given (originalToken, originalRollupId) pair
     /// @dev Returns address(0) if the token has not been bridged yet.
-    function getWrappedToken(address originalToken, uint256 originalRollupId) external view returns (address) {
+    function getWrappedToken(address originalToken, uint64 originalRollupId) external view returns (address) {
         return wrappedTokens[_wrappedSalt(originalToken, originalRollupId)];
     }
 
@@ -258,14 +258,14 @@ contract Bridge {
     }
 
     /// @dev Computes the deterministic salt for a WrappedToken.
-    function _wrappedSalt(address originalToken, uint256 originalRollupId) internal pure returns (bytes32) {
+    function _wrappedSalt(address originalToken, uint64 originalRollupId) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(originalToken, originalRollupId));
     }
 
     /// @dev Returns an existing WrappedToken or deploys a new one via CREATE2.
     function _getOrDeployWrapped(
         address originalToken,
-        uint256 originalRollupId,
+        uint64 originalRollupId,
         string calldata name,
         string calldata symbol,
         uint8 tokenDecimals
@@ -284,13 +284,13 @@ contract Bridge {
         // Register in both lookup directions: salt → address and address → origin info
         wrappedAddr = address(wrapped);
         wrappedTokens[salt] = wrappedAddr;
-        wrappedTokenInfo[wrappedAddr] = TokenInfo(originalToken, uint64(originalRollupId));
+        wrappedTokenInfo[wrappedAddr] = TokenInfo(originalToken, originalRollupId);
 
         emit WrappedTokenDeployed(wrappedAddr, originalToken, originalRollupId);
     }
 
     /// @dev Ensures a CrossChainProxy exists for (addr, rollupId), creating it if needed.
-    function _getOrDeployProxy(address originalAddress, uint256 _rollupId) internal returns (address proxy) {
+    function _getOrDeployProxy(address originalAddress, uint64 _rollupId) internal returns (address proxy) {
         proxy = manager.computeCrossChainProxyAddress(originalAddress, _rollupId);
         if (proxy.code.length == 0) {
             manager.createCrossChainProxy(originalAddress, _rollupId);
