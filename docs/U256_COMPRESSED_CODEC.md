@@ -334,6 +334,26 @@ Note the tie-break in action: `1280` chooses the base-256 form `5·256` over the
 equal-length base-10 form `128·10`, and the decimals use the **lowest** exponent
 (largest mantissa) — e.g. `10^27 = 100·10^25` (`exp 25`) rather than `10·10^26`.
 
+### 6.1 Test vectors
+
+[`U256_COMPRESSED_CODEC_VECTORS.json`](./U256_COMPRESSED_CODEC_VECTORS.json) carries
+machine-readable vectors generated with the reference implementation above (§5):
+
+* **`edge_cases`** — canonical `value ↔ hex` pairs for boundary and round values
+  (including every worked example from §6).
+* **`per_format_code`** — one canonical vector for **each** assigned format byte
+  `0 … 252`: all 33 literal lengths and all 220 scientific codes.
+* **`decode_only`** — well-formed but **non-canonical** encodings: a decoder accepts
+  them, a canonical encoder (§4) never emits them (each entry carries the
+  `canonical_hex` it should have used).
+* **`invalid`** — inputs a decoder MUST reject: reserved format bytes `253`–`255`,
+  truncated literal payloads, truncated mantissas.
+* **`streams`** — concatenated values, exercising self-delimiting decode.
+
+A conforming implementation must round-trip every `edge_cases` / `per_format_code` /
+`streams` entry exactly, decode every `decode_only` entry to its `value`, and reject
+every `invalid` entry.
+
 ## 7. Properties & trade-offs
 
 - **Total & lossless.** Every value has a literal fallback, so `decode(encode(v)) == v`
