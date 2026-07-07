@@ -8,7 +8,7 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ExecutionEntry,
     ExpectedStateRootPerRollup,
     ProxyInfo,
@@ -86,7 +86,7 @@ contract EEZ is EEZBase {
     // own re-entry window is covered by `_insideExecution()` instead.
     // TODO: promote to real `transient` once Solidity supports it for these types.
     ExecutionEntry[] public _transientExecutions;
-    StaticLookup[] public _transientStaticLookups;
+    StaticExecutionEntry[] public _transientStaticLookups;
 
     /// @notice The reentrant (L1→L2) table of the ONE immediate L2Tx entry currently executing —
     ///         the FIRST source `_getExpectedL1toL2Calls()` consults, so it holds only the in-flight
@@ -555,7 +555,7 @@ contract EEZ is EEZBase {
         // (`expectedStateRoots`, validated strictly-increasing); `destinationRollupId` must be pinned,
         // and the read-only sub-call sources must be in the set (a static lookup has no reentrant table).
         for (uint256 i = 0; i < batch.staticLookups.length; i++) {
-            StaticLookup calldata staticLookup = batch.staticLookups[i];
+            StaticExecutionEntry calldata staticLookup = batch.staticLookups[i];
             ExpectedStateRootPerRollup[] calldata expectedStateRoots = staticLookup.expectedStateRoots;
             uint64[] memory verifiedRollups = new uint64[](expectedStateRoots.length);
             uint64 prevPinRid = MAINNET_ROLLUP_ID;
@@ -639,7 +639,9 @@ contract EEZ is EEZBase {
     /// @notice Builds per-PS publicInputsHash and verifies every proof in the batch
     /// @dev Two-stage shape:
     ///        customDataHashes[r] = H(rollupId_r, customData_r)   // per-rollup, canonical order
-    ///        sharedPublicInput = H(entryHashes, staticLookupHashes, blobHashes, H(callData), customDataHashes)
+    ///        sharedPublicInput = H(entryHashes, staticLookupHashes, blobHashes, H(callData), customDataHashes, boundSender)
+    ///      where `boundSender = bindMsgSenderInPublicInput ? msg.sender : address(0)` — a submitter-bound
+    ///      batch only verifies for the address the proof committed to (front-run protection).
     ///      For each PS k we walk the rollupIdsWithProofSystems table in canonical order;
     ///      every rollup that lists k in its `proofSystemIndexes[]` folds into a per-PS
     ///      rolling accumulator one rollup at a time:
@@ -694,7 +696,8 @@ contract EEZ is EEZBase {
                 abi.encode(staticLookupHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
-                abi.encode(customDataHashes) // per-rollup customData; shared across all PS
+                abi.encode(customDataHashes), // per-rollup customData; shared across all PS
+                batch.bindMsgSenderInPublicInput ? msg.sender : address(0) // submitter binding (front-run protection)
             )
         );
 
@@ -941,7 +944,7 @@ contract EEZ is EEZBase {
     ///      Miss path: when the cursor is out of bounds or the entry doesn't fully match
     ///      (`_entryMatches`: identity, routing, or a stale `currentState`), we revert
     ///      `ExecutionNotFound`. There is no reverted-top-level fallback — top-level reverting calls
-    ///      are normal entries, and the static pool (`StaticLookup`) is read-only (`staticCallLookup`).
+    ///      are normal entries, and the static pool (`StaticExecutionEntry`) is read-only (`staticCallLookup`).
     /// @param destRid The destination rollup whose queue / transient slot to consume from
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
@@ -1213,7 +1216,7 @@ contract EEZ is EEZBase {
     /// @notice Whether every state-root pin of a top-level lookup equals the live root.
     ///         Part of the MATCH predicate (full-scan semantics) — a mismatch skips the
     ///         candidate instead of reverting.
-    function _stateRootsMatch(StaticLookup storage lookup) internal view returns (bool) {
+    function _stateRootsMatch(StaticExecutionEntry storage lookup) internal view returns (bool) {
         ExpectedStateRootPerRollup[] storage pins = lookup.expectedStateRoots;
         for (uint256 i = 0; i < pins.length; i++) {
             if (rollups[pins[i].rollupId].stateRoot != pins[i].stateRoot) return false;
@@ -1238,7 +1241,7 @@ contract EEZ is EEZBase {
     ///      `isStatic = true`, so only static entries can match. Outside: while a batch is mid-flight,
     ///      ONLY its transient pool (the
     ///      transient phase is self-contained — see docs/CAVEATS.md); otherwise the routed rollup's
-    ///      persistent `staticLookupQueue`. Match: a top-level `StaticLookup` with `proxyEntryHash` and
+    ///      persistent `staticLookupQueue`. Match: a top-level `StaticExecutionEntry` with `proxyEntryHash` and
     ///      every state-root pin live (full scan — a non-matching candidate is skipped). tload works
     ///      in static context, so the transient tracking variables are readable.
     /// @dev TODO (perf): linear scans are O(n) — sort + binary-search once profiling shows
@@ -1289,10 +1292,11 @@ contract EEZ is EEZBase {
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue.
         // Note that static calls do not obsolete after a block passes. As long as the state roots matches it can be execute
-        StaticLookup[] storage staticLookups =
-            _transientExecutions.length != 0 ? _transientStaticLookups : verificationByRollup[destRid].staticLookupQueue;
+        StaticExecutionEntry[] storage staticLookups = _transientExecutions.length != 0
+            ? _transientStaticLookups
+            : verificationByRollup[destRid].staticLookupQueue;
         for (uint256 i = 0; i < staticLookups.length; i++) {
-            StaticLookup storage lookup = staticLookups[i];
+            StaticExecutionEntry storage lookup = staticLookups[i];
             // Proxy protection: fold the declared destination into the match. The transient pool
             // is a single global table (not queue-routed by rollup), so without this a prover could
             // resolve a lookup for a rollup other than the calling proxy's. Persistent lookups are
@@ -1332,7 +1336,7 @@ contract EEZ is EEZBase {
     }
 
     /// @notice Runs the lookup's `calls[]` in static context, folding an untagged rolling hash verified
-    ///         against `StaticLookup.rollingHash` (source checked in validateStructure).
+    ///         against `StaticExecutionEntry.rollingHash` (source checked in validateStructure).
     /// @dev No `revertNextNCalls` since there are not changes on state; referenced proxies must already be deployed (CREATE2 is unavailable
     ///      inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
     function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {

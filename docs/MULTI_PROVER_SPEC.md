@@ -125,12 +125,15 @@ customDataAcc = bytes32(0)
 for each rollup r in rollupIdsWithProofSystems (rollupId-ascending):
   customDataAcc = keccak256(abi.encode(customDataAcc, rollupId_r, customData_r))
 
+boundSender = batch.bindMsgSenderInPublicInput ? msg.sender : address(0)
+
 sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
     keccak256(callData),
-    customDataAcc
+    customDataAcc,
+    boundSender
 ))
 
 for each PS k in proofSystems:
@@ -152,6 +155,10 @@ for each PS k in proofSystems:
   `sharedPublicInput`. It does NOT vary per PS, so it is shared across all `acc_k` rather than
   re-folded into each one.
 - `vkMatrix[r][j]` is the vkey of `proofSystems[proofSystemIndex[r][j]]` for `rollupId_r`.
+- `boundSender` binds the submitter: with `bindMsgSenderInPublicInput = true` the proof commits to
+  the exact `msg.sender` allowed to land the batch (front-run protection for the meta-hook / AA
+  bundle); with `false` it commits to `address(0)` and anyone may submit. See
+  `PROOF_REPLAY_AND_FRONTRUNNING.md`.
 
 ---
 

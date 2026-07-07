@@ -9,10 +9,10 @@ import {
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -258,7 +258,7 @@ contract DeferredL2TXBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticLookups
     )
         external
     {
@@ -283,7 +283,8 @@ contract DeferredL2TXBatcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         rollups.executeL2Txs(rollupId);

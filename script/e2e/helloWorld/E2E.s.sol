@@ -9,10 +9,10 @@ import {
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, StaticLookup} from "../../../src/interfaces/IEEZ.sol";
+import {StateDelta, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -155,7 +155,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticLookups,
         HelloWorldL1 h1
     )
         external
@@ -187,7 +187,8 @@ contract Batcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         greeting = h1.helloL2World();
@@ -211,7 +212,7 @@ contract ExecuteL2 is Script, HelloActions {
                 helloL1Addr,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(helloL2Addr, helloL1Addr),
-                new L2StaticLookup[](0)
+                new L2StaticExecutionEntry[](0)
             );
 
         console.log("done");

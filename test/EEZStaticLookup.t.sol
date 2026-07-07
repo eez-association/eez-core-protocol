@@ -8,7 +8,7 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
@@ -50,7 +50,7 @@ contract EEZStaticLookupTest is Base {
         target = new ViewTarget();
     }
 
-    function _stdBatchPost(Base.RollupHandle memory r, StaticLookup[] memory lookups) internal {
+    function _stdBatchPost(Base.RollupHandle memory r, StaticExecutionEntry[] memory lookups) internal {
         _postBatchOne(r, _emptyEntries(), lookups, 0, 0);
     }
 
@@ -66,7 +66,7 @@ contract EEZStaticLookupTest is Base {
     function _staticLookup(uint256 rid, bytes32 hash, bool success, bytes memory ret)
         internal
         view
-        returns (StaticLookup memory lc)
+        returns (StaticExecutionEntry memory lc)
     {
         lc.proxyEntryHash = hash;
         lc.destinationRollupId = uint64(rid);
@@ -96,7 +96,7 @@ contract EEZStaticLookupTest is Base {
         bytes memory payload = abi.encode(uint256(123));
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _staticLookup(r.id, h, true, payload);
         _stdBatchPost(r, lookups);
 
@@ -112,7 +112,7 @@ contract EEZStaticLookupTest is Base {
         bytes memory payload = hex"deadbeef";
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _staticLookup(r.id, h, false, payload); // !success → reverts with payload
         _stdBatchPost(r, lookups);
 
@@ -127,7 +127,7 @@ contract EEZStaticLookupTest is Base {
         bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _staticLookup(r.id, h, true, "");
         lookups[0].rollingHash = keccak256("wrong"); // no sub-calls → computed 0 != wrong
         _stdBatchPost(r, lookups);
@@ -163,8 +163,8 @@ contract EEZStaticLookupTest is Base {
         bytes memory payload = abi.encode(uint256(999));
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
-        StaticLookup memory lc = _staticLookup(r.id, h, true, payload);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticLookup(r.id, h, true, payload);
         L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
         subCalls[0] = L2ToL1Call({
             revertNextNCalls: 0,
@@ -196,8 +196,8 @@ contract EEZStaticLookupTest is Base {
         address undeployedSource = address(0xDEAD);
         address undeployedProxy = rollups.computeCrossChainProxyAddress(undeployedSource, uint64(r.id));
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
-        StaticLookup memory lc = _staticLookup(r.id, h, true, "");
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticLookup(r.id, h, true, "");
         L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
         subCalls[0] = L2ToL1Call({
             revertNextNCalls: 0,

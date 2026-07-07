@@ -17,7 +17,7 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ExpectedStateRootPerRollup,
     ProxyInfo
 } from "../src/interfaces/IEEZ.sol";
@@ -149,7 +149,7 @@ abstract contract Base is Test {
     function _singleSubBatch(
         RollupHandle memory r,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 immediateEntryCount,
         uint256 immediateStaticLookupCount
     )
@@ -170,6 +170,7 @@ abstract contract Base is Test {
         batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: immediateEntryCount,
@@ -186,7 +187,7 @@ abstract contract Base is Test {
     function _postBatchOne(
         RollupHandle memory r,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 immediateEntryCount,
         uint256 immediateStaticLookupCount
     )
@@ -214,8 +215,8 @@ abstract contract Base is Test {
         arr = new ExecutionEntry[](0);
     }
 
-    function _emptyStaticLookups() internal pure returns (StaticLookup[] memory arr) {
-        arr = new StaticLookup[](0);
+    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory arr) {
+        arr = new StaticExecutionEntry[](0);
     }
 
     function _emptyCalls() internal pure returns (L2ToL1Call[] memory arr) {

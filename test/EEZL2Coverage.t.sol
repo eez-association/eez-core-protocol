@@ -9,7 +9,7 @@ import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticLookup
+    StaticExecutionEntry
 } from "../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 
@@ -149,12 +149,12 @@ contract EEZL2CoverageTest is Test {
         });
     }
 
-    function _loadEntries(ExecutionEntry[] memory entries, StaticLookup[] memory lookups) internal {
+    function _loadEntries(ExecutionEntry[] memory entries, StaticExecutionEntry[] memory lookups) internal {
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, lookups);
     }
 
-    function _loadSingle(ExecutionEntry memory entry, StaticLookup[] memory lookups) internal {
+    function _loadSingle(ExecutionEntry memory entry, StaticExecutionEntry[] memory lookups) internal {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
         _loadEntries(entries, lookups);
@@ -189,7 +189,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = _rhSingle(crossChainCallHash, callHash, true, "");
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         uint256 sysBefore = SYSTEM_ADDRESS.balance;
         (bool success,) = proxy.call{value: sentValue}(callData);
@@ -218,7 +218,7 @@ contract EEZL2CoverageTest is Test {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
         vm.prank(address(rejecter));
-        mgr2.loadExecutionTable(entries, new StaticLookup[](0));
+        mgr2.loadExecutionTable(entries, new StaticExecutionEntry[](0));
 
         // The EtherTransferFailed error bubbles up through the proxy as a revert.
         (bool ok,) = proxy.call{value: 3}(callData);
@@ -233,7 +233,13 @@ contract EEZL2CoverageTest is Test {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EmptyEntries.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, new ExecutionEntry[](0), new StaticLookup[](0)
+            address(target),
+            0,
+            "",
+            address(this),
+            REMOTE_ROLLUP_ID,
+            new ExecutionEntry[](0),
+            new StaticExecutionEntry[](0)
         );
     }
 
@@ -245,14 +251,14 @@ contract EEZL2CoverageTest is Test {
         vm.expectRevert(EEZL2.ValueMismatch.selector);
         manager.executeIncomingCrossChainCall{
             value: 1
-        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0));
+        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0));
     }
 
     function test_IncomingCrossChainCall_NotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         vm.expectRevert(EEZL2.Unauthorized.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0)
+            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0)
         );
     }
 
@@ -267,7 +273,7 @@ contract EEZL2CoverageTest is Test {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EntryHashMismatch.selector);
         manager.executeIncomingCrossChainCall(
-            address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID, entries, new StaticLookup[](0)
+            address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0)
         );
     }
 
@@ -304,7 +310,7 @@ contract EEZL2CoverageTest is Test {
         vm.prank(SYSTEM_ADDRESS);
         bytes memory ret = manager.executeIncomingCrossChainCall{
             value: value
-        }(address(target), value, data, sourceAddr, sourceRollup, entries, new StaticLookup[](0));
+        }(address(target), value, data, sourceAddr, sourceRollup, entries, new StaticExecutionEntry[](0));
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
@@ -377,7 +383,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         (bool ok,) = outerProxy.call(outerCd);
         assertTrue(ok, "outer reentrant call must succeed");
@@ -401,7 +407,7 @@ contract EEZL2CoverageTest is Test {
         // Static lookup key: isStatic = true, source = (this caller, this L2), target = (target, remote).
         bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = true;
@@ -420,7 +426,7 @@ contract EEZL2CoverageTest is Test {
         bytes memory payload = hex"deadbeef";
         bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = false;
@@ -438,7 +444,7 @@ contract EEZL2CoverageTest is Test {
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes32 h = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
         lookups[0].success = true;
@@ -453,7 +459,7 @@ contract EEZL2CoverageTest is Test {
 
     function test_StaticLookup_TopLevelNoMatch() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
-        _loadEntries(new ExecutionEntry[](0), new StaticLookup[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
 
         vm.prank(proxy);
         vm.expectRevert(EEZBase.ExecutionNotFound.selector);
@@ -485,7 +491,7 @@ contract EEZL2CoverageTest is Test {
             data: subData
         });
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = true;
@@ -517,7 +523,7 @@ contract EEZL2CoverageTest is Test {
             data: cd
         });
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
         lookups[0].success = true;
@@ -582,7 +588,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
         // Invoke from 0xD00D so the consumed hash matches the entry's proxyEntryHash, whose
@@ -620,7 +626,7 @@ contract EEZL2CoverageTest is Test {
         // the outer call returns (false, ...). We set an incomplete rolling hash (seed + CALL_BEGIN
         // only) so the entry fails its rolling-hash check and the whole call reverts.
         entry.rollingHash = _hCallBegin(_seed(outerHash), outerCallHash);
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
         vm.prank(address(0xD00D));
@@ -665,7 +671,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         (bool ok,) = outerProxy.call(outerData);
         assertTrue(ok, "no-match reentrant folds CALL_NOT_FOUND; entry hash matches and commits");
@@ -703,7 +709,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = h;
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         (bool ok,) = proxy.call(cd);
         assertTrue(ok, "static incoming call dispatches via STATICCALL and reads getValue()");
@@ -733,7 +739,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = bytes32(0); // unreached
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         (bool ok, bytes memory ret) = proxy.call(cd);
         assertFalse(ok);
@@ -771,7 +777,7 @@ contract EEZL2CoverageTest is Test {
         entry.success = true;
         entry.returnData = "";
         entry.rollingHash = bytes32(0); // unreached
-        _loadSingle(entry, new StaticLookup[](0));
+        _loadSingle(entry, new StaticExecutionEntry[](0));
 
         (bool ok, bytes memory ret) = proxy.call(cd);
         assertFalse(ok);

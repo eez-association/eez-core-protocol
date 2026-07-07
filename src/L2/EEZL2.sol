@@ -2,7 +2,12 @@
 pragma solidity ^0.8.28;
 
 import {CrossChainProxy} from "../base/CrossChainProxy.sol";
-import {CrossChainCall, ExpectedOutgoingCrossChainCall, ExecutionEntry, StaticLookup} from "../interfaces/IEEZL2.sol";
+import {
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall,
+    ExecutionEntry,
+    StaticExecutionEntry
+} from "../interfaces/IEEZL2.sol";
 import {ProxyInfo} from "../interfaces/IEEZ.sol";
 import {EEZBase} from "../base/EEZBase.sol";
 
@@ -33,7 +38,7 @@ contract EEZL2 is EEZBase {
     ExecutionEntry[] public executions;
 
     /// @notice Array of pre-computed top-level static-lookup results
-    StaticLookup[] public staticLookups;
+    StaticExecutionEntry[] public staticLookups;
 
     /// @notice Last block number when execution table was loaded
     uint256 public lastLoadBlock;
@@ -129,7 +134,7 @@ contract EEZL2 is EEZBase {
     /// @dev Clears previous entries and stores new ones. Entries must be consumed in the same block.
     /// @param entries The execution entries to load
     /// @param _staticLookups The top-level static-lookup results to load
-    function loadExecutionTable(ExecutionEntry[] calldata entries, StaticLookup[] calldata _staticLookups)
+    function loadExecutionTable(ExecutionEntry[] calldata entries, StaticExecutionEntry[] calldata _staticLookups)
         external
         onlySystemAddress
     {
@@ -138,7 +143,9 @@ contract EEZL2 is EEZBase {
 
     /// @notice Internal: replaces the execution table and resets the consumption cursor
     /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`
-    function _loadExecutionTable(ExecutionEntry[] calldata entries, StaticLookup[] calldata _staticLookups) internal {
+    function _loadExecutionTable(ExecutionEntry[] calldata entries, StaticExecutionEntry[] calldata _staticLookups)
+        internal
+    {
         delete executions;
         delete staticLookups;
         executionIndex = 0;
@@ -229,7 +236,7 @@ contract EEZL2 is EEZBase {
         address sourceAddress,
         uint64 sourceRollup,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata _staticLookups
+        StaticExecutionEntry[] calldata _staticLookups
     )
         external
         payable
@@ -353,7 +360,7 @@ contract EEZL2 is EEZBase {
     /// @dev Forward-scan from the cursor skips intervening non-matches so a top-level call can reach
     ///      past already-attempted entries (a `success == false` entry reverts, leaving the cursor where
     ///      it was). No reverted fallback: top-level reverting calls are normal entries
-    ///      (`success == false`), and the static pool (`StaticLookup`) is read-only (`staticCallLookup`).
+    ///      (`success == false`), and the static pool (`StaticExecutionEntry`) is read-only (`staticCallLookup`).
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
     function _consumeAndExecute(bytes32 crossChainCallHash) internal returns (bytes memory result) {
@@ -521,7 +528,7 @@ contract EEZL2 is EEZBase {
     ///      whose `expectedOutgoingHash` matches `keccak256(crossChainCallHash, _rollingHash)` — the
     ///      same content-addressed key the reentrant CALLs use. The `crossChainCallHash` here folds
     ///      `isStatic = true`, so only static entries can match. Outside: scans the persistent
-    ///      `staticLookups` pool for a top-level `StaticLookup` matching `crossChainCallHash` (L2 has no
+    ///      `staticLookups` pool for a top-level `StaticExecutionEntry` matching `crossChainCallHash` (L2 has no
     ///      state roots to pin). tload works in static context, so the transient tracking variables are
     ///      readable.
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
@@ -567,7 +574,7 @@ contract EEZL2 is EEZBase {
 
         // Top-level: persistent pool, matched by hash alone (L2 has no state roots to pin).
         for (uint256 i = 0; i < staticLookups.length; i++) {
-            StaticLookup storage lookup = staticLookups[i];
+            StaticExecutionEntry storage lookup = staticLookups[i];
             if (lookup.proxyEntryHash == crossChainCallHash) {
                 return _resolveStaticLookup(lookup.incomingCalls, lookup.rollingHash, lookup.success, lookup.returnData);
             }
@@ -600,7 +607,7 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice Runs the lookup's `calls[]` in static context, folding an untagged rolling hash verified
-    ///         against `StaticLookup.rollingHash` / `ExpectedOutgoingCrossChainCall.revertedOrStaticRollingHash`.
+    ///         against `StaticExecutionEntry.rollingHash` / `ExpectedOutgoingCrossChainCall.revertedOrStaticRollingHash`.
     /// @dev No `revertNextNCalls` since there are no state changes; referenced proxies must already be
     ///      deployed (CREATE2 is unavailable inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
     function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {

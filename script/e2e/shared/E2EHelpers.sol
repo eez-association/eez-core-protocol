@@ -11,12 +11,12 @@ import {
     IEEZ,
     StateDelta,
     ExecutionEntry,
-    StaticLookup,
+    StaticExecutionEntry,
     L2ToL1Call,
     ExpectedL1ToL2Call
 } from "../../../src/interfaces/IEEZ.sol";
 import {
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -177,7 +177,7 @@ contract L2TXBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticLookups
     )
         external
     {
@@ -208,7 +208,8 @@ contract L2TXBatcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         rollups.executeL2Txs(rollupId);
@@ -223,7 +224,7 @@ function deferredSingleRollupBatch(
     address proofSystem,
     uint64 rollupId,
     ExecutionEntry[] memory entries,
-    StaticLookup[] memory staticLookups
+    StaticExecutionEntry[] memory staticLookups
 )
     pure
     returns (ProofSystemBatchPerVerificationEntries memory batch)
@@ -247,7 +248,8 @@ function deferredSingleRollupBatch(
         blobIndices: new uint256[](0),
         callData: "",
         proofs: proofs,
-        blockNumber: 0
+        blockNumber: 0,
+        bindMsgSenderInPublicInput: false
     });
 }
 
@@ -255,9 +257,9 @@ function deferredSingleRollupBatch(
 //  Common empty helpers (saves boilerplate in E2E scripts)
 // ══════════════════════════════════════════════════════════════════════
 
-/// @notice Returns an empty StaticLookup[] (L1) — for flows with no top-level static lookups.
-function noStaticLookups() pure returns (StaticLookup[] memory) {
-    return new StaticLookup[](0);
+/// @notice Returns an empty StaticExecutionEntry[] (L1) — for flows with no top-level static lookups.
+function noStaticLookups() pure returns (StaticExecutionEntry[] memory) {
+    return new StaticExecutionEntry[](0);
 }
 
 /// @notice Returns an empty ExpectedL1ToL2Call[] (unified reentrant table).
@@ -273,9 +275,9 @@ function noCalls() pure returns (L2ToL1Call[] memory) {
 // L2 (IEEZL2) variants — Solidity can't overload free functions by return type alone,
 // so the L2-typed empties get an `L2` infix.
 
-/// @notice Returns an empty StaticLookup[] (IEEZL2).
-function noL2StaticLookups() pure returns (L2StaticLookup[] memory) {
-    return new L2StaticLookup[](0);
+/// @notice Returns an empty StaticExecutionEntry[] (IEEZL2).
+function noL2StaticLookups() pure returns (L2StaticExecutionEntry[] memory) {
+    return new L2StaticExecutionEntry[](0);
 }
 
 /// @notice Returns an empty ExpectedOutgoingCrossChainCall[] (IEEZL2).

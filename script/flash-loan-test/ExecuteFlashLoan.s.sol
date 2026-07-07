@@ -12,8 +12,11 @@ import {EEZL2} from "../../src/L2/EEZL2.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {FlashLoan} from "../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, StaticLookup} from "../../src/interfaces/IEEZ.sol";
-import {ExecutionEntry as L2ExecutionEntry, StaticLookup as L2StaticLookup} from "../../src/interfaces/IEEZL2.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    StaticExecutionEntry as L2StaticExecutionEntry
+} from "../../src/interfaces/IEEZL2.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {
@@ -134,7 +137,7 @@ contract FlashLoanBatcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticLookups,
         FlashLoanBridgeExecutor executor
     )
         external
@@ -165,7 +168,8 @@ contract FlashLoanBatcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         executor.execute();
@@ -310,7 +314,9 @@ contract ExecuteFlashLoanL1 is Script {
 
         // Batcher ensures postAndVerifyBatch + execute happen in the same block
         FlashLoanBatcher batcher = new FlashLoanBatcher();
-        batcher.execute(rollups, proofSystemAddr, entries, new StaticLookup[](0), FlashLoanBridgeExecutor(executorL1));
+        batcher.execute(
+            rollups, proofSystemAddr, entries, new StaticExecutionEntry[](0), FlashLoanBridgeExecutor(executorL1)
+        );
 
         // Consume the L2TX entry
         rollups.executeL2Txs(L2_ROLLUP_ID);

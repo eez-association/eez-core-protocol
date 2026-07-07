@@ -14,11 +14,11 @@ import {
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
-    StaticLookup
+    StaticExecutionEntry
 } from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -244,7 +244,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticLookups,
         address counterProxy
     )
         external
@@ -275,7 +275,8 @@ contract Batcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         // Trigger: call counterProxy.increment() — consumes the entry.
@@ -352,7 +353,7 @@ contract ExecuteL2 is Script, RevertActions {
                 alice,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(counterL2, alice),
-                new L2StaticLookup[](0)
+                new L2StaticExecutionEntry[](0)
             );
 
         uint256 finalCounter = Counter(counterL2).counter();

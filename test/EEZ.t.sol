@@ -19,7 +19,7 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ProxyInfo,
     ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
@@ -157,7 +157,7 @@ contract EEZTest is Base {
     function _postBatchSingle(
         uint256 rid,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 immediateCount,
         uint256 immediateStaticLookupCount
     )
@@ -171,7 +171,7 @@ contract EEZTest is Base {
     function _postBatchSingleMulti(
         uint256[] memory rids,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 immediateCount,
         uint256 immediateStaticLookupCount
     )
@@ -194,6 +194,7 @@ contract EEZTest is Base {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: immediateCount,
@@ -229,6 +230,7 @@ contract EEZTest is Base {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: pins,
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
             immediateEntryCount: entries.length,
@@ -290,12 +292,12 @@ contract EEZTest is Base {
         e.returnData = payload;
     }
 
-    /// @notice Builds a minimal reverting top-level `StaticLookup` (no sub-calls), pinned to its own
+    /// @notice Builds a minimal reverting top-level `StaticExecutionEntry` (no sub-calls), pinned to its own
     ///         destination at the live root so it is structurally valid.
     function _revertedStaticLookup(uint64 rid, bytes32 proxyEntryHash, bytes memory payload)
         internal
         view
-        returns (StaticLookup memory lk)
+        returns (StaticExecutionEntry memory lk)
     {
         ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
         pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
@@ -567,8 +569,9 @@ contract EEZTest is Base {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: new ExecutionEntry[](0),
-            staticLookups: new StaticLookup[](0),
+            staticLookups: new StaticExecutionEntry[](0),
             immediateEntryCount: 0,
             immediateStaticLookupCount: 0,
             proofSystems: psList,
@@ -630,7 +633,7 @@ contract EEZTest is Base {
     function test_SubBatch_TransientLookupsWithoutTransientEntriesReverts() public {
         (uint64 rid,) = _makeRollupLocal(bytes32(0), alice);
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _revertedStaticLookup(rid, keccak256("h"), hex"deadbeef");
 
         vm.expectRevert(EEZ.ImmediateStaticLookupsWithoutImmediateEntries.selector);
@@ -1247,7 +1250,7 @@ contract EEZTest is Base {
     // it runs, verifies its rolling hash, then reverts with the cached `returnData`, rolling back all
     // state effects (including the cursor advance) so the caller's try/catch sees the revert and the
     // queue is not consumed. (There is no separate reverted-lookup pool for state-changing calls; the
-    // read-only `StaticLookup` pool serves static reads via `staticCallLookup`.)
+    // read-only `StaticExecutionEntry` pool serves static reads via `staticCallLookup`.)
 
     /// @notice Deferred path: the reverting entry sits in `verificationByRollup[rid].executionQueue`
     ///         and a top-level proxy call reverts with its cached returnData; the cursor advance rolls

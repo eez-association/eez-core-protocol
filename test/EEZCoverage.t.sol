@@ -12,7 +12,7 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
@@ -169,7 +169,7 @@ contract EEZCoverageTest is Base {
 
     function _raw(
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory lookups,
+        StaticExecutionEntry[] memory lookups,
         address[] memory psList,
         bytes[] memory proofs,
         RollupIdWithProofSystems[] memory rps,
@@ -196,7 +196,7 @@ contract EEZCoverageTest is Base {
     function _stdBatch(
         uint256 rid,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory lookups,
+        StaticExecutionEntry[] memory lookups,
         uint256 tc,
         uint256 tlc
     )
@@ -374,11 +374,11 @@ contract EEZCoverageTest is Base {
         rollups.postAndVerifyBatch(b);
     }
 
-    /// @notice A top-level `StaticLookup`'s read-only sub-call whose `sourceRollupId` isn't among the
+    /// @notice A top-level `StaticExecutionEntry`'s read-only sub-call whose `sourceRollupId` isn't among the
     ///         lookup's `expectedStateRoots` pins trips the static-lookup source check.
     function test_Validate_LookupCallSourceNotVerified() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _shellLookup(r.id);
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
@@ -398,7 +398,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_PinsNotIncreasing() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _shellLookup(r.id);
         // Both pins must be in-batch (membership is checked per-pin) so the duplicate trips the
         // strictly-increasing guard rather than RollupNotInBatch.
@@ -413,7 +413,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_PinRollupNotInBatch() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _shellLookup(r.id);
         ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
         pins[0] = ExpectedStateRootPerRollup({rollupId: 999, stateRoot: bytes32(0)}); // not in batch
@@ -425,7 +425,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_LookupDestinationNotPinned() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _shellLookup(r.id);
         lookups[0].destinationRollupId = 555; // not among pins
         ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
@@ -801,7 +801,7 @@ contract EEZCoverageTest is Base {
         assertEq(_getRollupState(rA.id), keccak256("s1"));
     }
 
-    /// @notice A top-level `StaticLookup` carrying TWO `expectedStateRoots` pins (strictly increasing)
+    /// @notice A top-level `StaticExecutionEntry` carrying TWO `expectedStateRoots` pins (strictly increasing)
     ///         exercises the multi-pin validation loop and the multi-pin `_stateRootsMatch` scan, then
     ///         resolves successfully.
     function test_Validate_TopLevelStaticLookup_TwoPins() public {
@@ -814,7 +814,7 @@ contract EEZCoverageTest is Base {
         bytes memory payload = abi.encode(uint256(321));
         bytes32 h = _ccHash(IS_STATIC, alice, uint64(MAINNET), address(target), uint64(rLo), 0, cd);
 
-        StaticLookup memory lk;
+        StaticExecutionEntry memory lk;
         lk.proxyEntryHash = h;
         lk.destinationRollupId = uint64(rLo);
         lk.l2ToL1Calls = new L2ToL1Call[](0);
@@ -825,7 +825,7 @@ contract EEZCoverageTest is Base {
         pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(rLo), stateRoot: _getRollupState(rLo)});
         pins[1] = ExpectedStateRootPerRollup({rollupId: uint64(rHi), stateRoot: _getRollupState(rHi)});
         lk.expectedStateRoots = pins;
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = lk;
 
         ProofSystemBatchPerVerificationEntries memory b = _twoRollupBatch(rLo, rHi, _emptyEntries(), lookups, 0, 0);
@@ -896,7 +896,7 @@ contract EEZCoverageTest is Base {
         entries[0].expectedL1ToL2Calls = reentrant;
         entries[0].rollingHash = h;
 
-        StaticLookup[] memory lookups = new StaticLookup[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _shellLookup(r.id); // pushed into the transient pool (immediateStaticLookupCount = 1)
 
         caller.setProxyCall(topProxy, outerData);
@@ -917,7 +917,7 @@ contract EEZCoverageTest is Base {
         uint256 rLo,
         uint256 rHi,
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory lookups,
+        StaticExecutionEntry[] memory lookups,
         uint256 tc,
         uint256 tlc
     )
@@ -1006,8 +1006,8 @@ contract EEZCoverageTest is Base {
         e.returnData = "";
     }
 
-    /// @notice A minimal `StaticLookup` pinned to `rid`'s live root; resolution reverts (`success == false`).
-    function _shellLookup(uint256 rid) internal view returns (StaticLookup memory lc) {
+    /// @notice A minimal `StaticExecutionEntry` pinned to `rid`'s live root; resolution reverts (`success == false`).
+    function _shellLookup(uint256 rid) internal view returns (StaticExecutionEntry memory lc) {
         lc.proxyEntryHash = keccak256("h");
         lc.destinationRollupId = uint64(rid);
         lc.returnData = "";

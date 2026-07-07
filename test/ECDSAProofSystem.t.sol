@@ -11,7 +11,7 @@ import {
     ExpectedStateRootPerRollup,
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
-import {ExecutionEntry, StaticLookup} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
 contract ECDSAProofSystemTest is Test {
     ECDSAProofSystem verifier;
@@ -82,7 +82,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
     ///      manager returns an empty `customData` blob, folded into the shared public input.
     function _computePublicInputsHash(
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 rid,
         bytes32 vk
     )
@@ -109,7 +109,8 @@ contract ECDSAProofSystemIntegrationTest is Base {
                 abi.encode(staticLookupHashes),
                 abi.encode(blobHashes),
                 keccak256(""),
-                abi.encode(customDataHashes)
+                abi.encode(customDataHashes),
+                address(0) // batches here are not submitter-bound (`bindMsgSenderInPublicInput = false`)
             )
         );
 
@@ -145,6 +146,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
             immediateEntryCount: 1,

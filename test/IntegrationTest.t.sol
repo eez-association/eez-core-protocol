@@ -17,12 +17,12 @@ import {
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    StaticLookup,
+    StaticExecutionEntry,
     ProxyInfo
 } from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../src/interfaces/IEEZL2.sol";
@@ -142,7 +142,7 @@ contract IntegrationTest is Test {
 
     function _postBatchToL2(
         ExecutionEntry[] memory entries,
-        StaticLookup[] memory staticLookups,
+        StaticExecutionEntry[] memory staticLookups,
         uint256 immediateEntryCount,
         uint256 immediateStaticLookupCount
     )
@@ -166,6 +166,7 @@ contract IntegrationTest is Test {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: staticLookups,
             immediateEntryCount: immediateEntryCount,
@@ -226,14 +227,14 @@ contract IntegrationTest is Test {
         return keccak256(abi.encodePacked(prev, CALL_END, success, retData));
     }
 
-    /// @notice Creates an empty L1 StaticLookup array (used by postAndVerifyBatch)
-    function _emptyStaticLookups() internal pure returns (StaticLookup[] memory) {
-        return new StaticLookup[](0);
+    /// @notice Creates an empty L1 StaticExecutionEntry array (used by postAndVerifyBatch)
+    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory) {
+        return new StaticExecutionEntry[](0);
     }
 
-    /// @notice Creates an empty L2 StaticLookup array (used by loadExecutionTable)
-    function _emptyL2StaticLookups() internal pure returns (L2StaticLookup[] memory) {
-        return new L2StaticLookup[](0);
+    /// @notice Creates an empty L2 StaticExecutionEntry array (used by loadExecutionTable)
+    function _emptyL2StaticLookups() internal pure returns (L2StaticExecutionEntry[] memory) {
+        return new L2StaticExecutionEntry[](0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
