@@ -28,14 +28,18 @@ These conventions apply across the per-type layouts in §2:
 
 * All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64`/`u128`/`u256`
   as written, `bool` is one byte, `address` is 20 bytes.
-* A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is
-  a **protobuf-style varint** ([LEB128](https://protobuf.dev/programming-guides/encoding/#varints)):
-  base-128, little-endian group order, 7 payload bits per byte, the high bit set while
-  more bytes follow. Lengths fit a `u32`, so a prefix is 1–5 bytes: length `5` = `05`,
-  length `300` = `ac 02`.
+* A `bytes` field is encoded as **protobuf** encodes its own `bytes` fields — a
+  [varint](https://protobuf.dev/programming-guides/encoding/#varints) length, then
+  exactly that many payload bytes:
 
-  **All byte fields are encoded this way** — whether the protocol parses their contents or
-  treats them as opaque.
+  ```
+  ac 02                  ← varint(300), 2 bytes
+  d0 9e … (300 bytes)    ← the payload itself, as-is
+  ```
+
+  Lengths fit a `u32` (prefix 1–5 bytes). **All four `bytes` fields (`operations`,
+  `tx_data`, `data`, `return_data`) are encoded this way** — whether their contents are
+  protocol-defined or opaque to it.
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
