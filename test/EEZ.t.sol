@@ -151,29 +151,29 @@ contract EEZTest is Base {
 
     /// @notice Wrap entries into a single-PS / single-rollup batch and call postAndVerifyBatch.
     function _postBatchSingle(uint256 rid, ExecutionEntry[] memory entries, uint256 immediateCount) internal {
-        _postBatchSingle(rid, entries, _emptyStaticLookups(), immediateCount, 0);
+        _postBatchSingle(rid, entries, _emptyStaticEntries(), immediateCount, 0);
     }
 
     function _postBatchSingle(
         uint256 rid,
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 immediateCount,
-        uint256 immediateStaticLookupCount
+        uint256 immediateStaticEntryCount
     )
         internal
     {
         uint256[] memory rids = new uint256[](1);
         rids[0] = rid;
-        _postBatchSingleMulti(rids, entries, staticLookups, immediateCount, immediateStaticLookupCount);
+        _postBatchSingleMulti(rids, entries, staticEntries, immediateCount, immediateStaticEntryCount);
     }
 
     function _postBatchSingleMulti(
         uint256[] memory rids,
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 immediateCount,
-        uint256 immediateStaticLookupCount
+        uint256 immediateStaticEntryCount
     )
         internal
     {
@@ -196,9 +196,9 @@ contract EEZTest is Base {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: immediateCount,
-            immediateStaticLookupCount: immediateStaticLookupCount,
+            immediateStaticEntryCount: immediateStaticEntryCount,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -232,9 +232,9 @@ contract EEZTest is Base {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: _emptyStaticLookups(),
+            staticEntries: _emptyStaticEntries(),
             immediateEntryCount: entries.length,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -456,7 +456,7 @@ contract EEZTest is Base {
         // strictly increasing required
         rids[0] = r1 < r2 ? r1 : r2;
         rids[1] = r1 < r2 ? r2 : r1;
-        _postBatchSingleMulti(rids, entries, _emptyStaticLookups(), 1, 0);
+        _postBatchSingleMulti(rids, entries, _emptyStaticEntries(), 1, 0);
 
         assertEq(_getRollupState(r1), keccak256("s1"));
         assertEq(_getRollupState(r2), keccak256("s2"));
@@ -530,7 +530,7 @@ contract EEZTest is Base {
         _postBatch(rid, e2);
         assertEq(_getRollupState(rid), keccak256("s2"));
         assertEq(rollups.queueLength(rid), 0);
-        assertEq(rollups.executionQueueIndex(rid), 0);
+        assertEq(rollups.entryQueueIndex(rid), 0);
     }
 
     function test_PostBatch_LastVerifiedBlock() public {
@@ -571,9 +571,9 @@ contract EEZTest is Base {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: new ExecutionEntry[](0),
-            staticLookups: new StaticExecutionEntry[](0),
+            staticEntries: new StaticExecutionEntry[](0),
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -602,7 +602,7 @@ contract EEZTest is Base {
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
-        _postBatchSingleMulti(rids, entries, _emptyStaticLookups(), 0, 0);
+        _postBatchSingleMulti(rids, entries, _emptyStaticEntries(), 0, 0);
     }
 
     // NOTE: `test_SubBatch_RollupInMultipleSubBatchesReverts` was dropped after the multi-
@@ -636,7 +636,7 @@ contract EEZTest is Base {
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
         lookups[0] = _revertedStaticLookup(rid, keccak256("h"), hex"deadbeef");
 
-        vm.expectRevert(EEZ.ImmediateStaticLookupsWithoutImmediateEntries.selector);
+        vm.expectRevert(EEZ.ImmediateStaticEntriesWithoutImmediateEntries.selector);
         _postBatchSingle(rid, new ExecutionEntry[](0), lookups, 0, 1);
     }
 
@@ -769,7 +769,7 @@ contract EEZTest is Base {
         uint256[] memory rids = new uint256[](2);
         rids[0] = r1 < r2 ? r1 : r2;
         rids[1] = r1 < r2 ? r2 : r1;
-        _postBatchSingleMulti(rids, entries, _emptyStaticLookups(), 1, 0);
+        _postBatchSingleMulti(rids, entries, _emptyStaticEntries(), 1, 0);
 
         assertEq(_getRollupEtherBalance(r1), 3 ether);
         assertEq(_getRollupEtherBalance(r2), 2 ether);
@@ -1250,9 +1250,9 @@ contract EEZTest is Base {
     // it runs, verifies its rolling hash, then reverts with the cached `returnData`, rolling back all
     // state effects (including the cursor advance) so the caller's try/catch sees the revert and the
     // queue is not consumed. (There is no separate reverted-lookup pool for state-changing calls; the
-    // read-only `StaticExecutionEntry` pool serves static reads via `staticCallLookup`.)
+    // read-only `StaticExecutionEntry` pool serves static reads via `staticCrossChainCall`.)
 
-    /// @notice Deferred path: the reverting entry sits in `verificationByRollup[rid].executionQueue`
+    /// @notice Deferred path: the reverting entry sits in `verificationByRollup[rid].entryQueue`
     ///         and a top-level proxy call reverts with its cached returnData; the cursor advance rolls
     ///         back with the revert, so a second identical call reverts identically.
     function test_RevertedLookup_TopLevel_Deferred() public {
@@ -1268,21 +1268,21 @@ contract EEZTest is Base {
         entries[0] = _revertedEntry(rid, bytes32(0), h, payload);
         _postBatchSingle(rid, entries, 0); // deferred — queued, consumed via the proxy
 
-        uint256 cursorBefore = rollups.executionQueueIndex(rid);
+        uint256 cursorBefore = rollups.entryQueueIndex(rid);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.executionQueueIndex(rid), cursorBefore, "reverting entry rolls back the cursor advance");
+        assertEq(rollups.entryQueueIndex(rid), cursorBefore, "reverting entry rolls back the cursor advance");
 
         // Repeatable: a second identical call reverts identically, still no advance.
         (ok, ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.executionQueueIndex(rid), cursorBefore);
+        assertEq(rollups.entryQueueIndex(rid), cursorBefore);
     }
 
-    /// @notice Transient path: the reverting entry lives in `_transientExecutions` and is hit by a
+    /// @notice Transient path: the reverting entry lives in `_transientEntries` and is hit by a
     ///         proxy call fired from inside the meta hook (the only window the transient table exists).
     function test_RevertedLookup_TopLevel_Transient() public {
         (uint64 rid, Rollup rollup) = _makeRollupLocal(bytes32(0), alice);
@@ -1304,7 +1304,7 @@ contract EEZTest is Base {
         // immediateEntryCount = 1 → the entry stays in the transient table for the meta hook.
         RollupHandle memory handle = RollupHandle({id: rid, manager: rollup});
         ProofSystemBatchPerVerificationEntries memory batch =
-            _singleSubBatch(handle, entries, _emptyStaticLookups(), 1, 0);
+            _singleSubBatch(handle, entries, _emptyStaticEntries(), 1, 0);
         caller.post(batch);
 
         assertTrue(caller.hookRan(), "meta hook did not run");
@@ -1317,7 +1317,7 @@ contract EEZTest is Base {
         (uint64 rid,) = _makeRollupLocal(bytes32(0), alice);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
         // Verify the rollup this block, but post nothing to consume.
-        _postBatchSingle(rid, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        _postBatchSingle(rid, _emptyEntries(), _emptyStaticEntries(), 0, 0);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
@@ -1399,7 +1399,7 @@ contract EEZTest is Base {
         assertFalse(ok);
         assertEq(ret, payload, "must revert with the entry's returnData");
         assertEq(target.value(), 0, "sub-execution state must be discarded by the terminal revert");
-        assertEq(rollups.executionQueueIndex(rid), 0, "reverting entry rolls back the cursor advance");
+        assertEq(rollups.entryQueueIndex(rid), 0, "reverting entry rolls back the cursor advance");
     }
 
     /// @notice Proves the sub-execution actually RUNS the sub-calls: a wrong `rollingHash` makes the

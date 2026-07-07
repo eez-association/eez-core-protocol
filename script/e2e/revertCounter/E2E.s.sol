@@ -26,7 +26,7 @@ import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -244,7 +244,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         address counterProxy
     )
         external
@@ -267,9 +267,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -305,7 +305,7 @@ contract Execute is Script, RevertActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterL1, counterL2, address(batcher)),
-            noStaticLookups(),
+            noStaticEntries(),
             counterProxy
         );
 

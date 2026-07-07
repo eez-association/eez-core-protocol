@@ -27,7 +27,7 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
+    noStaticEntries,
     noCalls,
     noL2Calls,
     RollingHashBuilder
@@ -452,7 +452,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         address ncProxy
     )
         external
@@ -475,9 +475,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -509,7 +509,7 @@ contract Execute is Script, DeepNestedActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterL2, capAddr, ncAddr, address(batcher)),
-            noStaticLookups(),
+            noStaticEntries(),
             ncProxy
         );
 

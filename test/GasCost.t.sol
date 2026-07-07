@@ -331,9 +331,9 @@ contract GasCost is Base {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: _emptyStaticLookups(),
+            staticEntries: _emptyStaticEntries(),
             immediateEntryCount: immediateCount,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -1223,7 +1223,7 @@ contract GasCost is Base {
         e[0].returnData = abi.encode(uint256(1));
         // l2ToL1Calls / expectedL1ToL2Calls empty
 
-        _postBatchOne(rB, e, _emptyStaticLookups(), 0, 0);
+        _postBatchOne(rB, e, _emptyStaticEntries(), 0, 0);
     }
 
     /// @notice Scenario 3 realized on L1 (mirror of scenario 4): alice -> D'(proxy) consumes an

@@ -15,11 +15,11 @@ import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noL2Calls,
     noL2OutgoingCalls,
-    noL2StaticLookups,
+    noL2StaticEntries,
     deferredSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
@@ -182,7 +182,7 @@ contract ExecuteL2 is Script, CounterL2Actions {
 
         vm.startBroadcast();
         EEZL2(vm.envAddress("MANAGER_L2"))
-            .loadExecutionTable(_l2Entries(vm.envAddress("COUNTER_L1"), capAddr), noL2StaticLookups());
+            .loadExecutionTable(_l2Entries(vm.envAddress("COUNTER_L1"), capAddr), noL2StaticEntries());
         CounterAndProxy(capAddr).incrementProxy();
 
         console.log("done");
@@ -200,7 +200,7 @@ contract ExecuteL2 is Script, CounterL2Actions {
 contract DeferredL2TXBatcher is CounterL2Actions {
     function execute(EEZ rollups, address proofSystem, address counterL1, address capL2) external {
         rollups.postAndVerifyBatch(
-            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticLookups())
+            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticEntries())
         );
         rollups.executeL2Txs(L2_ROLLUP_ID);
     }

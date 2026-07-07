@@ -20,7 +20,7 @@ import {HelloWorldL1, HelloWorldL2, IHelloWorldL2} from "../../../test/mocks/hel
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -155,7 +155,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         HelloWorldL1 h1
     )
         external
@@ -179,9 +179,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -231,7 +231,7 @@ contract Execute is Script, HelloActions {
         vm.startBroadcast();
         Batcher batcher = new Batcher();
         string memory greeting = batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, _l1Entries(helloL2Addr, h1Addr), noStaticLookups(), HelloWorldL1(h1Addr)
+            EEZ(rollupsAddr), proofSystemAddr, _l1Entries(helloL2Addr, h1Addr), noStaticEntries(), HelloWorldL1(h1Addr)
         );
         console.log("done");
         console.log("greeting=%s", greeting);

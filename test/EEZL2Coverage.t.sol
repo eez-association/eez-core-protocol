@@ -29,7 +29,7 @@ contract ViewTargetL2 {
 }
 
 /// @notice Performs a cross-chain STATICCALL through a proxy from inside an entry's call,
-///         exercising the nested `staticCallLookup` path + the proxy's static-context detection.
+///         exercising the nested `staticCrossChainCall` path + the proxy's static-context detection.
 contract StaticReaderL2 {
     function readUint(address proxy, bytes calldata data) external view returns (uint256) {
         (bool ok, bytes memory ret) = proxy.staticcall(data);
@@ -49,7 +49,7 @@ contract OutgoingForwarderL2 {
 }
 
 /// @notice Coverage tests for `src/L2/EEZL2.sol` — value forwarding, executeIncomingCrossChainCall,
-///         reentrant ExpectedOutgoing success path, and nested + top-level staticCallLookup.
+///         reentrant ExpectedOutgoing success path, and nested + top-level staticCrossChainCall.
 contract EEZL2CoverageTest is Test {
     EEZL2 public manager;
     ViewTargetL2 public target;
@@ -314,7 +314,7 @@ contract EEZL2CoverageTest is Test {
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
-        assertEq(manager.executionIndex(), 1, "executionIndex advances past entries[0]");
+        assertEq(manager.entryIndex(), 1, "entryIndex advances past entries[0]");
     }
 
     // ──────────────────────────────────────────────
@@ -392,12 +392,12 @@ contract EEZL2CoverageTest is Test {
     }
 
     // ──────────────────────────────────────────────
-    //  staticCallLookup — top-level pool
+    //  staticCrossChainCall — top-level pool
     // ──────────────────────────────────────────────
 
     function test_StaticLookup_Unauthorized() public {
         vm.expectRevert(EEZBase.UnauthorizedProxy.selector);
-        manager.staticCallLookup(address(this), "");
+        manager.staticCrossChainCall(address(this), "");
     }
 
     function test_StaticLookup_TopLevelSuccess() public {
@@ -416,7 +416,7 @@ contract EEZL2CoverageTest is Test {
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
-        bytes memory res = manager.staticCallLookup(address(this), cd);
+        bytes memory res = manager.staticCrossChainCall(address(this), cd);
         assertEq(res, payload);
     }
 
@@ -436,7 +436,7 @@ contract EEZL2CoverageTest is Test {
 
         vm.prank(proxy);
         vm.expectRevert(payload);
-        manager.staticCallLookup(address(this), cd);
+        manager.staticCrossChainCall(address(this), cd);
     }
 
     function test_StaticLookup_TopLevelHashMismatch() public {
@@ -454,7 +454,7 @@ contract EEZL2CoverageTest is Test {
 
         vm.prank(proxy);
         vm.expectRevert(EEZBase.RollingHashMismatch.selector);
-        manager.staticCallLookup(address(this), cd);
+        manager.staticCrossChainCall(address(this), cd);
     }
 
     function test_StaticLookup_TopLevelNoMatch() public {
@@ -463,7 +463,7 @@ contract EEZL2CoverageTest is Test {
 
         vm.prank(proxy);
         vm.expectRevert(EEZBase.ExecutionNotFound.selector);
-        manager.staticCallLookup(address(this), abi.encodeCall(ViewTargetL2.getValue, ()));
+        manager.staticCrossChainCall(address(this), abi.encodeCall(ViewTargetL2.getValue, ()));
     }
 
     /// Top-level lookup carrying a real static sub-call: `_processNStaticCalls` runs it
@@ -500,11 +500,11 @@ contract EEZL2CoverageTest is Test {
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
-        bytes memory res = manager.staticCallLookup(address(this), cd);
+        bytes memory res = manager.staticCrossChainCall(address(this), cd);
         assertEq(res, payload);
     }
 
-    /// Static sub-call whose source proxy was never deployed reverts LookupCallProxyNotDeployed.
+    /// Static sub-call whose source proxy was never deployed reverts StaticCallProxyNotDeployed.
     function test_StaticLookup_SubCallProxyNotDeployed() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
@@ -532,12 +532,12 @@ contract EEZL2CoverageTest is Test {
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
-        vm.expectRevert(abi.encodeWithSelector(EEZBase.LookupCallProxyNotDeployed.selector, undeployedProxy));
-        manager.staticCallLookup(address(this), cd);
+        vm.expectRevert(abi.encodeWithSelector(EEZBase.StaticCallProxyNotDeployed.selector, undeployedProxy));
+        manager.staticCrossChainCall(address(this), cd);
     }
 
     // ──────────────────────────────────────────────
-    //  staticCallLookup — nested inside execution
+    //  staticCrossChainCall — nested inside execution
     // ──────────────────────────────────────────────
 
     /// An entry whose call performs a cross-chain STATICCALL resolves through the active entry's
@@ -598,7 +598,7 @@ contract EEZL2CoverageTest is Test {
         assertTrue(ok, "entry with nested static read must commit");
     }
 
-    /// Nested staticCallLookup with no matching outgoing entry reverts ExecutionNotFound,
+    /// Nested staticCrossChainCall with no matching outgoing entry reverts ExecutionNotFound,
     /// surfacing as the outer call failing.
     function test_StaticLookup_NestedNoMatch() public {
         StaticReaderL2 reader = new StaticReaderL2();

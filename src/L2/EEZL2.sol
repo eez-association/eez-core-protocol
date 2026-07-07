@@ -34,17 +34,17 @@ contract EEZL2 is EEZBase {
     ///      or swap the table mid-execution).
     address public immutable SYSTEM_ADDRESS;
 
-    /// @notice Array of pre-computed executions
-    ExecutionEntry[] public executions;
+    /// @notice Array of pre-computed entries
+    ExecutionEntry[] public entries;
 
-    /// @notice Array of pre-computed top-level static-lookup results
-    StaticExecutionEntry[] public staticLookups;
+    /// @notice Array of pre-computed top-level static entries
+    StaticExecutionEntry[] public staticEntries;
 
     /// @notice Last block number when execution table was loaded
     uint256 public lastLoadBlock;
 
     /// @notice Index of the next execution entry to consume
-    uint256 public executionIndex;
+    uint256 public entryIndex;
 
     // ──────────────────────────────────────────────
     //  Transient execution state
@@ -56,7 +56,7 @@ contract EEZL2 is EEZBase {
     bool transient _executing;
 
     /// @notice Forward-scan position into the entry's unified `expectedOutgoingCalls`. MUST be
-    ///         transient — `_consumeNestedCall` / `staticCallLookup` read it from fresh reentrant
+    ///         transient — `_consumeNestedCall` / `staticCrossChainCall` read it from fresh reentrant
     ///         frames; it rides the `ContextResult` payload across a revert-span boundary.
     uint256 transient _lastOutgoingCallConsumed;
 
@@ -88,7 +88,7 @@ contract EEZL2 is EEZBase {
     event ExecutionTableLoaded(ExecutionEntry[] entries);
 
     /// @notice Emitted when an execution entry is consumed
-    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionIndex);
+    event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryIndex);
 
     /// @notice Emitted when the system address initiates an incoming cross-chain call from another rollup
     event IncomingCrossChainCallExecuted(
@@ -130,34 +130,34 @@ contract EEZL2 is EEZBase {
     //  Admin: load execution table
     // ──────────────────────────────────────────────
 
-    /// @notice Loads execution entries and static lookups into the execution table (system only)
+    /// @notice Loads execution entries and static entries into the execution table (system only)
     /// @dev Clears previous entries and stores new ones. Entries must be consumed in the same block.
-    /// @param entries The execution entries to load
-    /// @param _staticLookups The top-level static-lookup results to load
-    function loadExecutionTable(ExecutionEntry[] calldata entries, StaticExecutionEntry[] calldata _staticLookups)
+    /// @param _entries The execution entries to load
+    /// @param _staticEntries The top-level static entries to load
+    function loadExecutionTable(ExecutionEntry[] calldata _entries, StaticExecutionEntry[] calldata _staticEntries)
         external
         onlySystemAddress
     {
-        _loadExecutionTable(entries, _staticLookups);
+        _loadExecutionTable(_entries, _staticEntries);
     }
 
     /// @notice Internal: replaces the execution table and resets the consumption cursor
     /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`
-    function _loadExecutionTable(ExecutionEntry[] calldata entries, StaticExecutionEntry[] calldata _staticLookups)
+    function _loadExecutionTable(ExecutionEntry[] calldata _entries, StaticExecutionEntry[] calldata _staticEntries)
         internal
     {
-        delete executions;
-        delete staticLookups;
-        executionIndex = 0;
+        delete entries;
+        delete staticEntries;
+        entryIndex = 0;
 
-        for (uint256 i = 0; i < entries.length; i++) {
-            executions.push(entries[i]);
+        for (uint256 i = 0; i < _entries.length; i++) {
+            entries.push(_entries[i]);
         }
-        for (uint256 i = 0; i < _staticLookups.length; i++) {
-            staticLookups.push(_staticLookups[i]);
+        for (uint256 i = 0; i < _staticEntries.length; i++) {
+            staticEntries.push(_staticEntries[i]);
         }
         lastLoadBlock = block.number;
-        emit ExecutionTableLoaded(entries);
+        emit ExecutionTableLoaded(_entries);
     }
 
     // ──────────────────────────────────────────────
@@ -214,36 +214,36 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice System-initiated execution of an incoming cross-chain call from another rollup
-    /// @dev Atomically replaces the execution table and drives `executions[0]` through the
+    /// @dev Atomically replaces the execution table and drives `entries[0]` through the
     ///      flat call processor. The first entry's `incomingCalls[0]` is the inbound call itself
     ///      (its `sourceAddress` / `sourceRollupId` / `targetAddress` / `value` / `data` must
     ///      match the explicit params passed here — the prover builds them consistently).
     ///      `_executeEntry` makes the actual proxy invocation, folds tagged events into the rolling
     ///      hash, and handles `revertNextNCalls`. Reentrant cross-chain calls during execution see
-    ///      `_insideExecution() == true` and consume from `executions[0].expectedOutgoingCalls`.
+    ///      `_insideExecution() == true` and consume from `entries[0].expectedOutgoingCalls`.
     /// @param destination The L2 destination address (target of the inbound call)
     /// @param value The ETH value forwarded to the destination
     /// @param data The calldata for the destination
     /// @param sourceAddress The original caller address on the source rollup
     /// @param sourceRollup The source rollup ID
-    /// @param entries The execution entries to load (entries[0] is consumed by this call)
-    /// @param _staticLookups The static-lookup results to load (used for STATICCALL reads)
-    /// @return result The pre-computed return data from `executions[0]`
+    /// @param _entries The execution entries to load (entries[0] is consumed by this call)
+    /// @param _staticEntries The static entries to load (used for STATICCALL reads)
+    /// @return result The pre-computed return data from `entries[0]`
     function executeIncomingCrossChainCall(
         address destination,
         uint256 value,
         bytes calldata data,
         address sourceAddress,
         uint64 sourceRollup,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata _staticLookups
+        ExecutionEntry[] calldata _entries,
+        StaticExecutionEntry[] calldata _staticEntries
     )
         external
         payable
         onlySystemAddress
         returns (bytes memory result)
     {
-        if (entries.length == 0) revert EmptyEntries();
+        if (_entries.length == 0) revert EmptyEntries();
         // ETH model: the system mints `value` on L2 by attaching it to msg.value. That ETH
         // lives in the manager balance and is drawn down by `_processNCalls` when it forwards
         // through the source proxy (`sourceProxy.call{value: cc.value}(...)`). Strict equality
@@ -252,7 +252,7 @@ contract EEZL2 is EEZBase {
         if (msg.value != value) revert ValueMismatch();
 
         // 1. Replace the execution table (same logic as loadExecutionTable)
-        _loadExecutionTable(entries, _staticLookups);
+        _loadExecutionTable(_entries, _staticEntries);
 
         // 2. Compute and emit the action hash binding this top-level call
         bytes32 crossChainCallHash = computeCrossChainCallHash(
@@ -265,7 +265,7 @@ contract EEZL2 is EEZBase {
         //    all `transient` and default to zero/false at the start of every tx; SYSTEM_ADDRESS
         //    invokes this as a top-level call, once per tx, so they're already what `_executeEntry`
         //    expects (entry index 0, fresh rolling hash, reentrant cursor at 0, not executing).
-        ExecutionEntry storage entry = executions[0];
+        ExecutionEntry storage entry = entries[0];
         if (entry.proxyEntryHash != crossChainCallHash) revert EntryHashMismatch();
 
         _currentEntryIndex = 0;
@@ -273,7 +273,7 @@ contract EEZL2 is EEZBase {
 
         // 4. Advance past entries[0] so follow-up `executeCrossChainCall`s don't re-consume it.
         //    SYSTEM_ADDRESS is not reentry-reachable so no `_insideExecution()` guard is needed.
-        executionIndex = 1;
+        entryIndex = 1;
 
         return entry.returnData;
     }
@@ -283,12 +283,12 @@ contract EEZL2 is EEZBase {
     // ──────────────────────────────────────────────
 
     /// @notice The unified reentrant (outgoing) table a proxy re-entry resolves against — always the
-    ///         entry currently in `_executeEntry`. L2 has a single `executions` table, so the
+    ///         entry currently in `_executeEntry`. L2 has a single `entries` table, so the
     ///         transient `_currentEntryIndex` indexes it directly. A reverted sub-execution shares the
     ///         same table for its own reentrant calls, disambiguated by the `_rollingHash` folded into
     ///         each `expectedOutgoingHash`.
     function _getExpectedOutgoingCalls() internal view returns (ExpectedOutgoingCrossChainCall[] storage) {
-        return executions[_currentEntryIndex].expectedOutgoingCalls;
+        return entries[_currentEntryIndex].expectedOutgoingCalls;
     }
 
     /// @notice Resolves a reentrant (outgoing) CALL: a plain-success entry consumed from
@@ -298,8 +298,8 @@ contract EEZL2 is EEZBase {
     ///      execution point. The scan walks STRICT FORWARD from `_lastOutgoingCallConsumed`; the first
     ///      match IS the entry, and its `success` flag selects the path in `_resolveNestedReentrant`
     ///      (commit vs run-and-revert). Static entries can't match here — their `crossChainCallHash`
-    ///      folds `isStatic = true`, while this lookup is keyed with `isStatic = false`; the proxy
-    ///      routes reentrant STATICCALLs to `staticCallLookup`. On no match, `_rollingHashCallNotFound`
+    ///      folds `isStatic = true`, while this match is keyed with `isStatic = false`; the proxy
+    ///      routes reentrant STATICCALLs to `staticCrossChainCall`. On no match, `_rollingHashCallNotFound`
     ///      folds CALL_NOT_FOUND so the entry reverts at its rolling-hash check (`RollingHashMismatch`).
     function _consumeNestedCall(bytes32 crossChainCallHash) internal returns (bytes memory) {
         ExpectedOutgoingCrossChainCall[] storage expectedCalls = _getExpectedOutgoingCalls();
@@ -360,13 +360,13 @@ contract EEZL2 is EEZBase {
     /// @dev Forward-scan from the cursor skips intervening non-matches so a top-level call can reach
     ///      past already-attempted entries (a `success == false` entry reverts, leaving the cursor where
     ///      it was). No reverted fallback: top-level reverting calls are normal entries
-    ///      (`success == false`), and the static pool (`StaticExecutionEntry`) is read-only (`staticCallLookup`).
+    ///      (`success == false`), and the static pool (`StaticExecutionEntry`) is read-only (`staticCrossChainCall`).
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
     function _consumeAndExecute(bytes32 crossChainCallHash) internal returns (bytes memory result) {
-        uint256 idx = _findMatchingEntry(executionIndex, crossChainCallHash);
-        executionIndex = idx + 1;
-        ExecutionEntry storage entry = executions[idx];
+        uint256 idx = _findMatchingEntry(entryIndex, crossChainCallHash);
+        entryIndex = idx + 1;
+        ExecutionEntry storage entry = entries[idx];
 
         emit ExecutionConsumed(crossChainCallHash, idx);
 
@@ -380,13 +380,13 @@ contract EEZL2 is EEZBase {
         return entry.returnData;
     }
 
-    /// @notice Forward-scans `executions` from `startIndex` for the FIRST entry whose `proxyEntryHash`
+    /// @notice Forward-scans `entries` from `startIndex` for the FIRST entry whose `proxyEntryHash`
     ///         matches `crossChainCallHash`, returning its index. Reverts `ExecutionNotFound` if the
     ///         scan reaches the end with no match.
     function _findMatchingEntry(uint256 startIndex, bytes32 crossChainCallHash) internal view returns (uint256) {
-        uint256 queueLen = executions.length;
+        uint256 queueLen = entries.length;
         for (uint256 i = startIndex; i < queueLen; i++) {
-            if (executions[i].proxyEntryHash == crossChainCallHash) return i;
+            if (entries[i].proxyEntryHash == crossChainCallHash) return i;
         }
         revert ExecutionNotFound();
     }
@@ -520,21 +520,21 @@ contract EEZL2 is EEZBase {
     }
 
     // ──────────────────────────────────────────────
-    //  Static lookup
+    //  Static entries
     // ──────────────────────────────────────────────
 
-    /// @notice Looks up a pre-computed lookup result.
+    /// @notice Resolves a pre-computed static entry.
     /// @dev Inside an execution: scans the active entry's unified `expectedOutgoingCalls` for an entry
     ///      whose `expectedOutgoingHash` matches `keccak256(crossChainCallHash, _rollingHash)` — the
     ///      same content-addressed key the reentrant CALLs use. The `crossChainCallHash` here folds
     ///      `isStatic = true`, so only static entries can match. Outside: scans the persistent
-    ///      `staticLookups` pool for a top-level `StaticExecutionEntry` matching `crossChainCallHash` (L2 has no
+    ///      `staticEntries` pool for a top-level `StaticExecutionEntry` matching `crossChainCallHash` (L2 has no
     ///      state roots to pin). tload works in static context, so the transient tracking variables are
     ///      readable.
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
-    function staticCallLookup(address sourceAddress, bytes calldata callData) external view returns (bytes memory) {
+    function staticCrossChainCall(address sourceAddress, bytes calldata callData) external view returns (bytes memory) {
         ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
         if (!proxyInfo.isProxy) revert UnauthorizedProxy();
         address destAddress = proxyInfo.originalAddress;
@@ -561,7 +561,7 @@ contract EEZL2 is EEZBase {
             for (uint256 i = _lastOutgoingCallConsumed; i < expectedCalls.length; i++) {
                 ExpectedOutgoingCrossChainCall storage expectedCall = expectedCalls[i];
                 if (expectedCall.expectedOutgoingHash == expectedOutgoingHash) {
-                    return _resolveStaticLookup(
+                    return _resolveStaticEntry(
                         expectedCall.incomingCalls,
                         expectedCall.revertedOrStaticRollingHash,
                         expectedCall.success,
@@ -573,10 +573,12 @@ contract EEZL2 is EEZBase {
         }
 
         // Top-level: persistent pool, matched by hash alone (L2 has no state roots to pin).
-        for (uint256 i = 0; i < staticLookups.length; i++) {
-            StaticExecutionEntry storage lookup = staticLookups[i];
-            if (lookup.proxyEntryHash == crossChainCallHash) {
-                return _resolveStaticLookup(lookup.incomingCalls, lookup.rollingHash, lookup.success, lookup.returnData);
+        for (uint256 i = 0; i < staticEntries.length; i++) {
+            StaticExecutionEntry storage staticEntry = staticEntries[i];
+            if (staticEntry.proxyEntryHash == crossChainCallHash) {
+                return _resolveStaticEntry(
+                    staticEntry.incomingCalls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
+                );
             }
         }
 
@@ -585,9 +587,9 @@ contract EEZL2 is EEZBase {
 
     /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
     ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
-    ///         lookup's `rollingHash`), then return the cached data, or revert with it when
+    ///         static entry's `rollingHash`), then return the cached data, or revert with it when
     ///         `!success`.
-    function _resolveStaticLookup(
+    function _resolveStaticEntry(
         CrossChainCall[] storage calls,
         bytes32 rollingHash,
         bool success,
@@ -606,7 +608,7 @@ contract EEZL2 is EEZBase {
         return returnData;
     }
 
-    /// @notice Runs the lookup's `calls[]` in static context, folding an untagged rolling hash verified
+    /// @notice Runs the static entry's `calls[]` in static context, folding an untagged rolling hash verified
     ///         against `StaticExecutionEntry.rollingHash` / `ExpectedOutgoingCrossChainCall.revertedOrStaticRollingHash`.
     /// @dev No `revertNextNCalls` since there are no state changes; referenced proxies must already be
     ///      deployed (CREATE2 is unavailable inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
@@ -615,7 +617,7 @@ contract EEZL2 is EEZBase {
             CrossChainCall memory cc = calls[i];
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
-            if (sourceProxy.code.length == 0) revert LookupCallProxyNotDeployed(sourceProxy);
+            if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
             (bool success, bytes memory retData) =
                 sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
             computedHash = _rollingHashStaticResult(computedHash, success, retData);

@@ -15,7 +15,7 @@ import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -36,7 +36,7 @@ contract BridgeBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         Bridge bridge,
         address destination
     )
@@ -56,9 +56,9 @@ contract BridgeBatcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -146,7 +146,7 @@ contract E2EBridgeExecute is Script {
 
         batcher.execute{
             value: 1 ether
-        }(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noStaticLookups(), Bridge(bridgeAddr), destination);
+        }(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noStaticEntries(), Bridge(bridgeAddr), destination);
 
         console.log("done");
 

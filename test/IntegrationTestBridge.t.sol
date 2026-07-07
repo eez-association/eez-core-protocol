@@ -52,7 +52,7 @@ contract TestToken is ERC20 {
 ///   - `success` selects whether an entry returns `returnData` (true) or runs, verifies, then reverts (false)
 ///   - Entries consumed via proxy calls
 ///   - postAndVerifyBatch takes a ProofSystemBatchPerVerificationEntries
-///   - loadExecutionTable takes (entries, staticLookups)
+///   - loadExecutionTable takes (entries, staticEntries)
 ///
 /// ┌────┬───────────────────────────────────────┬──────────┬──────────────────┐
 /// │  # │ Flow                                  │ Direction│ Asset            │
@@ -194,12 +194,12 @@ contract IntegrationTestBridge is Test {
     }
 
     /// @dev Empty L1 top-level static-lookup array.
-    function _noStaticLookups() internal pure returns (StaticExecutionEntry[] memory) {
+    function _noStaticEntries() internal pure returns (StaticExecutionEntry[] memory) {
         return new StaticExecutionEntry[](0);
     }
 
     /// @dev Empty L2 top-level static-lookup array.
-    function _noL2StaticLookups() internal pure returns (L2StaticExecutionEntry[] memory) {
+    function _noL2StaticEntries() internal pure returns (L2StaticExecutionEntry[] memory) {
         return new L2StaticExecutionEntry[](0);
     }
 
@@ -225,9 +225,9 @@ contract IntegrationTestBridge is Test {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: _noStaticLookups(),
+            staticEntries: _noStaticEntries(),
             immediateEntryCount: immediateCount,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -348,7 +348,7 @@ contract IntegrationTestBridge is Test {
             entries[0].returnData = "";
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _noL2StaticEntries());
         }
 
         uint256 aliceBalanceBefore = alice.balance;
@@ -478,7 +478,7 @@ contract IntegrationTestBridge is Test {
             entries[0].returnData = "";
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _noL2StaticEntries());
         }
 
         // Trigger L2 delivery
@@ -598,7 +598,7 @@ contract IntegrationTestBridge is Test {
             entries[0].returnData = "";
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _noL2StaticEntries());
         }
 
         vm.prank(alice);
@@ -642,7 +642,7 @@ contract IntegrationTestBridge is Test {
             entries[0].returnData = "";
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _noL2StaticEntries());
         }
 
         vm.prank(alice);

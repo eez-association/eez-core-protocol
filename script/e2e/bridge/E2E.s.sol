@@ -19,9 +19,9 @@ import {
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
-    noL2StaticLookups,
+    noL2StaticEntries,
     noCalls,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
@@ -172,7 +172,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         BridgeSender sender
     )
         external
@@ -196,9 +196,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -233,7 +233,7 @@ contract ExecuteL2 is Script, BridgeActions {
             senderAddr,
             MAINNET_ROLLUP_ID,
             _l2Entries(l2DestAddr, senderAddr),
-            noL2StaticLookups()
+            noL2StaticEntries()
         );
 
         console.log("done");
@@ -258,7 +258,7 @@ contract Execute is Script, BridgeActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(l2DestAddr, senderAddr),
-            noStaticLookups(),
+            noStaticEntries(),
             BridgeSender(senderAddr)
         );
         console.log("done");

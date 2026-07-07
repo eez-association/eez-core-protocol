@@ -27,7 +27,7 @@ contract ViewTarget {
 }
 
 /// @notice Performs a cross-chain STATICCALL through a proxy from inside an entry's call,
-///         exercising the reentrant `staticCallLookup` path + the proxy's static-context detection.
+///         exercising the reentrant `staticCrossChainCall` path + the proxy's static-context detection.
 contract StaticReader {
     function readUint(address proxy, bytes calldata data) external view returns (uint256) {
         (bool ok, bytes memory ret) = proxy.staticcall(data);
@@ -36,8 +36,8 @@ contract StaticReader {
     }
 }
 
-/// @notice Coverage for `EEZ.staticCallLookup` (top-level pool + reentrant in-execution),
-///         `_resolveStaticLookup`, and `_processNStaticCalls`.
+/// @notice Coverage for `EEZ.staticCrossChainCall` (top-level pool + reentrant in-execution),
+///         `_resolveStaticEntry`, and `_processNStaticCalls`.
 contract EEZStaticLookupTest is Base {
     ViewTarget internal target;
     address internal alice = makeAddr("alice");
@@ -54,7 +54,7 @@ contract EEZStaticLookupTest is Base {
         _postBatchOne(r, _emptyEntries(), lookups, 0, 0);
     }
 
-    /// @notice Static cross-chain-call hash as `staticCallLookup` derives it for a proxy
+    /// @notice Static cross-chain-call hash as `staticCrossChainCall` derives it for a proxy
     ///         routing `(src → tgt on rid)` (target rollup = `rid`, source rollup = MAINNET).
     function _staticHash(uint256 rid, address tgt, bytes memory cd, address src) internal pure returns (bytes32) {
         return _ccHash(IS_STATIC, src, uint64(MAINNET), tgt, uint64(rid), 0, cd);
@@ -63,7 +63,7 @@ contract EEZStaticLookupTest is Base {
     /// @notice Minimal top-level static lookup pinned to `rid`'s live root.
     /// @dev Match key: `proxyEntryHash` (the static cch) + `destinationRollupId` + every
     ///      `expectedStateRoots` pin live. `success == false` resolves by reverting with `ret`.
-    function _staticLookup(uint256 rid, bytes32 hash, bool success, bytes memory ret)
+    function _staticEntry(uint256 rid, bytes32 hash, bool success, bytes memory ret)
         internal
         view
         returns (StaticExecutionEntry memory lc)
@@ -86,7 +86,7 @@ contract EEZStaticLookupTest is Base {
     function test_StaticLookup_Unauthorized() public {
         _makeRollup(bytes32(0));
         vm.expectRevert(EEZBase.UnauthorizedProxy.selector);
-        rollups.staticCallLookup(sourceAddr, "");
+        rollups.staticCrossChainCall(sourceAddr, "");
     }
 
     function test_StaticLookup_TopLevelSuccess() public {
@@ -97,11 +97,11 @@ contract EEZStaticLookupTest is Base {
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        lookups[0] = _staticLookup(r.id, h, true, payload);
+        lookups[0] = _staticEntry(r.id, h, true, payload);
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
-        bytes memory res = rollups.staticCallLookup(sourceAddr, cd);
+        bytes memory res = rollups.staticCrossChainCall(sourceAddr, cd);
         assertEq(res, payload);
     }
 
@@ -113,12 +113,12 @@ contract EEZStaticLookupTest is Base {
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        lookups[0] = _staticLookup(r.id, h, false, payload); // !success → reverts with payload
+        lookups[0] = _staticEntry(r.id, h, false, payload); // !success → reverts with payload
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
         vm.expectRevert(payload);
-        rollups.staticCallLookup(sourceAddr, cd);
+        rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
     function test_StaticLookup_TopLevelHashMismatchReverts() public {
@@ -128,23 +128,23 @@ contract EEZStaticLookupTest is Base {
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        lookups[0] = _staticLookup(r.id, h, true, "");
+        lookups[0] = _staticEntry(r.id, h, true, "");
         lookups[0].rollingHash = keccak256("wrong"); // no sub-calls → computed 0 != wrong
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
         vm.expectRevert(EEZBase.RollingHashMismatch.selector);
-        rollups.staticCallLookup(sourceAddr, cd);
+        rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
     function test_StaticLookup_TopLevelNoMatchReverts() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
         address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
-        _stdBatchPost(r, _emptyStaticLookups()); // verified, empty static-lookup queue
+        _stdBatchPost(r, _emptyStaticEntries()); // verified, empty static-lookup queue
 
         vm.prank(proxyAddr);
         vm.expectRevert(EEZBase.ExecutionNotFound.selector);
-        rollups.staticCallLookup(sourceAddr, abi.encodeCall(ViewTarget.getValue, ()));
+        rollups.staticCrossChainCall(sourceAddr, abi.encodeCall(ViewTarget.getValue, ()));
     }
 
     /// @notice Top-level static lookup carrying a real static sub-call: `_processNStaticCalls` runs it
@@ -164,7 +164,7 @@ contract EEZStaticLookupTest is Base {
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        StaticExecutionEntry memory lc = _staticLookup(r.id, h, true, payload);
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, payload);
         L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
         subCalls[0] = L2ToL1Call({
             revertNextNCalls: 0,
@@ -181,12 +181,12 @@ contract EEZStaticLookupTest is Base {
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
-        bytes memory res = rollups.staticCallLookup(sourceAddr, cd);
+        bytes memory res = rollups.staticCrossChainCall(sourceAddr, cd);
         assertEq(res, payload);
     }
 
     /// @notice A static sub-call whose source proxy was never deployed reverts
-    ///         `LookupCallProxyNotDeployed`.
+    ///         `StaticCallProxyNotDeployed`.
     function test_StaticLookup_SubCallProxyNotDeployed() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
         address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
@@ -197,7 +197,7 @@ contract EEZStaticLookupTest is Base {
         address undeployedProxy = rollups.computeCrossChainProxyAddress(undeployedSource, uint64(r.id));
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        StaticExecutionEntry memory lc = _staticLookup(r.id, h, true, "");
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, "");
         L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
         subCalls[0] = L2ToL1Call({
             revertNextNCalls: 0,
@@ -213,8 +213,8 @@ contract EEZStaticLookupTest is Base {
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
-        vm.expectRevert(abi.encodeWithSelector(EEZBase.LookupCallProxyNotDeployed.selector, undeployedProxy));
-        rollups.staticCallLookup(sourceAddr, cd);
+        vm.expectRevert(abi.encodeWithSelector(EEZBase.StaticCallProxyNotDeployed.selector, undeployedProxy));
+        rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
     // ──────────────────────────────────────────────
@@ -280,7 +280,7 @@ contract EEZStaticLookupTest is Base {
         entries[0].success = true;
         entries[0].returnData = "";
 
-        _postBatchOne(r, entries, _emptyStaticLookups(), 1, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
         assertEq(_getRollupState(r.id), keccak256("s1"), "entry must commit through the nested static read");
     }
 }

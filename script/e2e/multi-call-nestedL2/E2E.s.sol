@@ -21,10 +21,10 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noL2Calls,
-    noL2StaticLookups,
+    noL2StaticEntries,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -270,7 +270,7 @@ contract ExecuteL2 is Script, MultiCallNestedL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s cap=%s capL1Proxy=%s", alice, capAddr, capL1Proxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noL2StaticEntries());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls capL1Proxy.incrementProxy()
@@ -295,7 +295,7 @@ contract DeferredL2TXBatcherTwice {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticEntries
     )
         external
     {
@@ -312,9 +312,9 @@ contract DeferredL2TXBatcherTwice {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -340,7 +340,7 @@ contract Execute is Script, MultiCallNestedL2Actions {
 
         vm.startBroadcast();
         DeferredL2TXBatcherTwice batcher = new DeferredL2TXBatcherTwice();
-        batcher.execute(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap), noStaticLookups());
+        batcher.execute(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap), noStaticEntries());
 
         console.log("Execute: done");
         console.log("L1 counter=%s (expected 2)", Counter(counterL1).counter());

@@ -27,8 +27,8 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
 ///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
 ///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
-///          (`_resolveNestedReentrant`), `_resolveStaticLookup`, `_processNStaticCalls`,
-///          `staticCallLookup`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
+///          (`_resolveNestedReentrant`), `_resolveStaticEntry`, `_processNStaticCalls`,
+///          `staticCrossChainCall`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
 ///          `_sliceCrossChainCalls`).
 ///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
 ///          L2: `EntryExecuted`, `CallResult`, …).
@@ -63,12 +63,12 @@ abstract contract EEZBase is IEEZ {
     bytes32 transient _rollingHash;
 
     /// @notice The current execution entry being processed.
-    /// @dev L1 uses this to index `_transientExecutions` while a batch is mid-flight, otherwise
-    ///      `verificationByRollup[_currentEntryRollupId].executionQueue`. L2 always indexes `executions`.
+    /// @dev L1 uses this to index `_transientEntries` while a batch is mid-flight, otherwise
+    ///      `verificationByRollup[_currentEntryRollupId].entryQueue`. L2 always indexes `executions`.
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
-    // Sub-frame / reverted-lookup pointers are NOT shared here: L1 no longer needs them (it passes
+    // Sub-frame pointers are NOT shared here: L1 no longer needs them (it passes
     // the active call array to `_processNCalls` by `memory`), so they live in `EEZL2` only.
 
     // ──────────────────────────────────────────────
@@ -115,9 +115,9 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
 
-    /// @notice Error when a lookup-call sub-call targets an un-deployed proxy
+    /// @notice Error when a static sub-call targets an un-deployed proxy
     /// @dev STATICCALL to a codeless address returns `(true, "")`; prover could pre-hash that.
-    error LookupCallProxyNotDeployed(address sourceProxy);
+    error StaticCallProxyNotDeployed(address sourceProxy);
 
     /// @notice Error when a call marked `isStatic` was loaded carrying ETH value.
     /// @dev A STATICCALL cannot transfer value, so a non-zero `value` on a static call is a
@@ -260,8 +260,8 @@ abstract contract EEZBase is IEEZ {
     // the hash from a continuous run.
     //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
-    // because they're verified against `LookupCall.rollingHash`, a separate accumulator
-    // whose surrounding lookup key already pins the entry/call/nesting context. See spec §E.2.
+    // because they're verified against `StaticExecutionEntry.rollingHash`, a separate accumulator
+    // whose surrounding static-entry key already pins the entry/call/nesting context. See spec §E.2.
     //
     // These tags are protocol constants — a call executed on either chain MUST hash the same
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame
@@ -322,8 +322,8 @@ abstract contract EEZBase is IEEZ {
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
-    ///         `_rollingHash` because lookup calls are verified against
-    ///         `LookupCall.rollingHash`, a separate per-LookupCall accumulator.
+    ///         `_rollingHash` because static sub-calls are verified against
+    ///         `StaticExecutionEntry.rollingHash`, a separate per-static-entry accumulator.
     ///          Is much less constrained since static calls do not have state race conditions
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal

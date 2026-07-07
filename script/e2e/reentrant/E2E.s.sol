@@ -26,7 +26,7 @@ import {ReentrantCounter} from "../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noCalls,
     expectedL1toL2Hash,
     RollingHashBuilder
@@ -393,7 +393,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         address rcL1ProxyOnL1
     )
         external
@@ -416,9 +416,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -448,7 +448,7 @@ contract Execute is Script, ReentrantActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(rcL1Addr, rcL2Addr, address(batcher)),
-            noStaticLookups(),
+            noStaticEntries(),
             rcL1ProxyOnL1
         );
 

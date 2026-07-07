@@ -182,9 +182,9 @@ contract EEZCoverageTest is Base {
     {
         b.blockNumber = 0;
         b.entries = entries;
-        b.staticLookups = lookups;
+        b.staticEntries = lookups;
         b.immediateEntryCount = tc;
-        b.immediateStaticLookupCount = tlc;
+        b.immediateStaticEntryCount = tlc;
         b.proofSystems = psList;
         b.rollupIdsWithProofSystems = rps;
         b.blobIndices = new uint256[](0);
@@ -220,7 +220,7 @@ contract EEZCoverageTest is Base {
         address[] memory psList = new address[](0);
         bytes[] memory proofs = new bytes[](0);
         ProofSystemBatchPerVerificationEntries memory b =
-            _raw(_emptyEntries(), _emptyStaticLookups(), psList, proofs, _rpsOne(r.id, 1), 0, 0);
+            _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, _rpsOne(r.id, 1), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -231,7 +231,7 @@ contract EEZCoverageTest is Base {
         psList[0] = address(ps);
         bytes[] memory proofs = new bytes[](2); // mismatch
         ProofSystemBatchPerVerificationEntries memory b =
-            _raw(_emptyEntries(), _emptyStaticLookups(), psList, proofs, _rpsOne(r.id, 1), 0, 0);
+            _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, _rpsOne(r.id, 1), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -243,21 +243,21 @@ contract EEZCoverageTest is Base {
         proofs[0] = "proof";
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](0);
         ProofSystemBatchPerVerificationEntries memory b =
-            _raw(_emptyEntries(), _emptyStaticLookups(), psList, proofs, rps, 0, 0);
+            _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, rps, 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
 
     function test_Validate_UnregisteredRollup() public {
         // rollupId 999 has no manager registered.
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(999, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(999, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
 
     function test_Validate_EmptyProofSystemIndex() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         b.rollupIdsWithProofSystems[0].proofSystemIndexes = new uint64[](0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
@@ -265,7 +265,7 @@ contract EEZCoverageTest is Base {
 
     function test_Validate_IndexOutOfRange() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         uint64[] memory idx = new uint64[](1);
         idx[0] = 5; // >= psLen (1)
         b.rollupIdsWithProofSystems[0].proofSystemIndexes = idx;
@@ -288,7 +288,7 @@ contract EEZCoverageTest is Base {
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
         rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: idx});
         ProofSystemBatchPerVerificationEntries memory b =
-            _raw(_emptyEntries(), _emptyStaticLookups(), psList, proofs, rps, 0, 0);
+            _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, rps, 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -300,7 +300,7 @@ contract EEZCoverageTest is Base {
         deltas[1] = StateDelta({rollupId: uint64(r.id), currentState: bytes32(0), newState: bytes32(0), etherDelta: 0});
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EEZ.StateDeltasNotStrictlyIncreasing.selector, uint64(r.id)));
         rollups.postAndVerifyBatch(b);
     }
@@ -312,7 +312,7 @@ contract EEZCoverageTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].destinationRollupId = 12345; // not in deltas
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EEZ.EntryDestinationNotInStateDeltas.selector, uint64(12345)));
         rollups.postAndVerifyBatch(b);
     }
@@ -334,7 +334,7 @@ contract EEZCoverageTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].l2ToL1Calls = calls;
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EEZ.CallSourceNotVerified.selector, uint64(9999)));
         rollups.postAndVerifyBatch(b);
     }
@@ -369,7 +369,7 @@ contract EEZCoverageTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].expectedL1ToL2Calls = reentrant;
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EEZ.CallSourceNotVerified.selector, uint64(8888)));
         rollups.postAndVerifyBatch(b);
     }
@@ -432,14 +432,14 @@ contract EEZCoverageTest is Base {
         pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(r.id), stateRoot: _getRollupState(r.id)});
         lookups[0].expectedStateRoots = pins;
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), lookups, 0, 0);
-        vm.expectRevert(abi.encodeWithSelector(EEZ.LookupDestinationNotPinned.selector, uint64(555)));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.StaticEntryDestinationNotPinned.selector, uint64(555)));
         rollups.postAndVerifyBatch(b);
     }
 
     function test_Validate_ImmediateCountExceedsEntries() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
         // immediateEntryCount 1 > 0 entries.
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 1, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 1, 0);
         vm.expectRevert(EEZ.ImmediateCountExceedsEntries.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -448,9 +448,9 @@ contract EEZCoverageTest is Base {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _emptyImmediateEntry(r.id);
-        // immediateEntryCount 1 <= 1 entry OK, but immediateStaticLookupCount 1 > 0 lookups → second bound.
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticLookups(), 1, 1);
-        vm.expectRevert(EEZ.ImmediateStaticLookupCountExceedsStaticLookups.selector);
+        // immediateEntryCount 1 <= 1 entry OK, but immediateStaticEntryCount 1 > 0 lookups → second bound.
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 1, 1);
+        vm.expectRevert(EEZ.ImmediateStaticEntryCountExceedsStaticEntries.selector);
         rollups.postAndVerifyBatch(b);
     }
 
@@ -462,7 +462,7 @@ contract EEZCoverageTest is Base {
         BadVkeyManager bad = new BadVkeyManager();
         uint256 rid = rollups.registerRollup(address(bad), bytes32(0));
         // Single PS queried → manager returns 2 vkeys → length mismatch.
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(rid, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(rid, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
         rollups.postAndVerifyBatch(b);
     }
@@ -512,7 +512,7 @@ contract EEZCoverageTest is Base {
             RollupIdWithProofSystems({rollupId: uint64(idHi), proofSystemIndexes: idHi == rAll.id ? idxAll : idxOne});
 
         ProofSystemBatchPerVerificationEntries memory b =
-            _raw(_emptyEntries(), _emptyStaticLookups(), psSorted, proofs, rps, 0, 0);
+            _raw(_emptyEntries(), _emptyStaticEntries(), psSorted, proofs, rps, 0, 0);
         rollups.postAndVerifyBatch(b);
         assertEq(rollups.lastVerifiedBlock(uint64(rAll.id)), block.number);
         assertEq(rollups.lastVerifiedBlock(uint64(rOne.id)), block.number);
@@ -533,14 +533,14 @@ contract EEZCoverageTest is Base {
 
         // Inner batch the hook will try to post (any valid-ish batch — guard fires first).
         ProofSystemBatchPerVerificationEntries memory inner =
-            _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+            _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         caller.setInner(inner);
 
         // Outer batch: one undrained immediate entry so the meta hook fires.
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _emptyImmediateEntry(r.id);
         entries[0].proxyEntryHash = keccak256("undrained");
-        ProofSystemBatchPerVerificationEntries memory outer = _stdBatch(r.id, entries, _emptyStaticLookups(), 1, 0);
+        ProofSystemBatchPerVerificationEntries memory outer = _stdBatch(r.id, entries, _emptyStaticEntries(), 1, 0);
 
         vm.expectRevert(EEZ.PostBatchReentry.selector);
         caller.post(outer);
@@ -687,7 +687,7 @@ contract EEZCoverageTest is Base {
         entries[0].proxyEntryHash = ah;
         entries[0].expectedL1ToL2Calls = reentrant;
         entries[0].rollingHash = h;
-        _postBatchOne(r, entries, _emptyStaticLookups(), 0, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
@@ -761,7 +761,7 @@ contract EEZCoverageTest is Base {
         entries[0].proxyEntryHash = ah;
         entries[0].l2ToL1Calls = calls;
         entries[0].rollingHash = bytes32(0); // unreached — reverts before the hash check
-        _postBatchOne(r, entries, _emptyStaticLookups(), 0, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
@@ -793,7 +793,7 @@ contract EEZCoverageTest is Base {
         ExecutionEntry[] memory entries = _reentrantDestEntry(rA.id, address(reenter), outerData, uint64(rB.id));
 
         ProofSystemBatchPerVerificationEntries memory b =
-            _twoRollupBatch(rLo, rHi, entries, _emptyStaticLookups(), 0, 0);
+            _twoRollupBatch(rLo, rHi, entries, _emptyStaticEntries(), 0, 0);
         rollups.postAndVerifyBatch(b);
 
         (bool ok,) = topProxy.call(outerData);
@@ -832,7 +832,7 @@ contract EEZCoverageTest is Base {
         rollups.postAndVerifyBatch(b);
 
         vm.prank(proxyAddr);
-        bytes memory res = rollups.staticCallLookup(alice, cd);
+        bytes memory res = rollups.staticCrossChainCall(alice, cd);
         assertEq(res, payload);
     }
 
@@ -841,7 +841,7 @@ contract EEZCoverageTest is Base {
     ///         and the batch verifies (MockProofSystem accepts by default).
     function test_PostBatch_NonEmptyBlobIndices() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
-        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticLookups(), 0, 0);
+        ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         uint256[] memory blobs = new uint256[](1);
         blobs[0] = 0;
         b.blobIndices = blobs;
@@ -850,7 +850,7 @@ contract EEZCoverageTest is Base {
     }
 
     /// @notice Meta-hook path: an immediate static lookup is loaded into the transient pool
-    ///         (`immediateStaticLookupCount > 0`), and a transient (meta-hook) entry consumed during the
+    ///         (`immediateStaticEntryCount > 0`), and a transient (meta-hook) entry consumed during the
     ///         hook fires a reentrant call resolved against the TRANSIENT `expectedL1ToL2Calls` table.
     function test_MetaHook_ImmediateStaticLookupAndTransientReentrant() public {
         Base.RollupHandle memory r = _makeRollup(bytes32(0));
@@ -897,7 +897,7 @@ contract EEZCoverageTest is Base {
         entries[0].rollingHash = h;
 
         StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
-        lookups[0] = _shellLookup(r.id); // pushed into the transient pool (immediateStaticLookupCount = 1)
+        lookups[0] = _shellLookup(r.id); // pushed into the transient pool (immediateStaticEntryCount = 1)
 
         caller.setProxyCall(topProxy, outerData);
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, lookups, 1, 1);
@@ -1058,6 +1058,6 @@ contract EEZCoverageTest is Base {
 
     /// @notice Posts a single-rollup batch from a `RollupHandle` with explicit immediate count.
     function _postBatchOneAuto(Base.RollupHandle memory r, ExecutionEntry[] memory entries, uint256 tc) internal {
-        _postBatchOne(r, entries, _emptyStaticLookups(), tc, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), tc, 0);
     }
 }

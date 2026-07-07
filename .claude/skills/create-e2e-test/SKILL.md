@@ -75,7 +75,7 @@ When adding new contracts, pick a consistent noun + chain suffix (`_L1`, `_L2`) 
 - **Reentrant calls must succeed** — a revert inside a nested action would roll back the `_lastNestedActionConsumed++` and corrupt verification. Use `StaticCall[]` for calls that revert, or wrap them in a `revertSpan`.
 - **Same-block requirement** — `postBatch` / `loadExecutionTable` and the triggering user tx MUST land in the same block. Local mode uses `execute_l2_same_block` and `Batcher`; network mode relies on the sequencer intercepting the user tx and sandwiching `postBatch` in the same block.
 - **Proxy auto-creation** — `_processNCalls` auto-creates the source proxy via CREATE2 on first use if missing. That silent behavior hides deploy-order bugs; prefer explicit `createCrossChainProxy` or `getOrCreateProxy` in `Deploy*`.
-- **`failed: true` entries block the table** — a failed entry reverts *after* `executionIndex++`, which rolls back the increment, so the entry is never consumed. Don't use `failed: true` on entries that aren't the last one to be triggered. For recoverable failures, use `StaticCall` + `staticCallLookup` (the proxy's static-context detection routes to it automatically).
+- **`failed: true` entries block the table** — a failed entry reverts *after* `executionIndex++`, which rolls back the increment, so the entry is never consumed. Don't use `failed: true` on entries that aren't the last one to be triggered. For recoverable failures, use `StaticCall` + `staticCrossChainCall` (the proxy's static-context detection routes to it automatically).
 
 ## After the test passes
 

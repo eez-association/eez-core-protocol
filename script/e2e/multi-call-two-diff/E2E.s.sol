@@ -21,8 +21,8 @@ import {CallTwoDifferent} from "../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
-    noL2StaticLookups,
+    noStaticEntries,
+    noL2StaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -235,7 +235,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         CallTwoDifferent caller,
         address pA,
         address pB
@@ -261,9 +261,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -290,7 +290,7 @@ contract ExecuteL2 is Script, TwoDiffActions {
         address callerL2 = vm.envAddress("CALL_TWO_DIFF_L2");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterA, counterB, callerL2), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterA, counterB, callerL2), noL2StaticEntries());
         CallTwoDifferent(callerL2).callBothCounters(triggerA, triggerB);
 
         console.log("done");
@@ -316,7 +316,7 @@ contract Execute is Script, TwoDiffActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterA, counterB, callerAddr),
-            noStaticLookups(),
+            noStaticEntries(),
             CallTwoDifferent(callerAddr),
             proxyA,
             proxyB

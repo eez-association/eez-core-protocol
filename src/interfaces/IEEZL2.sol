@@ -19,7 +19,7 @@ pragma solidity ^0.8.28;
 //  Deliberately LEANER than L1's structs: L2 has a single rollup, no state deltas,
 //  and no per-rollup queue interleaving, so the L1-only fields are dropped entirely
 //  (no `StateDelta`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
-//  never hashes a whole entry/lookup, so its layout is free to diverge from L1's.
+//  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`CrossChainCall`, `OutgoingCallConsumed`,
 //  `UnconsumedOutgoingCalls`); variables / struct fields / params are mixedCase
@@ -50,7 +50,7 @@ struct CrossChainCall {
 ///      partition / `callCount`). Resolution:
 ///        - SUCCESS  (call key, `success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
-///        - STATIC   (static key): `staticCallLookup` runs the sub-array via STATICCALL (untagged
+///        - STATIC   (static key): `staticCrossChainCall` runs the sub-array via STATICCALL (untagged
 ///          hash vs `revertedOrStaticRollingHash`) and returns `returnData` (reverts with it if `!success`).
 ///        - REVERTED (call key, `!success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          mini-entry (tagged hash vs `revertedOrStaticRollingHash`) then reverts.
@@ -79,8 +79,8 @@ struct ExecutionEntry {
     bytes returnData; // pre-computed top-level return value (revert payload when !success)
 }
 
-/// @notice A pre-computed TOP-LEVEL static lookup: a read-only cross-chain call resolved via
-///         `staticCallLookup` OUTSIDE any execution, from the persistent `staticLookups` pool.
+/// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via
+///         `staticCrossChainCall` OUTSIDE any execution, from the persistent `staticEntries` pool.
 ///         Reverting top-level reads land here (`success == false`); state-changing top-level
 ///         calls are `ExecutionEntry`s.
 /// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool

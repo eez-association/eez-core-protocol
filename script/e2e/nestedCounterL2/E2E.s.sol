@@ -28,8 +28,8 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
-    noL2StaticLookups,
+    noStaticEntries,
+    noL2StaticEntries,
     noCalls,
     noL2Calls,
     getOrCreateProxy,
@@ -298,7 +298,7 @@ contract ExecuteL2 is Script, NestedL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s cap=%s capL1Proxy=%s", alice, capAddr, capL1Proxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1Addr, capAddr, alice), noL2StaticEntries());
         console.log("ExecuteL2: loadExecutionTable done");
 
         (bool ok,) = capL1Proxy.call(abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector));
@@ -321,7 +321,7 @@ contract DeferredL2TXBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticEntries
     )
         external
     {
@@ -338,9 +338,9 @@ contract DeferredL2TXBatcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -371,7 +371,7 @@ contract Execute is Script, NestedL2Actions {
             proofSystemAddr,
             L2_ROLLUP_ID,
             _l1Entries(counterL2TargetAddr, capL1Addr, capL2Addr),
-            noStaticLookups()
+            noStaticEntries()
         );
 
         console.log("done");

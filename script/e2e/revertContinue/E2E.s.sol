@@ -24,7 +24,7 @@ import {
 } from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {crossChainCallHash, expectedL1toL2Hash, noStaticLookups, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {crossChainCallHash, expectedL1toL2Hash, noStaticEntries, RollingHashBuilder} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  RevertContinue scenario — revert inside try/catch then continue
@@ -327,7 +327,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         address selfCallerProxy
     )
         external
@@ -350,9 +350,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -414,7 +414,7 @@ contract Execute is Script, RevertContinueActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(selfCallerAddr, counterL2, address(batcher)),
-            noStaticLookups(),
+            noStaticEntries(),
             selfCallerProxy
         );
 

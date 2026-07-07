@@ -239,7 +239,7 @@ contract ExpectedL1ToL2CallTransient is IEEZ {
         revert NotSupported();
     }
 
-    function staticCallLookup(address, bytes calldata) external view returns (bytes memory) {
+    function staticCrossChainCall(address, bytes calldata) external view returns (bytes memory) {
         revert NotSupported();
     }
 

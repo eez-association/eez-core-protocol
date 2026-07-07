@@ -29,8 +29,8 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
-    noL2StaticLookups,
+    noStaticEntries,
+    noL2StaticEntries,
     noNestedActions,
     noL2OutgoingCalls,
     noCalls,
@@ -336,7 +336,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         CallTwiceNestedAndOnce app,
         address nestedProxy,
         address simpleProxy
@@ -362,9 +362,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -478,7 +478,7 @@ contract Execute is Script, MCNActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterL1, cap2, counterL2, app),
-            noStaticLookups(),
+            noStaticEntries(),
             CallTwiceNestedAndOnce(app),
             cap2ProxyL1,
             counterL2ProxyL1
@@ -504,7 +504,7 @@ contract ExecuteL2 is Script, MCNActions {
         address simpleProxyL2 = vm.envAddress("SIMPLE_PROXY_L2");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1, cap2, counterL2, l2App), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL1, cap2, counterL2, l2App), noL2StaticEntries());
 
         uint256 simpleResult = CallTwiceNestedAndOnce(l2App).execute(nestedProxyL2, simpleProxyL2);
 

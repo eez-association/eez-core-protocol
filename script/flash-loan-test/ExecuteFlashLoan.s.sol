@@ -25,7 +25,7 @@ import {
     noNestedActions,
     noL2Calls,
     noL2OutgoingCalls,
-    noL2StaticLookups,
+    noL2StaticEntries,
     RollingHashBuilder
 } from "../e2e/shared/E2EHelpers.sol";
 
@@ -122,7 +122,7 @@ contract ExecuteFlashLoanL2 is Script {
             returnData: ""
         });
 
-        manager.loadExecutionTable(l2Entries, noL2StaticLookups());
+        manager.loadExecutionTable(l2Entries, noL2StaticEntries());
         console.log("L2 execution table loaded (3 entries)");
 
         vm.stopBroadcast();
@@ -137,7 +137,7 @@ contract FlashLoanBatcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         FlashLoanBridgeExecutor executor
     )
         external
@@ -160,9 +160,9 @@ contract FlashLoanBatcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
