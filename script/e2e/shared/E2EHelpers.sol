@@ -177,7 +177,7 @@ contract L2TXBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticEntries
     )
         external
     {
@@ -200,9 +200,9 @@ contract L2TXBatcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: ic,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -224,7 +224,7 @@ function deferredSingleRollupBatch(
     address proofSystem,
     uint64 rollupId,
     ExecutionEntry[] memory entries,
-    StaticExecutionEntry[] memory staticLookups
+    StaticExecutionEntry[] memory staticEntries
 )
     pure
     returns (ProofSystemBatchPerVerificationEntries memory batch)
@@ -240,9 +240,9 @@ function deferredSingleRollupBatch(
     batch = ProofSystemBatchPerVerificationEntries({
         expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
         entries: entries,
-        staticLookups: staticLookups,
+        staticEntries: staticEntries,
         immediateEntryCount: 0,
-        immediateStaticLookupCount: 0,
+        immediateStaticEntryCount: 0,
         proofSystems: psList,
         rollupIdsWithProofSystems: rps,
         blobIndices: new uint256[](0),
@@ -258,7 +258,7 @@ function deferredSingleRollupBatch(
 // ══════════════════════════════════════════════════════════════════════
 
 /// @notice Returns an empty StaticExecutionEntry[] (L1) — for flows with no top-level static lookups.
-function noStaticLookups() pure returns (StaticExecutionEntry[] memory) {
+function noStaticEntries() pure returns (StaticExecutionEntry[] memory) {
     return new StaticExecutionEntry[](0);
 }
 
@@ -276,7 +276,7 @@ function noCalls() pure returns (L2ToL1Call[] memory) {
 // so the L2-typed empties get an `L2` infix.
 
 /// @notice Returns an empty StaticExecutionEntry[] (IEEZL2).
-function noL2StaticLookups() pure returns (L2StaticExecutionEntry[] memory) {
+function noL2StaticEntries() pure returns (L2StaticExecutionEntry[] memory) {
     return new L2StaticExecutionEntry[](0);
 }
 

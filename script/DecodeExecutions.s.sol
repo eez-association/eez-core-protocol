@@ -207,7 +207,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printExecutionConsumedL1(bytes32[] memory topics, string memory p) internal pure {
-        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed executionQueueIndex)
+        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed entryQueueIndex)
         bytes32 cchash = topics[1];
         uint256 rollupId = uint256(topics[2]);
         uint256 cursor = uint256(topics[3]);
@@ -226,7 +226,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printExecutionConsumedL2(bytes32[] memory topics, string memory p) internal pure {
-        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionQueueIndex)
+        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryQueueIndex)
         bytes32 cchash = topics[1];
         uint256 entryIndex = uint256(topics[2]);
         console.log(
@@ -471,7 +471,7 @@ contract DecodeExecutions is Script {
         if (sel == bytes4(keccak256("executeCrossChainCall(address,bytes)"))) {
             return "executeCrossChainCall(address,bytes)";
         }
-        if (sel == bytes4(keccak256("staticCallLookup(address,bytes)"))) return "staticCallLookup(address,bytes)";
+        if (sel == bytes4(keccak256("staticCrossChainCall(address,bytes)"))) return "staticCrossChainCall(address,bytes)";
         // Fall back to raw 4-byte selector
         return vm.toString(abi.encodePacked(sel));
     }

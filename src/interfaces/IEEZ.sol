@@ -27,14 +27,14 @@ struct ExpectedStateRootPerRollup {
 ///      rejects address(0)); together with the once-per-block-per-rollup invariant this stops a batch
 ///      from verifying a rollup twice. Each rollup's `proofSystemIndexes[]` is strictly increasing in
 ///      `[0, proofSystems.length)` and must meet that rollup's threshold (checked by its manager).
-/// @dev `immediateEntryCount` / `immediateStaticLookupCount` are UNPROVEN dispatch params — not folded
+/// @dev `immediateEntryCount` / `immediateStaticEntryCount` are UNPROVEN dispatch params — not folded
 ///      into the public input, so the immediate/persistent split can be re-tuned without re-proving.
 struct ProofSystemBatchPerVerificationEntries {
     ExpectedStateRootPerRollup[] expectedStateRootPerRollup; // optional composer-supplied state-root assertions, if assertion fails, transaction reverts
     ExecutionEntry[] entries; // execution entries
-    StaticExecutionEntry[] staticLookups; // top-level static-lookup
+    StaticExecutionEntry[] staticEntries; // top-level static entries
     uint256 immediateEntryCount; // leading prefix executed this tx: immediate L2Txs (run directly) + meta-hook (AA) entries (not queued)
-    uint256 immediateStaticLookupCount; // leading static lookups resolvable this tx via the meta hook (not queued)
+    uint256 immediateStaticEntryCount; // leading static entries resolvable this tx via the meta hook (not queued)
     address[] proofSystems; // strictly increasing, no address(0)
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly increasing by rollupId
     uint256[] blobIndices; // tx-level EIP-4844 blobs this batch consumes
@@ -64,9 +64,9 @@ struct RollupConfig {
 ///      (c) `setStateRoot` lockout — reverts `RollupBatchActiveThisBlock` while `== block.number`.
 struct RollupVerification {
     uint64 lastVerifiedBlock; // block of the last verified batch
-    uint64 executionQueueIndex; // how many `executionQueue` entries have been consumed (packed with above)
-    ExecutionEntry[] executionQueue; // entries awaiting consumption this block
-    StaticExecutionEntry[] staticLookupQueue; // static lookups awaiting resolution this block
+    uint64 entryQueueIndex; // how many `entryQueue` entries have been consumed (packed with above)
+    ExecutionEntry[] entryQueue; // entries awaiting consumption this block
+    StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution this block
 }
 
 /// @notice A rollup's state transition for one entry.
@@ -102,7 +102,7 @@ struct L2ToL1Call {
 ///      partition). Resolution:
 ///        - SUCCESS  (call key, `success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
-///        - STATIC   (static key): `staticCallLookup` runs the sub-array via STATICCALL (untagged
+///        - STATIC   (static key): `staticCrossChainCall` runs the sub-array via STATICCALL (untagged
 ///          hash vs `rollingHash`) and returns `returnData` (reverts with it if `!success`).
 ///        - REVERTED (call key, `!success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          mini-entry (tagged hash vs `rollingHash`) then reverts.
@@ -133,9 +133,9 @@ struct ExecutionEntry {
     bytes returnData; // pre-computed top-level return value (revert payload when !success)
 }
 
-/// @notice A pre-computed TOP-LEVEL static lookup: a read-only cross-chain call resolved via
-///         `staticCallLookup` OUTSIDE any execution, from the pool (`_transientStaticLookups` /
-///         per-rollup `staticLookupQueue`). Reverting top-level reads land here; state-changing ones
+/// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via
+///         `staticCrossChainCall` OUTSIDE any execution, from the pool (`_transientStaticEntries` /
+///         per-rollup `staticEntryQueue`). Reverting top-level reads land here; state-changing ones
 ///         are `ExecutionEntry`s.
 /// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
 ///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` + `destinationRollupId` + all
@@ -169,7 +169,7 @@ interface IEEZ {
         external
         payable
         returns (bytes memory result);
-    function staticCallLookup(address sourceAddress, bytes calldata callData)
+    function staticCrossChainCall(address sourceAddress, bytes calldata callData)
         external
         view
         returns (bytes memory result);

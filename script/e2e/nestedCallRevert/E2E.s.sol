@@ -27,8 +27,8 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
-    noL2StaticLookups,
+    noStaticEntries,
+    noL2StaticEntries,
     noCalls,
     noL2Calls,
     RollingHashBuilder
@@ -313,7 +313,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         address scapProxy
     )
         external
@@ -336,9 +336,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -382,7 +382,7 @@ contract ExecuteL2 is Script, NestedCallRevertActions {
                 triggerSource,
                 MAINNET_ROLLUP_ID,
                 _l2Entries(scapL2, triggerSource, counterL1),
-                noL2StaticLookups()
+                noL2StaticEntries()
             );
 
         console.log("ExecuteL2: done");
@@ -408,7 +408,7 @@ contract Execute is Script, NestedCallRevertActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(scapAddr, address(batcher), counterL2),
-            noStaticLookups(),
+            noStaticEntries(),
             scapProxy
         );
 

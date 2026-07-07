@@ -73,7 +73,7 @@ contract CrossChainProxy {
     ///      Uses assembly return/revert which terminates the entire call context.
     ///
     ///      Static context detection: a self-call to staticCheck() attempts a transient store.
-    ///      If it reverts we're in a STATICCALL — route to staticCallLookup (view) instead.
+    ///      If it reverts we're in a STATICCALL — route to staticCrossChainCall (view) instead.
     ///
     ///      Result decoding:
     ///      The low-level `.call()` returns ABI-encoded return data. Since `executeCrossChainCall`
@@ -89,7 +89,7 @@ contract CrossChainProxy {
 
         if (!success) {
             // Static context — look up pre-computed result via view function
-            (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCallLookup, (msg.sender, msg.data)));
+            (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCrossChainCall, (msg.sender, msg.data)));
         } else {
             // Normal context — execute cross-chain call
             (success, result) =

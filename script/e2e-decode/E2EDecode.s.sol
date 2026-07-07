@@ -14,7 +14,7 @@ import {ExecutionEntry, StateDelta, StaticExecutionEntry} from "../../src/interf
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -37,7 +37,7 @@ contract Batcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         CounterAndProxy cap
     )
         external
@@ -55,9 +55,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -149,7 +149,7 @@ contract E2EExecute is Script {
         });
 
         batcher.execute(
-            rollups, proofSystemAddr, L2_ROLLUP_ID, entries, noStaticLookups(), CounterAndProxy(counterAndProxyAddr)
+            rollups, proofSystemAddr, L2_ROLLUP_ID, entries, noStaticEntries(), CounterAndProxy(counterAndProxyAddr)
         );
 
         console.log("done");

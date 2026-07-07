@@ -16,10 +16,10 @@ import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
     expectedL1toL2Hash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noL2Calls,
-    noL2StaticLookups,
+    noL2StaticEntries,
     deferredSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
@@ -248,7 +248,7 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s selfCaller=%s selfCallerProxy=%s", alice, selfCallerAddr, selfCallerProxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(selfCallerAddr, counterL1Addr, alice), noL2StaticEntries());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls selfCallerProxy.execute()
@@ -273,7 +273,7 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
 contract DeferredL2TXBatcher is RevertContinueL2Actions {
     function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
         rollups.postAndVerifyBatch(
-            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticLookups())
+            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticEntries())
         );
         rollups.executeL2Txs(L2_ROLLUP_ID);
     }

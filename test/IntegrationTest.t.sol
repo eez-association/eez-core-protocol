@@ -137,14 +137,14 @@ contract IntegrationTest is Test {
 
     /// @notice Wraps a single sub-batch (one PS attesting one rollup) and posts it.
     function _postBatchToL2(ExecutionEntry[] memory entries) internal {
-        _postBatchToL2(entries, _emptyStaticLookups(), 0, 0);
+        _postBatchToL2(entries, _emptyStaticEntries(), 0, 0);
     }
 
     function _postBatchToL2(
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 immediateEntryCount,
-        uint256 immediateStaticLookupCount
+        uint256 immediateStaticEntryCount
     )
         internal
     {
@@ -168,9 +168,9 @@ contract IntegrationTest is Test {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: immediateEntryCount,
-            immediateStaticLookupCount: immediateStaticLookupCount,
+            immediateStaticEntryCount: immediateStaticEntryCount,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -228,12 +228,12 @@ contract IntegrationTest is Test {
     }
 
     /// @notice Creates an empty L1 StaticExecutionEntry array (used by postAndVerifyBatch)
-    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory) {
+    function _emptyStaticEntries() internal pure returns (StaticExecutionEntry[] memory) {
         return new StaticExecutionEntry[](0);
     }
 
     /// @notice Creates an empty L2 StaticExecutionEntry array (used by loadExecutionTable)
-    function _emptyL2StaticLookups() internal pure returns (L2StaticExecutionEntry[] memory) {
+    function _emptyL2StaticEntries() internal pure returns (L2StaticExecutionEntry[] memory) {
         return new L2StaticExecutionEntry[](0);
     }
 
@@ -337,7 +337,7 @@ contract IntegrationTest is Test {
             });
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
         }
 
         // Alice triggers the resolution on L2
@@ -454,7 +454,7 @@ contract IntegrationTest is Test {
             });
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
         }
 
         // ════════════════════════════════════════════
@@ -469,8 +469,8 @@ contract IntegrationTest is Test {
         assertEq(counterAndProxy.counter(), 1, "A.counter should be 1");
         assertEq(counterAndProxy.targetCounter(), 1, "A.targetCounter should be 1");
         assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 state should be updated via L1 entry");
-        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
-        assertEq(managerL2.executionIndex(), 1, "L2 execution entry should be consumed");
+        assertEq(rollups.entryQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
+        assertEq(managerL2.entryIndex(), 1, "L2 execution entry should be consumed");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -521,7 +521,7 @@ contract IntegrationTest is Test {
             });
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
         }
 
         // ════════════════════════════════════════════
@@ -588,7 +588,7 @@ contract IntegrationTest is Test {
         assertEq(counterAndProxyL2.counter(), 1, "D.counter should be 1");
         assertEq(counterAndProxyL2.targetCounter(), 1, "D.targetCounter should be 1");
         assertEq(_getRollupState(L2_ROLLUP_ID), s1, "L2 state should be updated");
-        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
-        assertEq(managerL2.executionIndex(), 1, "L2 execution entry should be consumed");
+        assertEq(rollups.entryQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
+        assertEq(managerL2.entryIndex(), 1, "L2 execution entry should be consumed");
     }
 }

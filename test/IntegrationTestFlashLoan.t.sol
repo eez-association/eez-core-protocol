@@ -229,9 +229,9 @@ contract IntegrationTestFlashLoan is Test {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: _emptyStaticLookups(),
+            staticEntries: _emptyStaticEntries(),
             immediateEntryCount: immediateCount,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -241,11 +241,11 @@ contract IntegrationTestFlashLoan is Test {
         rollups.postAndVerifyBatch(batch);
     }
 
-    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory) {
+    function _emptyStaticEntries() internal pure returns (StaticExecutionEntry[] memory) {
         return new StaticExecutionEntry[](0);
     }
 
-    function _noL2StaticLookups() internal pure returns (L2StaticExecutionEntry[] memory) {
+    function _noL2StaticEntries() internal pure returns (L2StaticExecutionEntry[] memory) {
         return new L2StaticExecutionEntry[](0);
     }
 
@@ -357,7 +357,7 @@ contract IntegrationTestFlashLoan is Test {
             entries[0].returnData = "";
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(entries, _noL2StaticEntries());
         }
 
         // Trigger L2 delivery
@@ -513,7 +513,7 @@ contract IntegrationTestFlashLoan is Test {
             l2Entries[0].success = true;
 
             vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(l2Entries, _noL2StaticLookups());
+            managerL2.loadExecutionTable(l2Entries, _noL2StaticEntries());
         }
 
         // ── Post L1 batch ──
@@ -610,7 +610,7 @@ contract IntegrationTestFlashLoan is Test {
         assertEq(_getRollupState(L2_ROLLUP_ID), s3, "L2 state should be updated to s3");
 
         // Execution entries consumed
-        assertEq(rollups.executionQueueIndex(L2_ROLLUP_ID), 2, "Both L1 entries should be consumed");
-        assertEq(managerL2.executionIndex(), 1, "L2 entry should be consumed");
+        assertEq(rollups.entryQueueIndex(L2_ROLLUP_ID), 2, "Both L1 entries should be consumed");
+        assertEq(managerL2.entryIndex(), 1, "L2 entry should be consumed");
     }
 }

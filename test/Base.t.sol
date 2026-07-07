@@ -35,8 +35,8 @@ import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 ///        2. Call `setUpBase()` from their own `setUp()`.
 ///        3. Use `_makeRollup(initialState)` to register a fresh rollup with the default
 ///           shape (1 proof system, threshold 1, owner = `defaultOwner`).
-///        4. Use `_postBatchOne(handle, entries, staticLookups, immediateEntryCount,
-///           immediateStaticLookupCount)` to wrap a single sub-batch and post it.
+///        4. Use `_postBatchOne(handle, entries, staticEntries, immediateEntryCount,
+///           immediateStaticEntryCount)` to wrap a single sub-batch and post it.
 ///        5. Use the `_immediateEntry*` / `_empty*` builders for common shape primitives.
 ///        6. Use the `_h*` rolling-hash helpers to compute expected `entry.rollingHash`
 ///           values without hardcoding the tag formulas — they mirror `EEZBase` exactly.
@@ -149,9 +149,9 @@ abstract contract Base is Test {
     function _singleSubBatch(
         RollupHandle memory r,
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 immediateEntryCount,
-        uint256 immediateStaticLookupCount
+        uint256 immediateStaticEntryCount
     )
         internal
         view
@@ -172,9 +172,9 @@ abstract contract Base is Test {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: immediateEntryCount,
-            immediateStaticLookupCount: immediateStaticLookupCount,
+            immediateStaticEntryCount: immediateStaticEntryCount,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -187,14 +187,14 @@ abstract contract Base is Test {
     function _postBatchOne(
         RollupHandle memory r,
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 immediateEntryCount,
-        uint256 immediateStaticLookupCount
+        uint256 immediateStaticEntryCount
     )
         internal
     {
         ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(
-            r, entries, staticLookups, immediateEntryCount, immediateStaticLookupCount
+            r, entries, staticEntries, immediateEntryCount, immediateStaticEntryCount
         );
         rollups.postAndVerifyBatch(batch);
     }
@@ -204,7 +204,7 @@ abstract contract Base is Test {
     ///         accordingly.
     function _postBatchAutoTransient(RollupHandle memory r, ExecutionEntry[] memory entries) internal {
         uint256 tc = (entries.length > 0 && entries[0].proxyEntryHash == bytes32(0)) ? 1 : 0;
-        _postBatchOne(r, entries, _emptyStaticLookups(), tc, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), tc, 0);
     }
 
     // ──────────────────────────────────────────────
@@ -215,7 +215,7 @@ abstract contract Base is Test {
         arr = new ExecutionEntry[](0);
     }
 
-    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory arr) {
+    function _emptyStaticEntries() internal pure returns (StaticExecutionEntry[] memory arr) {
         arr = new StaticExecutionEntry[](0);
     }
 

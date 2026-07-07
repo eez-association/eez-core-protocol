@@ -202,7 +202,7 @@ contract EEZL2Test is Test {
         StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
-        assertEq(manager.executionIndex(), 0);
+        assertEq(manager.entryIndex(), 0);
     }
 
     function test_LoadExecutionTable_StoresEntries() public {
@@ -348,7 +348,7 @@ contract EEZL2Test is Test {
     //
     // A top-level cross-chain call that must revert is a normal `ExecutionEntry` with `success == false`:
     // `_consumeAndExecute` matches it by `proxyEntryHash`, `_executeEntry` runs it, verifies the rolling
-    // hash, then reverts with the cached `returnData`. The revert rolls back the `executionIndex` advance,
+    // hash, then reverts with the cached `returnData`. The revert rolls back the `entryIndex` advance,
     // so the entry is never consumed and an identical second call reverts identically. The negative case
     // (no matching entry → ExecutionNotFound) is covered by
     // `test_ExecuteCrossChainCall_RevertsExecutionNotFound` above.
@@ -372,18 +372,18 @@ contract EEZL2Test is Test {
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
-        uint256 idxBefore = manager.executionIndex();
+        uint256 idxBefore = manager.entryIndex();
 
         (bool ok, bytes memory ret) = proxy.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(manager.executionIndex(), idxBefore, "reverting entry must not advance executionIndex");
+        assertEq(manager.entryIndex(), idxBefore, "reverting entry must not advance entryIndex");
 
         // Repeatable: a second identical call reverts identically, still no advance.
         (ok, ret) = proxy.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(manager.executionIndex(), idxBefore);
+        assertEq(manager.entryIndex(), idxBefore);
     }
 
     /// @notice REVERTED reentrant (outgoing) call (L2): a reentrant call fired during an entry resolves

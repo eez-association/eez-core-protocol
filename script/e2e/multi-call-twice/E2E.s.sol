@@ -21,7 +21,7 @@ import {CallTwice} from "../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noCalls,
     RollingHashBuilder
@@ -41,7 +41,7 @@ import {
 //    contract on L2. SYSTEM loads the L2 table with both entries; CallTwiceL2
 //    then calls a trigger proxy (originalRollupId=MAINNET, originalAddress=
 //    counterL2) twice. Each proxy call forwards to managerL2.executeCrossChainCall,
-//    which consumes entries[0] then entries[1] sequentially via executionIndex.
+//    which consumes entries[0] then entries[1] sequentially via entryIndex.
 //    _consumeAndExecute resets _rollingHash to 0 between entries, so each
 //    entry's rollingHash starts fresh at CB(1)→CE(1, true, retData).
 //
@@ -223,7 +223,7 @@ contract Batcher {
         EEZ rollups,
         address proofSystem,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticEntries,
         CallTwice caller,
         address counterProxy
     )
@@ -248,9 +248,9 @@ contract Batcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -300,7 +300,7 @@ contract Execute is Script, MultiCallActions {
             EEZ(rollupsAddr),
             proofSystemAddr,
             _l1Entries(counterL2Addr, callerAddr),
-            noStaticLookups(),
+            noStaticEntries(),
             CallTwice(callerAddr),
             counterProxy
         );

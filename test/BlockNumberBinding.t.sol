@@ -38,7 +38,7 @@ contract BlockNumberBindingTest is Base {
     {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, STATE0, STATE1);
-        batch = _singleSubBatch(r, entries, _emptyStaticLookups(), 1, 0);
+        batch = _singleSubBatch(r, entries, _emptyStaticEntries(), 1, 0);
         batch.blockNumber = blockNumber;
     }
 
@@ -54,7 +54,7 @@ contract BlockNumberBindingTest is Base {
         for (uint256 i = 0; i < batch.entries.length; i++) {
             entryHashes[i] = keccak256(abi.encode(batch.entries[i]));
         }
-        bytes32[] memory staticLookupHashes = new bytes32[](0);
+        bytes32[] memory staticEntryHashes = new bytes32[](0);
         bytes32[] memory blobHashes = new bytes32[](0);
 
         bytes32[] memory customDataHashes = new bytes32[](1);
@@ -62,7 +62,7 @@ contract BlockNumberBindingTest is Base {
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
                 abi.encode(entryHashes),
-                abi.encode(staticLookupHashes),
+                abi.encode(staticEntryHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
                 abi.encode(customDataHashes),

@@ -182,7 +182,7 @@ contract ExpectedL1ToL2CallTransientTest is Test {
         t.executeCrossChainCall(address(0), "");
 
         vm.expectRevert(ExpectedL1ToL2CallTransient.NotSupported.selector);
-        t.staticCallLookup(address(0), "");
+        t.staticCrossChainCall(address(0), "");
 
         vm.expectRevert(ExpectedL1ToL2CallTransient.NotSupported.selector);
         t.createCrossChainProxy(address(0), 0);

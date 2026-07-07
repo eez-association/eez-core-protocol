@@ -82,7 +82,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
     ///      manager returns an empty `customData` blob, folded into the shared public input.
     function _computePublicInputsHash(
         ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticLookups,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 rid,
         bytes32 vk
     )
@@ -94,9 +94,9 @@ contract ECDSAProofSystemIntegrationTest is Base {
         for (uint256 i = 0; i < entries.length; i++) {
             entryHashes[i] = keccak256(abi.encode(entries[i]));
         }
-        bytes32[] memory staticLookupHashes = new bytes32[](staticLookups.length);
-        for (uint256 i = 0; i < staticLookups.length; i++) {
-            staticLookupHashes[i] = keccak256(abi.encode(staticLookups[i]));
+        bytes32[] memory staticEntryHashes = new bytes32[](staticEntries.length);
+        for (uint256 i = 0; i < staticEntries.length; i++) {
+            staticEntryHashes[i] = keccak256(abi.encode(staticEntries[i]));
         }
         bytes32[] memory blobHashes = new bytes32[](0);
 
@@ -106,7 +106,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
                 abi.encode(entryHashes),
-                abi.encode(staticLookupHashes),
+                abi.encode(staticEntryHashes),
                 abi.encode(blobHashes),
                 keccak256(""),
                 abi.encode(customDataHashes),
@@ -148,9 +148,9 @@ contract ECDSAProofSystemIntegrationTest is Base {
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
-            staticLookups: _emptyStaticLookups(),
+            staticEntries: _emptyStaticEntries(),
             immediateEntryCount: 1,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -169,7 +169,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, initialState, newState);
 
-        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticLookups(), r.id, vk);
+        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(SIGNER_PK, publicInputsHash);
 
         rollups.postAndVerifyBatch(_buildECDSABatch(r, entries, proof));
@@ -187,7 +187,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, initialState, newState);
 
-        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticLookups(), r.id, vk);
+        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(0xBAD, publicInputsHash);
 
         ProofSystemBatchPerVerificationEntries memory batch = _buildECDSABatch(r, entries, proof);

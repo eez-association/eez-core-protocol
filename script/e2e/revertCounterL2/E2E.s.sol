@@ -20,10 +20,10 @@ import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
-    noStaticLookups,
+    noStaticEntries,
     noNestedActions,
     noL2OutgoingCalls,
-    noL2StaticLookups,
+    noL2StaticEntries,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -220,7 +220,7 @@ contract ExecuteL2 is Script, RevertL2Actions {
         address alice = msg.sender;
         console.log("ExecuteL2: alice=%s counterProxy=%s", alice, counterProxy);
 
-        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), noL2StaticLookups());
+        EEZL2(managerAddr).loadExecutionTable(_l2Entries(counterL2, counterL1, alice), noL2StaticEntries());
         console.log("ExecuteL2: loadExecutionTable done");
 
         // Trigger: alice calls counterProxy.increment() — consumes the entry.
@@ -258,7 +258,7 @@ contract DeferredL2TXBatcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticLookups
+        StaticExecutionEntry[] calldata staticEntries
     )
         external
     {
@@ -275,9 +275,9 @@ contract DeferredL2TXBatcher {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            staticLookups: staticLookups,
+            staticEntries: staticEntries,
             immediateEntryCount: 0,
-            immediateStaticLookupCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
@@ -310,7 +310,7 @@ contract Execute is Script, RevertL2Actions {
 
         DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
         batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, alice), noStaticLookups()
+            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, alice), noStaticEntries()
         );
 
         uint256 finalCounter = Counter(counterL1).counter();

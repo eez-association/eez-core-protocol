@@ -8,7 +8,7 @@ The flatten model replaced the main branch's `ActionType` enum + scope tree + `R
 - A flat `NestedAction[] nestedActions` array (consumed by reentrant `executeCrossChainCall` / `_consumeNestedAction`).
 - A `bytes32 rollingHash` computed over the tagged event tape of the entire entry execution.
 - `CrossChainCall.revertSpan` + `executeInContext` self-call + `ContextResult` error for isolated revert contexts.
-- `StaticCall[]` for reverting / view-only calls (looked up by `staticCallLookup` from the proxy's static-context detection path).
+- `StaticCall[]` for reverting / view-only calls (looked up by `staticCrossChainCall` from the proxy's static-context detection path).
 
 There is no `ActionType` enum. The only `Action` struct is off-chain glue used to compute action hashes.
 
@@ -162,9 +162,9 @@ struct StaticCall {
 }
 ```
 
-The proxy's `_fallback` detects STATICCALL context via a self-call to `staticCheck()` (which attempts `tstore` — reverts in static context). When detection succeeds, the proxy routes to `manager.staticCallLookup(sender, data)` (view function).
+The proxy's `_fallback` detects STATICCALL context via a self-call to `staticCheck()` (which attempts `tstore` — reverts in static context). When detection succeeds, the proxy routes to `manager.staticCrossChainCall(sender, data)` (view function).
 
-`staticCallLookup` linearly scans `staticCalls[]` matching on `(actionHash, callNumber, lastNestedActionConsumed)` — the `callNumber` and `lastNestedActionConsumed` fields disambiguate multiple static calls within the same broader execution. If the match has calls, they're executed via `staticcall` and their rolling hash checked. If `failed`, the returnData is replayed as a revert.
+`staticCrossChainCall` linearly scans `staticCalls[]` matching on `(actionHash, callNumber, lastNestedActionConsumed)` — the `callNumber` and `lastNestedActionConsumed` fields disambiguate multiple static calls within the same broader execution. If the match has calls, they're executed via `staticcall` and their rolling hash checked. If `failed`, the returnData is replayed as a revert.
 
 ### Use StaticCall when
 
@@ -265,7 +265,7 @@ The simplest case is "this entry exists so that when its actionHash fires, the p
 - Example: `script/e2e/nestedCounter/E2E.s.sol`.
 
 ### Revert with static lookup
-- Trigger proxy call is a view or known-revert call. No deferred entry. Instead: a `StaticCall[]` entry with matching `actionHash, callNumber=0, lastNestedActionConsumed=0, failed=true, returnData=revertBytes`. The proxy's static-context detection routes through `staticCallLookup`.
+- Trigger proxy call is a view or known-revert call. No deferred entry. Instead: a `StaticCall[]` entry with matching `actionHash, callNumber=0, lastNestedActionConsumed=0, failed=true, returnData=revertBytes`. The proxy's static-context detection routes through `staticCrossChainCall`.
 - Use when the revert happens outside any entry execution (e.g., user-initiated view that must fail deterministically).
 
 ### Revert with isolated context (revertSpan)
