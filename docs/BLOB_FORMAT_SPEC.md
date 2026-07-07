@@ -6,6 +6,7 @@ messages — no header.
 and transaction boundaries differ only by message type.
 
 Excalidraw: https://excalidraw.com/#json=0Efuogd9EmGs1-dtl7VQs,6TO97Ut9nvF7ePynMCBd-Q
+
 ---
 
 ## 1. Framing
@@ -22,40 +23,15 @@ Each type's exact byte layout is defined inline with the type in §2.
 These conventions apply across the per-type layouts in §2:
 
 * All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64`/`u128`/`u256`
-  as written, `bool` is one byte, `address` is 20 bytes. A field marked **compressed**
-  (like `Call.value`) is the exception — it uses the variable-length encoding named for it
-  below.
-* A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is a
-  single leading byte that either holds the length directly or announces how many following
-  little-endian bytes do:
-
-  | leading byte | the length is… |
-  |---|---|
-  | `0`–`251` | the leading byte itself (`0`–`251`) |
-  | `252` | the next **2** bytes, little-endian |
-  | `253` | the next **3** bytes, little-endian |
-  | `254` | the next **4** bytes, little-endian |
-  | `255` | reserved |
+  as written, `bool` is one byte, `address` is 20 bytes.
+* A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is
+  a **protobuf-style varint** ([LEB128](https://protobuf.dev/programming-guides/encoding/#varints)):
+  base-128, little-endian group order, 7 payload bits per byte, the high bit set while
+  more bytes follow. Lengths fit a `u32`, so a prefix is 1–5 bytes: length `5` = `05`,
+  length `300` = `ac 02`.
 
   **All byte fields are encoded this way** — whether the protocol parses their contents or
-  treats them as opaque. 
-* A `u256` field (`Call.value`) is serialized with the **compressed `uint256` codec** — a
-  self-describing, variable-length encoding (1–33 bytes) defined in
-  [`U256_COMPRESSED_CODEC.md`](./U256_COMPRESSED_CODEC.md). The codec is self-delimiting, so no separate length prefix is
-  needed.
-* A `chain_id` field reuses a similar **leading-byte length-prefix** as `bytes`: the leading byte gives the byte length of the little-endian value that follows, and
-  its range also picks whether or not `CHAIN_ID_OFFSET` is applied:
-
-  | leading byte | the chain id is… |
-  |---|---|
-  | `0`–`8` | the next `leading` bytes, little-endian (**raw**) |
-  | `9`–`12` | `CHAIN_ID_OFFSET +` the next `leading − 8` bytes, little-endian (**offset**) |
-  | `13`–`255` | reserved |
-
-  Self-delimiting, so no separate length prefix is needed (1–9 bytes total). Raw ids reach
-  `2^64 − 1`; offset ids reach `2^32 + 2^32 − 1`. `CHAIN_ID_OFFSET` is a protocol constant
-  (`2^32`) — the base auto-assigned ids start from, so a large id like `2^32 + 5` collapses
-  to one payload byte (`09 05`).
+  treats them as opaque.
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
@@ -116,10 +92,10 @@ Each row gives the complete field layout in wire order; §2.1–2.9 add the pros
 | `0` | — **reserved, invalid** — | never begins a message |
 | `1` | `OpenBlobStream` | `u8 message_type` |
 | `2` | `CloseBlobStream` | `u8 message_type` |
-| `3` | `ChainOperation` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes operations` |
-| `4` | `InitiateCrossChainTransaction` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes tx_data` |
-| `5` | `Call` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address from_address` · `address to_address` · `u256 value` (compressed) · `bytes data` |
-| `6` | `StaticCall` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address from_address` · `address to_address` · `bytes data` |
+| `3` | `ChainOperation` | `u8 message_type` · `u64 chain_id` · `bytes operations` |
+| `4` | `InitiateCrossChainTransaction` | `u8 message_type` · `u64 chain_id` · `bytes tx_data` |
+| `5` | `Call` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `u256 value` · `bytes data` |
+| `6` | `StaticCall` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `bytes data` |
 | `7` | `ReturnSuccess` | `u8 message_type` · `bytes return_data` |
 | `8` | `ReturnFail` | `u8 message_type` · `bytes return_data` |
 | `9` | `Snapshot` | `u8 message_type` |
@@ -160,7 +136,7 @@ struct CloseBlobStream { u8 message_type; }   // = 2
 ### 2.3 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
 payload is **opaque** — an ordered list the executing chain interprets on its own. The
-operations list can be large, but its length prefix scales to a 4-byte size when needed.
+operations list can be large; its varint length prefix (§1.1) scales accordingly.
 
 A `ChainOperation` MUST NOT appear inside an `InitiateCrossChainTransaction` …
 `FinishCrossChainTransaction` bracket (§5, condition 7): between a `Call` and its return
@@ -170,7 +146,7 @@ the only legal messages are the cross-chain ones themselves (`Call` / `StaticCal
 ```c
 struct ChainOperation {          // type 3
     u8       message_type;       // = 3
-    chain_id chain_id;           // the executing chain, compressed (§1.1)
+    u64      chain_id;           // the executing chain
     bytes    operations;         // opaque to the protocol; the chain interprets it (length-prefixed)
 }
 ```
@@ -210,8 +186,8 @@ Opens one cross-chain transaction. `chain_id` is where the originating tx lives.
 ```c
 struct InitiateCrossChainTransaction {   // type 4
     u8       message_type;   // = 4
-    chain_id chain_id;       // where the originating tx lives, compressed (§1.1)
-    bytes    tx_data;        // opaque — the chain decides what goes here; trailing, length-prefixed
+    u64      chain_id;       // where the originating tx lives
+    bytes    tx_data;        // opaque — the chain decides what goes here; last, length-prefixed
 }
 ```
 
@@ -219,12 +195,9 @@ What `tx_data` contains is **up to the chain** — like `operations` (§2.3), th
 treats it as opaque bytes (e.g. an RLP transaction with or without its signature).
 
 An `InitiateCrossChainTransaction` requires an **empty context stack** (§1.2) — verified,
-not assumed: one nested inside another transaction is invalid (§5, condition 6).
-
-`InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.9) are **always
-paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a matching
-`FinishCrossChainTransaction`, a `FinishCrossChainTransaction` requires an open transaction,
-and everything the transaction produces lives between the two.
+not assumed: transactions never nest (§5, condition 6). It MUST be closed by a matching
+`FinishCrossChainTransaction` (§2.9); everything the transaction produces lives between
+the two.
 
 ### 2.5 `Call` / `StaticCall`
 A cross-chain call. Instead of an `is_static` flag, read-only calls are a **distinct message
@@ -235,16 +208,16 @@ absence of `value`:
 ```c
 struct Call {                // type 5
     u8       message_type;   // = 5
-    chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
+    u64      to_chain;       // target chain; from_chain is implicit — the executing chain
     address  from_address;
     address  to_address;
-    u256     value;          // compressed uint256 (see U256_COMPRESSED_CODEC.md)
+    u256     value;          // 32 bytes, little-endian (§1.1)
     bytes    data;           // the call's exact calldata; last, length-prefixed
 }
 
 struct StaticCall {          // type 6 — read-only STATICCALL
     u8       message_type;   // = 6
-    chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
+    u64      to_chain;       // target chain; from_chain is implicit — the executing chain
     address  from_address;
     address  to_address;
     bytes    data;           // the call's exact calldata; last, length-prefixed (no value)
@@ -285,8 +258,7 @@ the failure and handles it like a same-chain contract revert. That differs from 
 `Snapshot`/`Revert` region (§2.7–2.8), which force-reverts calls that already *succeeded*.
 
 ### 2.7 `Snapshot`
-Opens a revertable region — a forced-revert bracket. A **bare marker** (§1.1): just the
-`message_type` byte, no length and no params.
+Opens a revertable region — a forced-revert bracket. A **bare marker** (§1.1):
 
 ```c
 struct Snapshot { u8 message_type; }          // = 9
@@ -304,8 +276,8 @@ condition 7) — and its matching `Revert` must arrive before that bracket close
 same context-stack level the `Snapshot` opened at (§2.8).
 
 ### 2.8 `Revert`
-Closes the region opened by the matching `Snapshot` (§2.7), rolling back every effect —
-including any cross-chain `Call`s — executed since it. A **bare marker** (§1.1):
+Closes the region opened by the matching `Snapshot` (§2.7), rolling back everything
+executed since it. A **bare marker** (§1.1):
 
 ```c
 struct Revert { u8 message_type; }            // = 10
@@ -362,17 +334,7 @@ ChainOperation (chain_id: L2_A, operations: [ NewBlock{ts'} ])   # closeBlock fo
 ChainOperation (chain_id: L2_B, operations: [ NewBlock{ts'} ])   # closeBlock for L2_B
 ```
 
-### 3.2 Stand-alone vs. framed
-
-* **`ChainOperation` is stand-alone and self-closing** — no pair, and never inside an
-  `InitiateCrossChainTransaction` … `FinishCrossChainTransaction` bracket (§2.3).
-
-* **`InitiateCrossChainTransaction` MUST always be terminated by a
-  `FinishCrossChainTransaction`** — everything the tx produces lives between the two
-  markers, and the tx is not complete until its `FinishCrossChainTransaction` arrives (see
-  §3.1, step 3).
-
-### 3.3 Snapshot / Revert around a call
+### 3.2 Snapshot / Revert around a call
 
 A `Snapshot` … `Revert` bracket forces everything inside it to roll back:
 
@@ -385,7 +347,7 @@ Revert                                         # close region → the call's eff
 FinishCrossChainTransaction
 ```
 
-### 3.4 Nested snapshots
+### 3.3 Nested snapshots
 
 Brackets nest; each `Revert` closes the innermost open `Snapshot`:
 
@@ -409,32 +371,19 @@ FinishCrossChainTransaction
 The logical byte stream (§1) is not written into a blob verbatim. An EIP-4844 blob is
 **4096 field elements of 32 bytes each**, and each element must be a valid BLS12-381
 scalar — below the field modulus `r` (`2^254 < r < 2^255`). A raw 32-byte value can exceed
-`r`, so arbitrary bytes cannot be stored directly. Since `2^254 < r`, keeping the **top
-two bits of every element clear** is the safe choice: every element is then `< 2^254 < r`
-regardless of bit pattern.
+`r`, so arbitrary bytes cannot be stored directly.
 
-An element's 32 bytes are read as a **little-endian** scalar, like every scalar in this
-format (§1.1) — so its top two bits are the two most significant bits of its **last
-(32nd) byte**. Each field element thus encodes **31 full bytes plus the low 6 bits of the
-32nd byte** — 254 bits in place. The remaining **two high bits of the 32nd byte** would
-land in the element's top-two-bit positions, which must stay clear; instead they are set
-aside and re-encoded **at the end of the blob**:
+Each field element carries **31 bytes of stream data**, and its **last (32nd) byte is
+unused and MUST be zero**. Elements are read as **little-endian** scalars, like every
+scalar in this format (§1.1), so the zero byte is the most significant one — every
+element is `< 2^248 < r` regardless of its 31 data bytes.
 
-* **Data elements** carry the stream — 31 bytes + the low 6 bits of the 32nd byte, top two
-  bits clear — so each still represents a full 32 bytes of logical data.
-* The two deferred high bits per data element are collected in order. Across the 4064 data
-  elements that is `2 × 4064 = 8,128` bits (**1,016 bytes**), which are packed (same
-  254-bit scheme) into the **last 32 field elements** of the blob — an exact fit:
-  `32 × 254 = 8,128` bits, no slack.
-* **Capacity:** `(4096 − 32) × 32 = 130,048` useful bytes per blob.
-* **Read:** decode the 32 tail elements to recover the deferred bits, restore each data
-  element's full 32nd byte (in-place 6 bits + its two deferred bits), concatenate all data
-  elements, and parse messages (§1) from the result.
+* **Capacity:** `4096 × 31 = 126,976` useful bytes per blob.
+* **Read:** drop the last byte of each element, concatenate the 31-byte chunks of all
+  elements of all blobs in order, and parse messages (§1) from the result. A
+  `CloseBlobStream` (§2.2) is evaluated against this *decoded* stream.
 * The trailing `callData` (§1.1) has no field-element constraint — raw bytes, appended to
   the recovered stream as-is.
-
-A `CloseBlobStream` (§2.2) is evaluated against this *decoded* stream: it ends the blob
-portion's payload, and the remaining capacity is zero padding.
 
 ---
 
@@ -448,14 +397,13 @@ over a malformed stream, so publishing one is equivalent to publishing nothing.
 
 The stream is valid iff **all** of the following hold:
 
-1. **Encoding layer (§4).** Every field element of every blob is a valid BLS12-381 scalar
-   with its top two bits clear.
+1. **Encoding layer (§4).** Every field element of every blob has its last (32nd) byte
+   zero — a valid BLS12-381 scalar.
 2. **Stream brackets.** The first message of the stream is `OpenBlobStream` (`1`), and it
    appears nowhere else; `CloseBlobStream` (`2`) appears exactly once, in the blob portion.
-3. **Known types.** Every message begins with an assigned type byte: `1`–`11`.
-   A `0`, or any of `12`–`255`, is invalid — in particular, zero padding is never reachable
-   by a well-formed stream except after a `CloseBlobStream` (§2.2). Inside the `callData`
-   tail, `CloseBlobStream` is invalid too — there are no blobs left to close (§1.1).
+3. **Known types.** Every message begins with an assigned type byte: `1`–`11` — a `0`
+   (padding, §2) or any of `12`–`255` is invalid. Inside the `callData` tail,
+   `CloseBlobStream` is invalid too (§1.1).
 4. **No truncation.** Every message's fields decode completely within the stream; the
    stream ends exactly at a message boundary with no bracket still open (condition 6).
 5. **Invalid encodings.** Every field decodes exactly as its encoding defines.
@@ -490,3 +438,12 @@ type `1` as its opener — it introduces a **new opener type** (e.g. `12` =
 therefore doubles as the version marker: a verifier that does not recognize the opener
 type rejects the stream (§5, conditions 2–3), so a newer-format stream can never be
 misparsed as v1.
+
+---
+
+## 7. Future optimizations
+
+Several size optimizations are planned but not part of this version: a compressed
+`chain_id` encoding, a compressed `u256` for `Call.value`, and a denser blob packing
+(254 bits per field element, ~2.4% more capacity). They are specified in
+[`FUTURE_OPTIMIZATIONS.md`](./FUTURE_OPTIMIZATIONS.md).
