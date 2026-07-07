@@ -21,8 +21,10 @@ Each type's exact byte layout is defined inline with the type in §2.
 
 These conventions apply across the per-type layouts in §2:
 
-* All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64` as written,
-  `bool` is one byte, `address` is 20 bytes, `uint256` is 32 bytes.
+* All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64`/`u128`/`u256`
+  as written, `bool` is one byte, `address` is 20 bytes. A field marked **compressed**
+  (like `Call.value`) is the exception — it uses the variable-length encoding named for it
+  below.
 * A `bytes` field is length-prefixed, then carries exactly that many bytes. The length is a
   single leading byte that either holds the length directly or announces how many following
   little-endian bytes do:
@@ -77,7 +79,7 @@ hash (as `sourceRollupId`), every implementation MUST evolve it identically:
 
 | message | effect on the context stack |
 |---|---|
-| `InitiateCrossChainTransaction` | pushes its `chain_id` — the root context (stack was empty) |
+| `InitiateCrossChainTransaction` | pushes its `chain_id` — the root context; the stack MUST be empty (transactions never nest) |
 | `Call` / `StaticCall` | its `from_chain` **is the current top**; then pushes its `to_chain` — subsequent messages execute on the callee |
 | `ReturnSuccess` / `ReturnFail` | pops — execution resumes on the caller |
 | `FinishCrossChainTransaction` | pops the root `chain_id`; the stack MUST then be empty (every call already returned) |
@@ -158,7 +160,12 @@ struct CloseBlobStream { u8 message_type; }   // = 2
 ### 2.3 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
 payload is **opaque** — an ordered list the executing chain interprets on its own. The
-operations list can be large, but its length prefix scales to a 4-byte size when needed:
+operations list can be large, but its length prefix scales to a 4-byte size when needed.
+
+A `ChainOperation` MUST NOT appear inside an `InitiateCrossChainTransaction` …
+`FinishCrossChainTransaction` bracket (§5, condition 7): between a `Call` and its return
+the only legal messages are the cross-chain ones themselves (`Call` / `StaticCall`,
+`ReturnSuccess` / `ReturnFail`, `Snapshot` / `Revert`).
 
 ```c
 struct ChainOperation {          // type 3
@@ -210,6 +217,9 @@ struct InitiateCrossChainTransaction {   // type 4
 
 What `tx_data` contains is **up to the chain** — like `operations` (§2.3), the protocol
 treats it as opaque bytes (e.g. an RLP transaction with or without its signature).
+
+An `InitiateCrossChainTransaction` requires an **empty context stack** (§1.2) — verified,
+not assumed: one nested inside another transaction is invalid (§5, condition 6).
 
 `InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.9) are **always
 paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a matching
@@ -354,7 +364,8 @@ ChainOperation (chain_id: L2_B, operations: [ NewBlock{ts'} ])   # closeBlock fo
 
 ### 3.2 Stand-alone vs. framed
 
-* **`ChainOperation` is stand-alone and self-closing** — no pair.
+* **`ChainOperation` is stand-alone and self-closing** — no pair, and never inside an
+  `InitiateCrossChainTransaction` … `FinishCrossChainTransaction` bracket (§2.3).
 
 * **`InitiateCrossChainTransaction` MUST always be terminated by a
   `FinishCrossChainTransaction`** — everything the tx produces lives between the two
@@ -452,7 +463,8 @@ The stream is valid iff **all** of the following hold:
    `FinishCrossChainTransaction`; every `Snapshot` by a properly nested `Revert`; every
    `Call` / `StaticCall` has its `ReturnSuccess` / `ReturnFail`. A closer with no open
    counterpart (a bare `Revert`, a return with no outstanding call, a
-   `FinishCrossChainTransaction` with calls still open — §1.2's context stack) is invalid.
+   `FinishCrossChainTransaction` with calls still open — §1.2's context stack) is invalid,
+   as is an `InitiateCrossChainTransaction` on a non-empty stack (nested transaction).
    A `Revert` closes its `Snapshot` at the **same context-stack depth** it opened at
    (§2.8): a `Revert` while a `Call` opened after the `Snapshot` is still unreturned is
    invalid.
@@ -460,7 +472,9 @@ The stream is valid iff **all** of the following hold:
    `Revert` appear only inside
    an open `InitiateCrossChainTransaction` … `FinishCrossChainTransaction` bracket (a `Call`
    needs an executing context for its implicit `from_chain`, §1.2; a `Snapshot` cannot open
-   outside a cross-chain transaction, §2.7).
+   outside a cross-chain transaction, §2.7). Conversely, `ChainOperation` appears only
+   **outside** such a bracket (§2.3) — a `ChainOperation` between a `Call` and its return
+   is invalid.
 8. **Minimal encodings — NOT enforced.** An honest encoder always emits the shortest form, but
    the verifier does not assert it: non-minimal encodings still decode and do not
    invalidate the stream. Consequence: raw stream bytes are not canonical.
