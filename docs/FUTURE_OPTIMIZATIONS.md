@@ -4,7 +4,7 @@ Deferred size optimizations for the blob message format
 ([`BLOB_FORMAT_SPEC.md`](./BLOB_FORMAT_SPEC.md)). Version 1 of the format deliberately
 uses the simple encodings — plain `u64` chain ids, plain 32-byte `u256` values, 31 data
 bytes per blob field element. Each section below is a drop-in candidate for a future
-version of the format (spec §6: a new version means a new opener type).
+version of the format (spec §6: a new version means a new leading version byte).
 
 ## 1. Compressed `chain_id`
 
