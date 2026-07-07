@@ -57,20 +57,20 @@ These conventions apply across the per-type layouts in §2:
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
-  A `CloseBlob` (§2.9) ends a blob early so the next blob starts a fresh message; the bytes
-  between it and the blob boundary are padding. How that stream data is packed into a
-  blob's field elements is detailed in §4.
+  A `CloseBlobStream` (§2.2) ends the blob portion — it MUST appear exactly once: every
+  byte after it, up to the end of the last blob, is padding. How that stream data is packed into a blob's field
+  elements is detailed in §4.
 
-  The `callData` tail is part of the same stream: if the **last** blob ends with a
-  `CloseBlob`, its padding is skipped and the stream **resumes in `callData`**. A
-  `CloseBlob` cannot appear inside `callData` itself — there is no blob boundary to
-  close, so a `0xFF` type byte there is invalid (§5).
+  The `callData` tail is part of the same stream: after a `CloseBlobStream`, the padding
+  is skipped and the stream **resumes in `callData`**. A `CloseBlobStream` cannot appear
+  inside `callData` itself — there are no blobs left to close, so its type byte there is
+  invalid (§5).
 
 ### 1.2 The current executing chain (context stack)
 
 Several fields are never encoded because they are implied by **where execution currently
-is**: a `Call`'s `from_chain` (§2.4), both endpoints of a `return_success` / `return_fail`
-(§2.5), and the chain a cross-chain transaction ends on (§2.8). All of them read the same
+is**: a `Call`'s `from_chain` (§2.5), both endpoints of a `return_success` / `return_fail`
+(§2.6), and the chain a cross-chain transaction ends on (§2.9). All of them read the same
 stream-level state — the **currently executing chain** — tracked by a **context stack**
 that evolves deterministically with each message. Because it feeds the cross-chain call
 hash (as `sourceRollupId`), every implementation MUST evolve it identically:
@@ -81,7 +81,7 @@ hash (as `sourceRollupId`), every implementation MUST evolve it identically:
 | `Call` / `Call_static` | its `from_chain` **is the current top**; then pushes its `to_chain` — subsequent messages execute on the callee |
 | `return_success` / `return_fail` | pops — execution resumes on the caller |
 | `FinishCrossChainTransaction` | pops the root `chain_id`; the stack MUST then be empty (every call already returned) |
-| `ChainOperation`, `Snapshot`, `Revert`, `OpenBlobStream`, `CloseBlob` | no effect on the stack |
+| `ChainOperation`, `Snapshot`, `Revert`, `OpenBlobStream`, `CloseBlobStream` | no effect on the stack |
 
 Equivalently: the current chain is the one established by the most recent **non-finalized**
 `InitiateCrossChainTransaction` or `Call` / `Call_static` — "non-finalized" meaning its
@@ -113,45 +113,55 @@ Each row gives the complete field layout in wire order; §2.1–2.9 add the pros
 |---|---|---|
 | `0` | — **reserved, invalid** — | never begins a message |
 | `1` | `OpenBlobStream` | `u8 message_type` |
-| `2` | `ChainOperation` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes operations` |
-| `3` | `InitiateCrossChainTransaction` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes tx_data` |
-| `4` | `Call` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `u256 value` (compressed) · `bytes data` |
-| `5` | `Call_static` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `bytes data` |
-| `6` | `return_success` | `u8 message_type` · `bytes return_data` |
-| `7` | `return_fail` | `u8 message_type` · `bytes return_data` |
-| `8` | `Snapshot` | `u8 message_type` |
-| `9` | `Revert` | `u8 message_type` |
-| `10` | `FinishCrossChainTransaction` | `u8 message_type` |
-| `0xFF` | `CloseBlob` | `u8 message_type` |
+| `2` | `CloseBlobStream` | `u8 message_type` |
+| `3` | `ChainOperation` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes operations` |
+| `4` | `InitiateCrossChainTransaction` | `u8 message_type` · `chain_id` (compressed, §1.1) · `bytes tx_data` |
+| `5` | `Call` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `u256 value` (compressed) · `bytes data` |
+| `6` | `Call_static` | `u8 message_type` · `to_chain` (compressed, §1.1) · `address fromAddress` · `address toAddress` · `bytes data` |
+| `7` | `return_success` | `u8 message_type` · `bytes return_data` |
+| `8` | `return_fail` | `u8 message_type` · `bytes return_data` |
+| `9` | `Snapshot` | `u8 message_type` |
+| `10` | `Revert` | `u8 message_type` |
+| `11` | `FinishCrossChainTransaction` | `u8 message_type` |
 
-> **Type `0` is reserved as invalid** so zero padding never parses as messages — a blob
-> missing its `CloseBlob` fails at the first padding byte instead of decoding it as valid
-> markers.
+> **Type `0` is reserved as invalid** so zero padding never parses as messages — a stream
+> missing its `CloseBlobStream` fails at the first padding byte instead of decoding it as
+> valid markers.
 
 > **Pairing.** Three pairs always come matched: every `Call` / `Call_static` has a result —
-> `return_success` (`6`) or `return_fail` (`7`); every `Snapshot` a `Revert`; and every
+> `return_success` (`7`) or `return_fail` (`8`); every `Snapshot` a `Revert`; and every
 > `InitiateCrossChainTransaction` a `FinishCrossChainTransaction`. `ChainOperation`,
-> `OpenBlobStream`, and `CloseBlob` stand alone.
+> `OpenBlobStream`, and `CloseBlobStream` stand alone.
 
 ### 2.1 `OpenBlobStream`
 Opens the whole message stream — emitted once, as the very first message, before any content.
-It is **not** the per-blob counterpart of `CloseBlob` (§2.9): `CloseBlob` ends the *current*
-blob early, whereas `OpenBlobStream` is stream-level, spanning **all** blobs (§1.1 blob
-layout). It reserves the position to signal the format **version**
+Its closing counterpart is `CloseBlobStream` (§2.2), which ends the blob portion of the
+stream (§1.1 blob layout). It reserves the position to signal the format **version**
 in the future; for now it is a **bare marker** (§1.1) carrying no fields.
 
 ```c
 struct OpenBlobStream { u8 message_type; }          // = 1
 ```
 
-### 2.2 `ChainOperation`
+### 2.2 `CloseBlobStream`
+The closing counterpart of `OpenBlobStream` (§2.1): marks the end of meaningful content in
+the **blob portion** of the stream — **mandatory, emitted exactly once**; a stream
+without it is invalid (§5). Every byte after it, up to the
+end of the last blob, is padding and MUST be ignored; the stream continues in the
+`callData` tail (§1.1). A **bare marker** (§1.1):
+
+```c
+struct CloseBlobStream { u8 message_type; }   // = 2
+```
+
+### 2.3 `ChainOperation`
 Carries the operations of a single chain (the `chain_id`). At the protocol level its
 payload is **opaque** — an ordered list the executing chain interprets on its own. The
 operations list can be large, but its length prefix scales to a 4-byte size when needed:
 
 ```c
-struct ChainOperation {          // type 2
-    u8       message_type;       // = 2
+struct ChainOperation {          // type 3
+    u8       message_type;       // = 3
     chain_id chain_id;           // the executing chain, compressed (§1.1)
     bytes    operations;         // opaque to the protocol; the chain interprets it (length-prefixed)
 }
@@ -175,7 +185,7 @@ struct ChainOperation {          // type 2
 **Example** — chain `7` opens a block, runs two txs, opens a second block, runs one more:
 
 ```
-message_type = 2
+message_type = 3
 chain_id     = 7
 operations   = ChainOpItem[5] {
     [0] NewBlock     { timestamp: 1_700_000_000, ... }   # block 1 opens
@@ -186,34 +196,34 @@ operations   = ChainOpItem[5] {
 }
 ```
 
-### 2.3 `InitiateCrossChainTransaction`
+### 2.4 `InitiateCrossChainTransaction`
 Opens one cross-chain transaction. `chain_id` is where the originating tx lives.
 
 ```c
-struct InitiateCrossChainTransaction {   // type 3
-    u8       message_type;   // = 3
+struct InitiateCrossChainTransaction {   // type 4
+    u8       message_type;   // = 4
     chain_id chain_id;       // where the originating tx lives, compressed (§1.1)
     bytes    tx_data;        // opaque — the chain decides what goes here; trailing, length-prefixed
 }
 ```
 
-What `tx_data` contains is **up to the chain** — like `operations` (§2.2), the protocol
+What `tx_data` contains is **up to the chain** — like `operations` (§2.3), the protocol
 treats it as opaque bytes (e.g. an RLP transaction with or without its signature).
 
-`InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.8) are **always
+`InitiateCrossChainTransaction` / `FinishCrossChainTransaction` (§2.9) are **always
 paired**, like brackets: every `InitiateCrossChainTransaction` MUST be closed by a matching
 `FinishCrossChainTransaction`, a `FinishCrossChainTransaction` requires an open transaction,
 and everything the transaction produces lives between the two.
 
-### 2.4 `Call` / `Call_static`
+### 2.5 `Call` / `Call_static`
 A cross-chain call. Instead of an `is_static` flag, read-only calls are a **distinct message
-type** — `Call_static` (`5`), a `STATICCALL` that carries no value and reverts on state
-write. A value-bearing `Call` (`4`) and a static `Call_static` (`5`) differ only by the
+type** — `Call_static` (`6`), a `STATICCALL` that carries no value and reverts on state
+write. A value-bearing `Call` (`5`) and a static `Call_static` (`6`) differ only by the
 absence of `value`:
 
 ```c
-struct Call {                // type 4
-    u8       message_type;   // = 4
+struct Call {                // type 5
+    u8       message_type;   // = 5
     chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
     address  fromAddress;
     address  toAddress;
@@ -221,8 +231,8 @@ struct Call {                // type 4
     bytes    data;           // the call's exact calldata; last, length-prefixed
 }
 
-struct Call_static {         // type 5 — read-only STATICCALL
-    u8       message_type;   // = 5
+struct Call_static {         // type 6 — read-only STATICCALL
+    u8       message_type;   // = 6
     chain_id to_chain;       // target chain, compressed (§1.1); from_chain is implicit — the executing chain
     address  fromAddress;
     address  toAddress;
@@ -236,22 +246,22 @@ calldata of the cross-chain call.
 `from_chain` is **not encoded** — it is the **currently executing chain**: the top of the
 context stack (§1.2) at the moment the `Call` is emitted.
 
-### 2.5 `return_success` / `return_fail` (the Call's result)
+### 2.6 `return_success` / `return_fail` (the Call's result)
 The outcome of a finished `Call`, flowing back to the caller. Instead of one `Result` with a
 `success` flag, the outcome is carried by **two distinct message types** — `return_success`
-(`6`) for a successful **return** and `return_fail` (`7`) for the call's own **revert**.
+(`7`) for a successful **return** and `return_fail` (`8`) for the call's own **revert**.
 Either pairs with the last outstanding `Call` / `Call_static`, so **both** chains (`from`
 and `to`) are implicit — the return pops the context stack (§1.2), resuming execution on
 the caller. The payload layout is identical for both:
 
 ```c
-struct return_success {      // type 6
-    u8       message_type;   // = 6
+struct return_success {      // type 7
+    u8       message_type;   // = 7
     bytes    return_data;    // the call's exact return value; last, length-prefixed
 }
 
-struct return_fail {         // type 7
-    u8       message_type;   // = 7
+struct return_fail {         // type 8
+    u8       message_type;   // = 8
     bytes    return_data;    // the call's exact revert data; last, length-prefixed
 }
 ```
@@ -261,18 +271,18 @@ Like `Call.data`, `return_data` is **not** chain-defined: it is exactly the call
 
 `return_fail` means the call **finished by reverting** on the callee: the caller receives
 the failure and handles it like a same-chain contract revert. That differs from a
-`Snapshot`/`Revert` region (§2.6–2.7), which force-reverts calls that already *succeeded*.
+`Snapshot`/`Revert` region (§2.7–2.8), which force-reverts calls that already *succeeded*.
 
-### 2.6 `Snapshot`
+### 2.7 `Snapshot`
 Opens a revertable region — a forced-revert bracket. A **bare marker** (§1.1): just the
 `message_type` byte, no length and no params.
 
 ```c
-struct Snapshot { u8 message_type; }          // = 8
+struct Snapshot { u8 message_type; }          // = 9
 ```
 
 Everything executed after it (native ops, cross-chain `Call`s, nested regions) is rolled
-back when the region's matching `Revert` (§2.7) arrives. `Snapshot` / `Revert` are
+back when the region's matching `Revert` (§2.8) arrives. `Snapshot` / `Revert` are
 **always paired and properly nested**, like balanced brackets: every `Snapshot` is closed
 by exactly one `Revert`, a `Revert` must have an open `Snapshot`, and each `Revert` closes
 the innermost still-open `Snapshot`.
@@ -281,39 +291,28 @@ A `Snapshot` can only open **inside** an open `InitiateCrossChainTransaction` �
 `FinishCrossChainTransaction` bracket — never outside a cross-chain transaction (§5,
 condition 7) — and its matching `Revert` must arrive before that bracket closes.
 
-### 2.7 `Revert`
-Closes the region opened by the matching `Snapshot` (§2.6), rolling back every effect —
+### 2.8 `Revert`
+Closes the region opened by the matching `Snapshot` (§2.7), rolling back every effect —
 including any cross-chain `Call`s — executed since it. A **bare marker** (§1.1):
 
 ```c
-struct Revert { u8 message_type; }            // = 9
+struct Revert { u8 message_type; }            // = 10
 ```
 
 The region is delimited by the bracket, so no chain id, count, or call identifier is
 needed. A `Revert` is **not** a failed result: a call that fails by itself reports a
-`return_fail` (§2.5). `Revert` is used when calls inside the region completed with a
+`return_fail` (§2.6). `Revert` is used when calls inside the region completed with a
 `return_success`, but the chain that initiated them, later reverts that context — forcing
 those already-succeeded effects to roll back.
 
-### 2.8 `FinishCrossChainTransaction`
-Closes the cross-chain transaction opened by `InitiateCrossChainTransaction` (§2.3). A
+### 2.9 `FinishCrossChainTransaction`
+Closes the cross-chain transaction opened by `InitiateCrossChainTransaction` (§2.4). A
 **bare marker** (§1.1); the tx ends on the currently-executing chain, which is implicit
 (§1.2).
 
 ```c
-struct FinishCrossChainTransaction { u8 message_type; }   // = 10
+struct FinishCrossChainTransaction { u8 message_type; }   // = 11
 ```
-
-### 2.9 `CloseBlob`
-Ends a blob early: marks the end of meaningful content in the current EIP-4844 blob so the
-next blob starts a **fresh** message instead of continuing the current one (§1.1). A
-**bare marker** with the reserved type byte `0xFF`:
-
-```c
-struct CloseBlob { u8 message_type; }         // = 0xFF
-```
-
-Any bytes after `CloseBlob`, up to the blob boundary, are padding and MUST be ignored.
 
 ---
 
@@ -407,8 +406,8 @@ re-encoded **at the end of the blob**:
 * The trailing `callData` (§1.1) has no field-element constraint — raw bytes, appended to
   the recovered stream as-is.
 
-A `CloseBlob` (§2.9) is evaluated against this *decoded* stream: it ends the blob's payload
-early, and the remaining capacity is padding.
+A `CloseBlobStream` (§2.2) is evaluated against this *decoded* stream: it ends the blob
+portion's payload early, and the remaining capacity is padding.
 
 ---
 
@@ -424,12 +423,12 @@ The stream is valid iff **all** of the following hold:
 
 1. **Encoding layer (§4).** Every field element of every blob is a valid BLS12-381 scalar
    with its top two bits clear.
-2. **Opening.** The first message of the stream is `OpenBlobStream` (`1`), and it appears nowhere
-   else.
-3. **Known types.** Every message begins with an assigned type byte: `1`–`10` or `0xFF`.
-   A `0`, or any of `11`–`254`, is invalid — in particular, zero padding is never reachable
-   by a well-formed stream except after a `CloseBlob` (§2.9). Inside the `callData` tail,
-   `0xFF` is invalid too — there is no blob boundary to close (§1.1).
+2. **Stream brackets.** The first message of the stream is `OpenBlobStream` (`1`), and it
+   appears nowhere else; `CloseBlobStream` (`2`) appears exactly once, in the blob portion.
+3. **Known types.** Every message begins with an assigned type byte: `1`–`11`.
+   A `0`, or any of `12`–`255`, is invalid — in particular, zero padding is never reachable
+   by a well-formed stream except after a `CloseBlobStream` (§2.2). Inside the `callData`
+   tail, `CloseBlobStream` is invalid too — there are no blobs left to close (§1.1).
 4. **No truncation.** Every message's fields decode completely within the stream; the
    stream ends exactly at a message boundary with no bracket still open (condition 6).
 5. **Invalid encodings.** Every field decodes exactly as its encoding defines.
@@ -442,13 +441,7 @@ The stream is valid iff **all** of the following hold:
    `Revert` appear only inside
    an open `InitiateCrossChainTransaction` … `FinishCrossChainTransaction` bracket (a `Call`
    needs an executing context for its implicit `from_chain`, §1.2; a `Snapshot` cannot open
-   outside a cross-chain transaction, §2.6).
-8. **Minimal encodings — 🗣 to discuss.** The encoder always emits the shortest form: a
-   `bytes` length in the smallest prefix that holds it (length `5` as `05`, never `252` +
-   `05 00`), a `chain_id` payload with no zero-padded high bytes (id `5` as `01 05`,
-   never `02 05 00`; id `0` as `00`, never `01 00`), and the offset form whenever it is
-   shorter (ids in `[2^32, 2^33)` are encodable both raw and offset). Open question: MUST
-   the verifier assert this (a non-minimal encoding invalidates the whole stream), or is
-   minimality only an encoder-side rule and a decoder accepts non-minimal forms?
-   Trade-off: without enforcement the same logical stream has several byte
-   representations, so nothing hashed over the raw bytes is canonical.
+   outside a cross-chain transaction, §2.7).
+8. **Minimal encodings — NOT enforced.** An honest encoder always emits the shortest form, but
+   the verifier does not assert it: non-minimal encodings still decode and do not
+   invalidate the stream. Consequence: raw stream bytes are not canonical.
