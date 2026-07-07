@@ -12,10 +12,16 @@ import {
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call, StaticLookup} from "../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry,
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    StaticExecutionEntry
+} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticLookup as L2StaticLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../src/interfaces/IEEZL2.sol";
@@ -221,6 +227,7 @@ contract IntegrationTestFlashLoan is Test {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
             immediateEntryCount: immediateCount,
@@ -234,12 +241,12 @@ contract IntegrationTestFlashLoan is Test {
         rollups.postAndVerifyBatch(batch);
     }
 
-    function _emptyStaticLookups() internal pure returns (StaticLookup[] memory) {
-        return new StaticLookup[](0);
+    function _emptyStaticLookups() internal pure returns (StaticExecutionEntry[] memory) {
+        return new StaticExecutionEntry[](0);
     }
 
-    function _noL2StaticLookups() internal pure returns (L2StaticLookup[] memory) {
-        return new L2StaticLookup[](0);
+    function _noL2StaticLookups() internal pure returns (L2StaticExecutionEntry[] memory) {
+        return new L2StaticExecutionEntry[](0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

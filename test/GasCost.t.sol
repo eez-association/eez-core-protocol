@@ -329,6 +329,7 @@ contract GasCost is Base {
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
             immediateEntryCount: immediateCount,

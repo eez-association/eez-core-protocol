@@ -10,7 +10,7 @@ import {
 } from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, StaticLookup} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateDelta, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
 import {
     crossChainCallHash,
@@ -37,7 +37,7 @@ contract Batcher {
         address proofSystem,
         uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        StaticLookup[] calldata staticLookups,
+        StaticExecutionEntry[] calldata staticLookups,
         CounterAndProxy cap
     )
         external
@@ -63,7 +63,8 @@ contract Batcher {
             blobIndices: new uint256[](0),
             callData: "",
             proofs: proofs,
-            blockNumber: 0
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         cap.incrementProxy();

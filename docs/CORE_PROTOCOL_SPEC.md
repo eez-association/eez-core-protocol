@@ -116,7 +116,7 @@ struct ExecutionEntry {
 }
 ```
 
-A top-level entry carries a `success` flag. When `success == true`, `executeCrossChainCall` runs the entry and returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. (Read-only reverting top-level results are still expressed via a top-level `StaticLookup` resolved by `staticCallLookup` outside an execution.)
+A top-level entry carries a `success` flag. When `success == true`, `executeCrossChainCall` runs the entry and returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. (Read-only reverting top-level results are still expressed via a top-level `StaticExecutionEntry` resolved by `staticCallLookup` outside an execution.)
 
 Partition invariant: `entry.callCount + Σ expectedL1ToL2Calls[i].callCount == l2ToL1Calls.length` (L2: `expectedOutgoingCalls` / `incomingCalls`) — see §D.2.
 
@@ -327,12 +327,15 @@ customDataAcc = bytes32(0)
 for each rollup r in rollupIdsWithProofSystems (rollupId-ascending):
   customDataAcc = keccak256(abi.encode(customDataAcc, rollupId_r, customData_r))
 
+boundSender = batch.bindMsgSenderInPublicInput ? msg.sender : address(0)
+
 sharedPublicInput = keccak256(abi.encodePacked(
     abi.encode(entryHashes),
     abi.encode(lookupCallHashes),
     abi.encode(blobHashes),
     keccak256(callData),
-    customDataAcc
+    customDataAcc,
+    boundSender
 ))
 
 for each PS k in proofSystems:
@@ -346,6 +349,8 @@ lookupCallHashes[i] = keccak256(abi.encode(batch.l1ToL2lookupCalls[i]))
 ```
 
 `customData_r` is the opaque per-rollup blob fetched via `IRollupContract(rollupContract).getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment; the reference `Rollup` returns ABI-encoded `(timestamp, blockHash)`). Each blob folds — keyed by `rollupId_r`, rollupId-ascending — into `customDataAcc`, which binds into `sharedPublicInput`. It does NOT vary per PS, so it is folded ONCE into the shared input rather than into each per-PS `acc_k`.
+
+`boundSender` binds the submitter: with `batch.bindMsgSenderInPublicInput = true` the proof commits to the exact `msg.sender` allowed to land the batch (front-run protection for the meta-hook / AA bundle); with `false` it commits to `address(0)` and anyone may submit. See `PROOF_REPLAY_AND_FRONTRUNNING.md`.
 
 Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proofs verify atomically — any failure reverts the whole call.
 

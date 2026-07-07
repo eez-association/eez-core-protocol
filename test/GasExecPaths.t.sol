@@ -146,6 +146,7 @@ contract GasExecPaths is GasCost {
         batch = ProofSystemBatchPerVerificationEntries({
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             blockNumber: 0,
+            bindMsgSenderInPublicInput: false,
             entries: entries,
             staticLookups: _emptyStaticLookups(),
             immediateEntryCount: immediateCount,

@@ -9,7 +9,7 @@ import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticLookup
+    StaticExecutionEntry
 } from "../src/interfaces/IEEZL2.sol";
 import {Counter, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
 
@@ -135,7 +135,7 @@ contract EEZL2Test is Test {
     function _loadSingleEntry(ExecutionEntry memory entry) internal {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
     }
@@ -189,7 +189,7 @@ contract EEZL2Test is Test {
 
     function test_LoadExecutionTable_RevertsIfNotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.expectRevert(EEZL2.Unauthorized.selector);
         manager.loadExecutionTable(entries, noStatic);
         vm.prank(address(0xBEEF));
@@ -199,7 +199,7 @@ contract EEZL2Test is Test {
 
     function test_LoadExecutionTable_SystemCanLoadEmpty() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
         assertEq(manager.executionIndex(), 0);
@@ -258,7 +258,7 @@ contract EEZL2Test is Test {
         for (uint256 i = 0; i < 3; i++) {
             entries[i] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
         }
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -332,7 +332,7 @@ contract EEZL2Test is Test {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -368,7 +368,7 @@ contract EEZL2Test is Test {
         entries[0].success = false;
         entries[0].returnData = payload;
 
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -503,7 +503,7 @@ contract EEZL2Test is Test {
     // NOTE: a reverting top-level cross-chain call is now a normal `ExecutionEntry { success: false }`
     // (run, verified, then reverted with `returnData` — see `test_RevertedLookup_TopLevel_Reverts`);
     // reverting REENTRANT calls are `success == false` `ExpectedOutgoingCrossChainCall`s, and a top-level
-    // reverting READ is a `StaticLookup`. There is no separate `failed` flag any more.
+    // reverting READ is a `StaticExecutionEntry`. There is no separate `failed` flag any more.
 
     function test_ExecuteCrossChainCall_ConsumesInFifoOrder() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
@@ -528,7 +528,7 @@ contract EEZL2Test is Test {
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
         entries[0] = _buildSimpleEntry(crossChainCallHash, cc, abi.encode(uint256(111)), rollingHash);
         entries[1] = _buildSimpleEntry(crossChainCallHash, cc, abi.encode(uint256(222)), rollingHash);
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -752,7 +752,7 @@ contract EEZL2Test is Test {
         entries[1] = _buildNoCalls(hash2, "");
 
         vm.recordLogs();
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -765,7 +765,7 @@ contract EEZL2Test is Test {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
 
         vm.recordLogs();
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 
@@ -839,7 +839,7 @@ contract EEZL2Test is Test {
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
         entries[0] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
         entries[1] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
-        StaticLookup[] memory noStatic = new StaticLookup[](0);
+        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
 

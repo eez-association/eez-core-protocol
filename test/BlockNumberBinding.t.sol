@@ -6,13 +6,15 @@ import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {ExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
-/// @notice Covers `ProofSystemBatchPerVerificationEntries.blockNumber`:
-///         path coverage of `Rollup.getCustomData` (0 / recent block /
-///         `type(uint64).max` sentinel / `BlockHashUnavailable` reverts) AND the binding
-///         guarantee — the returned `customData` blob folds into `publicInputsHash`
-///         exactly as `_verifyProofSystemBatch` computes it. The fold is asserted with a
-///         pinned-hash `MockProofSystem`: the mock only accepts the exact hash the test
-///         replicates off-band, so a successful post proves the registry computed it.
+/// @notice Covers the `publicInputsHash` context bindings of
+///         `ProofSystemBatchPerVerificationEntries`: `blockNumber` (path coverage of
+///         `Rollup.getCustomData` — 0 / recent block / `type(uint64).max` sentinel /
+///         `BlockHashUnavailable` reverts — plus the binding guarantee that the returned
+///         `customData` blob folds into `publicInputsHash` exactly as
+///         `_verifyProofSystemBatch` computes it) and `bindMsgSenderInPublicInput` (the
+///         submitter fold). Bindings are asserted with a pinned-hash `MockProofSystem`:
+///         the mock only accepts the exact hash the test replicates off-band, so a
+///         successful post proves the registry computed it.
 contract BlockNumberBindingTest is Base {
     RollupHandle internal r;
 
@@ -63,7 +65,8 @@ contract BlockNumberBindingTest is Base {
                 abi.encode(staticLookupHashes),
                 abi.encode(blobHashes),
                 keccak256(batch.callData),
-                abi.encode(customDataHashes)
+                abi.encode(customDataHashes),
+                batch.bindMsgSenderInPublicInput ? address(this) : address(0) // this test contract is the submitter
             )
         );
 
@@ -155,6 +158,42 @@ contract BlockNumberBindingTest is Base {
         assertTrue(blockhash(990) != blockhash(991), "fixture: distinct block hashes required");
         // Pin the hash for block 991, then post a batch bound to 990.
         ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, abi.encode(uint256(0), blockhash(991))));
+        vm.expectRevert(EEZ.InvalidProof.selector);
+        rollups.postAndVerifyBatch(batch);
+    }
+
+    // ──────────────────────────────────────────────
+    //  bindMsgSenderInPublicInput (submitter binding)
+    // ──────────────────────────────────────────────
+
+    function test_BindMsgSender_BoundSubmitter_Succeeds() public {
+        ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(0);
+        batch.bindMsgSenderInPublicInput = true;
+        // Mirror folds address(this) — this contract is the submitter.
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, ""));
+        rollups.postAndVerifyBatch(batch);
+        _assertEntryApplied();
+    }
+
+    /// @notice A submitter-bound batch landed by ANY other sender must fail verification —
+    ///         the front-running protection the flag exists for.
+    function test_BindMsgSender_DifferentSubmitter_Reverts() public {
+        ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(0);
+        batch.bindMsgSenderInPublicInput = true;
+        // Proof committed to address(this); a front-runner copies the calldata and submits.
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, ""));
+        vm.prank(address(0xF807));
+        vm.expectRevert(EEZ.InvalidProof.selector);
+        rollups.postAndVerifyBatch(batch);
+    }
+
+    /// @notice Non-vacuousness: an unbound proof (committed to address(0)) does not verify a
+    ///         bound batch, and vice versa — the flag genuinely changes the public input.
+    function test_BindMsgSender_FlagMismatch_Reverts() public {
+        ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(0);
+        // Pin the UNBOUND hash (folds address(0)), then post with the flag set.
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, ""));
+        batch.bindMsgSenderInPublicInput = true;
         vm.expectRevert(EEZ.InvalidProof.selector);
         rollups.postAndVerifyBatch(batch);
     }

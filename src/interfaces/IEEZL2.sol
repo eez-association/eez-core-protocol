@@ -27,9 +27,7 @@ pragma solidity ^0.8.28;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice A cross-chain call executed on this L2 (sourced from a remote rollup).
-/// @dev `isStatic` dispatches via STATICCALL (read-only, no value). `revertNextNCalls > 0`
-///      force-reverts the state of the next N calls (this one included) — see `revertNextNCalls`
-///      handling in `EEZL2`. Field layout is identical to L1's `L2ToL1Call`.
+/// @dev Field layout is identical to L1's `L2ToL1Call`.
 struct CrossChainCall {
     uint16 revertNextNCalls; // >0 force-reverts the next N calls (this one included)
     bool isStatic; // dispatch via STATICCALL (read-only, no value)
@@ -70,7 +68,7 @@ struct ExpectedOutgoingCrossChainCall {
 ///         `returnData` (`executeCrossChainCall`); when false the entry is run, verified, then reverted with
 ///         `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT
 ///         calls are `success == false` `ExpectedOutgoingCrossChainCall`s and a top-level reverting read is a
-///         `StaticLookup`. A `bytes32(0)` `proxyEntryHash` is unreachable on L2 — there is no zero-hash
+///         `StaticExecutionEntry`. A `bytes32(0)` `proxyEntryHash` is unreachable on L2 — there is no zero-hash
 ///         consumption path (`executeL2Txs` is L1-only).
 struct ExecutionEntry {
     bytes32 proxyEntryHash; // inbound proxy-entry call hash; never bytes32(0) on L2
@@ -86,9 +84,9 @@ struct ExecutionEntry {
 ///         Reverting top-level reads land here (`success == false`); state-changing top-level
 ///         calls are `ExecutionEntry`s.
 /// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
-///      as ANOTHER `StaticLookup`). Match: `proxyEntryHash` alone (L2 has no state roots to pin).
+///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` alone (L2 has no state roots to pin).
 ///      Referenced proxies must already be deployed (CREATE2 is unavailable inside a STATICCALL frame).
-struct StaticLookup {
+struct StaticExecutionEntry {
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
     CrossChainCall[] incomingCalls; // read-only sub-calls run via STATICCALL during resolution
     bytes32 rollingHash; // expected rolling hash of the sub-calls (untagged static schema: keccak(prev, success, retData))
