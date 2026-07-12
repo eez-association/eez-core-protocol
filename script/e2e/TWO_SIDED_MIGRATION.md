@@ -1,6 +1,6 @@
 # Two-sided e2e migration guide
 
-How to upgrade a single-sided e2e scenario (only `Execute` OR only `ExecuteL2`) into a faithful two-sided scenario that exercises **both** anvil chains. Reference implementations: `counter/E2E.s.sol` (L1→L2) and `counterL2/E2E.s.sol` (L2→L1).
+How to upgrade a single-sided e2e scenario (only `Execute` OR only `ExecuteL2`) into a faithful two-sided scenario that exercises **both** anvil chains. Reference implementations: `one_way/L1_to_L2/counter/E2ECounter.s.sol` (L1→L2) and `one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol` (L2→L1).
 
 ## Why two-sided
 
@@ -19,7 +19,7 @@ Pick the right destination-side pattern by where the user-trigger lives:
 
 There is no `executeIncomingCrossChainCall` on L1 — the L1-side analog for system-driven execution is `executeL2TX`, and the destination-side entry has `proxyEntryHash = bytes32(0)`.
 
-## File anatomy — the contracts in each `E2E.s.sol`
+## File anatomy — the contracts in each scenario script (`E2E<Name>.s.sol`)
 
 Add or keep the following Forge `contract` types, in this order:
 
@@ -81,7 +81,7 @@ ExecutionEntry entry = {
 };
 ```
 
-For scenarios with a try/catch'd reverting reentrant call, put the reverted `ExpectedLookup` inside `expectedLookups` (reference: `nestedCallRevert/E2E.s.sol`).
+For scenarios with a try/catch'd reverting reentrant call, put the reverted `ExpectedLookup` inside `expectedLookups` (reference: `revert/L1_to_L2/nestedCallRevert/E2ENestedCallRevert.s.sol`).
 
 ### `ExecuteL2` contract
 
@@ -142,7 +142,7 @@ When the L2 destination needs to consume N entries in sequence — e.g. a `CallT
    CallTwice(l2Trigger).callCounterTwice(triggerProxy);   // or whatever shape the trigger has
    vm.stopBroadcast();
    ```
-   Each proxy call inside the trigger forwards to `managerL2.executeCrossChainCall`, which calls `_consumeAndExecute` → resets `_rollingHash`/`_currentIncomingCall` per entry, then `_processNCalls(entry.callCount)`. The trigger pattern matches `multi-call-nested/E2E.s.sol::ExecuteL2` — use it as the reference implementation.
+   Each proxy call inside the trigger forwards to `managerL2.executeCrossChainCall`, which calls `_consumeAndExecute` → resets `_rollingHash`/`_currentIncomingCall` per entry, then `_processNCalls(entry.callCount)`. The trigger pattern matches `nested/L1_to_L2/multi-call-nested/E2EMultiCallNested.s.sol::ExecuteL2` — use it as the reference implementation.
 
 The trade-off: L1 and L2 `proxyEntryHash` values diverge for these scenarios. The cross-chain tie is at the level of "the destination chain produced what the source-side cached `returnData` claimed it would" — verified by asserting real counter state at the end of `ExecuteL2`.
 
@@ -279,7 +279,7 @@ _logL2Entry(0, l2[0]);
 ## Verification
 
 ```bash
-L1_PORT=<port> L2_PORT=<port+1> bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol
+L1_PORT=<port> L2_PORT=<port+1> bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol
 ```
 
 A two-sided green run shows:

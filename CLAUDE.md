@@ -59,6 +59,7 @@ struct L2ToL1Call {
 
 struct ExpectedL1ToL2Call {
     bytes32 crossChainCallHash;   // hash of the reentrant call
+    uint256 destinationRollupId;  // rollup this reentrant call targets; checked vs the host's proven rollups AND the calling proxy's rollup
     uint256 callCount;            // slice of l2ToL1Calls[] consumed inside this frame
     bytes   returnData;           // pre-computed return value (must succeed)
 }
@@ -67,16 +68,17 @@ struct ExecutionEntry {
     StateDelta[]         stateDeltas;
     bytes32              proxyEntryHash;        // hashed inbound call; bytes32(0) = system-driven (L2TX / immediate)
     uint256              destinationRollupId;   // rollup whose queue this entry is routed to
+    bytes                returnData;            // pre-computed return data for the entry's top-level call
     L2ToL1Call[]         l2ToL1Calls;           // flat array of ALL calls in execution order
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;   // sequentially consumed by reentrant calls
     ExpectedLookup[]     expectedLookups;       // entry-scoped NESTED lookups (static reads + try/catch'd reverts)
     uint256              callCount;             // top-level iterations (partition invariant below)
-    bytes                returnData;            // pre-computed return data for the entry's top-level call
     bytes32              rollingHash;           // expected hash after all calls + nestings
 }
 
 struct ExpectedLookup {            // NESTED lookup — lives inside the entry; matched by 4-tuple
     bytes32              crossChainCallHash;
+    uint256              destinationRollupId;     // rollup the looked-up call targets; checked vs host pins + calling proxy's rollup
     bytes                returnData;
     bool                 failed;
     uint64               l2ToL1CallNumber;        // _currentL2ToL1Call at observation
@@ -276,4 +278,4 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 
 ## Testing
 
-Tests use a `MockProofSystem` that accepts all proofs by default; `setExpectedPublicInputsHash(h)` pins the exact public input the registry must produce, and `setShouldVerify(true)` without a pin rejects everything. `test/Base.t.sol` is the single-PS happy-path fixture; integration tests deploy a per-rollup `Rollup` manager on the fly. L1 unit tests live in `test/EEZ.t.sol`, L2 in `test/EEZL2.t.sol`; two-sided flows in the `IntegrationTest*.t.sol` files. E2E devnet scenarios live under `script/e2e/` (shared helpers in `script/e2e/shared/`).
+Tests use a `MockProofSystem` that accepts all proofs by default; `setExpectedPublicInputsHash(h)` pins the exact public input the registry must produce, and `setShouldVerify(true)` without a pin rejects everything. `test/Base.t.sol` is the single-PS happy-path fixture; integration tests deploy a per-rollup `Rollup` manager on the fly. L1 unit tests live in `test/EEZ.t.sol`, L2 in `test/EEZL2.t.sol`; two-sided flows in the `IntegrationTest*.t.sol` files. E2E devnet scenarios live under `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` (shared helpers in `script/e2e/shared/`). Categories: `one_way`, `multi_call`, `nested`, `reentrant`, `revert`; directions: `L1_to_L2` (L1-starting) and `L2_to_L1` (L2-starting). Script filenames are unique per scenario ON PURPOSE — identical `E2E.s.sol` names made forge's artifact resolution pick the wrong `Execute`/`Deploy` contract across scenarios. Run with `bash script/e2e/shared/run-all-parallel.sh [scenario ...]` (names resolve to their folder automatically).

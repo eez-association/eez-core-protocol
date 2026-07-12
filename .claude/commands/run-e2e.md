@@ -6,6 +6,8 @@ description: Run all e2e tests against the devnet and summarize results
 
 Runs every e2e scenario in `script/e2e/` and reports pass/fail.
 
+Scenarios live at `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol`. Categories: `one_way`, `multi_call`, `nested`, `reentrant`, `revert`; directions: `L1_to_L2` (L1-starting), `L2_to_L1` (L2-starting). Script filenames are UNIQUE per scenario on purpose — when every scenario was named `E2E.s.sol`, forge's artifact resolution could silently pick another scenario's `Execute`/`Deploy` contract (same `out/E2E.s.sol/` bucket). Keep new scenario filenames unique.
+
 - **Local mode runs in parallel by default** — each scenario gets its own anvil pair on unique ports + chain IDs (so forge `broadcast/<basename>/<chainId>/` dirs and deployer nonces don't collide).
 - **Network mode stays sequential** — the shared on-chain deployer nonce makes parallel runs against a real devnet unsafe.
 
@@ -21,35 +23,47 @@ Runs every e2e scenario in `script/e2e/` and reports pass/fail.
   `bash script/e2e/shared/run-all-parallel.sh`
   Forks one `run-local.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Run a subset with positional args: `bash script/e2e/shared/run-all-parallel.sh counter bridge`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
 - **Local — single scenario:**
-  `bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
+  `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs. (Or just `run-all-parallel.sh <scenario>` — it resolves the path for you.)
 - **Network (sequential):**
-  `bash script/e2e/shared/run-network.sh script/e2e/<scenario>/E2E.s.sol` — uses the configured devnet, goes through the user-tx-then-batch interception flow. Do not parallelize against a real network — shared deployer nonce will collide.
+  `bash script/e2e/shared/run-network.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — uses the configured devnet, goes through the user-tx-then-batch interception flow. Do not parallelize against a real network — shared deployer nonce will collide.
 
 ## Ordered test list (simplest → most complex)
 
 Sequence chosen so that a later test's failure usually indicates a genuinely new issue, not a regression in the primitives.
 
-Implemented today:
-1. `counter` — L1→L2 simplest, single deferred entry (no calls, no nested)
-2. `counterL2` — L2→L1 mirror (`loadExecutionTable` + proxy trigger on L2)
-3. `bridge` — L1→L2 with value + `etherDelta` state delta
-4. `helloWorld` — L1→L2 with rich precomputed `returnData`
-5. `multi-call-twice` — two deferred entries with **same** `proxyEntryHash` consumed sequentially
-6. `multi-call-two-diff` — two deferred entries with **different** `proxyEntryHash`es
-7. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
-8. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
-9. `revertCounter` — `L2ToL1Call.revertSpan=1` forced revert on L1 (inner call succeeds, EVM state rolled back; rolling hash still commits to success)
-10. `revertCounterL2` — `revertCounter` mirror on L2
-11. `revertContinue` — outer try/catch over a reentrant call that succeeds then naturally reverts; flow continues, rolling hash captures `(success=false, retData)` via `CALL_END`
-12. `revertContinueL2` — `revertContinue` mirror on L2 (rolling hash matches L1's — protocol parity)
-13. `nestedCallRevert` — reverting reentrant routed through `LookupCall { failed: true }` fallback (no NESTED tags in the rolling hash — the failed reentrant is replayed outside the chain)
-14. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
-15. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
-16. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
-17. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
+Implemented today (grouped by folder):
+
+`one_way/`
+1. `L1_to_L2/counter` — L1→L2 simplest, single deferred entry (no calls, no nested)
+2. `L2_to_L1/counterL2` — L2→L1 mirror (`loadExecutionTable` + proxy trigger on L2)
+3. `L1_to_L2/bridge` — L1→L2 with value + `etherDelta` state delta
+4. `L1_to_L2/helloWorld` — L1→L2 with rich precomputed `returnData`
+
+`multi_call/`
+5. `L1_to_L2/multi-call-twice` — two deferred entries with **same** `proxyEntryHash` consumed sequentially
+6. `L1_to_L2/multi-call-two-diff` — two deferred entries with **different** `proxyEntryHash`es
+7. `L2_to_L1/multi-call-twiceL2` — L2→L1 mirror of `multi-call-twice` (two same-hash L2 entries; one zero-hash L1 entry with 2 calls drained by `executeL2TX`)
+8. `L2_to_L1/multi-call-two-diffL2` — L2→L1 mirror of `multi-call-two-diff` (two different-hash L2 entries; one zero-hash L1 entry with 2 calls)
+
+`nested/`
+9. `L1_to_L2/nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
+10. `L2_to_L1/nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
+11. `L1_to_L2/deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
+12. `L1_to_L2/multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
+13. `L2_to_L1/multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
+
+`revert/`
+14. `L1_to_L2/revertCounter` — `L2ToL1Call.revertSpan=1` forced revert on L1 (inner call succeeds, EVM state rolled back; rolling hash still commits to success)
+15. `L2_to_L1/revertCounterL2` — `revertCounter` mirror on L2
+16. `L1_to_L2/revertContinue` — outer try/catch over a reentrant call that succeeds then naturally reverts; flow continues, rolling hash captures `(success=false, retData)` via `CALL_END`
+17. `L2_to_L1/revertContinueL2` — `revertContinue` mirror on L2 (rolling hash matches L1's — protocol parity)
+18. `L1_to_L2/nestedCallRevert` — reverting reentrant routed through `LookupCall { failed: true }` fallback (no NESTED tags in the rolling hash — the failed reentrant is replayed outside the chain)
+
+`reentrant/`
+19. `L1_to_L2/reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
 
 Pending:
-- `flash-loan` — refactor of `script/flash-loan-test/ExecuteFlashLoan.s.sol` into the E2E.s.sol template
+- `flash-loan` — refactor of `script/flash-loan-test/ExecuteFlashLoan.s.sol` into the e2e scenario template
 
 `siblingScopes` from main is deliberately **not** ported — scope arrays don't exist in the flatten model. Its coverage is subsumed by `multi-call-two-diff`.
 

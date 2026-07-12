@@ -1,6 +1,6 @@
 # E2E File Structure (flatten model)
 
-Authoritative layout rules for every `script/e2e/<scenario>/E2E.s.sol`.
+Authoritative layout rules for every `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol`.
 
 ## Single file, multiple contracts
 

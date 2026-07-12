@@ -5,7 +5,7 @@ allowed-tools: Read, Write, Edit, Bash
 
 # Skill: create-e2e-test
 
-Generate a new `script/e2e/<scenario>/E2E.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
+Generate a new `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
 
 ## Before writing anything
 
@@ -13,13 +13,13 @@ Generate a new `script/e2e/<scenario>/E2E.s.sol` that exercises the flatten exec
    - `.claude/skills/create-e2e-test/rules/e2e-structure.md` — file/contract layout
    - `.claude/skills/create-e2e-test/rules/entry-construction.md` — how to build `ExecutionEntry` / `StaticCall` / `NestedAction` / `CrossChainCall` in the flatten model
 2. Read the closest existing test as a template. Good starting points:
-   - Simple L1→L2 with precomputed return: `script/e2e/counter/E2E.s.sol`
-   - Simple L2→L1: `script/e2e/counterL2/E2E.s.sol`
-   - Value + ether delta: `script/e2e/bridge/E2E.s.sol`
-   - Rich return data: `script/e2e/helloWorld/E2E.s.sol`
-   - Same actionHash consumed twice: `script/e2e/multi-call-twice/E2E.s.sol`
-   - Different actionHashes consumed sequentially: `script/e2e/multi-call-two-diff/E2E.s.sol`
-   - `calls[]` + `nestedActions[]` with rolling-hash replay: `script/e2e/nestedCounter/E2E.s.sol`
+   - Simple L1→L2 with precomputed return: `script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol`
+   - Simple L2→L1: `script/e2e/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol`
+   - Value + ether delta: `script/e2e/one_way/L1_to_L2/bridge/E2EBridge.s.sol`
+   - Rich return data: `script/e2e/one_way/L1_to_L2/helloWorld/E2EHelloWorld.s.sol`
+   - Same actionHash consumed twice: `script/e2e/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol`
+   - Different actionHashes consumed sequentially: `script/e2e/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol`
+   - `calls[]` + `nestedActions[]` with rolling-hash replay: `script/e2e/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol`
 3. Read `src/Rollups.sol` and `src/EEZL2.sol` — the on-chain bookkeeping is the ground truth for every hash you compute off-chain. `_computeActionInputHash`, `_processNCalls`, `_consumeNestedAction`, and the entry-hash formula in `_computeEntryHashes` should be mirrored exactly by your off-chain builders (use the helpers in `script/e2e/shared/E2EHelpers.sol`).
 
 ## Design the tables on paper first
@@ -62,8 +62,8 @@ When adding new contracts, pick a consistent noun + chain suffix (`_L1`, `_L2`) 
 ## Verification loop
 
 1. `forge build` must be clean before running any shell.
-2. `bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
-3. Only after local passes, try `bash script/e2e/shared/run-network.sh script/e2e/<scenario>/E2E.s.sol` against the devnet. Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
+2. `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
+3. Only after local passes, try `bash script/e2e/shared/run-network.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` against the devnet. Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
 4. Compare `forge script <SOL>:ComputeExpected` output against `decode-block.sh` output — any divergence is a bug in the precomputation.
 
 ## Common pitfalls (flatten-specific)

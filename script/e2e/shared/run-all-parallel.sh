@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run every script/e2e/<scenario>/E2E.s.sol via run-local.sh in parallel.
+# Run every script/e2e/<category>/<direction>/<scenario>/E2E*.s.sol via run-local.sh in parallel.
+# Scenarios are addressed by their directory name (e.g. "counter"); the script
+# resolves each name to its E2E*.s.sol wherever it lives in the category tree.
 # Each scenario gets a unique (L1_PORT, L2_PORT, L1_CHAIN_ID, L2_CHAIN_ID) quadruple
 # so anvil instances and forge broadcast/ dirs don't collide.
 #
@@ -28,6 +30,8 @@ DEFAULT_TESTS=(
     helloWorld
     multi-call-twice
     multi-call-two-diff
+    multi-call-twiceL2
+    multi-call-two-diffL2
     nestedCounter
     nestedCounterL2
     revertCounter
@@ -54,14 +58,20 @@ BASE_CHAIN_ID="${BASE_CHAIN_ID:-41337}"
 mkdir -p tmp/e2e-parallel tmp/e2e-success tmp/e2e-failures
 rm -f tmp/e2e-parallel/*.log tmp/e2e-parallel/*.status
 
+# Resolve a scenario name to its script path anywhere under script/e2e/.
+resolve_sol() {
+    find script/e2e -mindepth 3 -path "*/$1/E2E*.s.sol" -not -path '*/shared/*' | head -1
+}
+
 run_one() {
     local idx="$1" name="$2"
-    local sol="script/e2e/$name/E2E.s.sol"
+    local sol
+    sol="$(resolve_sol "$name")"
     local log="tmp/e2e-parallel/$name.log"
     local status="tmp/e2e-parallel/$name.status"
-    if [[ ! -f "$sol" ]]; then
+    if [[ -z "$sol" || ! -f "$sol" ]]; then
         echo "SKIP" > "$status"
-        echo "  [$name] SKIP (missing $sol)" >&2
+        echo "  [$name] SKIP (no script/e2e/*/*/$name/E2E*.s.sol found)" >&2
         return 0
     fi
     local l1_port=$((BASE_PORT + idx * 2))

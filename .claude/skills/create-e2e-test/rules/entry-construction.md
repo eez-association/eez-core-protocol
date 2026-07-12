@@ -240,29 +240,29 @@ The simplest case is "this entry exists so that when its actionHash fires, the p
 - One L1 entry: `calls=[], nestedActions=[], callCount=0, returnData=abi.encode(value)`.
 - `stateDeltas`: one delta for L2 `(rollupId=1, newState, etherDelta=0)`.
 - `rollingHash = bytes32(0)` (no calls, no nesting).
-- Example: `script/e2e/counter/E2E.s.sol`.
+- Example: `script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol`.
 
 ### Simple L2→L1
 - One L2 entry: `calls=[], nestedActions=[], callCount=0, returnData=abi.encode(value)`.
 - `stateDeltas = []` (L2 never tracks state).
-- Example: `script/e2e/counterL2/E2E.s.sol`.
+- Example: `script/e2e/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol`.
 
 ### Value transfer (bridge)
 - Like simple L1→L2, but action has `value > 0` and the L2 state delta has `etherDelta: int256(value)`.
-- Example: `script/e2e/bridge/E2E.s.sol`.
+- Example: `script/e2e/one_way/L1_to_L2/bridge/E2EBridge.s.sol`.
 
 ### Multi-call same target
 - Two L1 entries with the **same** `actionHash` but different `returnData`. The two calls to the proxy inside the triggering user tx consume them in order (entry 0 returns 1, entry 1 returns 2).
-- Example: `script/e2e/multi-call-twice/E2E.s.sol`.
+- Example: `script/e2e/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol`.
 
 ### Multi-call different targets
 - Two L1 entries with **different** `actionHash` values, one per proxy. Still sequential consumption.
-- Example: `script/e2e/multi-call-two-diff/E2E.s.sol`.
+- Example: `script/e2e/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol`.
 
 ### Nested (calls + nestedActions)
 - Outer L1 entry with `calls=[one_call]`, `callCount=1`, plus `nestedActions=[one_return]`. The user tx triggers consumption; `calls[0]` invokes a contract that reentrantly calls another proxy → `_consumeNestedAction` matches `nestedActions[0]`.
 - Rolling hash: `CALL_BEGIN(1) → NESTED_BEGIN(1) → (any inner calls) → NESTED_END(1) → CALL_END(1, true, retDataOfCall1)`.
-- Example: `script/e2e/nestedCounter/E2E.s.sol`.
+- Example: `script/e2e/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol`.
 
 ### Revert with static lookup
 - Trigger proxy call is a view or known-revert call. No deferred entry. Instead: a `StaticCall[]` entry with matching `actionHash, callNumber=0, lastNestedActionConsumed=0, failed=true, returnData=revertBytes`. The proxy's static-context detection routes through `staticCallLookup`.
