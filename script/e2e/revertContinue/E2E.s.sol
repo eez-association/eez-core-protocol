@@ -2,12 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../../../src/EEZ.sol";
+import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {
     StateDelta,
@@ -24,7 +19,13 @@ import {
 } from "../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
-import {crossChainCallHash, expectedL1toL2Hash, noStaticEntries, RollingHashBuilder} from "../shared/E2EHelpers.sol";
+import {
+    crossChainCallHash,
+    expectedL1toL2Hash,
+    noStaticEntries,
+    RollingHashBuilder,
+    immediateSingleRollupBatch
+} from "../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  RevertContinue scenario — revert inside try/catch then continue
@@ -139,7 +140,6 @@ abstract contract RevertContinueActions {
         );
     }
 
-    /// NOTE: L2 rolling-hash + expectedOutgoingHash key are pending the EEZL2 migration; re-verify when EEZL2.sol lands.
     function _l2Entries(address selfCallerL2, address counterL1, address batcherL1)
         internal
         pure
@@ -332,36 +332,7 @@ contract Batcher {
     )
         external
     {
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        uint64[] memory rids = new uint64[](1);
-        rids[0] = L2_ROLLUP_ID;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-        uint64[] memory psIdx = new uint64[](psList.length);
-        for (uint256 _i = 0; _i < psList.length; _i++) {
-            psIdx[_i] = uint64(_i);
-        }
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
-        for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
-        }
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: 0,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false
-        });
-        rollups.postAndVerifyBatch(batch);
+        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
         (bool ok,) = selfCallerProxy.call(abi.encodeWithSelector(SelfCallerWithRevert.execute.selector));
         require(ok, "outer call failed");
     }

@@ -122,7 +122,7 @@ library RollingHashBuilder {
 
     /// @notice Entry-begin seed (L2): no state deltas, so the state fold collapses to keccak(0, ...) —
     ///         i.e. the seed is keccak(bytes32(0), proxyEntryHash). Mirrors the L1 convention with an
-    ///         empty delta set. NOTE: pending the EEZL2 migration; re-verify once EEZL2.sol lands.
+    ///         empty delta set.
     function entryBeginL2(bytes32 proxyEntryHash) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(bytes32(0), proxyEntryHash));
     }
@@ -216,11 +216,14 @@ contract L2TXBatcher {
     }
 }
 
-/// @notice Builds a single-rollup batch with NO immediate entries (everything deferred to the
-///         per-rollup queue). Kept as a free function so its array-building locals live in their
-///         own stack frame — callers that inline this construction can trip the via-ir ABI-encoder
-///         stack limit when encoding the nested `ExecutionEntry[]`.
-function deferredSingleRollupBatch(
+/// @notice Builds a single-rollup batch whose leading run of `proxyEntryHash == 0` entries is
+///         marked immediate — they execute inline during `postAndVerifyBatch` (the batch-structure
+///         check rejects a leading zero-hash entry left uncovered by `immediateEntryCount`). Any
+///         remainder past the leading run is published to the per-rollup queue. Kept as a free
+///         function so its array-building locals live in their own stack frame — callers that
+///         inline this construction can trip the via-ir ABI-encoder stack limit when encoding the
+///         nested `ExecutionEntry[]`.
+function immediateSingleRollupBatch(
     address proofSystem,
     uint64 rollupId,
     ExecutionEntry[] memory entries,
@@ -229,6 +232,12 @@ function deferredSingleRollupBatch(
     pure
     returns (ProofSystemBatchPerVerificationEntries memory batch)
 {
+    // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
+    uint256 ic = 0;
+    while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
+        ic++;
+    }
+
     address[] memory psList = new address[](1);
     psList[0] = proofSystem;
     bytes[] memory proofs = new bytes[](1);
@@ -241,7 +250,7 @@ function deferredSingleRollupBatch(
         expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
         entries: entries,
         staticEntries: staticEntries,
-        immediateEntryCount: 0,
+        immediateEntryCount: ic,
         immediateStaticEntryCount: 0,
         proofSystems: psList,
         rollupIdsWithProofSystems: rps,

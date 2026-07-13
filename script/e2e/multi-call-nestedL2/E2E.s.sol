@@ -80,10 +80,11 @@ abstract contract MultiCallNestedL2Actions {
         h = RollingHashBuilder.appendCallEnd(h, true, abi.encode(retVal));
     }
 
-    /// @dev L1 mirror entries. Two system-driven entries (proxyEntryHash=0), each draining
+    /// @dev L1 mirror entries. Two system-driven entries (proxyEntryHash=0), each running
     ///      one Counter.increment() call on L1. Each call surfaces on L1 as a top-level
     ///      cross-chain invocation from CAP (on L2) to Counter (on MAINNET); CALL_BEGIN folds
-    ///      targetRollupId=MAINNET. Each entry is drained by one executeL2Txs call.
+    ///      targetRollupId=MAINNET. Both entries are covered by immediateEntryCount and execute
+    ///      inline, in order, during postAndVerifyBatch.
     function _l1Entries(address counterL1, address cap) internal pure returns (ExecutionEntry[] memory entries) {
         L2ToL1Call memory innerCall = L2ToL1Call({
             revertNextNCalls: 0,
@@ -285,11 +286,10 @@ contract ExecuteL2 is Script, MultiCallNestedL2Actions {
     }
 }
 
-/// @notice L1-side batcher: postBatch (deferred, 2 entries) + executeL2Txs twice in one tx.
-/// @dev Two entries → two drains. Each executeL2Txs(rollupId) pops one entry from the L2
-///      rollup's queue, advancing the cursor. immediateEntryCount=0 keeps both
-///      entries in the deferred queue.
-contract DeferredL2TXBatcherTwice {
+/// @notice L1-side batcher: posts the batch with both zero-hash entries marked immediate.
+/// @dev immediateEntryCount covers the full leading zero-hash run, so both entries
+///      execute inline, in order, during postAndVerifyBatch.
+contract ImmediateL2TXBatcher {
     function execute(
         EEZ rollups,
         address proofSystem,
@@ -299,6 +299,12 @@ contract DeferredL2TXBatcherTwice {
     )
         external
     {
+        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
+        uint256 ic = 0;
+        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
+            ic++;
+        }
+
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
         bytes[] memory proofs = new bytes[](1);
@@ -313,7 +319,7 @@ contract DeferredL2TXBatcherTwice {
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticEntries: staticEntries,
-            immediateEntryCount: 0,
+            immediateEntryCount: ic,
             immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
@@ -324,13 +330,11 @@ contract DeferredL2TXBatcherTwice {
             bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
-        rollups.executeL2Txs(rollupId);
-        rollups.executeL2Txs(rollupId);
     }
 }
 
-/// @title Execute - L1-side mirror. Drains the two L2-anchored inner Counter.increment()
-///        calls on the real L1 Counter via two executeL2Txs invocations.
+/// @title Execute - L1-side mirror. Runs the two L2-anchored inner Counter.increment()
+///        calls on the real L1 Counter as immediate L2Txs inside one postAndVerifyBatch.
 contract Execute is Script, MultiCallNestedL2Actions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -339,7 +343,7 @@ contract Execute is Script, MultiCallNestedL2Actions {
         address cap = vm.envAddress("COUNTER_AND_PROXY_L2");
 
         vm.startBroadcast();
-        DeferredL2TXBatcherTwice batcher = new DeferredL2TXBatcherTwice();
+        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
         batcher.execute(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap), noStaticEntries());
 
         console.log("Execute: done");

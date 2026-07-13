@@ -31,6 +31,13 @@ Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
   `fallback()` then the manager's `executeOnBehalf()`): `CrossChainProxy` holds only immutable
   fields, and the two entry points are independent.
 
+## Related suites
+
+- `IntegrationTestBridge.t.sol` — ether/token bridging and a full lock → mint → burn → release
+  roundtrip (value flow + `etherDelta` deltas).
+- `IntegrationTestFlashLoan.t.sol` — atomic cross-chain flash loan (borrow on L1, bridge to L2,
+  claim NFT, bridge back, repay).
+
 ## Open questions / future work
 
 1. **ETH value transfers**: scenarios with non-zero `value`, `etherDelta` accounting in state

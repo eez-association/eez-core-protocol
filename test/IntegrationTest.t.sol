@@ -1,32 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test, console} from "forge-std/Test.sol";
-import {
-    EEZ,
-    RollupConfig,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../src/EEZ.sol";
-import {Rollup} from "../src/rollupContract/Rollup.sol";
-import {EEZL2} from "../src/L2/EEZL2.sol";
-import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
-import {
-    ExecutionEntry,
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    StaticExecutionEntry,
-    ProxyInfo
-} from "../src/interfaces/IEEZ.sol";
+import {IntegrationBase} from "./IntegrationBase.t.sol";
+import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../src/interfaces/IEEZL2.sol";
-import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 
 /// @title IntegrationTest
@@ -49,21 +30,7 @@ import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 /// │  3 │ Alice -> A' (-> A -> B') resolved │ L2 entry+calls │ Nested (L2->L1)│
 /// │  4 │ Alice -> D' (-> D -> C') resolved │ L1 entry+calls │ Nested (L1->L2)│
 /// └────┴───────────────────────────────────┴────────────────┴────────────────┘
-contract IntegrationTest is Test {
-    // ── Rolling hash tag constants (must match EEZBase) ──
-    uint8 constant CALL_BEGIN = 1;
-    uint8 constant CALL_END = 2;
-    uint8 constant NESTED_BEGIN = 3;
-    uint8 constant NESTED_END = 4;
-
-    // ── L1 contracts ──
-    EEZ public rollups;
-    MockProofSystem public ps;
-    Rollup public l2Manager; // per-rollup IRollupContract manager for L2_ROLLUP_ID
-
-    // ── L2 contracts ──
-    EEZL2 public managerL2;
-
+contract IntegrationTest is IntegrationBase {
     // ── Application contracts (see legend) ──
     CounterAndProxy public counterAndProxy; // A  -- CounterAndProxy on L1, target = B'
     Counter public counterL2; // B  -- Counter on L2
@@ -76,35 +43,9 @@ contract IntegrationTest is Test {
     address public counterAndProxyProxyL2; // A' -- proxy for A, deployed on L2
     address public counterAndProxyL2ProxyL1; // D' -- proxy for D, deployed on L1
 
-    // ── Constants ──
-    uint64 constant L2_ROLLUP_ID = 1;
-    uint64 constant MAINNET_ROLLUP_ID = 0;
-    address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
-    bytes32 constant DEFAULT_VK = keccak256("verificationKey");
-
-    address public alice = makeAddr("alice");
-
-    function setUp() public {
-        // ── L1 infrastructure ──
-        rollups = new EEZ();
-        ps = new MockProofSystem();
-
-        // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
-        // skipped and the first registered rollup lands at id 1 = L2_ROLLUP_ID.
-
-        // Create L2 rollup at id = 1 = L2_ROLLUP_ID
-        {
-            address[] memory psList = new address[](1);
-            psList[0] = address(ps);
-            bytes32[] memory vks = new bytes32[](1);
-            vks[0] = DEFAULT_VK;
-            l2Manager = new Rollup(address(rollups), address(this), 1, psList, vks);
-            uint64 rid = rollups.registerRollup(address(l2Manager), keccak256("l2-initial-state"));
-            require(rid == L2_ROLLUP_ID, "expected L2_ROLLUP_ID = 1");
-        }
-
-        // ── L2 infrastructure ──
-        managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS);
+    function setUp() public override {
+        // ── Dual-manager infrastructure (EEZ + MockProofSystem + Rollup manager + EEZL2) ──
+        super.setUp();
 
         // ── Deploy application contracts ──
         counterL2 = new Counter(); // B
@@ -128,113 +69,6 @@ contract IntegrationTest is Test {
 
         // D': proxy for D(CounterAndProxy on L2), lives on L1 -- for Scenario 4
         counterAndProxyL2ProxyL1 = rollups.createCrossChainProxy(address(counterAndProxyL2), L2_ROLLUP_ID);
-    }
-
-    function _getRollupState(uint64 rollupId) internal view returns (bytes32) {
-        (, bytes32 stateRoot,) = rollups.rollups(rollupId);
-        return stateRoot;
-    }
-
-    /// @notice Wraps a single sub-batch (one PS attesting one rollup) and posts it.
-    function _postBatchToL2(ExecutionEntry[] memory entries) internal {
-        _postBatchToL2(entries, _emptyStaticEntries(), 0, 0);
-    }
-
-    function _postBatchToL2(
-        ExecutionEntry[] memory entries,
-        StaticExecutionEntry[] memory staticEntries,
-        uint256 immediateEntryCount,
-        uint256 immediateStaticEntryCount
-    )
-        internal
-    {
-        address[] memory psList = new address[](1);
-        psList[0] = address(ps);
-        uint64[] memory rids = new uint64[](1);
-        rids[0] = L2_ROLLUP_ID;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-        uint64[] memory psIdx = new uint64[](psList.length);
-        for (uint256 _i = 0; _i < psList.length; _i++) {
-            psIdx[_i] = uint64(_i);
-        }
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
-        for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
-        }
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false,
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: immediateEntryCount,
-            immediateStaticEntryCount: immediateStaticEntryCount,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
-        rollups.postAndVerifyBatch(batch);
-    }
-
-    // ──────────────────────────────────────────────
-    //  Hash helpers (mirror EEZBase's tag scheme)
-    // ──────────────────────────────────────────────
-
-    /// @notice Mirror of `EEZBase.computeCrossChainCallHash`. Field order:
-    ///         isStatic → source(addr,rid) → target(addr,rid) → value → data.
-    function _ccHash(
-        bool isStatic,
-        address sourceAddress,
-        uint64 sourceRollupId,
-        address targetAddress,
-        uint64 targetRollupId,
-        uint256 value,
-        bytes memory data
-    )
-        internal
-        pure
-        returns (bytes32)
-    {
-        return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data)
-        );
-    }
-
-    /// @notice Mirror of L1 `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
-    ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
-        bytes32 statesHash;
-        for (uint256 i = 0; i < deltas.length; i++) {
-            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
-        }
-        return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
-    }
-
-    /// @notice Mirror of L2 `EEZL2._seedRollingHash`: empty state-delta prefix closed with `proxyEntryHash`.
-    function _l2EntrySeed(bytes32 proxyEntryHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(bytes32(0), proxyEntryHash));
-    }
-
-    function _hCallBegin(bytes32 prev, bytes32 crossChainCallHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_BEGIN, crossChainCallHash));
-    }
-
-    function _hCallEnd(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_END, success, retData));
-    }
-
-    /// @notice Creates an empty L1 StaticExecutionEntry array (used by postAndVerifyBatch)
-    function _emptyStaticEntries() internal pure returns (StaticExecutionEntry[] memory) {
-        return new StaticExecutionEntry[](0);
-    }
-
-    /// @notice Creates an empty L2 StaticExecutionEntry array (used by loadExecutionTable)
-    function _emptyL2StaticEntries() internal pure returns (L2StaticExecutionEntry[] memory) {
-        return new L2StaticExecutionEntry[](0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -266,9 +100,8 @@ contract IntegrationTest is Test {
         // L1 deferred entry: no calls, just returnData
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
-            stateDeltas[0] = StateDelta({
-                rollupId: L2_ROLLUP_ID, currentState: keccak256("l2-initial-state"), newState: newState, etherDelta: 0
-            });
+            stateDeltas[0] =
+                StateDelta({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0});
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
@@ -331,13 +164,12 @@ contract IntegrationTest is Test {
                 proxyEntryHash: crossChainCallHash,
                 incomingCalls: calls,
                 expectedOutgoingCalls: expectedOutgoingCalls,
-                rollingHash: _l2EntrySeed(crossChainCallHash),
+                rollingHash: _hEntryBeginL2(crossChainCallHash),
                 success: true,
                 returnData: abi.encode(uint256(1))
             });
 
-            vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
+            _loadL2Table(entries, _emptyL2StaticEntries());
         }
 
         // Alice triggers the resolution on L2
@@ -386,9 +218,8 @@ contract IntegrationTest is Test {
 
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
-            stateDeltas[0] = StateDelta({
-                rollupId: L2_ROLLUP_ID, currentState: keccak256("l2-initial-state"), newState: newState, etherDelta: 0
-            });
+            stateDeltas[0] =
+                StateDelta({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0});
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
@@ -426,7 +257,7 @@ contract IntegrationTest is Test {
             0,
             incrementProxyCallData
         );
-        bytes32 rollingHash = _hCallBegin(_l2EntrySeed(l2ActionHash), callHash);
+        bytes32 rollingHash = _hCallBegin(_hEntryBeginL2(l2ActionHash), callHash);
         rollingHash = _hCallEnd(rollingHash, true, "");
 
         {
@@ -453,8 +284,7 @@ contract IntegrationTest is Test {
                 returnData: ""
             });
 
-            vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
+            _loadL2Table(entries, _emptyL2StaticEntries());
         }
 
         // ════════════════════════════════════════════
@@ -515,13 +345,12 @@ contract IntegrationTest is Test {
                 proxyEntryHash: l2ActionHash,
                 incomingCalls: calls,
                 expectedOutgoingCalls: expectedOutgoingCalls,
-                rollingHash: _l2EntrySeed(l2ActionHash),
+                rollingHash: _hEntryBeginL2(l2ActionHash),
                 success: true,
                 returnData: abi.encode(uint256(1))
             });
 
-            vm.prank(SYSTEM_ADDRESS);
-            managerL2.loadExecutionTable(entries, _emptyL2StaticEntries());
+            _loadL2Table(entries, _emptyL2StaticEntries());
         }
 
         // ════════════════════════════════════════════
@@ -536,9 +365,8 @@ contract IntegrationTest is Test {
 
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
-            stateDeltas[0] = StateDelta({
-                rollupId: L2_ROLLUP_ID, currentState: keccak256("l2-initial-state"), newState: s1, etherDelta: 0
-            });
+            stateDeltas[0] =
+                StateDelta({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: s1, etherDelta: 0});
 
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
 

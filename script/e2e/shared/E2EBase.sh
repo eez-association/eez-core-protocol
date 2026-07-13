@@ -131,6 +131,31 @@ strip_traces() {
     grep -v '├─\|└─\|│ \|→ new\|\[staticcall\]\|\[Return\]\|\[Stop\]\|\[Revert\]\|::run(' | sed -n '/^  /p'
 }
 
+# ── Verify-step wrappers around script/e2e/shared/Verify.s.sol ──
+# Each runs the given verifier contract, captures its combined output in the
+# global VERIFY_OUT, and returns forge's exit status. Callers own the failure
+# plumbing (FAILED flags, PASS-grep, diagnostics), which differs per runner.
+_run_verifier() {
+    local contract="$1" rpc="$2" sig="$3"
+    shift 3
+    local rc=0
+    VERIFY_OUT=$(forge script "script/e2e/shared/Verify.s.sol:$contract" \
+        --rpc-url "$rpc" --sig "$sig" "$@" 2>&1) || rc=$?
+    return "$rc"
+}
+
+# Usage: verify_l1_batch RPC BLOCK ROLLUPS EXPECTED_CALL_HASHES
+verify_l1_batch() { _run_verifier VerifyL1Batch "$1" "run(uint256,address,bytes32[])" "$2" "$3" "$4"; }
+
+# Usage: verify_l2_table RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_ENTRY_HASHES
+verify_l2_table() { _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[])" "$2" "$3" "$4"; }
+
+# Usage: verify_l2_calls RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_CALL_HASHES
+verify_l2_calls() { _run_verifier VerifyL2Calls "$1" "run(uint256[],address,bytes32[])" "$2" "$3" "$4"; }
+
+# Usage: verify_l2_absent RPC BLOCKS_ARRAY MANAGER_L2 ABSENT_ENTRY_HASHES
+verify_l2_absent() { _run_verifier VerifyL2Absent "$1" "run(uint256[],address,bytes32[])" "$2" "$3" "$4"; }
+
 # ── Trace failed transactions from forge output ──
 trace_failed_txs() {
     local output="$1"
@@ -274,6 +299,9 @@ ensure_create2_factory() {
         return
     fi
     echo "$label: Deploying CREATE2 factory..."
+    # Run twice on purpose (see DeployBridge.s.sol): the first run funds the
+    # keyless factory signer, the second publishes the pre-signed deployment tx
+    # (forge can't fund + send a pre-signed raw tx atomically).
     forge script script/DeployBridge.s.sol:DeployCreate2Factory \
         --rpc-url "$rpc" --broadcast --private-key "$pk" 2>&1 | tail -1
     forge script script/DeployBridge.s.sol:DeployCreate2Factory \

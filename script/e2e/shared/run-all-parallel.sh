@@ -20,26 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Default ordered list (mirrors .claude/commands/run-e2e.md).
-DEFAULT_TESTS=(
-    counter
-    counterL2
-    bridge
-    helloWorld
-    multi-call-twice
-    multi-call-two-diff
-    nestedCounter
-    nestedCounterL2
-    revertCounter
-    revertCounterL2
-    revertContinue
-    revertContinueL2
-    nestedCallRevert
-    deepNested
-    multi-call-nested
-    multi-call-nestedL2
-    reentrant
-)
+# Default list: every scenario dir with an E2E.s.sol. Order is irrelevant for
+# parallel dispatch, so plain glob order is used.
+DEFAULT_TESTS=()
+for _sol in script/e2e/*/E2E.s.sol; do
+    DEFAULT_TESTS+=("$(basename "$(dirname "$_sol")")")
+done
 
 if [[ $# -gt 0 ]]; then
     TESTS=("$@")

@@ -20,7 +20,7 @@ import {
     noNestedActions,
     noL2Calls,
     noL2StaticEntries,
-    deferredSingleRollupBatch,
+    immediateSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -80,7 +80,7 @@ abstract contract RevertContinueL2Actions {
         return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCaller, L2_ROLLUP_ID);
     }
 
-    /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — drained by executeL2Txs.
+    /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — executed as an immediate L2Tx during postAndVerifyBatch.
     ///      `l2ToL1Calls[0]` is the inbound call from SelfCaller (on L2) to Counter on MAINNET,
     ///      delivered through the lazily-created source proxy for (SelfCaller, L2_ROLLUP_ID) on L1.
     ///      The L2-side inner reentrant call surfaces on L1 as a plain top-level call; CALL_BEGIN
@@ -262,31 +262,30 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs in one tx.
-/// @dev Pins immediateEntryCount=0 so the zero-hash entry stays in the deferred
-///      queue and is drained by the subsequent executeL2Txs(rollupId) call.
+/// @notice Inline L2-TX batcher — posts the batch with the zero-hash entry marked immediate.
 /// @dev Builds the L1 entry INTERNALLY (inherits `RevertContinueL2Actions`) so the caller never
 ///      ABI-encodes the nested `ExecutionEntry[]` across the call boundary — only the single
-///      deferred-batch encode for `postAndVerifyBatch` remains, keeping clear of the via-ir stack
-///      limit. `immediateEntryCount` is 0 so the zero-hash entry stays in the deferred queue and is
-///      drained by `executeL2Txs`.
-contract DeferredL2TXBatcher is RevertContinueL2Actions {
+///      batch encode for `postAndVerifyBatch` remains, keeping clear of the via-ir stack
+///      limit. `immediateEntryCount` covers the leading zero-hash run, so the entry executes
+///      inline during `postAndVerifyBatch`.
+contract ImmediateL2TXBatcher is RevertContinueL2Actions {
     function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
         rollups.postAndVerifyBatch(
-            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticEntries())
+            immediateSingleRollupBatch(
+                proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticEntries()
+            )
         );
-        rollups.executeL2Txs(L2_ROLLUP_ID);
     }
 }
 
-/// @title Execute - L1-side mirror. Deferred postBatch + executeL2Txs runs the actual
-///        Counter.increment() on L1 (the destination of the L2-anchored inner reentrant call).
+/// @title Execute - L1-side mirror. postBatch executes the immediate entry inline, running the
+///        actual Counter.increment() on L1 (the destination of the L2-anchored inner reentrant call).
 contract Execute is Script {
     function run() external {
         address counterL1 = vm.envAddress("COUNTER_L1");
 
         vm.startBroadcast();
-        DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
+        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
         batcher.execute(
             EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("SELF_CALLER")
         );
