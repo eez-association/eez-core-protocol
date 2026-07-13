@@ -120,7 +120,11 @@ deploy_contracts() {
         fi
         echo "--- $contract ($label) ---"
         local out
-        out=$(forge script "$sol:$contract" --rpc-url "$rpc" --broadcast --private-key "$pk" 2>&1)
+        if ! out=$(forge script "$sol:$contract" --rpc-url "$rpc" --broadcast --private-key "$pk" 2>&1); then
+            echo "DEPLOY FAILED: $contract ($label) — forge output tail:"
+            echo "$out" | tail -25
+            return 1
+        fi
         echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true
         _export_outputs "$out"
     done <<< "$contracts"
@@ -154,7 +158,11 @@ execute_l2_same_block() {
 
     cast rpc evm_setAutomine false --rpc-url "$l2_rpc" > /dev/null 2>&1
 
-    forge script "$sol:ExecuteL2" --rpc-url "$l2_rpc" --broadcast --private-key "$pk" > "$tmpfile" 2>&1 &
+    # --isolate: simulate each broadcast call as its OWN transaction (fresh
+    # transient storage), matching on-chain execution — without it, scenarios
+    # that make multiple system deliveries in one script (multi-call) fail the
+    # pre-broadcast simulation with a false RollingHashMismatch.
+    forge script "$sol:ExecuteL2" --rpc-url "$l2_rpc" --broadcast --isolate --private-key "$pk" > "$tmpfile" 2>&1 &
     local forge_pid=$!
     _E2E_PIDS+=("$forge_pid")
 
@@ -190,33 +198,6 @@ get_block_from_broadcast() {
     printf "%d\n" "$(jq -r '.receipts[-1].blockNumber' "$json")"
 }
 
-# ── Extract L2 block numbers from a postAndVerifyBatch tx's callData ──
-# OBSOLETE post-refactor — see comment at top of file. Cross-chain block
-# correlation is no longer encoded on-chain; use off-chain indexing if needed.
-# Post-refactor `postAndVerifyBatch(ProofSystemBatchPerVerificationEntries[] batches)` no longer carries an L2
-# block list: the per-prover `callData` field is opaque prover input, not an
-# orchestrator-declared list of L2 blocks. Kept for call-site compat — always
-# returns "[]".
-extract_l2_blocks_from_tx() {
-    echo "[]"
-    return 0
-}
-
-# ── Find L1 batch block that references a specific L2 block ──
-# OBSOLETE post-refactor — see comment at top of file. Cross-chain block
-# correlation is no longer encoded on-chain; use off-chain indexing if needed.
-# Computes the new `BatchPosted(uint256)` signature for completeness, but the
-# inner extract_l2_blocks_from_tx call has nothing to find, so the function
-# always reports "not found" (return 1).
-find_batch_block_by_l2_ref() {
-    # Correct post-refactor event signature (kept here so callers that grep
-    # this script for the SIG aren't pointed at the old ABI).
-    local SIG_BATCH
-    SIG_BATCH=$(cast keccak 'BatchPosted(uint256)') || true
-    : "$SIG_BATCH"  # silence unused-var lint
-    return 1
-}
-
 # ── Publish a pre-signed raw tx ──
 publish_user_tx() {
     local rpc="$1"
@@ -240,9 +221,22 @@ publish_user_tx() {
 
     local receipt block_number status
 
-    if ! receipt=$(cast receipt "$tx_hash" --rpc-url "$rpc" --json 2>&1); then
-        echo "ERROR: cast receipt failed for tx: $tx_hash"
-        echo "$receipt"
+    # Bounded receipt poll — a blocking `cast receipt` never returns for a tx
+    # that a cross-chain front HOLDS but the composer never bundles. Poll with
+    # a deadline instead (override with RECEIPT_TIMEOUT, seconds).
+    local deadline=$(( $(date +%s) + ${RECEIPT_TIMEOUT:-300} ))
+    receipt=""
+    while [[ $(date +%s) -lt $deadline ]]; do
+        receipt=$(curl -s --max-time 10 -X POST "$rpc" -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$tx_hash\"],\"id\":1}" \
+            | jq -c '.result // empty' 2>/dev/null)
+        [[ -n "$receipt" ]] && break
+        sleep 5
+    done
+    if [[ -z "$receipt" ]]; then
+        echo "ERROR: no receipt for tx $tx_hash after ${RECEIPT_TIMEOUT:-300}s."
+        echo "  If this tx went to a cross-chain front, it is HELD until the composer"
+        echo "  bundles it — no receipt means the pipeline did not process it in time."
         return 1
     fi
 

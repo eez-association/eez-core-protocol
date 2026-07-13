@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "src/EEZ.sol";
 import {EEZL2} from "src/L2/EEZL2.sol";
+import {IEEZ} from "src/interfaces/IEEZ.sol";
 import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
@@ -15,6 +16,7 @@ import {
 import {ComputeExpectedBase} from "script/e2e/shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    getOrCreateProxy,
     noLookupCalls,
     noNestedActions,
     noCalls,
@@ -25,14 +27,14 @@ import {
 //  Bridge scenario — L1→L2 with ETH value transfer, two-sided
 //
 //  L1 side (Execute):
-//    BridgeSender.bridge{value: 1 ether}() → L2_PROXY.call{value: 1 ether}("")
-//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 1 ether
+//    BridgeSender.bridge{value: 0.01 ether}() → L2_PROXY.call{value: 0.01 ether}("")
+//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 0.01 ether
 //    (the etherDelta on the StateDelta records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
-//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: 1 ether}(...)
+//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: 0.01 ether}(...)
 //    → _processNCalls forwards through the source proxy into BridgeReceiver, which
-//    accepts the ETH via receive(). After: BridgeReceiver.balance == 1 ether.
+//    accepts the ETH via receive(). After: BridgeReceiver.balance == 0.01 ether.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint256 constant L2_ROLLUP_ID = 1;
@@ -61,7 +63,7 @@ contract BridgeReceiver {
 
 abstract contract BridgeActions {
     function _callHash(address l2Destination, address sender) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, l2Destination, 1 ether, "", sender, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(L2_ROLLUP_ID, l2Destination, 0.01 ether, "", sender, MAINNET_ROLLUP_ID);
     }
 
     function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
@@ -70,7 +72,7 @@ abstract contract BridgeActions {
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-bridge"),
-            etherDelta: int256(1 ether)
+            etherDelta: int256(0.01 ether)
         });
 
         entries = new ExecutionEntry[](1);
@@ -96,7 +98,7 @@ abstract contract BridgeActions {
         calls[0] = CrossChainCall({
             isStatic: false,
             targetAddress: l2Destination,
-            value: 1 ether,
+            value: 0.01 ether,
             data: "",
             sourceAddress: sender,
             sourceRollupId: MAINNET_ROLLUP_ID,
@@ -142,12 +144,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address l2Proxy;
-        try rollups.createCrossChainProxy(l2DestAddr, L2_ROLLUP_ID) returns (address p) {
-            l2Proxy = p;
-        } catch {
-            l2Proxy = rollups.computeCrossChainProxyAddress(l2DestAddr, L2_ROLLUP_ID);
-        }
+        address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, L2_ROLLUP_ID);
 
         BridgeSender sender = new BridgeSender(l2Proxy, l2DestAddr);
         console.log("L2_PROXY=%s", l2Proxy);
@@ -213,10 +210,10 @@ contract ExecuteL2 is Script, BridgeActions {
         vm.startBroadcast();
         EEZL2(managerAddr)
         .executeIncomingCrossChainCall{
-            value: 1 ether
+            value: 0.01 ether
         }(
             l2DestAddr,
-            1 ether,
+            0.01 ether,
             "",
             senderAddr,
             MAINNET_ROLLUP_ID,
@@ -241,7 +238,7 @@ contract Execute is Script, BridgeActions {
         vm.startBroadcast();
         Batcher batcher = new Batcher();
         batcher.execute{
-            value: 1 ether
+            value: 0.01 ether
         }(
             EEZ(rollupsAddr),
             proofSystemAddr,
@@ -259,7 +256,7 @@ contract ExecuteNetwork is Script {
     function run() external view {
         address target = vm.envAddress("BRIDGE_SENDER");
         console.log("TARGET=%s", target);
-        console.log("VALUE=1000000000000000000"); // 1 ether
+        console.log("VALUE=10000000000000000"); // 0.01 ether
         console.log("CALLDATA=%s", vm.toString(abi.encodeWithSelector(BridgeSender.bridge.selector)));
     }
 }
@@ -283,6 +280,10 @@ contract ComputeExpected is ComputeExpectedBase, BridgeActions {
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
         console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1[0].proxyEntryHash));
+        // The inbound ETH transfer executes on L2 via executeIncomingCrossChainCall,
+        // which emits the same cross-chain call hash — network mode uses this to
+        // locate the L2 sync block.
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
 
         console.log("");
         console.log("=== EXPECTED L1 TABLE (1 entry, 1 ETH bridge) ===");

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "src/EEZ.sol";
 import {EEZL2} from "src/L2/EEZL2.sol";
+import {IEEZ} from "src/interfaces/IEEZ.sol";
 import {StateDelta, L2ToL1Call, ExecutionEntry, LookupCall, ExpectedLookup} from "src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
@@ -17,6 +18,7 @@ import {CallTwoDifferent} from "test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "script/e2e/shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    getOrCreateProxy,
     noLookupCalls,
     noL2LookupCalls,
     noNestedActions,
@@ -177,11 +179,7 @@ contract DeployL2 is Script {
     }
 
     function _proxy(EEZL2 manager, address target) internal returns (address) {
-        try manager.createCrossChainProxy(target, MAINNET_ROLLUP_ID) returns (address p) {
-            return p;
-        } catch {
-            return manager.computeCrossChainProxyAddress(target, MAINNET_ROLLUP_ID);
-        }
+        return getOrCreateProxy(IEEZ(address(manager)), target, MAINNET_ROLLUP_ID);
     }
 }
 

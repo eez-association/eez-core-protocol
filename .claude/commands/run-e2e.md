@@ -37,7 +37,6 @@ Implemented today (grouped by folder):
 1. `L1_to_L2/counter` — L1→L2 simplest, single deferred entry (no calls, no nested)
 2. `L2_to_L1/counterL2` — L2→L1 mirror (`loadExecutionTable` + proxy trigger on L2)
 3. `L1_to_L2/bridge` — L1→L2 with value + `etherDelta` state delta
-4. `L1_to_L2/helloWorld` — L1→L2 with rich precomputed `returnData`
 
 `multi_call/`
 5. `L1_to_L2/multi-call-twice` — two deferred entries with **same** `proxyEntryHash` consumed sequentially

@@ -16,7 +16,6 @@ Generate a new `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` th
    - Simple L1→L2 with precomputed return: `script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol`
    - Simple L2→L1: `script/e2e/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol`
    - Value + ether delta: `script/e2e/one_way/L1_to_L2/bridge/E2EBridge.s.sol`
-   - Rich return data: `script/e2e/one_way/L1_to_L2/helloWorld/E2EHelloWorld.s.sol`
    - Same actionHash consumed twice: `script/e2e/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol`
    - Different actionHashes consumed sequentially: `script/e2e/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol`
    - `calls[]` + `nestedActions[]` with rolling-hash replay: `script/e2e/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol`

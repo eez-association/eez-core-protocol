@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "src/EEZ.sol";
 import {EEZL2} from "src/L2/EEZL2.sol";
+import {IEEZ} from "src/interfaces/IEEZ.sol";
 import {StateDelta, ExecutionEntry, LookupCall, ExpectedLookup} from "src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
@@ -16,6 +17,7 @@ import {Counter, CounterAndProxy} from "test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "script/e2e/shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    getOrCreateProxy,
     noLookupCalls,
     noNestedActions,
     noCalls,
@@ -191,12 +193,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address counterProxy;
-        try rollups.createCrossChainProxy(counterL2Addr, L2_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = rollups.computeCrossChainProxyAddress(counterL2Addr, L2_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
 
         CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
 

@@ -27,7 +27,6 @@ DEFAULT_TESTS=(
     counter
     counterL2
     bridge
-    helloWorld
     multi-call-twice
     multi-call-two-diff
     multi-call-twiceL2
@@ -46,7 +45,19 @@ DEFAULT_TESTS=(
 )
 
 if [[ $# -gt 0 ]]; then
-    TESTS=("$@")
+    # Each arg may be a scenario name (counter), a category (one_way, multi_call,
+    # nested, reentrant, revert), or a category/direction (one_way/L2_to_L1) —
+    # categories expand to every scenario under them.
+    TESTS=()
+    for arg in "$@"; do
+        if [[ -d "script/e2e/$arg" && "$arg" != */E2E* ]]; then
+            while IFS= read -r sol; do
+                TESTS+=("$(basename "$(dirname "$sol")")")
+            done < <(find "script/e2e/$arg" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
+        else
+            TESTS+=("$arg")
+        fi
+    done
 else
     TESTS=("${DEFAULT_TESTS[@]}")
 fi
