@@ -51,11 +51,11 @@ import {
 //       commits to a successful call.
 //
 //  L1 side (Execute) — system-driven mirror:
-//    1. postAndVerifyBatch loads a deferred entry
-//       (proxyEntryHash=0; immediateEntryCount=0) routed to the L2
-//       rollup queue. calls[0] targets the real Counter on L1 with
-//       revertNextNCalls=1, source=(alice, L2_ROLLUP_ID).
-//    2. executeL2Txs(L2_ROLLUP_ID) drains the entry; _processNCalls handles
+//    1. postAndVerifyBatch carries an immediate entry
+//       (proxyEntryHash=0, covered by immediateEntryCount). calls[0] targets
+//       the real Counter on L1 with revertNextNCalls=1,
+//       source=(alice, L2_ROLLUP_ID).
+//    2. The immediate L2Tx run executes the entry inline; _processNCalls handles
 //       revertNextNCalls exactly as L2 does — the inner span successfully calls
 //       Counter on L1, returns abi.encode(1), and executeInContext reverts.
 //    3. Net effect on L1: Counter.counter() == 0, rolling hash records
@@ -249,10 +249,9 @@ contract ExecuteNetworkL2 is Script {
     }
 }
 
-/// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs on L1.
-/// @dev Forces immediateEntryCount=0 so the proxyEntryHash=0 entry
-///      stays in the deferred queue and is drained by executeL2Txs(rollupId).
-contract DeferredL2TXBatcher {
+/// @notice Inline L2-TX batcher — posts the batch with the leading zero-hash run
+///         marked immediate, so the entry executes inline during postAndVerifyBatch.
+contract ImmediateL2TXBatcher {
     function execute(
         EEZ rollups,
         address proofSystem,
@@ -262,6 +261,12 @@ contract DeferredL2TXBatcher {
     )
         external
     {
+        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
+        uint256 ic = 0;
+        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
+            ic++;
+        }
+
         address[] memory psList = new address[](1);
         psList[0] = proofSystem;
         bytes[] memory proofs = new bytes[](1);
@@ -276,7 +281,7 @@ contract DeferredL2TXBatcher {
             expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
             staticEntries: staticEntries,
-            immediateEntryCount: 0,
+            immediateEntryCount: ic,
             immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
@@ -287,13 +292,12 @@ contract DeferredL2TXBatcher {
             bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
-        rollups.executeL2Txs(rollupId);
     }
 }
 
-/// @title Execute — local mode: postBatch (deferred) + executeL2Txs on L1.
+/// @title Execute — local mode: postBatch with the immediate L2Tx entry on L1.
 /// @dev Destination-side mirror of the L2-originated cross-chain call. The L1
-///      anvil holds the real Counter contract; the deferred entry contains a
+///      anvil holds the real Counter contract; the immediate entry contains a
 ///      revertNextNCalls=1 call targeting it. _processNCalls runs Counter.increment()
 ///      inside executeInContext, which reverts and rolls back the state — net
 ///      effect: Counter.counter() == 0 on L1.
@@ -308,7 +312,7 @@ contract Execute is Script, RevertL2Actions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
+        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
         batcher.execute(
             EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, alice), noStaticEntries()
         );

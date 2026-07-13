@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Script, console} from "forge-std/Script.sol";
+import {console} from "forge-std/Script.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
@@ -9,12 +9,15 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {ComputeExpectedBase} from "./ComputeExpectedBase.sol";
 
 // ══════════════════════════════════════════════════════════════════════
-//  Shared helpers — event signatures + formatting
+//  Shared helpers — event signatures + formatting. Inherits the entry-hash
+//  and short-formatting primitives (_entryHash, _shortHash, _shortBytes,
+//  _sub) from ComputeExpectedBase so there is a single implementation.
 // ══════════════════════════════════════════════════════════════════════
 
-abstract contract VerifyHelpers is Script {
+abstract contract VerifyHelpers is ComputeExpectedBase {
     // BatchPosted(uint256 subBatchCount)
     // POST-REFACTOR: BatchPosted no longer carries the full entries array — the on-chain
     // event was simplified to just the sub-batch count. Off-chain decoders that need the
@@ -41,37 +44,6 @@ abstract contract VerifyHelpers is Script {
 
     // CrossChainCallExecuted(bytes32 crossChainCallHash, address proxy, address sourceAddress, bytes callData, uint256 value)
     bytes32 constant SIG_CROSSCHAIN_CALL = keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
-
-    function _entryHash(ExecutionEntry memory e) internal pure returns (bytes32) {
-        return keccak256(abi.encode(e.proxyEntryHash, e.rollingHash));
-    }
-
-    function _entryHash(L2ExecutionEntry memory e) internal pure returns (bytes32) {
-        return keccak256(abi.encode(e.proxyEntryHash, e.rollingHash));
-    }
-
-    function _shortHash(bytes32 h) internal pure returns (string memory) {
-        string memory full = vm.toString(h);
-        return string.concat(_sub(full, 0, 6), "..", _sub(full, 62, 66));
-    }
-
-    function _shortBytes(bytes memory b) internal pure returns (string memory) {
-        if (b.length == 0) return "0x";
-        if (b.length <= 36) return vm.toString(b);
-        string memory full = vm.toString(b);
-        return string.concat(_sub(full, 0, 10), "...(", vm.toString(b.length), " bytes)");
-    }
-
-    function _sub(string memory str, uint256 s, uint256 e) internal pure returns (string memory) {
-        bytes memory b = bytes(str);
-        if (e > b.length) e = b.length;
-        if (s >= e) return "";
-        bytes memory r = new bytes(e - s);
-        for (uint256 i = s; i < e; i++) {
-            r[i - s] = b[i];
-        }
-        return string(r);
-    }
 
     function _printEntryDetailed(uint256 idx, ExecutionEntry memory e) internal pure {
         bool immediate = e.proxyEntryHash == bytes32(0);
@@ -163,6 +135,9 @@ abstract contract VerifyHelpers is Script {
 
     // ── Log collection: decode BatchPosted ──
 
+    /// @dev PLACEHOLDER pending re-implementation: `BatchPosted(uint256)` now carries only the
+    ///      sub-batch count, not the entries, so this decode of `logs[i].data` finds nothing on
+    ///      current-format events — the entries travel in the postAndVerifyBatch tx calldata.
     function _collectBatchEntries(Vm.EthGetLogs[] memory logs) internal pure returns (ExecutionEntry[] memory) {
         uint256 totalCount;
         for (uint256 i = 0; i < logs.length; i++) {

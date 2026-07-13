@@ -5,12 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
 import {ECDSAProofSystem} from "../src/proofSystems/ECDSAProofSystem.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../src/EEZ.sol";
+import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
 import {ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
 contract ECDSAProofSystemTest is Test {
@@ -30,27 +25,27 @@ contract ECDSAProofSystemTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function test_verify_validSignature() public view {
+    function test_Verify_ValidSignature() public view {
         bytes32 message = keccak256("test message");
         bytes memory proof = _sign(SIGNER_PK, message);
         assertTrue(verifier.verify(proof, message));
     }
 
-    function test_verify_wrongSigner() public view {
+    function test_Verify_WrongSigner() public view {
         bytes32 message = keccak256("test message");
         uint256 wrongPk = 0xBAD;
         bytes memory proof = _sign(wrongPk, message);
         assertFalse(verifier.verify(proof, message));
     }
 
-    function test_setSigner_byOwner() public {
+    function test_SetSigner_ByOwner() public {
         address newSigner = address(0x1234);
         vm.prank(owner);
         verifier.setSigner(newSigner);
         assertEq(verifier.signer(), newSigner);
     }
 
-    function test_setSigner_byNonOwner_reverts() public {
+    function test_SetSigner_ByNonOwnerReverts() public {
         address nonOwner = address(0xDEAD);
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
@@ -128,6 +123,8 @@ contract ECDSAProofSystemIntegrationTest is Base {
         return _makeRollupCustom(initialState, psList, vks, 1, defaultOwner);
     }
 
+    /// @notice Single-batch wrapper over `Base._raw` swapping the default `ps` for the ECDSA
+    ///         `verifier` and its signed `proof`; the one entry is immediate.
     function _buildECDSABatch(RollupHandle memory r, ExecutionEntry[] memory entries, bytes memory proof)
         internal
         view
@@ -137,29 +134,10 @@ contract ECDSAProofSystemIntegrationTest is Base {
         psList[0] = address(verifier);
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = proof;
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: psIdx});
-
-        batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false,
-            entries: entries,
-            staticEntries: _emptyStaticEntries(),
-            immediateEntryCount: 1,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
+        batch = _raw(entries, _emptyStaticEntries(), psList, proofs, _rpsOne(r.id, 1), 1, 0);
     }
 
-    function test_postAndVerifyBatch_withECDSAVerifier() public {
+    function test_PostAndVerifyBatch_WithECDSAVerifier() public {
         bytes32 initialState = keccak256("initial");
         bytes32 newState = keccak256("new");
         bytes32 vk = keccak256("vk");
@@ -177,7 +155,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         assertEq(_getRollupState(r.id), newState);
     }
 
-    function test_postAndVerifyBatch_withWrongSigner_reverts() public {
+    function test_PostAndVerifyBatch_WrongSignerReverts() public {
         bytes32 initialState = keccak256("initial");
         bytes32 newState = keccak256("new");
         bytes32 vk = keccak256("vk");

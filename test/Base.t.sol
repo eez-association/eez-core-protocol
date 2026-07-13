@@ -2,27 +2,18 @@
 pragma solidity ^0.8.28;
 
 import {Test, Vm} from "forge-std/Test.sol";
-import {
-    EEZ,
-    RollupConfig,
-    ProofSystemBatchPerVerificationEntries,
-    RollupIdWithProofSystems,
-    RollupVerification
-} from "../src/EEZ.sol";
+import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
-import {IRollupContract} from "../src/interfaces/IRollup.sol";
-import {IProofSystem} from "../src/interfaces/IProofSystem.sol";
 import {
     ExecutionEntry,
     StateDelta,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
-    ExpectedStateRootPerRollup,
-    ProxyInfo
+    ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
-import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
+import {TestHashes} from "./TestHashes.sol";
 
 /// @notice Shared fixture for all `*.t.sol` tests touching the L1 `EEZ` registry.
 /// @dev Sets up a `EEZ` instance + a default `MockProofSystem`, and exposes builders for
@@ -38,25 +29,21 @@ import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 ///        4. Use `_postBatchOne(handle, entries, staticEntries, immediateEntryCount,
 ///           immediateStaticEntryCount)` to wrap a single sub-batch and post it.
 ///        5. Use the `_immediateEntry*` / `_empty*` builders for common shape primitives.
-///        6. Use the `_h*` rolling-hash helpers to compute expected `entry.rollingHash`
-///           values without hardcoding the tag formulas — they mirror `EEZBase` exactly.
-abstract contract Base is Test {
+///        6. Use the `_h*` rolling-hash helpers (from `TestHashes`) to compute expected
+///           `entry.rollingHash` values without hardcoding the tag formulas — they mirror
+///           `EEZBase` exactly.
+abstract contract Base is Test, TestHashes {
     EEZ internal rollups;
     MockProofSystem internal ps;
 
     address internal defaultOwner = makeAddr("defaultOwner");
     bytes32 internal constant DEFAULT_VK = bytes32(uint256(0x100));
 
-    // ── Rolling hash tag constants (mirror EEZBase.sol) ──
-    uint8 internal constant CALL_BEGIN = 1;
-    uint8 internal constant CALL_END = 2;
-    uint8 internal constant NESTED_BEGIN = 3;
-    uint8 internal constant NESTED_END = 4;
-    uint8 internal constant CALL_NOT_FOUND = 5;
-
-    // ── Readable isStatic flags (mirror EEZBase.sol) ──
-    bool internal constant NOT_STATIC_CALL = false;
-    bool internal constant IS_STATIC = true;
+    // ── Placeholder rollup-side actors (no code behind them) ──
+    /// @notice Rollup-side source address of an L2→L1 call.
+    address internal constant L2_SENDER = address(0xD00D);
+    /// @notice Rollup-side contract fronted by an L1 cross-chain proxy.
+    address internal constant L2_REMOTE = address(0xBEEF);
 
     /// @notice Per-test handle bundling the registered rollupId + its manager contract.
     struct RollupHandle {
@@ -145,6 +132,92 @@ abstract contract Base is Test {
     //  ProofSystemBatchPerVerificationEntries builders
     // ──────────────────────────────────────────────
 
+    /// @notice `RollupIdWithProofSystems[1]` for `rid` selecting proof-system indices `0..nPs-1`.
+    function _rpsOne(uint256 rid, uint256 nPs) internal pure returns (RollupIdWithProofSystems[] memory rps) {
+        uint64[] memory idx = new uint64[](nPs);
+        for (uint256 i = 0; i < nPs; i++) {
+            idx[i] = uint64(i);
+        }
+        rps = new RollupIdWithProofSystems[](1);
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rid), proofSystemIndexes: idx});
+    }
+
+    /// @notice Raw batch builder: every list is caller-supplied; `blockNumber = 0`, no pins,
+    ///         no blobs, empty `callData`, submitter-unbound.
+    function _raw(
+        ExecutionEntry[] memory entries,
+        StaticExecutionEntry[] memory staticEntries,
+        address[] memory psList,
+        bytes[] memory proofs,
+        RollupIdWithProofSystems[] memory rps,
+        uint256 immediateEntryCount,
+        uint256 immediateStaticEntryCount
+    )
+        internal
+        pure
+        returns (ProofSystemBatchPerVerificationEntries memory b)
+    {
+        b.blockNumber = 0;
+        b.entries = entries;
+        b.staticEntries = staticEntries;
+        b.immediateEntryCount = immediateEntryCount;
+        b.immediateStaticEntryCount = immediateStaticEntryCount;
+        b.proofSystems = psList;
+        b.rollupIdsWithProofSystems = rps;
+        b.blobIndices = new uint256[](0);
+        b.callData = "";
+        b.proofs = proofs;
+    }
+
+    /// @notice Default single-PS ([`ps`] + ["proof"]) batch keyed by a raw `rid`. Unlike
+    ///         `_singleSubBatch` it needs no `RollupHandle`, so it can also target
+    ///         unregistered ids (for validation-guard tests).
+    function _stdBatch(
+        uint256 rid,
+        ExecutionEntry[] memory entries,
+        StaticExecutionEntry[] memory staticEntries,
+        uint256 immediateEntryCount,
+        uint256 immediateStaticEntryCount
+    )
+        internal
+        view
+        returns (ProofSystemBatchPerVerificationEntries memory b)
+    {
+        address[] memory psList = new address[](1);
+        psList[0] = address(ps);
+        bytes[] memory proofs = new bytes[](1);
+        proofs[0] = "proof";
+        b = _raw(
+            entries, staticEntries, psList, proofs, _rpsOne(rid, 1), immediateEntryCount, immediateStaticEntryCount
+        );
+    }
+
+    /// @notice Two-rollup single-PS batch (both rollups list the default `ps`). The ids are used
+    ///         in the order given — pass them strictly increasing for a valid batch.
+    function _twoRollupBatch(
+        uint256 ridFirst,
+        uint256 ridSecond,
+        ExecutionEntry[] memory entries,
+        StaticExecutionEntry[] memory staticEntries,
+        uint256 immediateEntryCount,
+        uint256 immediateStaticEntryCount
+    )
+        internal
+        view
+        returns (ProofSystemBatchPerVerificationEntries memory b)
+    {
+        address[] memory psList = new address[](1);
+        psList[0] = address(ps);
+        bytes[] memory proofs = new bytes[](1);
+        proofs[0] = "proof";
+        uint64[] memory idx = new uint64[](1);
+        idx[0] = 0;
+        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(ridFirst), proofSystemIndexes: idx});
+        rps[1] = RollupIdWithProofSystems({rollupId: uint64(ridSecond), proofSystemIndexes: idx});
+        b = _raw(entries, staticEntries, psList, proofs, rps, immediateEntryCount, immediateStaticEntryCount);
+    }
+
     /// @notice Builds a single-PS / single-rollup `ProofSystemBatchPerVerificationEntries` using the default `ps`.
     function _singleSubBatch(
         RollupHandle memory r,
@@ -157,30 +230,7 @@ abstract contract Base is Test {
         view
         returns (ProofSystemBatchPerVerificationEntries memory batch)
     {
-        address[] memory psList = new address[](1);
-        psList[0] = address(ps);
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: psIdx});
-
-        batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false,
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: immediateEntryCount,
-            immediateStaticEntryCount: immediateStaticEntryCount,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
+        batch = _stdBatch(r.id, entries, staticEntries, immediateEntryCount, immediateStaticEntryCount);
     }
 
     /// @notice Wraps a single batch for `r` and calls `rollups.postAndVerifyBatch`.
@@ -205,6 +255,21 @@ abstract contract Base is Test {
     function _postBatchAutoTransient(RollupHandle memory r, ExecutionEntry[] memory entries) internal {
         uint256 tc = (entries.length > 0 && entries[0].proxyEntryHash == bytes32(0)) ? 1 : 0;
         _postBatchOne(r, entries, _emptyStaticEntries(), tc, 0);
+    }
+
+    /// @notice Posts a single-rollup batch whose whole `entries` prefix is immediate, carrying
+    ///         `expectedStateRootPerRollup` pins (mismatch reverts `ExpectedStateRootMismatch`).
+    function _postBatchWithPins(
+        RollupHandle memory r,
+        ExecutionEntry[] memory entries,
+        ExpectedStateRootPerRollup[] memory pins
+    )
+        internal
+    {
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _singleSubBatch(r, entries, _emptyStaticEntries(), entries.length, 0);
+        batch.expectedStateRootPerRollup = pins;
+        rollups.postAndVerifyBatch(batch);
     }
 
     // ──────────────────────────────────────────────
@@ -267,71 +332,95 @@ abstract contract Base is Test {
         entry = _immediateEntry(rid, bytes32(0), bytes32(0));
     }
 
-    // ──────────────────────────────────────────────
-    //  Cross-chain call hash helper (mirrors EEZBase.computeCrossChainCallHash)
-    // ──────────────────────────────────────────────
+    /// @notice A "shell" entry: given deltas, default everything else (`proxyEntryHash = 0`,
+    ///         no calls, `rollingHash = 0`, `success = true`); destination = `destRid`.
+    function _shellEntry(uint256 destRid, StateDelta[] memory deltas) internal pure returns (ExecutionEntry memory e) {
+        e.stateDeltas = deltas;
+        e.proxyEntryHash = bytes32(0);
+        e.destinationRollupId = uint64(destRid);
+        e.l2ToL1Calls = _emptyCalls();
+        e.expectedL1ToL2Calls = _emptyReentrant();
+        e.rollingHash = bytes32(0);
+        e.success = true;
+        e.returnData = "";
+    }
 
-    /// @notice Mirror of `EEZBase.computeCrossChainCallHash`. Field order:
-    ///         isStatic → source(addr,rid) → target(addr,rid) → value → data.
-    function _ccHash(
-        bool isStatic,
-        address sourceAddress,
-        uint64 sourceRollupId,
-        address targetAddress,
-        uint64 targetRollupId,
-        uint256 value_,
-        bytes memory data
+    /// @notice Rolling hash for an entry with exactly one top-level call.
+    function _oneCallHash(
+        StateDelta[] memory deltas,
+        bytes32 proxyEntryHash,
+        bytes32 crossChainCallHash,
+        bool success,
+        bytes memory retData
     )
         internal
         pure
-        returns (bytes32)
+        returns (bytes32 h)
     {
-        return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data)
-        );
+        h = _hEntryBegin(deltas, proxyEntryHash);
+        h = _hCallBegin(h, crossChainCallHash);
+        h = _hCallEnd(h, success, retData);
     }
+
+    /// @notice Compact default-shape call: state-changing (`isStatic = false`), no forced revert.
+    function _call(address src, uint64 srcRid, address tgt, uint256 value_, bytes memory data)
+        internal
+        pure
+        returns (L2ToL1Call memory c)
+    {
+        c = L2ToL1Call({
+            revertNextNCalls: 0,
+            isStatic: false,
+            sourceAddress: src,
+            sourceRollupId: srcRid,
+            targetAddress: tgt,
+            value: value_,
+            data: data
+        });
+    }
+
+    /// @notice Compact read-only call: dispatched via STATICCALL (`isStatic = true`, no value).
+    function _staticCall(address src, uint64 srcRid, address tgt, bytes memory data)
+        internal
+        pure
+        returns (L2ToL1Call memory c)
+    {
+        c = _call(src, srcRid, tgt, 0, data);
+        c.isStatic = true;
+    }
+
+    /// @notice Wraps one call into a single-element array (the common `l2ToL1Calls` shape).
+    function _oneCall(L2ToL1Call memory c) internal pure returns (L2ToL1Call[] memory arr) {
+        arr = new L2ToL1Call[](1);
+        arr[0] = c;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Assertion helpers
+    // ──────────────────────────────────────────────
+
+    /// @notice Asserts a raw revert payload `ret` begins with the 4-byte selector `expected`.
+    function _assertRevertSelector(bytes memory ret, bytes4 expected) internal pure {
+        assertGe(ret.length, 4, "revert data shorter than a selector");
+        assertEq(bytes4(ret), expected, "unexpected revert selector");
+    }
+
+    /// @notice True when `logs` contains an event whose topic0 equals `selector`.
+    function _findLog(Vm.Log[] memory logs, bytes32 selector) internal pure returns (bool) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == selector) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ──────────────────────────────────────────────
+    //  Reentrant position-key helper
+    // ──────────────────────────────────────────────
 
     /// @notice Mirror of `EEZBase._computeExpectedL1toL2Hash`: position key for a reentrant call.
     function _expectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(crossChainCallHash, rollingHash));
-    }
-
-    // ──────────────────────────────────────────────
-    //  Rolling hash helpers (mirror EEZBase.sol's tag scheme)
-    // ──────────────────────────────────────────────
-
-    /// @notice Mirror of `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
-    ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
-        bytes32 statesHash;
-        for (uint256 i = 0; i < deltas.length; i++) {
-            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
-        }
-        return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
-    }
-
-    function _hCallBegin(bytes32 prev, bytes32 crossChainCallHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_BEGIN, crossChainCallHash));
-    }
-
-    function _hCallEnd(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_END, success, retData));
-    }
-
-    function _hNestedBegin(bytes32 prev, bytes32 crossChainCallHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_BEGIN, crossChainCallHash));
-    }
-
-    function _hNestedEnd(bytes32 prev) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_END));
-    }
-
-    function _hCallNotFound(bytes32 prev, bytes32 crossChainCallHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_NOT_FOUND, crossChainCallHash));
-    }
-
-    /// @notice Mirror of `EEZBase._rollingHashStaticResult` (untagged static sub-call schema).
-    function _hStatic(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, success, retData));
     }
 }

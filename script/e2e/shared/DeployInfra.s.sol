@@ -17,9 +17,8 @@ contract AcceptAllProofSystem is IProofSystem {
 
 /// @title DeployEEZL1
 /// @notice Deploys AcceptAllProofSystem + EEZ + creates L2 rollup (id=1).
-/// @dev The first registered rollup gets id 0 = MAINNET_ROLLUP_ID, which is unpostable
-///      because the strict-increasing rollupIds check in postAndVerifyBatch rejects 0. So we burn
-///      id 0 with a throwaway rollup, then register the L2 rollup at id 1.
+/// @dev Id 0 is MAINNET_ROLLUP_ID and is never assigned — registerRollup pre-increments its
+///      counter, so the first registered rollup (the L2 manager) lands directly at id 1.
 /// Outputs: ROLLUPS, PROOF_SYSTEM, L2_MANAGER, L2_ROLLUP_ID
 contract DeployEEZL1 is Script {
     bytes32 constant DEFAULT_VK = keccak256("verificationKey");

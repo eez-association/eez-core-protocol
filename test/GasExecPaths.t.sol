@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {GasCost} from "./GasCost.t.sol";
+import {GasFixture} from "./GasFixture.t.sol";
 import {
     EEZ,
     ProofSystemBatchPerVerificationEntries,
@@ -63,7 +63,7 @@ contract MetaExecDriver is IMetaCrossChainReceiver {
 ///         each separate tx additionally pays the 21,000 intrinsic base not counted by `gasleft()` —
 ///         noted in the printout. Reported numbers are the SECOND (warm) run; the first pays one-time
 ///         cold-slot init. Run with: forge test --match-path test/GasExecPaths.t.sol -vv
-contract GasExecPaths is GasCost {
+contract GasExecPaths is GasFixture {
     MetaExecDriver internal driver;
 
     // Rollups whose queues are SEEDED in setUp with the exact shape each saved measurement re-writes.
@@ -76,7 +76,7 @@ contract GasExecPaths is GasCost {
     RollupHandle internal g1Exp; //  1 entry, 1 ExpectedL1ToL2Call
 
     function setUp() public override {
-        super.setUp(); // GasCost fixtures (rA, rB, proxies, actors, seeded rS*)
+        super.setUp(); // shared gas fixture (rA, rB, proxies, actors, seeded rS*)
 
         gBare1 = _makeRollup(keccak256("gBare1"));
         gBare2 = _makeRollup(keccak256("gBare2"));
@@ -125,7 +125,7 @@ contract GasExecPaths is GasCost {
     }
 
     /// @notice Builds a two-rollup (rA, rB) batch around `entries` with an explicit immediateEntryCount.
-    ///         Mirrors GasCost._postBatchTwoT but RETURNS the struct so any poster (EOA prank or the
+    ///         Mirrors GasFixture._postBatchTwoT but RETURNS the struct so any poster (EOA prank or the
     ///         driver contract) can submit it.
     function _buildBatch(ExecutionEntry[] memory entries, uint256 immediateCount)
         internal
@@ -337,43 +337,6 @@ contract GasExecPaths is GasCost {
         d[0] = StateDelta({rollupId: uint64(rA.id), currentState: cur, newState: cur, etherDelta: 0});
     }
 
-    /// General rolling-hash fold: any mix of plain/reentrant top-level calls (mirrors EEZ._processNCalls
-    /// + the nested-reentry resolution). Each reentrant call opens one ExpectedL1ToL2Call frame.
-    function _foldGeneric(bytes32 seed, L2ToL1Call[] memory calls, bool[] memory reentrant, bytes[] memory rets)
-        internal
-        view
-        returns (bytes32 h, ExpectedL1ToL2Call[] memory expected)
-    {
-        uint256 nRe;
-        for (uint256 k = 0; k < reentrant.length; k++) {
-            if (reentrant[k]) nRe++;
-        }
-        expected = new ExpectedL1ToL2Call[](nRe);
-        uint256 ei;
-        h = seed;
-        for (uint256 k = 0; k < calls.length; k++) {
-            L2ToL1Call memory c = calls[k];
-            bytes32 cch = _ccHash(
-                c.isStatic, c.sourceAddress, c.sourceRollupId, c.targetAddress, MAINNET_ROLLUP_ID, c.value, c.data
-            );
-            h = _hCallBegin(h, cch);
-            if (reentrant[k]) {
-                bytes32 fireHash = h;
-                bytes32 nestedCch = _nestedCch(c);
-                h = _hNestedBegin(h, nestedCch);
-                h = _hNestedEnd(h);
-                expected[ei++] = ExpectedL1ToL2Call({
-                    expectedL1toL2Hash: _expectedL1toL2Hash(nestedCch, fireHash),
-                    l2ToL1Calls: new L2ToL1Call[](0),
-                    revertedOrStaticRollingHash: bytes32(0),
-                    success: true,
-                    returnData: abi.encode(uint256(1))
-                });
-            }
-            h = _hCallEnd(h, true, rets[k]);
-        }
-    }
-
     /// One EXECUTED immediate L2Tx entry (proxyEntryHash == 0) with `nSink` plain L2ToL1Calls and
     /// `nReentrant` reentrant L1ToL2Calls (each re-enters EEZ for rA once).
     function _execEntry(uint256 nSink, uint256 nReentrant) internal view returns (ExecutionEntry memory e) {
@@ -399,48 +362,6 @@ contract GasExecPaths is GasCost {
     /// `nEntries` identical bare EXECUTED L2Tx entries (no calls) — isolates the per-entry overhead.
     function _execBareEntries(uint256 nEntries) internal view returns (ExecutionEntry[] memory entries) {
         ExecutionEntry memory e = _execEntry(0, 0);
-        entries = new ExecutionEntry[](nEntries);
-        for (uint256 i = 0; i < nEntries; i++) {
-            entries[i] = e;
-        }
-    }
-
-    /// `nEntries` identical DEFERRED (saved, never executed) entries routed to `dest`, each carrying
-    /// `nCalls` placeholder L2ToL1Calls and `nExpected` placeholder ExpectedL1ToL2Calls. Rolling hash /
-    /// keys are placeholders (consumption never happens). Source/StateDelta pin to `dest` so the entry
-    /// passes post-validation. Mirrors GasCost._steadyShapedFor.
-    function _savedFor(uint256 dest, uint256 nEntries, uint256 nCalls, uint256 nExpected)
-        internal
-        view
-        returns (ExecutionEntry[] memory entries)
-    {
-        StateDelta[] memory d = new StateDelta[](1);
-        d[0] = StateDelta({
-            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
-        });
-        L2ToL1Call[] memory calls = new L2ToL1Call[](nCalls);
-        for (uint256 i = 0; i < nCalls; i++) {
-            calls[i] = L2ToL1Call({
-                revertNextNCalls: 0,
-                isStatic: false,
-                sourceAddress: genericSource,
-                sourceRollupId: uint64(dest),
-                targetAddress: address(sink),
-                value: 0,
-                data: hex"deadbeef"
-            });
-        }
-        ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](nExpected);
-        for (uint256 i = 0; i < nExpected; i++) {
-            exp[i] = _deferredExpected();
-        }
-        ExecutionEntry memory e;
-        e.stateDeltas = d;
-        e.proxyEntryHash = keccak256("save-defer");
-        e.destinationRollupId = uint64(dest);
-        e.l2ToL1Calls = calls;
-        e.expectedL1ToL2Calls = exp;
-        e.success = true;
         entries = new ExecutionEntry[](nEntries);
         for (uint256 i = 0; i < nEntries; i++) {
             entries[i] = e;

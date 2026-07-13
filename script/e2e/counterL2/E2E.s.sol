@@ -20,7 +20,7 @@ import {
     noL2Calls,
     noL2OutgoingCalls,
     noL2StaticEntries,
-    deferredSingleRollupBatch,
+    immediateSingleRollupBatch,
     RollingHashBuilder
 } from "../shared/E2EHelpers.sol";
 
@@ -34,10 +34,10 @@ import {
 //    4. Entry consumed, returns abi.encode(1); CAP (L2): counter=1, targetCounter=1
 //
 //  L1 side (Execute):
-//    1. postAndVerifyBatch loads ONE deferred entry
+//    1. postAndVerifyBatch carries ONE immediate entry
 //       (proxyEntryHash=0 — no source-side hash to match; system-driven) whose
 //       l2ToL1Calls describe the inbound call from CAP (L2) to Counter (L1)
-//    2. executeL2Txs(L2_ROLLUP_ID) drains the entry via _processNCalls
+//    2. The immediate L2Tx run executes the entry inline via _processNCalls
 //    3. _processNCalls forwards through the lazily-created source proxy
 //       (proxy_for_CAP_on_L2 deployed on L1) into Counter.increment() on L1
 //    4. Counter.counter() on L1 advances to 1
@@ -58,14 +58,13 @@ abstract contract CounterL2Actions {
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`
     /// (CAP L2 -> Counter L1 proxy); it carries no incoming calls and returns precomputed `uint256(1)`,
     /// so the rolling hash is just the entry-begin seed.
-    /// NOTE: L2 rolling-hash seed (`entryBeginL2`) is pending the EEZL2 migration; re-verify when EEZL2.sol lands.
     function _l2Entries(address counterL1, address counterAndProxyL2)
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 proxyEntryHash = _callHash(counterL1, counterAndProxyL2);
-        // PENDING EEZL2: seed-only rolling hash (no incoming calls).
+        // Seed-only rolling hash (no incoming calls).
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
 
         entries = new L2ExecutionEntry[](1);
@@ -79,8 +78,8 @@ abstract contract CounterL2Actions {
         });
     }
 
-    /// @dev Single L1 entry — the DESTINATION side. System-driven (proxyEntryHash=0), drained by
-    /// `executeL2Txs`. `l2ToL1Calls[0]` is the inbound call delivered through the source proxy for
+    /// @dev Single L1 entry — the DESTINATION side. System-driven (proxyEntryHash=0), executed as an
+    /// immediate L2Tx during `postAndVerifyBatch`. `l2ToL1Calls[0]` is the inbound call delivered through the source proxy for
     /// CAP-on-L2 (lazily created during processing); it executes ON L1, so CALL_BEGIN folds the call
     /// hash with targetRollupId = MAINNET.
     function _l1Entries(address counterL1, address counterAndProxyL2)
@@ -192,31 +191,30 @@ contract ExecuteL2 is Script, CounterL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — postBatch (deferred) + executeL2Txs in one tx.
+/// @notice Inline L2-TX batcher — posts the batch with the zero-hash entry marked immediate.
 /// @dev Builds the L1 entry INTERNALLY (inherits `CounterL2Actions`) so the caller never ABI-encodes
-///      the nested `ExecutionEntry[]` across the call boundary — only the single deferred-batch encode
+///      the nested `ExecutionEntry[]` across the call boundary — only the single batch encode
 ///      for `postAndVerifyBatch` remains, keeping clear of the via-ir stack limit. `immediateEntryCount`
-///      is 0 so the zero-hash entry stays in the deferred queue and is drained by `executeL2Txs`.
-contract DeferredL2TXBatcher is CounterL2Actions {
+///      covers the leading zero-hash run, so the entry executes inline during `postAndVerifyBatch`.
+contract ImmediateL2TXBatcher is CounterL2Actions {
     function execute(EEZ rollups, address proofSystem, address counterL1, address capL2) external {
         rollups.postAndVerifyBatch(
-            deferredSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticEntries())
+            immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticEntries())
         );
-        rollups.executeL2Txs(L2_ROLLUP_ID);
     }
 }
 
-/// @title Execute — local mode: postBatch (deferred) + executeL2Txs on L1.
+/// @title Execute — local mode: postBatch with the immediate L2Tx entry on L1.
 /// @dev Drives the L1-side simulation of the L2-originated cross-chain call. The lazily-created source
 ///      proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1 and is created inside `_processNCalls` during
-///      executeL2Txs.
+///      the immediate L2Tx run.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L1, COUNTER_AND_PROXY_L2
 contract Execute is Script {
     function run() external {
         address counterL1 = vm.envAddress("COUNTER_L1");
 
         vm.startBroadcast();
-        DeferredL2TXBatcher batcher = new DeferredL2TXBatcher();
+        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
         batcher.execute(
             EEZ(vm.envAddress("ROLLUPS")),
             vm.envAddress("PROOF_SYSTEM"),

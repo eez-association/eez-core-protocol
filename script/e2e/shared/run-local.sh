@@ -151,18 +151,11 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     if [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
-        set +e
-        L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1Batch \
-            --rpc-url "$L1_RPC" \
-            --sig "run(uint256,address,bytes32[])" \
-            "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" 2>&1)
-        L1_VERIFY_EXIT=$?
-        set -e
-        if [[ $L1_VERIFY_EXIT -eq 0 ]]; then
-            echo "$L1_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        if verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
         else
             echo "L1 VERIFICATION FAILED"
-            echo "$L1_VERIFY" | strip_traces 2>/dev/null || echo "$L1_VERIFY"
+            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
     fi
@@ -171,18 +164,11 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
-        set +e
-        L2_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Blocks \
-            --rpc-url "$L2_RPC" \
-            --sig "run(uint256[],address,bytes32[])" \
-            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" 2>&1)
-        L2_VERIFY_EXIT=$?
-        set -e
-        if [[ $L2_VERIFY_EXIT -eq 0 ]]; then
-            echo "$L2_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        if verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
         else
             echo "L2 TABLE VERIFICATION FAILED"
-            echo "$L2_VERIFY" | strip_traces 2>/dev/null || echo "$L2_VERIFY"
+            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
     fi
@@ -191,18 +177,11 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_CALL_HASHES" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L2 Calls (block $L2_BLOCK) ======"
-        set +e
-        L2_CALL_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
-            --rpc-url "$L2_RPC" \
-            --sig "run(uint256[],address,bytes32[])" \
-            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1)
-        L2_CALL_VERIFY_EXIT=$?
-        set -e
-        if [[ $L2_CALL_VERIFY_EXIT -eq 0 ]]; then
-            echo "$L2_CALL_VERIFY" | grep -E "^\s*PASS" || echo "  PASS"
+        if verify_l2_calls "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
         else
             echo "L2 CALL VERIFICATION FAILED"
-            echo "$L2_CALL_VERIFY" | strip_traces 2>/dev/null || echo "$L2_CALL_VERIFY"
+            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
     fi

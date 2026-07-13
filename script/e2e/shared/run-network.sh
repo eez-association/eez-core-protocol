@@ -226,11 +226,9 @@ fi
 echo ""
 echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
 if $L1_OK; then
-    L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1Batch \
-        --rpc-url "$RPC" \
-        --sig "run(uint256,address,bytes32[])" \
-        "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" 2>&1) \
+    verify_l1_batch "$RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" \
         && L1_OK=true || L1_OK=false
+    L1_VERIFY="$VERIFY_OUT"
 
     if $L1_OK; then
         echo "$L1_VERIFY" | grep "PASS"
@@ -286,10 +284,8 @@ if [[ "$L2_BLOCKS" == "[]" && -n "${EXPECTED_L2_CALL_HASHES:-}" ]]; then
     echo "Searching L2 blocks $L2_SEARCH_START..$L2_CURRENT..."
     FOUND_L2_BLOCK=""
     for (( b=L2_CURRENT; b>=L2_SEARCH_START; b-- )); do
-        forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
-            --rpc-url "$L2_RPC" \
-            --sig "run(uint256[],address,bytes32[])" "[$b]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1 \
-            | grep -q "PASS" \
+        verify_l2_calls "$L2_RPC" "[$b]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" || true
+        echo "$VERIFY_OUT" | grep -q "PASS" \
             && { FOUND_L2_BLOCK="$b"; break; } || true
     done
 
@@ -321,10 +317,9 @@ elif [[ "$EXPECTED_L2_HASHES" == "[]" ]]; then
             echo "PASS: no L2 blocks found (no L2 activity, as expected)"
             L2_OK=true
         else
-            ABSENT_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Absent \
-                --rpc-url "$L2_RPC" \
-                --sig "run(uint256[],address,bytes32[])" "$L2_BLOCKS" "$MANAGER_L2" "$ABSENT_L2_HASHES" 2>&1) \
+            verify_l2_absent "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$ABSENT_L2_HASHES" \
                 && L2_OK=true || L2_OK=false
+            ABSENT_VERIFY="$VERIFY_OUT"
             if $L2_OK; then
                 echo "$ABSENT_VERIFY" | grep "PASS"
             else
@@ -342,10 +337,9 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_OK=false
 else
-    L2_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Blocks \
-        --rpc-url "$L2_RPC" \
-        --sig "run(uint256[],address,bytes32[])" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" 2>&1) \
+    verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" \
         && L2_OK=true || L2_OK=false
+    L2_VERIFY="$VERIFY_OUT"
 
     if $L2_OK; then
         echo "$L2_VERIFY" | grep "PASS"
@@ -370,10 +364,9 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_CALL_OK=false
 else
-    L2_CALL_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
-        --rpc-url "$L2_RPC" \
-        --sig "run(uint256[],address,bytes32[])" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1) \
+    verify_l2_calls "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" \
         && L2_CALL_OK=true || L2_CALL_OK=false
+    L2_CALL_VERIFY="$VERIFY_OUT"
 
     if $L2_CALL_OK; then
         echo "$L2_CALL_VERIFY" | grep "PASS"
