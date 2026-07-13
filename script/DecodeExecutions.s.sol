@@ -471,7 +471,9 @@ contract DecodeExecutions is Script {
         if (sel == bytes4(keccak256("executeCrossChainCall(address,bytes)"))) {
             return "executeCrossChainCall(address,bytes)";
         }
-        if (sel == bytes4(keccak256("staticCrossChainCall(address,bytes)"))) return "staticCrossChainCall(address,bytes)";
+        if (sel == bytes4(keccak256("staticCrossChainCall(address,bytes)"))) {
+            return "staticCrossChainCall(address,bytes)";
+        }
         // Fall back to raw 4-byte selector
         return vm.toString(abi.encodePacked(sel));
     }

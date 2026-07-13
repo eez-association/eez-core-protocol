@@ -502,7 +502,7 @@ Both permissionless.
 salt         = keccak256(abi.encodePacked(originalRollupId, originalAddress))
 bytecodeHash = keccak256(abi.encodePacked(
     type(CrossChainProxy).creationCode,
-    abi.encode(address(this), originalAddress, originalRollupId)
+    abi.encode(address(this))
 ))
 address      = address(uint160(uint256(keccak256(abi.encodePacked(
                    bytes1(0xff),
@@ -834,10 +834,10 @@ Inherited from `EEZBase`. Identical formula on both L1 and L2 (§B.1); L2's `Sam
 ### B.3 CrossChainProxy.sol
 
 ```solidity
-constructor(address _eez, address _originalAddress, uint64 _originalRollupId)
+constructor(address _eez)
 ```
 
-Three immutables: `EEZ`, `ORIGINAL_ADDRESS`, `ORIGINAL_ROLLUP_ID` (`src/base/CrossChainProxy.sol`). The `EEZ` immutable holds the manager address (L1 `EEZ` or L2 `EEZL2`); the proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
+One immutable: `EEZ` (`src/base/CrossChainProxy.sol`), holding the manager address (L1 `EEZ` or L2 `EEZL2`). The `(originalAddress, originalRollupId)` pair lives in the CREATE2 salt and the manager's `authorizedProxies` mapping. The proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
 
 #### `executeOnBehalf(address destination, bytes calldata data) external payable`
 
@@ -1311,10 +1311,10 @@ This single check attests that every call described in the entry (and in every n
 
 ### H.5 Proxy Determinism
 
-Address of `CrossChainProxy(originalAddress, originalRollupId)` is fully determined by:
-- The manager contract (`address(this)` at deployment time)
-- Salt: `keccak256(abi.encodePacked(originalRollupId, originalAddress))`
-- `CrossChainProxy` creation code + constructor args
+The proxy address for a `(originalAddress, originalRollupId)` pair is fully determined by:
+- The manager contract (`address(this)` at deployment time — also the sole constructor arg)
+- Salt: `keccak256(abi.encodePacked(originalRollupId, originalAddress))` — the ONLY place the pair enters the derivation; all proxies on a manager share identical init code
+- `CrossChainProxy` creation code
 
 The same pair always maps to the same proxy address on the same manager. Two proxies for the same pair cannot exist (CREATE2 collision would revert). A proxy for the manager's own network is unrepresentable (`SameNetworkProxy`).
 
