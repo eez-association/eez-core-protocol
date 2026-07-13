@@ -5,7 +5,7 @@ import {IEEZ} from "../interfaces/IEEZ.sol";
 
 /// @title CrossChainProxy
 /// @notice Proxy contract for cross-chain addresses, deployed via CREATE2
-/// @dev Stores the EEZ manager address, original address, and original rollup ID as immutables.
+/// @dev Stores the EEZ manager address as an immutable.
 ///      Uses the OZ TransparentProxy pattern: the EEZ manager (admin) calling executeOnBehalf
 ///      gets the direct forwarding behavior; any other caller hitting executeOnBehalf
 ///      is routed through the cross-chain execution path via _fallback().
@@ -13,23 +13,13 @@ contract CrossChainProxy {
     /// @notice The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     address internal immutable EEZ;
 
-    /// @notice The original address this proxy represents
-    address internal immutable ORIGINAL_ADDRESS;
-
-    /// @notice The original rollup ID
-    uint64 internal immutable ORIGINAL_ROLLUP_ID;
-
     /// @dev Dummy transient variable used to detect STATICCALL context.
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
     uint256 transient _staticDetector;
 
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
-    /// @param _originalAddress The original address this proxy represents
-    /// @param _originalRollupId The original rollup ID
-    constructor(address _eez, address _originalAddress, uint64 _originalRollupId) {
+    constructor(address _eez) {
         EEZ = _eez;
-        ORIGINAL_ADDRESS = _originalAddress;
-        ORIGINAL_ROLLUP_ID = _originalRollupId;
     }
 
     /// @notice Fallback function that forwards all calls to the manager contract

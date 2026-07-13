@@ -238,7 +238,7 @@ All three reentrant flavours live in ONE table (`expectedL1ToL2Calls` / `expecte
 
 ```
 salt          = keccak256(abi.encodePacked(originalRollupId, originalAddress))
-bytecodeHash  = keccak256(creationCode || abi.encode(manager, originalAddress, originalRollupId))
+bytecodeHash  = keccak256(creationCode || abi.encode(manager))
 proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || bytecodeHash))))
 ```
 

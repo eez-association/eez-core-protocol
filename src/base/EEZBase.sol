@@ -155,7 +155,7 @@ abstract contract EEZBase is IEEZ {
         // A proxy stands in for a REMOTE address — never one on this manager's own network.
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
+        proxy = address(new CrossChainProxy{salt: salt}(address(this)));
         authorizedProxies[proxy] = ProxyInfo(true, originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
@@ -169,11 +169,8 @@ abstract contract EEZBase is IEEZ {
         returns (address)
     {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash = keccak256(
-            abi.encodePacked(
-                type(CrossChainProxy).creationCode, abi.encode(address(this), originalAddress, originalRollupId)
-            )
-        );
+        bytes32 bytecodeHash =
+            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
     }
 
