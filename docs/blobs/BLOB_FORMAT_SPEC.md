@@ -3,7 +3,8 @@
 A binary format for publishing chain activity as a single stream of
 messages — no header.
 **Everything is a message**: chain-local operations, cross-chain calls, results, reverts,
-and transaction boundaries differ only by message type.
+and transaction boundaries differ only by message type. The one exception is the first
+byte of each blob stream — the reserved version byte (§6).
 
 Excalidraw: https://excalidraw.com/#json=0Efuogd9EmGs1-dtl7VQs,6TO97Ut9nvF7ePynMCBd-Q
 
@@ -12,8 +13,8 @@ Excalidraw: https://excalidraw.com/#json=0Efuogd9EmGs1-dtl7VQs,6TO97Ut9nvF7ePynM
 ## 1. Framing
 
 The very first byte of the stream is the **protocol version** (§6) — hardcoded `00` for
-this version, decoded specially and not part of any message. Everything after it is
-messages.
+this version. It is reserved in every blob stream and **not encoded as a message** — the
+one exception. Everything after it is messages.
 
 Every message begins with a `message_type` byte, which selects one of two shapes:
 
@@ -373,10 +374,16 @@ unused and MUST be zero**. Elements are read as **little-endian** scalars, like 
 scalar in this format (§1.1), so the zero byte is the most significant one — every
 element is `< 2^248 < r` regardless of its 31 data bytes.
 
+**Physical byte order.** Blob bytes are read from the **least significant byte to the
+most significant byte** of each field element: stream byte `k` sits at byte
+significance `k`, and the unused zero byte is the last one read. This is not just the
+§1.1 scalar convention — it is the *physical* layout of stream data in the element.
+
 * **Capacity:** `4096 × 31 = 126,976` useful bytes per blob.
-* **Read:** drop the last byte of each element, concatenate the 31-byte chunks of all
-  elements of all blobs in order, and parse the version byte and messages (§1) from the
-  result. A `CloseBlobStream` (§2.1) is evaluated against this *decoded* stream.
+* **Read:** for each element, read its 31 data bytes from least significant to most
+  significant and drop the 32nd (most significant, zero) byte; concatenate the chunks of
+  all elements of all blobs in order, and parse the version byte and messages (§1) from
+  the result. A `CloseBlobStream` (§2.1) is evaluated against this *decoded* stream.
 * The trailing `callData` (§1.1) has no field-element constraint — raw bytes, appended to
   the recovered stream as-is.
 
@@ -427,10 +434,10 @@ The stream is valid iff **all** of the following hold:
 
 ## 6. Versioning
 
-The first byte of the stream is the **protocol version** — decoded on its own, before
-any message parsing (§1). This document defines version **`00`**. A future version of
-this spec MUST use a different version byte, and may define an entirely different format
-for everything after it. A verifier that does not recognize the version byte rejects the
+The first byte of the stream is the **protocol version** — reserved, decoded on its
+own, never a message (§1). This holds in every version of the format. This document
+defines version **`00`**. A future version MUST use a different version byte, and may
+define an entirely different format for everything after it. A verifier that does not recognize the version byte rejects the
 stream (§5, condition 2), so a newer-format stream can never be misparsed under this
 spec's rules.
 
