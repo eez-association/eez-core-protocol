@@ -13,13 +13,13 @@
 #   L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2 PK
 #
 # Example chain.env:
-#   L1_RPC=http://127.0.0.1:8545
-#   L1_FRONT=0x0000000000000000000000000000000000000000   # EEZ (L1 manager)
-#   L2_RPC=http://127.0.0.1:8546
-#   L2_FRONT=0x0000000000000000000000000000000000000000   # EEZL2 (L2 manager)
-#   ROLLUPS=0x0000000000000000000000000000000000000000    # L1 rollup registry (DeployInfra)
-#   MANAGER_L2=0x0000000000000000000000000000000000000000 # L2 manager (DeployInfra)
-#   PK=0x...                                              # deployer private key
+#   L1_RPC=https://l1-rpc.example.net                     # L1 read/deploy RPC
+#   L1_FRONT=http://x.x.x.x:18999                         # L1 x-chain front (L1→L2 trigger txs ONLY)
+#   L2_RPC=http://x.x.x.x:18688                           # L2 read/deploy RPC
+#   L2_FRONT=http://x.x.x.x:18998                         # L2 x-chain front (L2→L1 trigger txs ONLY)
+#   ROLLUPS=0x0000000000000000000000000000000000000000    # EEZ — L1 rollup registry
+#   MANAGER_L2=0x4200000000000000000000000000000000000007 # EEZL2 — L2 manager (genesis predeploy)
+#   PK=0x...                                              # test key, funded on BOTH chains
 #
 # Per-scenario logs: tmp/e2e-network/<scenario>.log. Exit 1 if any scenario fails.
 

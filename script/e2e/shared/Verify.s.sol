@@ -560,7 +560,9 @@ abstract contract VerifyHelpers is Script {
         }
         for (uint256 d = 0; d < e.stateDeltas.length; d++) {
             if (e.stateDeltas[d].currentState == e.stateDeltas[d].newState) {
-                console.log("FAIL: entry %s stateDelta %s does not move the state root (currentState == newState)", i, d);
+                console.log(
+                    "FAIL: entry %s stateDelta %s does not move the state root (currentState == newState)", i, d
+                );
                 ok = false;
             }
         }
@@ -750,11 +752,16 @@ abstract contract VerifyHelpers is Script {
         ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
         ExecutionEntry[] memory matched = new ExecutionEntry[](expected.length);
         uint256 nMatched;
+        // Entries are queue-consumed in order and (proxyEntryHash, rollingHash) is NOT
+        // unique (e.g. two identical increments) — match each posted entry at most once,
+        // in posting order.
+        bool[] memory used = new bool[](posted.length);
         ok = true;
         for (uint256 i = 0; i < expected.length; i++) {
             bool found = false;
             for (uint256 j = 0; j < posted.length; j++) {
-                if (_entryHash(posted[j]) != _entryHash(expected[i])) continue;
+                if (used[j] || _entryHash(posted[j]) != _entryHash(expected[i])) continue;
+                used[j] = true;
                 found = true;
                 matched[nMatched++] = posted[j];
                 if (!_comparePostedEntry(posted[j], expected[i], i, legacyAbi)) ok = false;
@@ -768,6 +775,8 @@ abstract contract VerifyHelpers is Script {
         assembly {
             mstore(matched, nMatched)
         }
+        // root movement + contiguity across the WHOLE posted batch
+        if (!_checkPostedDeltaChain(posted)) ok = false;
         // live-root check against the REAL posted deltas (exact roots, unlike the
         // expected blob's local placeholders)
         if (!_checkLiveStateRoots(rollupsAddr, matched)) ok = false;
@@ -855,10 +864,55 @@ abstract contract VerifyHelpers is Script {
                 );
                 ok = false;
             }
-            if (a[d].currentState == a[d].newState) {
-                console.log(
-                    "FAIL: entry %s posted stateDelta %s does not move the state root (currentState == newState)", i, d
-                );
+        }
+    }
+
+    /// @dev Per-rollup delta-chain checks across ALL posted entries, in posting
+    ///      order: every delta must continue from the previous one (pre ==
+    ///      previous post) and the chain as a whole MUST move the root.
+    ///      Per-entry movement cannot be required: state roots are per-L2-block,
+    ///      so entries executed in the same L2 block share one root transition
+    ///      and all but one of them legitimately post currentState == newState
+    ///      (observed on the devnet: two same-block calls -> B->C then C->C).
+    function _checkPostedDeltaChain(ExecutionEntry[] memory posted) internal pure returns (bool ok) {
+        ok = true;
+        uint256 maxDeltas;
+        for (uint256 i = 0; i < posted.length; i++) {
+            maxDeltas += posted[i].stateDeltas.length;
+        }
+        uint256[] memory rids = new uint256[](maxDeltas);
+        bytes32[] memory firstPre = new bytes32[](maxDeltas);
+        bytes32[] memory lastPost = new bytes32[](maxDeltas);
+        uint256 n;
+        for (uint256 i = 0; i < posted.length; i++) {
+            for (uint256 d = 0; d < posted[i].stateDeltas.length; d++) {
+                StateDelta memory sd = posted[i].stateDeltas[d];
+                bool seen = false;
+                for (uint256 k = 0; k < n; k++) {
+                    if (rids[k] != sd.rollupId) continue;
+                    seen = true;
+                    if (sd.currentState != lastPost[k]) {
+                        console.log(
+                            "FAIL: rollup %s posted delta chain broken at entry %s (pre != previous post)",
+                            sd.rollupId,
+                            i
+                        );
+                        ok = false;
+                    }
+                    lastPost[k] = sd.newState;
+                    break;
+                }
+                if (!seen) {
+                    rids[n] = sd.rollupId;
+                    firstPre[n] = sd.currentState;
+                    lastPost[n] = sd.newState;
+                    n++;
+                }
+            }
+        }
+        for (uint256 k = 0; k < n; k++) {
+            if (firstPre[k] == lastPost[k]) {
+                console.log("FAIL: rollup %s state root does not move across the posted batch", rids[k]);
                 ok = false;
             }
         }
