@@ -306,7 +306,9 @@ contract ComputeExpected is ComputeExpectedBase, TwoDiffL2Actions {
         address callerL2 = vm.envAddress("CALL_TWO_DIFF_L2");
 
         L2ExecutionEntry[] memory l2 = _l2Entries(counterA, counterB, callerL2);
+        _printL2Table(l2);
         ExecutionEntry[] memory l1 = _l1Entries(counterA, counterB, callerL2);
+        _printL1Table(l1);
 
         bytes32 l2h0 = _entryHash(l2[0]);
         bytes32 l2h1 = _entryHash(l2[1]);

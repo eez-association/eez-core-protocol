@@ -138,6 +138,11 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
     EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
     EXPECTED_L2_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_CALL_HASHES")
+    # Full expected tables (abi-encoded) — optional; "0x" = hash-only fallback.
+    EXPECTED_L1_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L1_TABLE")
+    EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
+    EXPECTED_L2_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L2_TABLE")
+    EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
     [[ -n "$EXPECTED_L1_HASHES"      ]] && echo "EXPECTED_L1_HASHES=$EXPECTED_L1_HASHES"
     [[ -n "$EXPECTED_L2_HASHES"      ]] && echo "EXPECTED_L2_HASHES=$EXPECTED_L2_HASHES"
     [[ -n "$EXPECTED_L1_CALL_HASHES" ]] && echo "EXPECTED_L1_CALL_HASHES=$EXPECTED_L1_CALL_HASHES"
@@ -154,8 +159,8 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         set +e
         L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1Batch \
             --rpc-url "$L1_RPC" \
-            --sig "run(uint256,address,bytes32[])" \
-            "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" 2>&1)
+            --sig "run(uint256,address,bytes32[],bytes)" \
+            "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE" 2>&1)
         L1_VERIFY_EXIT=$?
         set -e
         if [[ $L1_VERIFY_EXIT -eq 0 ]]; then
@@ -174,8 +179,8 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         set +e
         L2_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Blocks \
             --rpc-url "$L2_RPC" \
-            --sig "run(uint256[],address,bytes32[])" \
-            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" 2>&1)
+            --sig "run(uint256[],address,bytes32[],bytes)" \
+            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" 2>&1)
         L2_VERIFY_EXIT=$?
         set -e
         if [[ $L2_VERIFY_EXIT -eq 0 ]]; then
@@ -194,8 +199,8 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         set +e
         L2_CALL_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
             --rpc-url "$L2_RPC" \
-            --sig "run(uint256[],address,bytes32[])" \
-            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1)
+            --sig "run(uint256[],address,bytes32[],bytes)" \
+            "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE" 2>&1)
         L2_CALL_VERIFY_EXIT=$?
         set -e
         if [[ $L2_CALL_VERIFY_EXIT -eq 0 ]]; then

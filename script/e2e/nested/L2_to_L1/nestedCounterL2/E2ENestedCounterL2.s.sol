@@ -389,7 +389,9 @@ contract ComputeExpected is ComputeExpectedBase, NestedL2Actions {
         address alice = msg.sender;
 
         L2ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capAddr, alice);
+        _printL2Table(l2);
         ExecutionEntry[] memory l1 = _l1Entries(counterL2TargetAddr, capL1Addr, capAddr);
+        _printL1Table(l1);
 
         bytes32 l2Hash = _entryHash(l2[0]);
         bytes32 l1Hash = _entryHash(l1[0]);

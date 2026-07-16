@@ -431,7 +431,9 @@ contract ComputeExpected is ComputeExpectedBase, RevertContinueActions {
         address alice = msg.sender;
 
         ExecutionEntry[] memory l1 = _l1Entries(selfCallerAddr, counterL2, alice);
+        _printL1Table(l1);
         L2ExecutionEntry[] memory l2 = _l2Entries(selfCallerL2, counterL1, alice);
+        _printL2Table(l2);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
 

@@ -463,7 +463,9 @@ contract ComputeExpected is ComputeExpectedBase, NestedCallRevertActions {
         address alice = msg.sender;
 
         ExecutionEntry[] memory l1 = _l1Entries(scapAddr, alice, counterL2);
+        _printL1Table(l1);
         L2ExecutionEntry[] memory l2 = _l2Entries(scapL2, alice, counterL1);
+        _printL2Table(l2);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
 

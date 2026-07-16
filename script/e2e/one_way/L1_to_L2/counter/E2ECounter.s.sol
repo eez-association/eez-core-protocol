@@ -306,6 +306,8 @@ contract ComputeExpected is ComputeExpectedBase, CounterActions {
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
         console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1CallHash));
         console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2CallHash));
+        _printL1Table(l1);
+        _printL2Table(l2);
 
         console.log("");
         console.log("=== EXPECTED L1 EXECUTION TABLE (1 entry) ===");

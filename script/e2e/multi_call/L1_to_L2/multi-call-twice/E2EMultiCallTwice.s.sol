@@ -104,11 +104,7 @@ abstract contract MultiCallActions {
     ///      and one system delivery on L2). proxyEntryHash commits to the L1 source
     ///      (CallTwice on L1) and equals the L1 entries' hash. returnData and the
     ///      rolling-hash CALL_END payload differ per entry (1 vs 2).
-    function _l2Entries(address counterL2, address callerL1)
-        internal
-        pure
-        returns (L2ExecutionEntry[] memory entries)
-    {
+    function _l2Entries(address counterL2, address callerL1) internal pure returns (L2ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, callerL1);
         entries = new L2ExecutionEntry[](2);
         entries[0] = _buildL2Entry(counterL2, callerL1, ah, abi.encode(uint256(1)));
@@ -300,13 +296,8 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallActions {
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, callerAddr);
         L2ExecutionEntry[] memory l2 = _l2Entries(counterL2Addr, callerAddr);
-        bytes32 h0 = _entryHash(l1[0]);
-        bytes32 h1 = _entryHash(l1[1]);
-        bytes32 l2h0 = _entryHash(l2[0]);
-        bytes32 l2h1 = _entryHash(l2[1]);
-
-        console.log("EXPECTED_L1_HASHES=[%s,%s]", vm.toString(h0), vm.toString(h1));
-        console.log("EXPECTED_L2_HASHES=[%s,%s]", vm.toString(l2h0), vm.toString(l2h1));
+        console.log("EXPECTED_L1_HASHES=[%s,%s]", vm.toString(_entryHash(l1[0])), vm.toString(_entryHash(l1[1])));
+        console.log("EXPECTED_L2_HASHES=[%s,%s]", vm.toString(_entryHash(l2[0])), vm.toString(_entryHash(l2[1])));
         console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1[0].proxyEntryHash));
         console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
         console.log("");
@@ -319,5 +310,7 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallActions {
         for (uint256 i = 0; i < l2.length; i++) {
             _logL2Entry(i, l2[i]);
         }
+        _printL1Table(l1);
+        _printL2Table(l2);
     }
 }

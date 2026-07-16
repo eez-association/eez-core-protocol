@@ -3,7 +3,17 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry, LookupCall} from "../../../src/interfaces/IEEZ.sol";
+import {
+    StateDelta,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExpectedLookup,
+    ExecutionEntry,
+    LookupCall,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems,
+    ProofSystemBatchPerVerificationEntries
+} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     ExpectedLookup as L2ExpectedLookup,
@@ -50,6 +60,95 @@ struct LegacyL2ExecutionEntry {
     uint256 callCount;
     bytes returnData;
     bytes32 rollingHash;
+}
+
+// ── Legacy L1 (IEEZ @ 5c51e02) — used to decode `postAndVerifyBatch` calldata
+//    posted by legacy devnets. vs current: L2ToL1Call has no leading `isStatic`,
+//    ExpectedL1ToL2Call / ExpectedLookup have no `destinationRollupId`, the
+//    entry's `returnData` sits after `callCount` (not before `l2ToL1Calls`),
+//    and the batch carries an extra `crossProofSystemInteractions` word.
+//    Selector verified against live devnet settlement txs: 0x8b1a095a. ──
+
+struct LegacyL2ToL1Call {
+    address targetAddress;
+    uint256 value;
+    bytes data;
+    address sourceAddress;
+    uint256 sourceRollupId;
+    uint256 revertSpan;
+}
+
+struct LegacyExpectedL1ToL2Call {
+    bytes32 crossChainCallHash;
+    uint256 callCount;
+    bytes returnData;
+}
+
+struct LegacyL1ExpectedLookup {
+    bytes32 crossChainCallHash;
+    bytes returnData;
+    bool failed;
+    uint64 l2ToL1CallNumber;
+    uint64 lastL1ToL2CallConsumed;
+    uint64 executingLookupIndex;
+    LegacyL2ToL1Call[] l2ToL1Calls;
+    LegacyExpectedL1ToL2Call[] expectedL1ToL2Calls;
+    uint256 callCount;
+    bytes32 rollingHash;
+}
+
+struct LegacyL1ExecutionEntry {
+    StateDelta[] stateDeltas;
+    bytes32 proxyEntryHash;
+    uint256 destinationRollupId;
+    LegacyL2ToL1Call[] l2ToL1Calls;
+    LegacyExpectedL1ToL2Call[] expectedL1ToL2Calls;
+    LegacyL1ExpectedLookup[] expectedLookups;
+    uint256 callCount;
+    bytes returnData;
+    bytes32 rollingHash;
+}
+
+struct LegacyL1LookupCall {
+    bytes32 crossChainCallHash;
+    uint256 destinationRollupId;
+    bytes returnData;
+    bool failed;
+    LegacyL2ToL1Call[] l2ToL1Calls;
+    LegacyExpectedL1ToL2Call[] expectedL1ToL2Calls;
+    LegacyL1ExpectedLookup[] expectedLookups;
+    uint256 callCount;
+    bytes32 rollingHash;
+    ExpectedStateRootPerRollup[] expectedStateRoots;
+}
+
+struct LegacyL1Batch {
+    LegacyL1ExecutionEntry[] entries;
+    LegacyL1LookupCall[] l1ToL2lookupCalls;
+    uint256 transientExecutionEntryCount;
+    uint256 transientLookupCallCount;
+    address[] proofSystems;
+    RollupIdWithProofSystems[] rollupIdsWithProofSystems;
+    bytes32 crossProofSystemInteractions;
+    uint256[] blobIndices;
+    bytes callData;
+    bytes[] proofs;
+    uint64 blockNumber;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Minimal read interfaces for live on-chain checks
+// ══════════════════════════════════════════════════════════════════════
+
+interface IRollupsRegistryView {
+    function rollups(uint256 rollupId)
+        external
+        view
+        returns (address rollupContract, bytes32 stateRoot, uint256 etherBalance);
+}
+
+interface IEEZL2View {
+    function ROLLUP_ID() external view returns (uint256);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -312,6 +411,769 @@ abstract contract VerifyHelpers is Script {
         return result;
     }
 
+    // ══════════════════════════════════════════════════════════════════
+    //  Field-level verification (expected-table blobs)
+    //
+    //  ComputeExpected prints EXPECTED_L1_TABLE / EXPECTED_L2_TABLE as
+    //  abi.encode(entries) blobs; the runners pass them through so every
+    //  entry field can be compared, not just the (proxyEntryHash,
+    //  rollingHash) identity. Empty blob = checks skipped (back-compat).
+    // ══════════════════════════════════════════════════════════════════
+
+    /// @dev EntryExecuted payload: (rollingHash, callsProcessed, nestedConsumed) —
+    ///      same layout on L1 (l2ToL1Calls / expectedL1ToL2Calls) and L2
+    ///      (incomingCalls / expectedOutgoingCalls).
+    struct ExecutedTriple {
+        bytes32 rollingHash;
+        uint256 callsProcessed;
+        uint256 nestedConsumed;
+    }
+
+    function _bytesEq(bytes memory a, bytes memory b) internal pure returns (bool) {
+        return keccak256(a) == keccak256(b);
+    }
+
+    // Struct equality via encoded hashes. Kept in dedicated frames — inlining the
+    // double abi.encode of nested dynamic structs blows the via-ir stack limit.
+    function _l2EntryEq(L2ExecutionEntry memory a, L2ExecutionEntry memory b) internal pure returns (bool) {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _outgoingEq(ExpectedOutgoingCrossChainCall memory a, ExpectedOutgoingCrossChainCall memory b)
+        internal
+        pure
+        returns (bool)
+    {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _lookupEq(L2ExpectedLookup memory a, L2ExpectedLookup memory b) internal pure returns (bool) {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _collectExecutedTriples(Vm.EthGetLogs[] memory logs) internal pure returns (ExecutedTriple[] memory) {
+        uint256 count;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED) count++;
+        }
+        ExecutedTriple[] memory triples = new ExecutedTriple[](count);
+        uint256 kept;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
+            if (logs[i].data.length < 96) continue; // foreign layout — don't decode
+            (bytes32 rh, uint256 c, uint256 n) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
+            triples[kept++] = ExecutedTriple(rh, c, n);
+        }
+        assembly {
+            mstore(triples, kept)
+        }
+        return triples;
+    }
+
+    function _hasTriple(ExecutedTriple[] memory triples, bytes32 rh, uint256 calls, uint256 nested)
+        internal
+        pure
+        returns (bool)
+    {
+        for (uint256 i = 0; i < triples.length; i++) {
+            if (
+                triples[i].rollingHash == rh && triples[i].callsProcessed == calls
+                    && triples[i].nestedConsumed == nested
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ── L1: per-entry field checks against ExecutionConsumed / EntryExecuted + live state roots ──
+
+    function _verifyL1EntryFields(Vm.EthGetLogs[] memory logs, address rollupsAddr, bytes memory expectedTable)
+        internal
+        view
+        returns (bool ok)
+    {
+        ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
+        ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
+        ok = true;
+        for (uint256 i = 0; i < expected.length; i++) {
+            if (!_checkL1Entry(logs, executed, i, expected[i])) ok = false;
+        }
+        if (!_checkLiveStateRoots(rollupsAddr, expected)) ok = false;
+        if (ok) {
+            console.log(
+                "PASS: L1 field checks on %s entries (EntryExecuted, rollupId, stateDeltas, partition, live roots)",
+                expected.length
+            );
+        }
+    }
+
+    function _checkL1Entry(
+        Vm.EthGetLogs[] memory logs,
+        ExecutedTriple[] memory executed,
+        uint256 i,
+        ExecutionEntry memory e
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        // ExecutionConsumed must route the entry to its declared destination rollup
+        if (e.proxyEntryHash != bytes32(0)) {
+            for (uint256 j = 0; j < logs.length; j++) {
+                if (logs[j].topics[0] != SIG_EXECUTION_CONSUMED_L1 || logs[j].topics.length < 3) continue;
+                if (logs[j].topics[1] != e.proxyEntryHash) continue;
+                if (uint256(logs[j].topics[2]) != e.destinationRollupId) {
+                    console.log(
+                        "FAIL: entry %s consumed on rollup %s, expected destinationRollupId %s",
+                        i,
+                        uint256(logs[j].topics[2]),
+                        e.destinationRollupId
+                    );
+                    ok = false;
+                }
+            }
+        }
+        // EntryExecuted must report the exact (rollingHash, callsProcessed, nestedConsumed)
+        if (!_hasTriple(executed, e.rollingHash, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length)) {
+            console.log("FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, nestedConsumed)", i);
+            console.log(
+                "      want rollingHash=%s calls=%s nested=%s",
+                vm.toString(e.rollingHash),
+                e.l2ToL1Calls.length,
+                e.expectedL1ToL2Calls.length
+            );
+            ok = false;
+        }
+        // Prover obligation: at least one StateDelta, and every delta MUST move the
+        // state root (any execution changes L2 state, regardless of ether movement)
+        if (e.stateDeltas.length == 0) {
+            console.log("FAIL: entry %s carries no StateDelta (unpinned from StateRootMismatch backstop)", i);
+            ok = false;
+        }
+        for (uint256 d = 0; d < e.stateDeltas.length; d++) {
+            if (e.stateDeltas[d].currentState == e.stateDeltas[d].newState) {
+                console.log("FAIL: entry %s stateDelta %s does not move the state root (currentState == newState)", i, d);
+                ok = false;
+            }
+        }
+        // Partition invariant: callCount + nested callCounts == flat array length
+        uint256 total = e.callCount;
+        for (uint256 n = 0; n < e.expectedL1ToL2Calls.length; n++) {
+            total += e.expectedL1ToL2Calls[n].callCount;
+        }
+        if (total != e.l2ToL1Calls.length) {
+            console.log(
+                "FAIL: entry %s partition invariant: callCount sum %s != flat calls %s", i, total, e.l2ToL1Calls.length
+            );
+            ok = false;
+        }
+    }
+
+    /// @dev Reads the live registry root per touched rollup: it must equal the last delta's
+    ///      newState (exact settlement), or at minimum have moved off the pre-batch root.
+    function _checkLiveStateRoots(address rollupsAddr, ExecutionEntry[] memory expected)
+        internal
+        view
+        returns (bool ok)
+    {
+        uint256 maxDeltas;
+        for (uint256 i = 0; i < expected.length; i++) {
+            maxDeltas += expected[i].stateDeltas.length;
+        }
+        uint256[] memory rids = new uint256[](maxDeltas);
+        bytes32[] memory pre = new bytes32[](maxDeltas);
+        bytes32[] memory post = new bytes32[](maxDeltas);
+        uint256 n;
+        for (uint256 i = 0; i < expected.length; i++) {
+            for (uint256 d = 0; d < expected[i].stateDeltas.length; d++) {
+                StateDelta memory sd = expected[i].stateDeltas[d];
+                bool seen = false;
+                for (uint256 k = 0; k < n; k++) {
+                    if (rids[k] == sd.rollupId) {
+                        post[k] = sd.newState; // deltas apply in entry order — track the final root
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    rids[n] = sd.rollupId;
+                    pre[n] = sd.currentState;
+                    post[n] = sd.newState;
+                    n++;
+                }
+            }
+        }
+        ok = true;
+        for (uint256 k = 0; k < n; k++) {
+            (, bytes32 live,) = IRollupsRegistryView(rollupsAddr).rollups(rids[k]);
+            if (live == post[k]) {
+                console.log("PASS: rollup %s live state root == expected newState", rids[k]);
+            } else if (live != pre[k]) {
+                console.log("PASS: rollup %s state root changed (advanced beyond this batch)", rids[k]);
+            } else {
+                console.log("FAIL: rollup %s state root UNCHANGED - still the pre-batch root:", rids[k]);
+                console.log("      %s", vm.toString(live));
+                ok = false;
+            }
+        }
+    }
+
+    // ── L1: posted-batch calldata comparison. The batch entries ACTUALLY posted
+    //    on-chain (decoded from the settlement tx's postAndVerifyBatch input) are
+    //    field-matched against the expected table — the L1 analogue of the L2
+    //    ExecutionTableLoaded comparison. StateDelta ROOTS are checked structurally
+    //    and against the live registry, never against the expected blob:
+    //    ComputeExpected cannot predict real state roots off-chain. ──
+
+    function _fromLegacyL1Entries(LegacyL1ExecutionEntry[] memory entries)
+        internal
+        pure
+        returns (ExecutionEntry[] memory out)
+    {
+        out = new ExecutionEntry[](entries.length);
+        for (uint256 i = 0; i < entries.length; i++) {
+            out[i] = _fromLegacyL1(entries[i]);
+        }
+    }
+
+    function _fromLegacyL1(LegacyL1ExecutionEntry memory e) internal pure returns (ExecutionEntry memory n) {
+        n.stateDeltas = e.stateDeltas;
+        n.proxyEntryHash = e.proxyEntryHash;
+        n.destinationRollupId = e.destinationRollupId;
+        n.returnData = e.returnData;
+        n.l2ToL1Calls = _fromLegacyL1Calls(e.l2ToL1Calls);
+        n.expectedL1ToL2Calls = _fromLegacyL1Nested(e.expectedL1ToL2Calls);
+        n.expectedLookups = new ExpectedLookup[](e.expectedLookups.length);
+        for (uint256 k = 0; k < e.expectedLookups.length; k++) {
+            LegacyL1ExpectedLookup memory l = e.expectedLookups[k];
+            n.expectedLookups[k] = ExpectedLookup({
+                crossChainCallHash: l.crossChainCallHash,
+                destinationRollupId: 0, // absent in the legacy ABI
+                returnData: l.returnData,
+                failed: l.failed,
+                l2ToL1CallNumber: l.l2ToL1CallNumber,
+                lastL1ToL2CallConsumed: l.lastL1ToL2CallConsumed,
+                executingLookupIndex: l.executingLookupIndex,
+                l2ToL1Calls: _fromLegacyL1Calls(l.l2ToL1Calls),
+                expectedL1ToL2Calls: _fromLegacyL1Nested(l.expectedL1ToL2Calls),
+                callCount: l.callCount,
+                rollingHash: l.rollingHash
+            });
+        }
+        n.callCount = e.callCount;
+        n.rollingHash = e.rollingHash;
+    }
+
+    function _fromLegacyL1Calls(LegacyL2ToL1Call[] memory calls) internal pure returns (L2ToL1Call[] memory out) {
+        out = new L2ToL1Call[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            out[i] = L2ToL1Call({
+                isStatic: false,
+                targetAddress: calls[i].targetAddress,
+                value: calls[i].value,
+                data: calls[i].data,
+                sourceAddress: calls[i].sourceAddress,
+                sourceRollupId: calls[i].sourceRollupId,
+                revertSpan: calls[i].revertSpan
+            });
+        }
+    }
+
+    function _fromLegacyL1Nested(LegacyExpectedL1ToL2Call[] memory calls)
+        internal
+        pure
+        returns (ExpectedL1ToL2Call[] memory out)
+    {
+        out = new ExpectedL1ToL2Call[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            out[i] = ExpectedL1ToL2Call({
+                crossChainCallHash: calls[i].crossChainCallHash,
+                destinationRollupId: 0, // absent in the legacy ABI
+                callCount: calls[i].callCount,
+                returnData: calls[i].returnData
+            });
+        }
+    }
+
+    /// @dev Fields the legacy ABI cannot encode are fabricated by the decoder
+    ///      (isStatic = false, nested destinationRollupId = 0) — copy them from
+    ///      the expected side so the comparison only covers real posted data.
+    function _neutralizeLegacyL1Fields(ExecutionEntry memory a, ExecutionEntry memory e) internal pure {
+        uint256 m = a.l2ToL1Calls.length < e.l2ToL1Calls.length ? a.l2ToL1Calls.length : e.l2ToL1Calls.length;
+        for (uint256 c = 0; c < m; c++) {
+            a.l2ToL1Calls[c].isStatic = e.l2ToL1Calls[c].isStatic;
+        }
+        m = a.expectedL1ToL2Calls.length < e.expectedL1ToL2Calls.length
+            ? a.expectedL1ToL2Calls.length
+            : e.expectedL1ToL2Calls.length;
+        for (uint256 c = 0; c < m; c++) {
+            a.expectedL1ToL2Calls[c].destinationRollupId = e.expectedL1ToL2Calls[c].destinationRollupId;
+        }
+        m = a.expectedLookups.length < e.expectedLookups.length ? a.expectedLookups.length : e.expectedLookups.length;
+        for (uint256 k = 0; k < m; k++) {
+            _neutralizeLegacyL1Lookup(a.expectedLookups[k], e.expectedLookups[k]);
+        }
+    }
+
+    function _neutralizeLegacyL1Lookup(ExpectedLookup memory a, ExpectedLookup memory e) internal pure {
+        a.destinationRollupId = e.destinationRollupId;
+        uint256 m = a.l2ToL1Calls.length < e.l2ToL1Calls.length ? a.l2ToL1Calls.length : e.l2ToL1Calls.length;
+        for (uint256 c = 0; c < m; c++) {
+            a.l2ToL1Calls[c].isStatic = e.l2ToL1Calls[c].isStatic;
+        }
+        m = a.expectedL1ToL2Calls.length < e.expectedL1ToL2Calls.length
+            ? a.expectedL1ToL2Calls.length
+            : e.expectedL1ToL2Calls.length;
+        for (uint256 c = 0; c < m; c++) {
+            a.expectedL1ToL2Calls[c].destinationRollupId = e.expectedL1ToL2Calls[c].destinationRollupId;
+        }
+    }
+
+    function _verifyL1PostedEntries(
+        ExecutionEntry[] memory posted,
+        address rollupsAddr,
+        bytes memory expectedTable,
+        bool legacyAbi
+    )
+        internal
+        view
+        returns (bool ok)
+    {
+        ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
+        ExecutionEntry[] memory matched = new ExecutionEntry[](expected.length);
+        uint256 nMatched;
+        ok = true;
+        for (uint256 i = 0; i < expected.length; i++) {
+            bool found = false;
+            for (uint256 j = 0; j < posted.length; j++) {
+                if (_entryHash(posted[j]) != _entryHash(expected[i])) continue;
+                found = true;
+                matched[nMatched++] = posted[j];
+                if (!_comparePostedEntry(posted[j], expected[i], i, legacyAbi)) ok = false;
+                break;
+            }
+            if (!found) {
+                console.log("FAIL: expected entry %s not in posted batch (no (proxyEntryHash, rollingHash) match)", i);
+                ok = false;
+            }
+        }
+        assembly {
+            mstore(matched, nMatched)
+        }
+        // live-root check against the REAL posted deltas (exact roots, unlike the
+        // expected blob's local placeholders)
+        if (!_checkLiveStateRoots(rollupsAddr, matched)) ok = false;
+        if (ok) {
+            console.log(
+                "PASS: posted batch calldata matches expected table (%s entries, field-by-field)", expected.length
+            );
+            if (legacyAbi) {
+                console.log("      (legacy ABI: isStatic / nested destinationRollupId not encoded, skipped)");
+            }
+        }
+    }
+
+    function _comparePostedEntry(ExecutionEntry memory a, ExecutionEntry memory e, uint256 i, bool legacyAbi)
+        internal
+        pure
+        returns (bool ok)
+    {
+        if (legacyAbi) _neutralizeLegacyL1Fields(a, e);
+        ok = true;
+        if (a.destinationRollupId != e.destinationRollupId) {
+            console.log(
+                "FAIL: entry %s destinationRollupId: posted %s expected %s",
+                i,
+                a.destinationRollupId,
+                e.destinationRollupId
+            );
+            ok = false;
+        }
+        if (a.callCount != e.callCount) {
+            console.log("FAIL: entry %s callCount: posted %s expected %s", i, a.callCount, e.callCount);
+            ok = false;
+        }
+        if (!_bytesEq(a.returnData, e.returnData)) {
+            console.log(
+                "FAIL: entry %s returnData: posted %s expected %s",
+                i,
+                _shortBytes(a.returnData),
+                _shortBytes(e.returnData)
+            );
+            ok = false;
+        }
+        if (!_comparePostedDeltas(a.stateDeltas, e.stateDeltas, i)) ok = false;
+        if (!_comparePostedCalls(a.l2ToL1Calls, e.l2ToL1Calls, i)) ok = false;
+        if (!_comparePostedNested(a.expectedL1ToL2Calls, e.expectedL1ToL2Calls, i)) ok = false;
+        if (!_comparePostedLookups(a.expectedLookups, e.expectedLookups, i)) ok = false;
+    }
+
+    /// @dev rollupId and etherDelta are deterministic and compared exactly; the
+    ///      roots themselves are only sanity-checked (posted delta must not be a
+    ///      no-op) — their live settlement is covered by _checkLiveStateRoots.
+    function _comparePostedDeltas(StateDelta[] memory a, StateDelta[] memory e, uint256 i)
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        if (a.length == 0) {
+            console.log("FAIL: entry %s posted with no StateDelta (unpinned from StateRootMismatch backstop)", i);
+            ok = false;
+        }
+        if (a.length != e.length) {
+            console.log("FAIL: entry %s stateDeltas.length: posted %s expected %s", i, a.length, e.length);
+            ok = false;
+        }
+        uint256 m = a.length < e.length ? a.length : e.length;
+        for (uint256 d = 0; d < m; d++) {
+            if (a[d].rollupId != e[d].rollupId || a[d].etherDelta != e[d].etherDelta) {
+                console.log(
+                    string.concat(
+                        "FAIL: entry ",
+                        vm.toString(i),
+                        " stateDelta ",
+                        vm.toString(d),
+                        ": posted (rollup ",
+                        vm.toString(a[d].rollupId),
+                        ", ether ",
+                        vm.toString(a[d].etherDelta),
+                        ") expected (rollup ",
+                        vm.toString(e[d].rollupId),
+                        ", ether ",
+                        vm.toString(e[d].etherDelta),
+                        ")"
+                    )
+                );
+                ok = false;
+            }
+            if (a[d].currentState == a[d].newState) {
+                console.log(
+                    "FAIL: entry %s posted stateDelta %s does not move the state root (currentState == newState)", i, d
+                );
+                ok = false;
+            }
+        }
+    }
+
+    function _comparePostedCalls(L2ToL1Call[] memory a, L2ToL1Call[] memory e, uint256 i)
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        if (a.length != e.length) {
+            console.log("FAIL: entry %s l2ToL1Calls.length: posted %s expected %s", i, a.length, e.length);
+            ok = false;
+        }
+        uint256 m = a.length < e.length ? a.length : e.length;
+        for (uint256 c = 0; c < m; c++) {
+            if (_l1CallEq(a[c], e[c])) continue;
+            console.log("FAIL: entry %s l2ToL1Calls[%s] differs (posted vs expected):", i, c);
+            _diffL1Call(c, a[c], e[c]);
+            ok = false;
+        }
+    }
+
+    function _comparePostedNested(ExpectedL1ToL2Call[] memory a, ExpectedL1ToL2Call[] memory e, uint256 i)
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        if (a.length != e.length) {
+            console.log("FAIL: entry %s expectedL1ToL2Calls.length: posted %s expected %s", i, a.length, e.length);
+            ok = false;
+        }
+        uint256 m = a.length < e.length ? a.length : e.length;
+        for (uint256 c = 0; c < m; c++) {
+            if (!_l1NestedEq(a[c], e[c])) {
+                console.log("FAIL: entry %s expectedL1ToL2Calls[%s] differs (posted vs expected)", i, c);
+                ok = false;
+            }
+        }
+    }
+
+    function _comparePostedLookups(ExpectedLookup[] memory a, ExpectedLookup[] memory e, uint256 i)
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        if (a.length != e.length) {
+            console.log("FAIL: entry %s expectedLookups.length: posted %s expected %s", i, a.length, e.length);
+            ok = false;
+        }
+        uint256 m = a.length < e.length ? a.length : e.length;
+        for (uint256 c = 0; c < m; c++) {
+            if (!_l1LookupEq(a[c], e[c])) {
+                console.log("FAIL: entry %s expectedLookups[%s] differs (posted vs expected)", i, c);
+                ok = false;
+            }
+        }
+    }
+
+    // Struct equality via encoded hashes, each in its own frame (via-ir stack).
+    function _l1CallEq(L2ToL1Call memory a, L2ToL1Call memory b) internal pure returns (bool) {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _l1NestedEq(ExpectedL1ToL2Call memory a, ExpectedL1ToL2Call memory b) internal pure returns (bool) {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _l1LookupEq(ExpectedLookup memory a, ExpectedLookup memory b) internal pure returns (bool) {
+        bytes32 ha = keccak256(abi.encode(a));
+        bytes32 hb = keccak256(abi.encode(b));
+        return ha == hb;
+    }
+
+    function _diffL1Call(uint256 c, L2ToL1Call memory a, L2ToL1Call memory e) internal pure {
+        if (a.isStatic != e.isStatic) {
+            console.log("      call[%s].isStatic: posted %s expected %s", c, a.isStatic, e.isStatic);
+        }
+        if (a.targetAddress != e.targetAddress) {
+            console.log("      call[%s].targetAddress: posted %s expected %s", c, a.targetAddress, e.targetAddress);
+        }
+        if (a.value != e.value) {
+            console.log("      call[%s].value: posted %s expected %s", c, a.value, e.value);
+        }
+        if (!_bytesEq(a.data, e.data)) {
+            console.log("      call[%s].data: posted %s expected %s", c, _shortBytes(a.data), _shortBytes(e.data));
+        }
+        if (a.sourceAddress != e.sourceAddress) {
+            console.log("      call[%s].sourceAddress: posted %s expected %s", c, a.sourceAddress, e.sourceAddress);
+        }
+        if (a.sourceRollupId != e.sourceRollupId) {
+            console.log("      call[%s].sourceRollupId: posted %s expected %s", c, a.sourceRollupId, e.sourceRollupId);
+        }
+        if (a.revertSpan != e.revertSpan) {
+            console.log("      call[%s].revertSpan: posted %s expected %s", c, a.revertSpan, e.revertSpan);
+        }
+    }
+
+    // ── L2: full-struct comparison of the loaded table + invariants + EntryExecuted ──
+
+    function _verifyL2TableFields(
+        L2ExecutionEntry[] memory actual,
+        Vm.EthGetLogs[] memory logs,
+        bytes memory expectedTable
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        L2ExecutionEntry[] memory expected = abi.decode(expectedTable, (L2ExecutionEntry[]));
+        ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
+        ok = true;
+        for (uint256 i = 0; i < expected.length; i++) {
+            if (!_checkL2Entry(actual, executed, i, expected[i])) ok = false;
+        }
+        if (ok) {
+            console.log("PASS: L2 field checks on %s entries (full struct, invariants, EntryExecuted)", expected.length);
+        }
+    }
+
+    function _checkL2Entry(
+        L2ExecutionEntry[] memory actual,
+        ExecutedTriple[] memory executed,
+        uint256 i,
+        L2ExecutionEntry memory e
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        // Full struct equality vs the loaded entry with the same (proxyEntryHash, rollingHash)
+        bool found = false;
+        for (uint256 j = 0; j < actual.length; j++) {
+            if (_entryHash(actual[j]) != _entryHash(e)) continue;
+            found = true;
+            if (!_l2EntryEq(actual[j], e)) {
+                console.log("FAIL: entry %s: loaded table entry differs from expected:", i);
+                _diffL2Entry(actual[j], e);
+                ok = false;
+            }
+        }
+        if (!found) {
+            console.log("FAIL: entry %s: no loaded entry with matching entryHash", i);
+            ok = false;
+        }
+        // Structural invariants
+        if (e.proxyEntryHash == bytes32(0)) {
+            console.log("FAIL: entry %s: zero proxyEntryHash is invalid on L2", i);
+            ok = false;
+        }
+        uint256 total = e.callCount;
+        for (uint256 c = 0; c < e.expectedOutgoingCalls.length; c++) {
+            total += e.expectedOutgoingCalls[c].callCount;
+        }
+        if (total != e.incomingCalls.length) {
+            console.log(
+                "FAIL: entry %s partition invariant: callCount sum %s != flat calls %s",
+                i,
+                total,
+                e.incomingCalls.length
+            );
+            ok = false;
+        }
+        for (uint256 c = 0; c < e.incomingCalls.length; c++) {
+            if (e.incomingCalls[c].isStatic && (e.incomingCalls[c].value != 0 || e.incomingCalls[c].revertSpan != 0)) {
+                console.log("FAIL: entry %s call %s: static call must have value == 0 and revertSpan == 0", i, c);
+                ok = false;
+            }
+        }
+        // EntryExecuted must report the exact (rollingHash, callsProcessed, outgoingConsumed)
+        if (!_hasTriple(executed, e.rollingHash, e.incomingCalls.length, e.expectedOutgoingCalls.length)) {
+            console.log("FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, outgoingConsumed)", i);
+            ok = false;
+        }
+    }
+
+    function _diffL2Entry(L2ExecutionEntry memory a, L2ExecutionEntry memory e) internal pure {
+        if (a.callCount != e.callCount) {
+            console.log("      callCount: actual %s expected %s", a.callCount, e.callCount);
+        }
+        if (!_bytesEq(a.returnData, e.returnData)) {
+            console.log("      returnData: actual %s expected %s", _shortBytes(a.returnData), _shortBytes(e.returnData));
+        }
+        if (a.incomingCalls.length != e.incomingCalls.length) {
+            console.log(
+                "      incomingCalls.length: actual %s expected %s", a.incomingCalls.length, e.incomingCalls.length
+            );
+        }
+        uint256 m = a.incomingCalls.length < e.incomingCalls.length ? a.incomingCalls.length : e.incomingCalls.length;
+        for (uint256 c = 0; c < m; c++) {
+            _diffCall(c, a.incomingCalls[c], e.incomingCalls[c]);
+        }
+        if (a.expectedOutgoingCalls.length != e.expectedOutgoingCalls.length) {
+            console.log(
+                "      expectedOutgoingCalls.length: actual %s expected %s",
+                a.expectedOutgoingCalls.length,
+                e.expectedOutgoingCalls.length
+            );
+        }
+        m = a.expectedOutgoingCalls.length < e.expectedOutgoingCalls.length
+            ? a.expectedOutgoingCalls.length
+            : e.expectedOutgoingCalls.length;
+        for (uint256 c = 0; c < m; c++) {
+            if (!_outgoingEq(a.expectedOutgoingCalls[c], e.expectedOutgoingCalls[c])) {
+                console.log("      expectedOutgoingCalls[%s] differs", c);
+            }
+        }
+        if (a.expectedLookups.length != e.expectedLookups.length) {
+            console.log(
+                "      expectedLookups.length: actual %s expected %s",
+                a.expectedLookups.length,
+                e.expectedLookups.length
+            );
+        }
+        m = a.expectedLookups.length < e.expectedLookups.length ? a.expectedLookups.length : e.expectedLookups.length;
+        for (uint256 c = 0; c < m; c++) {
+            if (!_lookupEq(a.expectedLookups[c], e.expectedLookups[c])) {
+                console.log("      expectedLookups[%s] differs", c);
+            }
+        }
+    }
+
+    function _diffCall(uint256 c, CrossChainCall memory a, CrossChainCall memory e) internal pure {
+        if (a.isStatic != e.isStatic) {
+            console.log("      call[%s].isStatic: actual %s expected %s", c, a.isStatic, e.isStatic);
+        }
+        if (a.targetAddress != e.targetAddress) {
+            console.log("      call[%s].targetAddress: actual %s expected %s", c, a.targetAddress, e.targetAddress);
+        }
+        if (a.value != e.value) {
+            console.log("      call[%s].value: actual %s expected %s", c, a.value, e.value);
+        }
+        if (!_bytesEq(a.data, e.data)) {
+            console.log("      call[%s].data: actual %s expected %s", c, _shortBytes(a.data), _shortBytes(e.data));
+        }
+        if (a.sourceAddress != e.sourceAddress) {
+            console.log("      call[%s].sourceAddress: actual %s expected %s", c, a.sourceAddress, e.sourceAddress);
+        }
+        if (a.sourceRollupId != e.sourceRollupId) {
+            console.log("      call[%s].sourceRollupId: actual %s expected %s", c, a.sourceRollupId, e.sourceRollupId);
+        }
+        if (a.revertSpan != e.revertSpan) {
+            console.log("      call[%s].revertSpan: actual %s expected %s", c, a.revertSpan, e.revertSpan);
+        }
+    }
+
+    // ── L2: IncomingCrossChainCallExecuted events — recompute the hash from the
+    //    emitted fields (format check, needs no expected data) and compare the
+    //    fields against the expected entry's inbound call (incomingCalls[0]). ──
+
+    function _verifyIncomingCallEvents(Vm.EthGetLogs[] memory logs, address managerL2, bytes memory expectedTable)
+        internal
+        view
+        returns (bool ok)
+    {
+        ok = true;
+        uint256 rid;
+        try IEEZL2View(managerL2).ROLLUP_ID() returns (uint256 r) {
+            rid = r;
+        } catch {
+            console.log("NOTE: manager has no ROLLUP_ID() - skipping incoming-call hash recompute");
+            return true;
+        }
+        L2ExecutionEntry[] memory expected =
+            expectedTable.length > 0 ? abi.decode(expectedTable, (L2ExecutionEntry[])) : new L2ExecutionEntry[](0);
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_INCOMING_CROSSCHAIN_CALL) continue;
+            if (!_checkIncomingEvent(logs[i].topics[1], logs[i].data, rid, expected)) ok = false;
+        }
+    }
+
+    /// @dev Own frame per event — the decode + recompute + compare locals overflow
+    ///      the via-ir stack when inlined into the log loop.
+    function _checkIncomingEvent(
+        bytes32 emittedHash,
+        bytes memory eventData,
+        uint256 rid,
+        L2ExecutionEntry[] memory expected
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        ok = true;
+        (address dest, uint256 value, bytes memory data, address src, uint256 srcRollup) =
+            abi.decode(eventData, (address, uint256, bytes, address, uint256));
+        bytes32 computed = keccak256(abi.encode(rid, dest, value, data, src, srcRollup));
+        if (computed != emittedHash) {
+            console.log("FAIL: IncomingCrossChainCallExecuted fields do not hash to the emitted crossChainCallHash");
+            console.log("      emitted    %s", vm.toString(emittedHash));
+            console.log("      recomputed %s", vm.toString(computed));
+            ok = false;
+        }
+        for (uint256 j = 0; j < expected.length; j++) {
+            if (expected[j].proxyEntryHash != emittedHash || expected[j].incomingCalls.length == 0) continue;
+            CrossChainCall memory c = expected[j].incomingCalls[0];
+            if (
+                c.targetAddress != dest || c.value != value || !_bytesEq(c.data, data) || c.sourceAddress != src
+                    || c.sourceRollupId != srcRollup
+            ) {
+                console.log("FAIL: entry %s: inbound call event fields differ from expected incomingCalls[0]:", j);
+                _diffCall(0, CrossChainCall(c.isStatic, dest, value, data, src, srcRollup, c.revertSpan), c);
+                ok = false;
+            }
+        }
+    }
+
     function _findMissingHashes(bytes32[] memory actual, bytes32[] calldata expected)
         internal
         pure
@@ -349,6 +1211,21 @@ contract VerifyL1Batch is VerifyHelpers {
     /// whose first topic is the consumed entry's `crossChainCallHash`. This verifier
     /// extracts those hashes and checks every expected hash is present.
     function run(uint256 blockNumber, address rollups, bytes32[] calldata expectedCallHashes) external view {
+        run(blockNumber, rollups, expectedCallHashes, "");
+    }
+
+    /// @dev Blob-aware variant: `expectedTable` is abi.encode(ExecutionEntry[]) from
+    ///      ComputeExpected. Adds per-entry field checks (EntryExecuted, rollupId routing,
+    ///      stateDeltas, partition invariant) and the live state-root movement check.
+    function run(
+        uint256 blockNumber,
+        address rollups,
+        bytes32[] calldata expectedCallHashes,
+        bytes memory expectedTable
+    )
+        public
+        view
+    {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blockNumber, blockNumber, rollups, topics);
 
@@ -387,6 +1264,10 @@ contract VerifyL1Batch is VerifyHelpers {
             revert("Verification failed");
         }
 
+        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
+            revert("Field verification failed");
+        }
+
         console.log(
             "PASS: %s/%s expected call hashes consumed in L1 block %s",
             expectedCallHashes.length,
@@ -415,6 +1296,19 @@ contract VerifyL1BatchInRange is VerifyHelpers {
         external
         view
     {
+        run(fromBlock, toBlock, rollups, expectedCallHashes, "");
+    }
+
+    function run(
+        uint256 fromBlock,
+        uint256 toBlock,
+        address rollups,
+        bytes32[] calldata expectedCallHashes,
+        bytes memory expectedTable
+    )
+        public
+        view
+    {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, rollups, topics);
 
@@ -438,8 +1332,14 @@ contract VerifyL1BatchInRange is VerifyHelpers {
             revert("Verification failed");
         }
 
+        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
+            revert("Field verification failed");
+        }
+
         console.log(
-            "PASS: %s/%s expected call hashes consumed in L1 range", expectedCallHashes.length, expectedCallHashes.length
+            "PASS: %s/%s expected call hashes consumed in L1 range",
+            expectedCallHashes.length,
+            expectedCallHashes.length
         );
         console.log("L1_MATCH_BLOCK=%s", matchBlock);
         for (uint256 i = 0; i < logs.length; i++) {
@@ -493,6 +1393,19 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
         external
         view
     {
+        run(fromBlock, toBlock, rollups, expectedEntryHashes, "");
+    }
+
+    function run(
+        uint256 fromBlock,
+        uint256 toBlock,
+        address rollups,
+        bytes32[] calldata expectedEntryHashes,
+        bytes memory expectedTable
+    )
+        public
+        view
+    {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, rollups, topics);
 
@@ -522,6 +1435,10 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
             revert("Verification failed");
         }
 
+        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
+            revert("Field verification failed");
+        }
+
         console.log(
             "PASS: %s/%s expected L1 entries executed in range", expectedEntryHashes.length, expectedEntryHashes.length
         );
@@ -542,12 +1459,67 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+//  VerifyL1BatchCalldata — decode the settlement tx's postAndVerifyBatch
+//  input and compare the POSTED entries field-by-field against the
+//  expected table. The L1 analogue of the L2 ExecutionTableLoaded check:
+//  L1 events never carry the entries, but the tx calldata does.
+// ══════════════════════════════════════════════════════════════════════
+
+contract VerifyL1BatchCalldata is VerifyHelpers {
+    // postAndVerifyBatch selectors, derived from the full tuple signatures.
+    // Current = HEAD ABI (forge inspect EEZ methodIdentifiers); legacy =
+    // pre-addStatic 5c51e02 ABI, verified against live devnet settlement txs.
+    bytes4 constant SEL_POST_BATCH = 0xd1fc6b5a;
+    bytes4 constant SEL_POST_BATCH_LEGACY = 0x8b1a095a;
+
+    function run(bytes calldata batchInput, address rollups, bytes calldata expectedTable) external view {
+        require(expectedTable.length > 0, "expected table required");
+        require(batchInput.length > 4, "batch input too short");
+        bytes4 sel = bytes4(batchInput[:4]);
+        ExecutionEntry[] memory posted;
+        bool legacyAbi;
+        if (sel == SEL_POST_BATCH) {
+            ProofSystemBatchPerVerificationEntries memory b =
+                abi.decode(batchInput[4:], (ProofSystemBatchPerVerificationEntries));
+            posted = b.entries;
+        } else if (sel == SEL_POST_BATCH_LEGACY) {
+            LegacyL1Batch memory b = abi.decode(batchInput[4:], (LegacyL1Batch));
+            posted = _fromLegacyL1Entries(b.entries);
+            legacyAbi = true;
+        } else {
+            console.log("Unknown settlement tx selector: %s", vm.toString(abi.encodePacked(sel)));
+            revert("settlement tx is not postAndVerifyBatch (update selectors if the ABI changed)");
+        }
+        console.log("Posted batch decoded from calldata: %s entries", posted.length);
+        if (!_verifyL1PostedEntries(posted, rollups, expectedTable, legacyAbi)) {
+            revert("Posted-batch calldata verification failed");
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 //  VerifyL2Blocks — check ExecutionTableLoaded events in one of the
 //  given blocks contain all expected entry hashes.
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL2Blocks is VerifyHelpers {
     function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedEntryHashes) external view {
+        run(l2Blocks, managerL2, expectedEntryHashes, "");
+    }
+
+    /// @dev Blob-aware variant: `expectedTable` is abi.encode(L2ExecutionEntry[]) from
+    ///      ComputeExpected. On the block that matches the entry hashes, additionally
+    ///      compares every entry field, checks structural invariants, and matches the
+    ///      EntryExecuted result fields.
+    function run(
+        uint256[] calldata l2Blocks,
+        address managerL2,
+        bytes32[] calldata expectedEntryHashes,
+        bytes memory expectedTable
+    )
+        public
+        view
+    {
         if (l2Blocks.length == 0) {
             console.log("FAIL: no L2 blocks to check");
             revert("No L2 blocks");
@@ -556,11 +1528,14 @@ contract VerifyL2Blocks is VerifyHelpers {
         for (uint256 i = 0; i < l2Blocks.length; i++) {
             L2ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
             if (_allPresent(entries, expectedEntryHashes)) {
+                bytes32[] memory topics = new bytes32[](0);
+                Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
+                if (expectedTable.length > 0 && !_verifyL2TableFields(entries, blkLogs, expectedTable)) {
+                    revert("Field verification failed");
+                }
                 console.log(
                     "PASS: all %s expected entries found at L2 block %s", expectedEntryHashes.length, l2Blocks[i]
                 );
-                bytes32[] memory topics = new bytes32[](0);
-                Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
                 for (uint256 j = 0; j < blkLogs.length; j++) {
                     if (blkLogs[j].topics[0] == SIG_TABLE_LOADED || blkLogs[j].topics[0] == SIG_TABLE_LOADED_LEGACY) {
                         console.log("L2_TABLE_TX=%s", vm.toString(blkLogs[j].transactionHash));
@@ -633,10 +1608,34 @@ contract VerifyL2Blocks is VerifyHelpers {
 
 contract VerifyL2Calls is VerifyHelpers {
     function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedCallHashes) external view {
+        run(l2Blocks, managerL2, expectedCallHashes, "");
+    }
+
+    /// @dev Blob-aware variant: for every IncomingCrossChainCallExecuted event, recomputes
+    ///      the crossChainCallHash from the emitted fields + ROLLUP_ID() (format check,
+    ///      runs even with an empty blob) and, when `expectedTable` is given, compares the
+    ///      event fields against the expected entry's inbound call.
+    function run(
+        uint256[] calldata l2Blocks,
+        address managerL2,
+        bytes32[] calldata expectedCallHashes,
+        bytes memory expectedTable
+    )
+        public
+        view
+    {
         if (l2Blocks.length == 0) {
             console.log("FAIL: no L2 blocks to check");
             revert("No L2 blocks");
         }
+
+        bool fieldsOk = true;
+        for (uint256 i = 0; i < l2Blocks.length; i++) {
+            bytes32[] memory topics = new bytes32[](0);
+            Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
+            if (!_verifyIncomingCallEvents(blkLogs, managerL2, expectedTable)) fieldsOk = false;
+        }
+        if (!fieldsOk) revert("Field verification failed");
 
         bytes32[] memory found = _collectActionHashes(l2Blocks, managerL2);
         bytes32[] memory missing = _findMissingHashes(found, expectedCallHashes);
@@ -741,7 +1740,9 @@ contract VerifyL2CallsInRange is VerifyHelpers {
             revert("Verification failed");
         }
 
-        console.log("PASS: %s/%s expected L2 calls found in range", expectedCallHashes.length, expectedCallHashes.length);
+        console.log(
+            "PASS: %s/%s expected L2 calls found in range", expectedCallHashes.length, expectedCallHashes.length
+        );
         // First log whose hash is one of the expected — that block is the sync block.
         for (uint256 i = 0; i < logs.length; i++) {
             bytes32 sig = logs[i].topics[0];

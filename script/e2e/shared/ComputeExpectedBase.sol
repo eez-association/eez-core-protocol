@@ -42,6 +42,29 @@ abstract contract ComputeExpectedBase is Script {
     }
 
     // ══════════════════════════════════════════════════════════════════
+    //  Full expected tables — ABI-encoded blobs consumed by Verify.s.sol
+    //  for field-by-field comparison (picked up by run-network.sh /
+    //  run-local.sh via the EXPECTED_*_TABLE output lines).
+    // ══════════════════════════════════════════════════════════════════
+
+    function _printL1Table(ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L1_TABLE=%s", blob);
+    }
+
+    function _printL2Table(L2ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L2_TABLE=%s", blob);
+    }
+
+    /// @dev Separate frame for the hex conversion + log — keeps the via-ir stack of
+    ///      callers that print both tables under the limit.
+    function _printTableLine(string memory label, bytes memory blob) private pure {
+        string memory hexStr = vm.toString(blob);
+        console.log(label, hexStr);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
     //  Address / selector naming — override per test.
     // ══════════════════════════════════════════════════════════════════
 

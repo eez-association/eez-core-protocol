@@ -273,7 +273,9 @@ contract ComputeExpected is ComputeExpectedBase, BridgeActions {
         address senderAddr = vm.envAddress("BRIDGE_SENDER");
 
         ExecutionEntry[] memory l1 = _l1Entries(l2DestAddr, senderAddr);
+        _printL1Table(l1);
         L2ExecutionEntry[] memory l2 = _l2Entries(l2DestAddr, senderAddr);
+        _printL2Table(l2);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
 

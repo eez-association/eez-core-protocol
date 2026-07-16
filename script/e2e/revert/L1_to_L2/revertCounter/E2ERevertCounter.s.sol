@@ -373,9 +373,11 @@ contract ComputeExpected is ComputeExpectedBase, RevertActions {
         address aliceL2 = msg.sender; // L2 path uses SYSTEM (broadcaster) as source
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, aliceL1);
+        _printL1Table(l1);
         bytes32 l1Hash = _entryHash(l1[0]);
 
         L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, aliceL2);
+        _printL2Table(l2);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));

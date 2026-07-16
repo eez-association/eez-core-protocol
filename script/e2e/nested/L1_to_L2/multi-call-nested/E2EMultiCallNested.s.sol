@@ -567,7 +567,9 @@ contract ComputeExpected is ComputeExpectedBase, MCNActions {
         address l2App = vm.envAddress("L2_APP");
 
         ExecutionEntry[] memory l1 = _l1Entries(counterL1, cap2, counterL2, app);
+        _printL1Table(l1);
         L2ExecutionEntry[] memory l2 = _l2Entries(counterL1, cap2, counterL2, l2App);
+        _printL2Table(l2);
 
         bytes32 l1h0 = _entryHash(l1[0]);
         bytes32 l1h1 = _entryHash(l1[1]);

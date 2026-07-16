@@ -355,5 +355,7 @@ contract ComputeExpected is ComputeExpectedBase, TwoDiffActions {
         for (uint256 i = 0; i < l2.length; i++) {
             _logL2Entry(i, l2[i]);
         }
+        _printL1Table(l1);
+        _printL2Table(l2);
     }
 }
