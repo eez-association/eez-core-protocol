@@ -18,7 +18,7 @@ pragma solidity ^0.8.28;
 //
 //  Deliberately LEANER than L1's structs: L2 has a single rollup, no state deltas,
 //  and no per-rollup queue interleaving, so the L1-only fields are dropped entirely
-//  (no `StateDelta`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
+//  (no `StateUpdate`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
 //  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`CrossChainCall`, `OutgoingCallConsumed`,
@@ -29,13 +29,13 @@ pragma solidity ^0.8.28;
 /// @notice A cross-chain call executed on this L2 (sourced from a remote rollup).
 /// @dev Field layout is identical to L1's `L2ToL1Call`.
 struct CrossChainCall {
-    uint16 revertNextNCalls; // >0 force-reverts the next N calls (this one included)
-    bool isStatic; // dispatch via STATICCALL (read-only, no value)
+    uint16 revertNextNCalls; // number of consecutive calls (this one included) to force-revert; 0 = none
+    bool isStatic; // whether to execute via STATICCALL (read-only, no value)
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on this L2
     uint256 value; // ether to send (0 when isStatic)
-    bytes data; // calldata
+    bytes data; // calldata to execute on the target
 }
 
 /// @notice Pre-computed result for a reentrant cross-chain call (outgoing, leaving this L2) fired
@@ -59,7 +59,7 @@ struct CrossChainCall {
 struct ExpectedOutgoingCrossChainCall {
     bytes32 expectedOutgoingHash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
     CrossChainCall[] incomingCalls; // the reentrant frame's own sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected sub-call rollingHash: checked for STATIC / REVERTED
+    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls; checked only for STATIC / REVERTED flavours
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
 }
@@ -71,10 +71,10 @@ struct ExpectedOutgoingCrossChainCall {
 ///         `StaticExecutionEntry`. A `bytes32(0)` `proxyEntryHash` is unreachable on L2 — there is no zero-hash
 ///         consumption path (`executeL2Txs` is L1-only).
 struct ExecutionEntry {
-    bytes32 proxyEntryHash; // inbound proxy-entry call hash; never bytes32(0) on L2
-    CrossChainCall[] incomingCalls; // the entry's TOP-LEVEL calls (reentrant frames carry their own)
-    ExpectedOutgoingCrossChainCall[] expectedOutgoingCalls; // unified reentrant table; see above
-    bytes32 rollingHash; // expected rolling hash over all calls + nestings
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); never bytes32(0) on L2
+    CrossChainCall[] incomingCalls; // incoming calls to be executed, run in order; reentrant frames (nested outgoing calls) carry their own sub-arrays
+    ExpectedOutgoingCrossChainCall[] expectedOutgoingCalls; // expected outgoing calls, each of those opens a reentrant frame
+    bytes32 rollingHash; // expected rolling hash, which contains all calls, their return/revert values and reentrant frames
     bool success; // indicates whether the entry returns or reverts
     bytes returnData; // pre-computed top-level return value (revert payload when !success)
 }
@@ -87,9 +87,9 @@ struct ExecutionEntry {
 ///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` alone (L2 has no state roots to pin).
 ///      Referenced proxies must already be deployed (CREATE2 is unavailable inside a STATICCALL frame).
 struct StaticExecutionEntry {
-    bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
-    CrossChainCall[] incomingCalls; // read-only sub-calls run via STATICCALL during resolution
-    bytes32 rollingHash; // expected rolling hash of the sub-calls (untagged static schema: keccak(prev, success, retData))
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); mirrors `ExecutionEntry.proxyEntryHash`
+    CrossChainCall[] incomingCalls; // incoming calls to be executed read-only via STATICCALL, run in order (no reentrant frames)
+    bytes32 rollingHash; // expected rolling hash, which contains all calls and their return/revert values (untagged static schema: keccak(prev, success, retData))
     bool success; // indicates whether resolution returns or reverts (false ⇒ reverts with `returnData`)
     bytes returnData; // pre-computed return value (revert payload when !success)
 }

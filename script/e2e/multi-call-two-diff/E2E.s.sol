@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -69,16 +69,16 @@ abstract contract TwoDiffActions {
         bytes32 hA = _callHash(counterA, caller);
         bytes32 hB = _callHash(counterB, caller);
 
-        StateDelta[] memory deltas1 = new StateDelta[](1);
-        deltas1[0] = StateDelta({
+        StateUpdate[] memory deltas1 = new StateUpdate[](1);
+        deltas1[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-two-diff-1"),
             etherDelta: 0
         });
 
-        StateDelta[] memory deltas2 = new StateDelta[](1);
-        deltas2[0] = StateDelta({
+        StateUpdate[] memory deltas2 = new StateUpdate[](1);
+        deltas2[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-state-after-two-diff-1"),
             newState: keccak256("l2-state-after-two-diff-2"),
@@ -89,7 +89,7 @@ abstract contract TwoDiffActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas1,
+            stateUpdates: deltas1,
             proxyEntryHash: hA,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -99,7 +99,7 @@ abstract contract TwoDiffActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateDeltas: deltas2,
+            stateUpdates: deltas2,
             proxyEntryHash: hB,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

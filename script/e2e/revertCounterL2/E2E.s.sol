@@ -9,7 +9,7 @@ import {
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -138,8 +138,8 @@ abstract contract RevertL2Actions {
             data: _incrementCallData()
         });
 
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-revertCounter"),
@@ -153,7 +153,7 @@ abstract contract RevertL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

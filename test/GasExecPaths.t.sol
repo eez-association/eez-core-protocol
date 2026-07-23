@@ -10,7 +10,7 @@ import {
     ExpectedStateRootPerRollup,
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 
 /// @notice A contract poster that drives the meta-hook. Implements IMetaCrossChainReceiver so that,
@@ -43,7 +43,7 @@ contract MetaExecDriver is IMetaCrossChainReceiver {
 
 /// @title GasExecPaths
 /// @notice Apples-to-apples gas for the FOUR ways one proven entry can be executed. Every path uses
-///         the EXACT same entry shape — a same-rollup reentrant entry on rA: 1 StateDelta, 1 flat
+///         the EXACT same entry shape — a same-rollup reentrant entry on rA: 1 StateUpdate, 1 flat
 ///         L2ToL1Call that re-enters EEZ once, 1 ExpectedL1ToL2Call — so the only thing that varies is
 ///         the consumption path. All marginal post costs subtract an empty-batch baseline (proofs
 ///         verified + rollups marked, no entry), so they isolate "handle this one entry".
@@ -111,7 +111,7 @@ contract GasExecPaths is GasFixture {
     ///         is identified by `proxyEntryHash`. `proxyEntryHash == 0` makes it an L2Tx entry.
     function _sharedEntry(bytes32 proxyEntryHash) internal view returns (ExecutionEntry memory e) {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
-        StateDelta[] memory deltas = _oneDelta(newA);
+        StateUpdate[] memory deltas = _oneDelta(newA);
         L2ToL1Call[] memory calls = _calls(_reentrantCallA());
         (bytes32 h, ExpectedL1ToL2Call[] memory exp) =
             _foldExec(_hEntryBegin(deltas, proxyEntryHash), calls, _rets(""), true);
@@ -329,12 +329,12 @@ contract GasExecPaths is GasFixture {
     //  overhead cancels and only the marginal unit remains.
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// A no-op StateDelta on rA (currentState == newState): lets several same-rollup entries coexist
+    /// A no-op StateUpdate on rA (currentState == newState): lets several same-rollup entries coexist
     /// in one batch without invalidating each other's pre-state, and keeps execution side-effect-free.
-    function _noopDelta() internal view returns (StateDelta[] memory d) {
+    function _noopDelta() internal view returns (StateUpdate[] memory d) {
         bytes32 cur = _getRollupState(rA.id);
-        d = new StateDelta[](1);
-        d[0] = StateDelta({rollupId: uint64(rA.id), currentState: cur, newState: cur, etherDelta: 0});
+        d = new StateUpdate[](1);
+        d[0] = StateUpdate({rollupId: uint64(rA.id), currentState: cur, newState: cur, etherDelta: 0});
     }
 
     /// One EXECUTED immediate L2Tx entry (proxyEntryHash == 0) with `nSink` plain L2ToL1Calls and
@@ -354,7 +354,7 @@ contract GasExecPaths is GasFixture {
             reentrant[nSink + i] = true;
             rets[nSink + i] = "";
         }
-        StateDelta[] memory d = _noopDelta();
+        StateUpdate[] memory d = _noopDelta();
         (bytes32 h, ExpectedL1ToL2Call[] memory exp) = _foldGeneric(_hEntryBegin(d, bytes32(0)), calls, reentrant, rets);
         e = _entry(d, bytes32(0), calls, exp, "", h);
     }

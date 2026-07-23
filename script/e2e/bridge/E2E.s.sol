@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -28,7 +28,7 @@ import {
 //  L1 side (Execute):
 //    BridgeSender.bridge{value: 1 ether}() → L2_PROXY.call{value: 1 ether}("")
 //    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 1 ether
-//    (the etherDelta on the StateDelta records the cross-chain effect on L2's view).
+//    (the etherDelta on the StateUpdate records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
 //    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: 1 ether}(...)
@@ -66,8 +66,8 @@ abstract contract BridgeActions {
     }
 
     function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-bridge"),
@@ -77,7 +77,7 @@ abstract contract BridgeActions {
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

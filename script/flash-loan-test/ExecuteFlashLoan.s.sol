@@ -12,7 +12,7 @@ import {EEZL2} from "../../src/L2/EEZL2.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {FlashLoan} from "../../src/periphery/defiMock/FlashLoan.sol";
 import {FlashLoanBridgeExecutor} from "../../src/periphery/defiMock/FlashLoanBridgeExecutor.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, L2ToL1Call, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry
@@ -244,23 +244,23 @@ contract ExecuteFlashLoanL1 is Script {
         bytes32 s3 = keccak256("l2-bridge-return-executed");
 
         // 3 deferred entries
-        StateDelta[] memory deltas1 = new StateDelta[](1);
-        deltas1[0] = StateDelta({
+        StateUpdate[] memory deltas1 = new StateUpdate[](1);
+        deltas1[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID, currentState: keccak256("l2-initial-state"), newState: s1, etherDelta: 0
         });
 
-        StateDelta[] memory deltas2 = new StateDelta[](1);
-        deltas2[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
+        StateUpdate[] memory deltas2 = new StateUpdate[](1);
+        deltas2[0] = StateUpdate({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
 
-        StateDelta[] memory deltas3 = new StateDelta[](1);
-        deltas3[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0});
+        StateUpdate[] memory deltas3 = new StateUpdate[](1);
+        deltas3[0] = StateUpdate({rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0});
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](3);
 
         // Entry 0: forward bridge call -- consumed when bridgeTokens triggers the L2-bridge proxy.
         // No L1 top-level calls; rolling hash is just the entry-begin seed.
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas1,
+            stateUpdates: deltas1,
             proxyEntryHash: callForwardHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -288,7 +288,7 @@ contract ExecuteFlashLoanL1 is Script {
         rh1 = RollingHashBuilder.appendCallEnd(rh1, true, "");
 
         entries[1] = ExecutionEntry({
-            stateDeltas: deltas2,
+            stateUpdates: deltas2,
             proxyEntryHash: callClaimHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: entry1Calls,
@@ -300,7 +300,7 @@ contract ExecuteFlashLoanL1 is Script {
 
         // Entry 2: final state update (L2TX -- proxyEntryHash == 0, consumed via executeL2Txs)
         entries[2] = ExecutionEntry({
-            stateDeltas: deltas3,
+            stateUpdates: deltas3,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

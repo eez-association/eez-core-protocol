@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -135,8 +135,8 @@ abstract contract ComputeExpectedBase is Script {
             e.expectedL1ToL2Calls.length
         );
 
-        for (uint256 d = 0; d < e.stateDeltas.length; d++) {
-            StateDelta memory sd = e.stateDeltas[d];
+        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
+            StateUpdate memory sd = e.stateUpdates[d];
             string memory etherStr =
                 sd.etherDelta == 0 ? "" : string.concat("  ether: ", _fmtEtherSigned(sd.etherDelta));
             console.log(

@@ -6,7 +6,7 @@ import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} f
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {
     ExecutionEntry,
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
@@ -56,7 +56,7 @@ abstract contract Base is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     function setUpBase() internal {
-        rollups = new EEZ();
+        rollups = new EEZ(makeAddr("recovery"));
         ps = new MockProofSystem();
     }
 
@@ -300,11 +300,11 @@ abstract contract Base is Test, TestHashes {
     function _oneDelta(uint256 rid, bytes32 currentState, bytes32 newState, int256 etherDelta)
         internal
         pure
-        returns (StateDelta[] memory deltas)
+        returns (StateUpdate[] memory deltas)
     {
-        deltas = new StateDelta[](1);
+        deltas = new StateUpdate[](1);
         deltas[0] =
-            StateDelta({rollupId: uint64(rid), currentState: currentState, newState: newState, etherDelta: etherDelta});
+            StateUpdate({rollupId: uint64(rid), currentState: currentState, newState: newState, etherDelta: etherDelta});
     }
 
     /// @notice An immediate entry (`proxyEntryHash == 0`) transitioning `rid` from
@@ -314,18 +314,18 @@ abstract contract Base is Test, TestHashes {
         pure
         returns (ExecutionEntry memory entry)
     {
-        entry.stateDeltas = _oneDelta(rid, currentState, newState, 0);
+        entry.stateUpdates = _oneDelta(rid, currentState, newState, 0);
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = uint64(rid);
         entry.l2ToL1Calls = _emptyCalls();
         entry.expectedL1ToL2Calls = _emptyReentrant();
-        entry.rollingHash = _hEntryBegin(entry.stateDeltas, bytes32(0));
+        entry.rollingHash = _hEntryBegin(entry.stateUpdates, bytes32(0));
         entry.success = true;
         entry.returnData = "";
     }
 
     /// @notice An immediate entry with a single no-op state delta (`proxyEntryHash == 0`, empty
-    ///         calls). The delta exists only so `destinationRollupId ∈ stateDeltas` (postBatch
+    ///         calls). The delta exists only so `destinationRollupId ∈ stateUpdates` (postBatch
     ///         requires it); entries built with this helper are not consumed, so the state values
     ///         are placeholders. Useful for tests that want to verify postAndVerifyBatch flow.
     function _emptyImmediateEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
@@ -334,8 +334,8 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice A "shell" entry: given deltas, default everything else (`proxyEntryHash = 0`,
     ///         no calls, `rollingHash = 0`, `success = true`); destination = `destRid`.
-    function _shellEntry(uint256 destRid, StateDelta[] memory deltas) internal pure returns (ExecutionEntry memory e) {
-        e.stateDeltas = deltas;
+    function _shellEntry(uint256 destRid, StateUpdate[] memory deltas) internal pure returns (ExecutionEntry memory e) {
+        e.stateUpdates = deltas;
         e.proxyEntryHash = bytes32(0);
         e.destinationRollupId = uint64(destRid);
         e.l2ToL1Calls = _emptyCalls();
@@ -347,7 +347,7 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice Rolling hash for an entry with exactly one top-level call.
     function _oneCallHash(
-        StateDelta[] memory deltas,
+        StateUpdate[] memory deltas,
         bytes32 proxyEntryHash,
         bytes32 crossChainCallHash,
         bool success,

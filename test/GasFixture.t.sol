@@ -7,7 +7,7 @@ import {
     ExpectedStateRootPerRollup,
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -62,7 +62,7 @@ abstract contract GasFixture is Base {
     RollupHandle internal rB; // second touched rollup + reentrant target's rollup
     RollupHandle internal rS; // queue seeded FULL-shape in setUp → steady-state post measurements
     RollupHandle internal rS2; // queue seeded BARE in setUp → control: call/expected NOT pre-filled
-    RollupHandle internal rS3; // queue seeded 2-StateDelta full in setUp → marginal per-StateDelta
+    RollupHandle internal rS3; // queue seeded 2-StateUpdate full in setUp → marginal per-StateUpdate
 
     // L1 mainnet rollup id — the rollup an L1-executed call's target lives on, and the source
     // rollup of any reentrant L1→L2 call (EEZ forces it via `executeCrossChainCall`).
@@ -164,7 +164,7 @@ abstract contract GasFixture is Base {
         rS2 = _makeRollup(keccak256("rS2-init")); // id 4
         _postBatchTwo(rB.id, rS2.id, _savedFor(rS2.id, 1, 0, 0));
 
-        // Seeded with a 2-StateDelta full entry → measure the marginal cost of one extra StateDelta.
+        // Seeded with a 2-StateUpdate full entry → measure the marginal cost of one extra StateUpdate.
         rS3 = _makeRollup(keccak256("rS3-init")); // id 5
         _postBatchTwo(rB.id, rS3.id, _one(_steadyShaped2(rS3.id)));
     }
@@ -172,14 +172,14 @@ abstract contract GasFixture is Base {
     /// @notice `nEntries` identical DEFERRED (saved, never executed) entries routed to `dest`, each
     ///         carrying `nCalls` placeholder L2ToL1Calls and `nExpected` placeholder
     ///         ExpectedL1ToL2Calls. Rolling hash / keys are placeholders (consumption never happens).
-    ///         Source/StateDelta pin to `dest` so the entry passes post-validation.
+    ///         Source/StateUpdate pin to `dest` so the entry passes post-validation.
     function _savedFor(uint256 dest, uint256 nEntries, uint256 nCalls, uint256 nExpected)
         internal
         view
         returns (ExecutionEntry[] memory entries)
     {
-        StateDelta[] memory d = new StateDelta[](1);
-        d[0] = StateDelta({
+        StateUpdate[] memory d = new StateUpdate[](1);
+        d[0] = StateUpdate({
             rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
         });
         L2ToL1Call[] memory calls = new L2ToL1Call[](nCalls);
@@ -199,7 +199,7 @@ abstract contract GasFixture is Base {
             exp[i] = _deferredExpected();
         }
         ExecutionEntry memory e;
-        e.stateDeltas = d;
+        e.stateUpdates = d;
         e.proxyEntryHash = keccak256("save-defer");
         e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
@@ -211,17 +211,17 @@ abstract contract GasFixture is Base {
         }
     }
 
-    /// @notice Same full shape as `_savedFor(dest, 1, 1, 1)` but with TWO StateDeltas (rB + dest),
-    ///         so the marginal cost of one extra StateDelta can be measured.
+    /// @notice Same full shape as `_savedFor(dest, 1, 1, 1)` but with TWO StateUpdates (rB + dest),
+    ///         so the marginal cost of one extra StateUpdate can be measured.
     function _steadyShaped2(uint256 dest) internal view returns (ExecutionEntry memory e) {
-        StateDelta[] memory d = new StateDelta[](2);
-        d[0] = StateDelta({
+        StateUpdate[] memory d = new StateUpdate[](2);
+        d[0] = StateUpdate({
             rollupId: uint64(rB.id),
             currentState: _getRollupState(rB.id),
             newState: bytes32(uint256(0xB0)),
             etherDelta: 0
         });
-        d[1] = StateDelta({
+        d[1] = StateUpdate({
             rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
         });
 
@@ -238,7 +238,7 @@ abstract contract GasFixture is Base {
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
         exp[0] = _deferredExpected();
 
-        e.stateDeltas = d;
+        e.stateUpdates = d;
         e.proxyEntryHash = keccak256("steady2");
         e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
@@ -305,26 +305,26 @@ abstract contract GasFixture is Base {
         rollups.postAndVerifyBatch(batch);
     }
 
-    /// @notice Two StateDeltas (rA, rB) — touches 2 rollups.
-    function _twoDeltas(bytes32 newA, bytes32 newB) internal view returns (StateDelta[] memory deltas) {
-        deltas = new StateDelta[](2);
+    /// @notice Two StateUpdates (rA, rB) — touches 2 rollups.
+    function _twoDeltas(bytes32 newA, bytes32 newB) internal view returns (StateUpdate[] memory deltas) {
+        deltas = new StateUpdate[](2);
         deltas[0] =
-            StateDelta({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            StateUpdate({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
         deltas[1] =
-            StateDelta({rollupId: uint64(rB.id), currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
+            StateUpdate({rollupId: uint64(rB.id), currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
     }
 
-    /// @notice One StateDelta (rA) — touches a single rollup.
-    function _oneDelta(bytes32 newA) internal view returns (StateDelta[] memory deltas) {
-        deltas = new StateDelta[](1);
+    /// @notice One StateUpdate (rA) — touches a single rollup.
+    function _oneDelta(bytes32 newA) internal view returns (StateUpdate[] memory deltas) {
+        deltas = new StateUpdate[](1);
         deltas[0] =
-            StateDelta({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            StateUpdate({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
     }
 
     /// @notice Assembles a single entry routed to rA, with the given calls/expected/hash. `success`
     ///         is always true (these entries return their `returnData`).
     function _entry(
-        StateDelta[] memory deltas,
+        StateUpdate[] memory deltas,
         bytes32 proxyEntryHash,
         L2ToL1Call[] memory calls,
         ExpectedL1ToL2Call[] memory expected,
@@ -335,7 +335,7 @@ abstract contract GasFixture is Base {
         view
         returns (ExecutionEntry memory entry)
     {
-        entry.stateDeltas = deltas;
+        entry.stateUpdates = deltas;
         entry.proxyEntryHash = proxyEntryHash;
         entry.destinationRollupId = uint64(rA.id);
         entry.l2ToL1Calls = calls;
@@ -397,7 +397,7 @@ abstract contract GasFixture is Base {
     }
 
     /// @notice SAME-rollup reentrant call: actorA re-enters EEZ for rA (the entry's own rollup),
-    ///         so the entry needs only ONE StateDelta (rA).
+    ///         so the entry needs only ONE StateUpdate (rA).
     function _reentrantCallA() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
             revertNextNCalls: 0,

@@ -6,7 +6,7 @@ import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../src/interfaces/IEEZ.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -134,22 +134,22 @@ abstract contract MCNActions {
         L2ToL1Call[] memory calls1 = new L2ToL1Call[](1);
         calls1[0] = cap2CallsCounterL1;
 
-        StateDelta[] memory d0 = new StateDelta[](1);
-        d0[0] = StateDelta({
+        StateUpdate[] memory d0 = new StateUpdate[](1);
+        d0[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-mcn-step-1"),
             etherDelta: 0
         });
-        StateDelta[] memory d1 = new StateDelta[](1);
-        d1[0] = StateDelta({
+        StateUpdate[] memory d1 = new StateUpdate[](1);
+        d1[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-mcn-step-1"),
             newState: keccak256("l2-mcn-step-2"),
             etherDelta: 0
         });
-        StateDelta[] memory d2 = new StateDelta[](1);
-        d2[0] = StateDelta({
+        StateUpdate[] memory d2 = new StateUpdate[](1);
+        d2[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-mcn-step-2"),
             newState: keccak256("l2-mcn-step-3"),
@@ -167,7 +167,7 @@ abstract contract MCNActions {
         rh0 = RollingHashBuilder.appendCallBegin(rh0, topCallCch);
         rh0 = RollingHashBuilder.appendCallEnd(rh0, true, abi.encode(uint256(1)));
         entries[0] = ExecutionEntry({
-            stateDeltas: d0,
+            stateUpdates: d0,
             proxyEntryHash: outerCAP2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls0,
@@ -181,7 +181,7 @@ abstract contract MCNActions {
         rh1 = RollingHashBuilder.appendCallBegin(rh1, topCallCch);
         rh1 = RollingHashBuilder.appendCallEnd(rh1, true, abi.encode(uint256(2)));
         entries[1] = ExecutionEntry({
-            stateDeltas: d1,
+            stateUpdates: d1,
             proxyEntryHash: outerCAP2, // same hash, sequential consumption
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls1,
@@ -193,7 +193,7 @@ abstract contract MCNActions {
 
         // [2]: no L1-side execution (CounterL2 is L2-local); rolling hash is just the entry seed.
         entries[2] = ExecutionEntry({
-            stateDeltas: d2,
+            stateUpdates: d2,
             proxyEntryHash: outerCounterL2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

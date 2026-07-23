@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -68,16 +68,16 @@ abstract contract MultiCallActions {
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, caller);
 
-        StateDelta[] memory deltasA = new StateDelta[](1);
-        deltasA[0] = StateDelta({
+        StateUpdate[] memory deltasA = new StateUpdate[](1);
+        deltasA[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-twice-1"),
             etherDelta: 0
         });
 
-        StateDelta[] memory deltasB = new StateDelta[](1);
-        deltasB[0] = StateDelta({
+        StateUpdate[] memory deltasB = new StateUpdate[](1);
+        deltasB[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-state-after-twice-1"),
             newState: keccak256("l2-state-after-twice-2"),
@@ -88,7 +88,7 @@ abstract contract MultiCallActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltasA,
+            stateUpdates: deltasA,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -98,7 +98,7 @@ abstract contract MultiCallActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateDeltas: deltasB,
+            stateUpdates: deltasB,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

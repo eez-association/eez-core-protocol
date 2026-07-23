@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
-import {StateDelta, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -27,12 +27,12 @@ import {
 //
 //  L1 side (Execute):
 //    1. postAndVerifyBatch loads ONE deferred L1 entry
-//       with precomputed return=uint256(1) and a StateDelta advancing L2's stateRoot
+//       with precomputed return=uint256(1) and a StateUpdate advancing L2's stateRoot
 //    2. User calls CounterAndProxy.incrementProxy() on L1
 //    3. CAP calls CounterProxy (L1 proxy for Counter@L2)
 //    4. Proxy forwards to EEZ.executeCrossChainCall
 //    5. Entry consumed, returns abi.encode(1); CAP: counter=1, targetCounter=1
-//    6. L2 rollup stateRoot in the registry updated via StateDelta
+//    6. L2 rollup stateRoot in the registry updated via StateUpdate
 //
 //  L2 side (ExecuteL2):
 //    1. SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(...) loading
@@ -69,8 +69,8 @@ abstract contract CounterActions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-counter"),
@@ -82,7 +82,7 @@ abstract contract CounterActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

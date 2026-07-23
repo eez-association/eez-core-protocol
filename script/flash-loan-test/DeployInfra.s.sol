@@ -24,7 +24,7 @@ contract DeployEEZL1 is Script {
         vm.startBroadcast();
 
         MockProofSystem ps = new MockProofSystem();
-        EEZ rollups = new EEZ();
+        EEZ rollups = new EEZ(msg.sender);
 
         // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so the first registered rollup
         // lands at id 1.

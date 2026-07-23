@@ -10,7 +10,7 @@ import {
 } from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateDelta, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
 import {
     crossChainCallHash,
@@ -80,7 +80,7 @@ contract E2EDeploy is Script {
         vm.startBroadcast();
 
         MockProofSystem ps = new MockProofSystem();
-        EEZ rollups = new EEZ();
+        EEZ rollups = new EEZ(msg.sender);
 
         address[] memory psList = new address[](1);
         psList[0] = address(ps);
@@ -125,8 +125,8 @@ contract E2EExecute is Script {
             L2_ROLLUP_ID, counterL2Addr, 0, incrementCallData, counterAndProxyAddr, MAINNET_ROLLUP_ID
         );
 
-        StateDelta[] memory stateDeltas = new StateDelta[](1);
-        stateDeltas[0] = StateDelta({
+        StateUpdate[] memory stateUpdates = new StateUpdate[](1);
+        stateUpdates[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-scenario1"),
@@ -134,11 +134,11 @@ contract E2EExecute is Script {
         });
 
         // No L1 top-level calls; rolling hash is just the entry-begin seed.
-        bytes32 rh = RollingHashBuilder.entryBegin(stateDeltas, callHash);
+        bytes32 rh = RollingHashBuilder.entryBegin(stateUpdates, callHash);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: stateDeltas,
+            stateUpdates: stateUpdates,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

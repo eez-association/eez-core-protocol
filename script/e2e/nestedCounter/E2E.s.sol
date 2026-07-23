@@ -6,7 +6,7 @@ import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../src/interfaces/IEEZ.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -127,8 +127,8 @@ abstract contract NestedActions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-nested"),
@@ -143,7 +143,7 @@ abstract contract NestedActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID, // sub-call source must be in the entry's stateDeltas (the proven rollup)
+            sourceRollupId: L2_ROLLUP_ID, // sub-call source must be in the entry's stateUpdates (the proven rollup)
             targetAddress: cap,
             value: 0,
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
@@ -171,7 +171,7 @@ abstract contract NestedActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

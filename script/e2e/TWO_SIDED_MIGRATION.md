@@ -4,7 +4,7 @@ How a two-sided scenario exercises **both** anvil chains, and which pattern to p
 
 ## Why two-sided
 
-The protocol commits on the source side to "the destination chain will execute X and produce returnData=Y" via a cached `returnData` (plus a per-rollup `StateDelta` on L1). A single-sided test only checks the source-side bookkeeping — the destination chain stays passive. A two-sided test additionally invokes the destination call for real, so any drift between the cached `returnData` and what the destination actually produces surfaces as an assertion failure.
+The protocol commits on the source side to "the destination chain will execute X and produce returnData=Y" via a cached `returnData` (plus a per-rollup `StateUpdate` on L1). A single-sided test only checks the source-side bookkeeping — the destination chain stays passive. A two-sided test additionally invokes the destination call for real, so any drift between the cached `returnData` and what the destination actually produces surfaces as an assertion failure.
 
 The cross-chain call hash (`computeCrossChainCallHash(...)`, identical formula on both managers) is the cryptographic tie: a green two-sided run shows the **same hash** in events on both chains.
 

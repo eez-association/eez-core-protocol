@@ -6,19 +6,19 @@ pragma solidity ^0.8.28;
 //
 //  Direction (L1, absolute): an `L2ToL1Call` is executed ON L1; an `ExpectedL1ToL2Call` is a
 //  reentrant call LEAVING L1 during execution. The mirror-image L2 structs live in `IEEZL2.sol`
-//  with self-relative names and a leaner layout (no `StateDelta` / state-root pins).
+//  with self-relative names and a leaner layout (no `StateUpdate` / state-root pins).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice A participating rollup + the subset of the batch's `proofSystems[]` it accepts.
 struct RollupIdWithProofSystems {
     uint64 rollupId; // the participating rollup
-    uint64[] proofSystemIndexes; // strictly-increasing indices into the batch's `proofSystems[]`, resolved to PS addresses for the rollup's `checkProofSystemsAndGetVkeys`
+    uint64[] proofSystemIndexes; // indices into the batch's `proofSystems[]` selecting the systems this rollup will be verified against; strictly increasing
 }
 
 /// @notice A rollup's expected state root.
 /// @dev A candidate matches when every pin equals the live `rollups[rollupId].stateRoot`.
 struct ExpectedStateRootPerRollup {
-    uint64 rollupId; // the pinned rollup
+    uint64 rollupId; // the rollup id
     bytes32 stateRoot; // the expected live state root
 }
 
@@ -30,17 +30,17 @@ struct ExpectedStateRootPerRollup {
 /// @dev `immediateEntryCount` / `immediateStaticEntryCount` are UNPROVEN dispatch params — not folded
 ///      into the public input, so the immediate/persistent split can be re-tuned without re-proving.
 struct ProofSystemBatchPerVerificationEntries {
-    ExpectedStateRootPerRollup[] expectedStateRootPerRollup; // optional composer-supplied state-root assertions, if assertion fails, transaction reverts
-    ExecutionEntry[] entries; // execution entries
+    ExpectedStateRootPerRollup[] expectedStateRootPerRollup; // optional state-root assertions from the composer; any mismatch reverts the tx
+    ExecutionEntry[] entries; // execution entries: immediate entries are executed in this call, remainder are saved in storage
     StaticExecutionEntry[] staticEntries; // top-level static entries
-    uint256 immediateEntryCount; // leading prefix executed this tx: immediate L2Txs (run directly) + meta-hook (AA) entries (not queued)
-    uint256 immediateStaticEntryCount; // leading static entries resolvable this tx via the meta hook (not queued)
-    address[] proofSystems; // strictly increasing, no address(0)
-    RollupIdWithProofSystems[] rollupIdsWithProofSystems; // strictly increasing by rollupId
-    uint256[] blobIndices; // tx-level EIP-4844 blobs this batch consumes
-    bytes callData; // batch-scoped calldata
+    uint256 immediateEntryCount; // number of leading `entries` executed this tx (immediate L2Txs + meta-hook (AA) entries, not queued)
+    uint256 immediateStaticEntryCount; // number of leading `staticEntries`
+    address[] proofSystems; // proof systems attesting this batch; strictly increasing, no address(0)
+    RollupIdWithProofSystems[] rollupIdsWithProofSystems; // participating rollups + their accepted proof-system subsets; strictly increasing by rollupId
+    uint256[] blobIndices; // indices of the tx's EIP-4844 blobs this batch consumes
+    bytes callData; // batch-scoped calldata; its hash is folded into the public input
     bytes[] proofs; // one proof per `proofSystems` entry
-    uint64 blockNumber; // block binding: 0 = none, type(uint64).max = latest
+    uint64 blockNumber; // L1 block the batch binds to (via `getCustomData`): 0 = none, type(uint64).max = latest
     bool bindMsgSenderInPublicInput; // true = fold msg.sender into the public input so only the submitter can land the batch (front-run protection); false = fold address(0) (anyone may submit)
 }
 
@@ -72,22 +72,23 @@ struct RollupVerification {
 /// @notice A rollup's state transition for one entry.
 /// @dev The on-chain pre-state check content-addresses the entry to the proven trajectory, which
 ///      is what lets the per-rollup queues interleave safely.
-struct StateDelta {
-    uint64 rollupId; // the rollup this delta applies to
+struct StateUpdate {
+    uint64 rollupId; // the rollup this update applies to
     bytes32 currentState; // expected pre-state, checked against `rollups[rollupId].stateRoot`
     bytes32 newState; // post-execution state root
     int256 etherDelta; // signed ether change for this rollup
 }
 
 /// @notice A cross-chain call executed on L1 (sourced from an L2 rollup).
+/// @dev TODO: consider adding a gas field — especially for force inclusions (0 = all remaining gas).
 struct L2ToL1Call {
-    uint16 revertNextNCalls; // >0 force-reverts the next N calls (this one included)
-    bool isStatic; // dispatch via STATICCALL (read-only, no value)
+    uint16 revertNextNCalls; // number of consecutive calls (this one included) to force-revert; 0 = none
+    bool isStatic; // whether to execute via STATICCALL (read-only, no value)
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on L1
     uint256 value; // ether to send (0 when isStatic)
-    bytes data; // calldata
+    bytes data; // calldata to execute on the target
 }
 
 /// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) fired during execution.
@@ -113,7 +114,7 @@ struct L2ToL1Call {
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
     L2ToL1Call[] l2ToL1Calls; // the reentrant frame's own sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected middle-call rollingHash: checked for STATIC / REVERTED (success == false)
+    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls; checked only for STATIC / REVERTED flavours
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
 }
@@ -123,12 +124,12 @@ struct ExpectedL1ToL2Call {
 ///         `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT
 ///         calls are `success == false` `ExpectedL1ToL2Call`s and a top-level reverting read is a `StaticExecutionEntry`.
 struct ExecutionEntry {
-    StateDelta[] stateDeltas; // the entry's true state transition (≥1, enforced on-chain)
-    bytes32 proxyEntryHash; // inbound proxy-entry call hash; bytes32(0) for L2 txs
-    L2ToL1Call[] l2ToL1Calls; // the entry's TOP-LEVEL calls (reentrant frames carry their own)
-    ExpectedL1ToL2Call[] expectedL1ToL2Calls; // unified reentrant (L1→L2) table; see `ExpectedL1ToL2Call`
-    bytes32 rollingHash; // expected rolling hash over all calls + nestings
-    uint64 destinationRollupId; // routes to a per-rollup queue; must match the consumer's rollup
+    StateUpdate[] stateUpdates; // per-rollup state updates — the entry's full state transition (≥1, enforced on-chain)
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); bytes32(0) for L2 txs
+    L2ToL1Call[] l2ToL1Calls; // L2→L1 calls to be executed, run in order; reentrant frames (nested L1→L2 calls) carry their own sub-arrays
+    ExpectedL1ToL2Call[] expectedL1ToL2Calls; // expected L1→L2 calls, each of those opens a reentrant frame
+    bytes32 rollingHash; // expected rolling hash, which contains all calls, their return/revert values and reentrant frames
+    uint64 destinationRollupId; // rollup whose queue this entry routes to; must match the consumer's rollup
     bool success; // indicates whether the entry returns or reverts
     bytes returnData; // pre-computed top-level return value (revert payload when !success)
 }
@@ -141,11 +142,11 @@ struct ExecutionEntry {
 ///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` + `destinationRollupId` + all
 ///      `expectedStateRoots` pins live (full scan). Referenced proxies must already be deployed.
 struct StaticExecutionEntry {
-    ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH predicate
-    bytes32 proxyEntryHash; // inbound proxy-entry call hash (mirrors `ExecutionEntry.proxyEntryHash`)
-    L2ToL1Call[] l2ToL1Calls; // read-only sub-calls run via STATICCALL during resolution
-    bytes32 rollingHash; // expected rolling hash of the sub-calls (untagged static schema: keccak(prev, success, retData))
-    uint64 destinationRollupId; // routes the pool entry; must match the calling proxy's rollup
+    ExpectedStateRootPerRollup[] expectedStateRoots; // expected live state roots per rollup; part of the MATCH predicate (full scan)
+    bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); mirrors `ExecutionEntry.proxyEntryHash`
+    L2ToL1Call[] l2ToL1Calls; // L2→L1 calls to be executed read-only via STATICCALL, run in order (no reentrant frames)
+    bytes32 rollingHash; // expected rolling hash, which contains all calls and their return/revert values (untagged static schema: keccak(prev, success, retData))
+    uint64 destinationRollupId; // rollup whose static pool this entry routes to; must match the calling proxy's rollup
     bool success; // indicates whether resolution returns or reverts (false ⇒ reverts with `returnData`)
     bytes returnData; // pre-computed return value (revert payload when !success)
 }
@@ -155,8 +156,8 @@ struct StaticExecutionEntry {
 ///      `EEZBase` proxy registry.
 struct ProxyInfo {
     bool isProxy; // existence flag, set on registration
-    address originalAddress; // Address this proxy points to
-    uint64 originalRollupId; // Rollup this proxy points to
+    address originalAddress; // address this proxy points to
+    uint64 originalRollupId; // rollup this proxy points to
 }
 
 /// @title IEEZ
@@ -165,15 +166,36 @@ struct ProxyInfo {
 ///         depend on. The L1 execution structs above are consumed by `EEZ.sol`; the mirror-image
 ///         L2 structs live in `IEEZL2.sol`.
 interface IEEZ {
+    /// @notice Executes a cross-chain call initiated by an authorized proxy.
+    /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
+    /// @param callData The original calldata sent to the proxy
+    /// @return result The pre-computed return data of the matched entry
     function executeCrossChainCall(address sourceAddress, bytes calldata callData)
         external
         payable
         returns (bytes memory result);
+
+    /// @notice Resolves a read-only cross-chain call initiated by an authorized proxy.
+    /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
+    /// @param callData The original calldata sent to the proxy
+    /// @return result The pre-computed return data of the matched static entry
     function staticCrossChainCall(address sourceAddress, bytes calldata callData)
         external
         view
         returns (bytes memory result);
+
+    /// @notice Creates the CrossChainProxy for an address on another rollup.
+    /// @param originalAddress The address this proxy represents on the source rollup
+    /// @param originalRollupId The source rollup ID
+    /// @return proxy The deployed proxy address
     function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy);
+
+    /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
+    function RECOVERY_ADDRESS() external view returns (address);
+
+    /// @notice Computes the deterministic CREATE2 address of the CrossChainProxy for an (address, rollup) pair.
+    /// @param originalAddress The address this proxy represents on the source rollup
+    /// @param originalRollupId The source rollup ID
     function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
         external
         view

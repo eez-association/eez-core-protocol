@@ -34,6 +34,12 @@ contract EEZL2 is EEZBase {
     ///      or swap the table mid-execution).
     address public immutable SYSTEM_ADDRESS;
 
+    /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
+    /// @dev On L2 this is `SYSTEM_ADDRESS` — same as the burn path in `executeCrossChainCall`.
+    function RECOVERY_ADDRESS() external view returns (address) {
+        return SYSTEM_ADDRESS;
+    }
+
     /// @notice Array of pre-computed entries
     ExecutionEntry[] public entries;
 

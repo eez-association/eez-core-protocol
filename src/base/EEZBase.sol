@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ, ProxyInfo, StateDelta} from "../interfaces/IEEZ.sol";
+import {IEEZ, ProxyInfo, StateUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -268,12 +268,12 @@ abstract contract EEZBase is IEEZ {
     ///         `(rollupId, currentState)` state context closed with the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
-    /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateDelta`); L2 has no
+    /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateUpdate`); L2 has no
     ///      state deltas and will get its own entry-begin. Deltas are strictly-increasing-by-rollupId,
     ///      so the fold is deterministic.
     ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function _rollingHashEntryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal {
+    function _rollingHashEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
 
         bytes32 _rollupStatesHash;

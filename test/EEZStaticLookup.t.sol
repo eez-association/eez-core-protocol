@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Base} from "./Base.t.sol";
 import {
     ExecutionEntry,
-    StateDelta,
+    StateUpdate,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
     ExpectedStateRootPerRollup
@@ -219,7 +219,7 @@ contract EEZStaticLookupTest is Base {
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
         bytes memory outerData = abi.encodeCall(StaticReader.readUint, (innerProxy, innerData));
 
-        StateDelta[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        StateUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
 
         // Rolling hash: entry seed → CALL_BEGIN(outer call) → [static read pinned here, hash unchanged]
         //   → CALL_END(true, abi.encode(77)). `hAtFire` is `_rollingHash` when the static read fires.

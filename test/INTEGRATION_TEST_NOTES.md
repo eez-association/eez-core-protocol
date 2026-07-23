@@ -22,7 +22,7 @@ Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
   (Scenarios 3/4), it consumes that manager's own entry — the reentrant tables
   (`expectedL1ToL2Calls` / `expectedOutgoingCalls`) only serve reentry into the SAME manager.
 - **Sequential state deltas (L1).** Entries consuming the same rollup must chain
-  `currentState → newState`; `StateDelta.currentState` is checked against the live
+  `currentState → newState`; `StateUpdate.currentState` is checked against the live
   `rollups[rid].stateRoot` at consumption (`StateRootMismatch` otherwise).
 - **Same-block consumption.** Deferred entries are only consumable in the block their batch was
   posted (`lastVerifiedBlock` gate on L1, `lastLoadBlock` on L2) — tests post and consume in
