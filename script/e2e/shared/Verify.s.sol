@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Script.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {StateDelta, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -32,7 +32,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint64)");
 
     // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only (IEEZL2 structs; no
-    // StateDelta[] / destinationRollupId on L2). New flatten model (no callCount /
+    // StateUpdate[] / destinationRollupId on L2). New flatten model (no callCount /
     // ExpectedLookup; unified expectedOutgoingCalls; trailing success flag).
     //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
     //                      proxyEntryHash  incomingCalls  expectedOutgoingCalls          rollingHash success ret
@@ -54,8 +54,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         console.log(
             "      success=%s  calls=%s  nested=%s", e.success, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
         );
-        for (uint256 d = 0; d < e.stateDeltas.length; d++) {
-            StateDelta memory sd = e.stateDeltas[d];
+        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
+            StateUpdate memory sd = e.stateUpdates[d];
             console.log(
                 string.concat(
                     "      stateDelta: rollup ",
@@ -95,7 +95,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         console.log("      entryHash: %s", vm.toString(_entryHash(e)));
     }
 
-    /// @dev L2 (IEEZL2) entry — no stateDeltas / destinationRollupId.
+    /// @dev L2 (IEEZL2) entry — no stateUpdates / destinationRollupId.
     function _printEntryDetailed(uint256 idx, L2ExecutionEntry memory e) internal pure {
         bool immediate = e.proxyEntryHash == bytes32(0);
         console.log(

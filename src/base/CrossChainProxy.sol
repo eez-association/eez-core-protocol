@@ -20,6 +20,13 @@ contract CrossChainProxy {
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     constructor(address _eez) {
         EEZ = _eez;
+
+        // Best-effort sweep of ether sent here before deployment (otherwise stuck —
+        // the proxy only forwards msg.value); a failed transfer never blocks creation.
+        uint256 predeployedEther = address(this).balance;
+        if (predeployedEther != 0) {
+            IEEZ(_eez).RECOVERY_ADDRESS().call{value: predeployedEther}("");
+        }
     }
 
     /// @notice Fallback function that forwards all calls to the manager contract

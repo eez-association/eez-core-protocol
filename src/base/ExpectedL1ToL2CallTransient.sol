@@ -250,4 +250,8 @@ contract ExpectedL1ToL2CallTransient is IEEZ {
     function computeCrossChainProxyAddress(address, uint64) external view returns (address) {
         revert NotSupported();
     }
+
+    function RECOVERY_ADDRESS() external view returns (address) {
+        revert NotSupported();
+    }
 }

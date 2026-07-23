@@ -9,7 +9,7 @@ import {
     ExpectedStateRootPerRollup,
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
-import {StateDelta, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -69,7 +69,7 @@ abstract contract MultiCallNestedL2Actions {
     }
 
     /// @dev L1 mirror rolling hash for a single entry — one top-level Counter.increment().
-    function _expectedRollingHashL1(StateDelta[] memory deltas, address counterL1, address cap, uint256 retVal)
+    function _expectedRollingHashL1(StateUpdate[] memory deltas, address counterL1, address cap, uint256 retVal)
         internal
         pure
         returns (bytes32 h)
@@ -100,15 +100,15 @@ abstract contract MultiCallNestedL2Actions {
         L2ToL1Call[] memory calls1 = new L2ToL1Call[](1);
         calls1[0] = innerCall;
 
-        StateDelta[] memory deltas0 = new StateDelta[](1);
-        deltas0[0] = StateDelta({
+        StateUpdate[] memory deltas0 = new StateUpdate[](1);
+        deltas0[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-mid"),
             etherDelta: 0
         });
-        StateDelta[] memory deltas1 = new StateDelta[](1);
-        deltas1[0] = StateDelta({
+        StateUpdate[] memory deltas1 = new StateUpdate[](1);
+        deltas1[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-state-mid"),
             newState: keccak256("l2-state-final"),
@@ -117,7 +117,7 @@ abstract contract MultiCallNestedL2Actions {
 
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas0,
+            stateUpdates: deltas0,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls0,
@@ -127,7 +127,7 @@ abstract contract MultiCallNestedL2Actions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateDeltas: deltas1,
+            stateUpdates: deltas1,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls1,

@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -75,7 +75,7 @@ abstract contract ReentrantActions {
     }
 
     /// @dev L1 top-level call dC(3): executed ON L1 (target rcL1 MAINNET), sourced from batcher L2
-    ///      (the call's `sourceRollupId` must be in the entry's stateDeltas).
+    ///      (the call's `sourceRollupId` must be in the entry's stateUpdates).
     function _cchTop3(address rcL1, address batcher) internal pure returns (bytes32) {
         return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(3), batcher, L2_ROLLUP_ID);
     }
@@ -126,8 +126,8 @@ abstract contract ReentrantActions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-reentrant"),
@@ -199,7 +199,7 @@ abstract contract ReentrantActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: topCalls,

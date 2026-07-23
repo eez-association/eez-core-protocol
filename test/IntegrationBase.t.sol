@@ -10,7 +10,7 @@ import {
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {ExecutionEntry, StateDelta, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry
@@ -55,7 +55,7 @@ abstract contract IntegrationBase is Test {
 
     function setUp() public virtual {
         // ── L1 infrastructure ──
-        rollups = new EEZ();
+        rollups = new EEZ(makeAddr("recovery"));
         ps = new MockProofSystem();
 
         // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
@@ -168,7 +168,7 @@ abstract contract IntegrationBase is Test {
 
     /// @notice Mirror of L1 `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
     ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function _hEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
             statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));

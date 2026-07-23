@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {EEZL2} from "../../../src/L2/EEZL2.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -107,8 +107,8 @@ abstract contract RevertActions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-forced-revert"),
@@ -118,7 +118,7 @@ abstract contract RevertActions {
         // Inner call: a Counter.increment() on L1 wrapped in revertNextNCalls=1 to
         // demonstrate the EVM state effect being rolled back while the rolling
         // hash still records the successful outcome. sourceRollupId must be a
-        // rollup proved by this entry's stateDeltas (L2_ROLLUP_ID); L1 is never
+        // rollup proved by this entry's stateUpdates (L2_ROLLUP_ID); L1 is never
         // its own cross-chain counterparty (rule #2).
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
@@ -141,7 +141,7 @@ abstract contract RevertActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: deltas,
+            stateUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

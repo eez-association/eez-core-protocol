@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IntegrationBase} from "./IntegrationBase.t.sol";
-import {ExecutionEntry, StateDelta, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -142,16 +142,16 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         bytes32 s1 = keccak256("l2-state-after-phase1-bridge");
 
         {
-            StateDelta[] memory stateDeltas = new StateDelta[](1);
-            stateDeltas[0] =
-                StateDelta({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: s1, etherDelta: 0});
+            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
+            stateUpdates[0] =
+                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: s1, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].stateDeltas = stateDeltas;
+            entries[0].stateUpdates = stateUpdates;
             entries[0].proxyEntryHash = phase1L1ActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             // No calls; rolling hash is just the entry-begin seed, success returns ""
-            entries[0].rollingHash = _hEntryBegin(stateDeltas, phase1L1ActionHash);
+            entries[0].rollingHash = _hEntryBegin(stateUpdates, phase1L1ActionHash);
             entries[0].success = true;
 
             _postBatchToL2(entries, 0);
@@ -376,9 +376,9 @@ contract IntegrationTestFlashLoan is IntegrationBase {
             ExecutionEntry[] memory l1Entries = new ExecutionEntry[](2);
 
             // Entry #0: bridgeTokens proxy call (no calls, simple state delta)
-            StateDelta[] memory deltas0 = new StateDelta[](1);
-            deltas0[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
-            l1Entries[0].stateDeltas = deltas0;
+            StateUpdate[] memory deltas0 = new StateUpdate[](1);
+            deltas0[0] = StateUpdate({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
+            l1Entries[0].stateUpdates = deltas0;
             l1Entries[0].proxyEntryHash = l1Entry0ActionHash;
             l1Entries[0].destinationRollupId = L2_ROLLUP_ID;
             l1Entries[0].rollingHash = _hEntryBegin(deltas0, l1Entry0ActionHash);
@@ -386,8 +386,8 @@ contract IntegrationTestFlashLoan is IntegrationBase {
             // l2ToL1Calls[], expectedL1ToL2Calls[], returnData all default (empty)
 
             // Entry #1: executorL2Proxy call (with calls to claimAndBridgeBack + receiveTokens)
-            StateDelta[] memory deltas1 = new StateDelta[](1);
-            deltas1[0] = StateDelta({rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0});
+            StateUpdate[] memory deltas1 = new StateUpdate[](1);
+            deltas1[0] = StateUpdate({rollupId: L2_ROLLUP_ID, currentState: s2, newState: s3, etherDelta: 0});
 
             // Rolling hash: seed + 2 top-level calls, each void -> success=true, retData="".
             // L1-executed calls fold their identity with target rollup = MAINNET.
@@ -411,7 +411,7 @@ contract IntegrationTestFlashLoan is IntegrationBase {
                 entry1RollingHash = h;
             }
 
-            l1Entries[1].stateDeltas = deltas1;
+            l1Entries[1].stateUpdates = deltas1;
             l1Entries[1].proxyEntryHash = l1Entry1ActionHash;
             l1Entries[1].destinationRollupId = L2_ROLLUP_ID;
             l1Entries[1].l2ToL1Calls = l1Entry1Calls;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {StateDelta} from "../src/interfaces/IEEZ.sol";
+import {StateUpdate} from "../src/interfaces/IEEZ.sol";
 
 /// @notice Protocol-mirror hash helpers shared by the L1 (`Base`) and L2 (`BaseL2`) test
 ///         fixtures: the rolling-hash tag folds, the cross-chain call hash, and the per-side
@@ -41,7 +41,7 @@ abstract contract TestHashes {
 
     /// @notice Mirror of `EEZ._rollingHashEntryBegin` (L1 seed): folds the entry's starting state
     ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(StateDelta[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function _hEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
             statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));

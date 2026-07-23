@@ -32,20 +32,20 @@ The execution structs come in **two layout-similar but separately-declared famil
 - **L1 (`src/interfaces/IEEZ.sol`)** — absolute directional names: an `L2ToL1Call` is a cross-chain call executed on L1; an `ExpectedL1ToL2Call` is a reentrant L1→L2 call fired during execution.
 - **L2 (`src/interfaces/IEEZL2.sol`)** — **self-relative** directional names: an `incomingCalls[]` entry is a call executed ON this L2 on behalf of a remote caller; an `expectedOutgoingCalls[]` entry is the pre-computed result of a reentrant call fired FROM this L2. The naming is relative to the chain itself because an L2's counterparty can be L1 (mainnet) OR another L2 — absolute names like `l1ToL2Calls` would frequently be wrong.
 
-The L2 structs are deliberately **leaner**: L2 has a single rollup, no state deltas, and no per-rollup queue interleaving, so the L1-only fields (`StateDelta[] stateDeltas`, `destinationRollupId`, `ExpectedStateRootPerRollup[] expectedStateRoots`) do not exist on L2 at all. L2 never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
+The L2 structs are deliberately **leaner**: L2 has a single rollup, no state deltas, and no per-rollup queue interleaving, so the L1-only fields (`StateUpdate[] stateUpdates`, `destinationRollupId`, `ExpectedStateRootPerRollup[] expectedStateRoots`) do not exist on L2 at all. L2 never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 
 #### Cross-chain call hash (off-chain helper)
 
 Tooling computes `crossChainCallHash` from seven fields (`isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data`) — see §C for the exact formula. On-chain code calls the `public pure` helper `computeCrossChainCallHash(...)` on `EEZBase` (inherited by both managers). Off-chain tooling can use the free functions in `script/e2e/shared/E2EHelpers.sol` (`crossChainCallHashFull`, plus the `crossChainCallHash` / `crossChainCallHashStatic` convenience wrappers); all routes produce the same preimage.
 
-#### StateDelta (L1 only)
+#### StateUpdate (L1 only)
 
 Describes one rollup's state transition caused by executing one entry. The pre-state binding lives on the entry: `currentState` is checked at consumption time against `rollups[delta.rollupId].stateRoot`; mismatch reverts `StateRootMismatch`. This makes entries content-addressed against the trajectory the proof committed to and is the soundness backstop that lets the per-rollup queue model interleave consumption across rollups safely.
 
-Every entry must carry **at least one** `StateDelta`, and the deltas must be **strictly increasing by `rollupId`** — both enforced **on-chain** at batch validation (`EntryHasNoStateDeltas`, `StateDeltasNotStrictlyIncreasing`; the ≥1 check is re-asserted in `_executeEntry`). An empty `stateDeltas[]` would leave the entry unpinned from any rollup trajectory (nothing for the `StateRootMismatch` backstop to check); strict ordering rejects duplicate rollups and (starting above `MAINNET_ROLLUP_ID`) a mainnet delta. The prover remains responsible for `stateDeltas` being the entry's *true* state transition.
+Every entry must carry **at least one** `StateUpdate`, and the deltas must be **strictly increasing by `rollupId`** — both enforced **on-chain** at batch validation (`EntryHasNoStateUpdates`, `StateUpdatesNotStrictlyIncreasing`; the ≥1 check is re-asserted in `_executeEntry`). An empty `stateUpdates[]` would leave the entry unpinned from any rollup trajectory (nothing for the `StateRootMismatch` backstop to check); strict ordering rejects duplicate rollups and (starting above `MAINNET_ROLLUP_ID`) a mainnet delta. The prover remains responsible for `stateUpdates` being the entry's *true* state transition.
 
 ```solidity
-struct StateDelta {
+struct StateUpdate {
     uint64  rollupId;       // which rollup's state changes
     bytes32 currentState;   // expected pre-state root on rollupId — checked against rollups[rid].stateRoot
     bytes32 newState;       // post-execution state root
@@ -107,19 +107,19 @@ The central execution unit. Loaded by `postAndVerifyBatch` (L1) or `loadExecutio
 ```solidity
 // L1 (IEEZ.sol)
 struct ExecutionEntry {
-    StateDelta[]         stateDeltas;          // the entry's true state transition (≥1, enforced on-chain)
+    StateUpdate[]         stateUpdates;          // the entry's true state transition (≥1, enforced on-chain)
     bytes32              proxyEntryHash;       // inbound proxy-entry call hash; bytes32(0) = L2Tx entry
     L2ToL1Call[]         l2ToL1Calls;          // the entry's TOP-LEVEL calls (reentrant frames carry their own)
     ExpectedL1ToL2Call[] expectedL1ToL2Calls;  // unified reentrant table; see above
     bytes32              rollingHash;          // expected rolling hash over all calls + nestings
-    uint64               destinationRollupId;  // routes to a per-rollup queue; must be ∈ stateDeltas
+    uint64               destinationRollupId;  // routes to a per-rollup queue; must be ∈ stateUpdates
     bool                 success;              // whether the entry returns or reverts
     bytes                returnData;           // pre-computed top-level return value (revert payload when !success)
 }
 ```
 
 ```solidity
-// L2 (IEEZL2.sol) — no stateDeltas, no destinationRollupId
+// L2 (IEEZL2.sol) — no stateUpdates, no destinationRollupId
 struct ExecutionEntry {
     bytes32                          proxyEntryHash;        // hash of the inbound call — never bytes32(0) on L2 (no zero-hash consumption path; executeL2Txs is L1-only)
     CrossChainCall[]                 incomingCalls;         // the entry's TOP-LEVEL calls
@@ -225,7 +225,7 @@ struct RollupVerification {
 | `_transientEntries` | ExecutionEntry[] (public) | Transient-backed meta-hook entries (cleared each `postAndVerifyBatch`); non-empty length flags the meta-hook window of the reentry guard |
 | `_transientStaticEntries` | StaticExecutionEntry[] (public) | Transient-backed TOP-LEVEL static entries for the meta-hook phase |
 | `_expectedL1toL2CallsForImmediateL2Txs` | ExpectedL1ToL2Call[] (internal) | Reentrant table of the ONE immediate L2Tx entry currently executing — parked here because the immediate run executes entries straight from calldata (never SSTOREd whole) and a proxy re-entry crosses an external boundary; pushed before `_executeEntry`, `delete`d right after |
-| `_verifiedRollupInCurrentExecutingEntry` | uint64[] (internal) | The rollups the executing entry may drive proxies for (its `stateDeltas` rollupIds); pushed at execution start, `delete`d at the end. Doubles as `_insideExecution()` (non-empty ⇔ executing) and the runtime proxy-protection set |
+| `_verifiedRollupInCurrentExecutingEntry` | uint64[] (internal) | The rollups the executing entry may drive proxies for (its `stateUpdates` rollupIds); pushed at execution start, `delete`d at the end. Doubles as `_insideExecution()` (non-empty ⇔ executing) and the runtime proxy-protection set |
 | `_transientEntryIndex` | `uint256 transient` | Global cursor into `_transientEntries` (cross-rollup, intra-`postAndVerifyBatch`) |
 | `_currentEntryRollupId` | `uint64 transient` | Rollup whose persistent queue supplies the executing entry (so `_getExpectedL1toL2Calls()` finds the right queue); set only by `_consumeAndExecuteEntry`'s persistent branch, `0` everywhere else |
 | `_lastL1ToL2CallConsumed` | `uint256 transient` | Forward-scan position into the entry's unified `expectedL1ToL2Calls[]` |
@@ -323,7 +323,7 @@ struct RollupIdWithProofSystems {
 - `proofSystems.length != 0`, `proofSystems.length == proofs.length`, `rollupIdsWithProofSystems.length != 0`, else `InvalidProofSystemConfig`.
 - `proofSystems[]` strictly increasing by address (rejects duplicates + `address(0)`), else `DuplicateProofSystem(ps)`.
 - `rollupIdsWithProofSystems[]` strictly ascending by `rollupId`, each `> MAINNET_ROLLUP_ID`, each registered; each row's `proofSystemIndexes[]` non-empty, strictly ascending, all in `[0, proofSystems.length)` — else `InvalidProofSystemConfig`.
-- **Per entry (proxy protection)**: `stateDeltas.length >= 1` (`EntryHasNoStateDeltas`); deltas strictly increasing by rollupId (`StateDeltasNotStrictlyIncreasing`); every delta rollup in the batch's rollup set (`RollupNotInBatch`); `destinationRollupId` ∈ the entry's own deltas (`EntryDestinationNotInStateDeltas`); every call SOURCE — top-level calls plus each reentrant frame's sub-calls — ∈ the entry's deltas (`CallSourceNotVerified`). Reentrant TARGETS carry no clear-text rollup field, so they stay a runtime check (§B.1 `_consumeNestedCall`).
+- **Per entry (proxy protection)**: `stateUpdates.length >= 1` (`EntryHasNoStateUpdates`); deltas strictly increasing by rollupId (`StateUpdatesNotStrictlyIncreasing`); every delta rollup in the batch's rollup set (`RollupNotInBatch`); `destinationRollupId` ∈ the entry's own deltas (`EntryDestinationNotInStateUpdates`); every call SOURCE — top-level calls plus each reentrant frame's sub-calls — ∈ the entry's deltas (`CallSourceNotVerified`). Reentrant TARGETS carry no clear-text rollup field, so they stay a runtime check (§B.1 `_consumeNestedCall`).
 - **Per static entry**: `expectedStateRoots` pins strictly increasing (`ExpectedStateRootsNotStrictlyIncreasing`), each ∈ batch (`RollupNotInBatch`); `destinationRollupId` ∈ its own pins (`StaticEntryDestinationNotPinned`); every sub-call source ∈ the pins (`CallSourceNotVerified`).
 - `immediateEntryCount <= entries.length` else `ImmediateCountExceedsEntries`; `immediateStaticEntryCount <= staticEntries.length` else `ImmediateStaticEntryCountExceedsStaticEntries`; static-entries-without-entries shape rejected (`ImmediateStaticEntriesWithoutImmediateEntries`).
 - If `entries[immediateEntryCount]` exists and has `proxyEntryHash == 0`, revert `ImmediateCountStrandsLeadingL2Tx` — protects honest composers against a poster under-counting the unproven `immediateEntryCount` and stranding a proven leading L2Tx into the queue.
@@ -367,12 +367,12 @@ Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proof
 4. **Mark verified-this-block** (`_markVerifiedBlockAndDeletePreviousEntries(rid)` for each rollup): sets `verificationByRollup[rid].lastVerifiedBlock = block.number` AND **wipes the rollup's `entryQueue` / `staticEntryQueue` / `entryQueueIndex` on EVERY verify** — a same-block re-verify REPLACES (does not append to) the prior batch's entries for that rollup. Done before any non-view external CALL so (a) `executeCrossChainCall` / `executeL2Txs(rid)` work during the meta hook, and (b) `setStateRoot` is locked out until the next block.
 5. **Drain the leading run of immediate L2Txs straight from calldata**: while `i < immediateEntryCount` and `batch.entries[i].proxyEntryHash == bytes32(0)`, self-call `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }` and advance — a skip is not a hard error, but if at least one L2Tx was attempted and NONE succeeded, revert `AllImmediateL2TxsFailed` (a fully-failed immediate prefix unwinds the whole post). These entries are never SSTOREd whole; only each entry's reentrant table is parked in `_expectedL1toL2CallsForImmediateL2Txs` for the duration of that entry.
 6. **Meta hook**: if entries remain in the immediate prefix past the leading L2Tx run (`i < immediateEntryCount`) AND `msg.sender.code.length > 0`: push `entries[i..immediateEntryCount)` into `_transientEntries` and `staticEntries[0..immediateStaticEntryCount)` into `_transientStaticEntries`, then call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2Txs(rid)` to consume the transient stream.
-7. **Publish the remainder** (`_saveRemainderEntries(batch)`): push `entries[immediateEntryCount..]` into `verificationByRollup[entry.destinationRollupId].entryQueue` and `staticEntries[immediateStaticEntryCount..]` into the matching `staticEntryQueue`, **unconditionally** (even if the meta hook left transient entries unconsumed — there is no drain-cleanly gate). Soundness backstop: each entry's `StateDelta.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers.
+7. **Publish the remainder** (`_saveRemainderEntries(batch)`): push `entries[immediateEntryCount..]` into `verificationByRollup[entry.destinationRollupId].entryQueue` and `staticEntries[immediateStaticEntryCount..]` into the matching `staticEntryQueue`, **unconditionally** (even if the meta hook left transient entries unconsumed — there is no drain-cleanly gate). Soundness backstop: each entry's `StateUpdate.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers.
 8. **Cleanup transient tables**: `delete _transientEntries; delete _transientStaticEntries; _transientEntryIndex = 0` (emptying `_transientEntries` also closes the reentry window). Finally, `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
 
-**Revert conditions**: `PostBatchReentry`, `ExpectedStateRootMismatch(rid)`, `InvalidProofSystemConfig`, `DuplicateProofSystem(ps)`, `EntryHasNoStateDeltas`, `StateDeltasNotStrictlyIncreasing(rid)`, `RollupNotInBatch(rid)`, `EntryDestinationNotInStateDeltas(rid)`, `CallSourceNotVerified(rid)`, `ExpectedStateRootsNotStrictlyIncreasing(rid)`, `StaticEntryDestinationNotPinned(rid)`, `ImmediateCountExceedsEntries`, `ImmediateStaticEntryCountExceedsStaticEntries`, `ImmediateStaticEntriesWithoutImmediateEntries`, `ImmediateCountStrandsLeadingL2Tx`, threshold/vkey reverts from the manager (e.g. `ThresholdNotMet`, `ProofSystemNotAllowed`), `InvalidProof`, `AllImmediateL2TxsFailed`, plus whatever the meta hook reverts with (`RollingHashMismatch`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `ExecutionNotFound`, `StateRootMismatch(rid)`, …; an *immediate L2Tx*'s revert is caught by the try/catch and only skips that entry).
+**Revert conditions**: `PostBatchReentry`, `ExpectedStateRootMismatch(rid)`, `InvalidProofSystemConfig`, `DuplicateProofSystem(ps)`, `EntryHasNoStateUpdates`, `StateUpdatesNotStrictlyIncreasing(rid)`, `RollupNotInBatch(rid)`, `EntryDestinationNotInStateUpdates(rid)`, `CallSourceNotVerified(rid)`, `ExpectedStateRootsNotStrictlyIncreasing(rid)`, `StaticEntryDestinationNotPinned(rid)`, `ImmediateCountExceedsEntries`, `ImmediateStaticEntryCountExceedsStaticEntries`, `ImmediateStaticEntriesWithoutImmediateEntries`, `ImmediateCountStrandsLeadingL2Tx`, threshold/vkey reverts from the manager (e.g. `ThresholdNotMet`, `ProofSystemNotAllowed`), `InvalidProof`, `AllImmediateL2TxsFailed`, plus whatever the meta hook reverts with (`RollingHashMismatch`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `ExecutionNotFound`, `StateRootMismatch(rid)`, …; an *immediate L2Tx*'s revert is caught by the try/catch and only skips that entry).
 
-Note: same-block re-touch of a rollup is **permitted** — but `_markVerifiedBlockAndDeletePreviousEntries` wipes the queue on every verify, so the second batch's entries REPLACE (not append to) the first batch's for that rollup. Safe because state only mutates at consumption and every entry is gated by `StateDelta.currentState`.
+Note: same-block re-touch of a rollup is **permitted** — but `_markVerifiedBlockAndDeletePreviousEntries` wipes the queue on every verify, so the second batch's entries REPLACE (not append to) the first batch's for that rollup. Safe because state only mutates at consumption and every entry is gated by `StateUpdate.currentState`.
 
 #### `executeCrossChainCall`
 
@@ -573,7 +573,7 @@ return entry.returnData
 
 - `entry.proxyEntryHash == crossChainCallHash` (identity),
 - `entry.destinationRollupId == destRid` (routing — load-bearing in the transient branch, whose cursor is global across rollups; holds by construction in the persistent branch),
-- every `entry.stateDeltas[i].currentState` equals the live `rollups[rid].stateRoot` (state preconditions — a stale entry is a *non-match*, skipped rather than reverted on).
+- every `entry.stateUpdates[i].currentState` equals the live `rollups[rid].stateRoot` (state preconditions — a stale entry is a *non-match*, skipped rather than reverted on).
 
 Skipping intervening non-matches is what lets a top-level call reach past already-attempted `success == false` entries (whose reverts left the cursor where it was) and past stale-state entries. A skipped entry simply never executes — anything depending on it later fails its own `currentState` check.
 
@@ -634,17 +634,17 @@ A SUCCESS frame commits: its sub-calls fold into the host's continuous `_rolling
 `_entryEtherDelta` already holds the entry-point call's `msg.value` here (SET by the top-level entry point before consumption), so it is NOT reset in the preamble — only at the end, after the invariant check. The entry is taken by `memory` so an immediate L2Tx can run straight from calldata.
 
 ```
-if (entry.stateDeltas.length == 0) revert EntryHasNoStateDeltas   // redundant guard; backs _insideExecution()
+if (entry.stateUpdates.length == 0) revert EntryHasNoStateUpdates   // redundant guard; backs _insideExecution()
 
-for delta in entry.stateDeltas:
+for delta in entry.stateUpdates:
     if (rollups[delta.rollupId].stateRoot != delta.currentState) revert StateRootMismatch(delta.rollupId)
     _verifiedRollupInCurrentExecutingEntry.push(delta.rollupId)    // allowed set; flips _insideExecution() true
 
-_rollingHashEntryBegin(entry.stateDeltas, entry.proxyEntryHash)    // seed: starting state + identity (§E)
+_rollingHashEntryBegin(entry.stateUpdates, entry.proxyEntryHash)    // seed: starting state + identity (§E)
 _lastL1ToL2CallConsumed = 0
 
 _processNCalls(entry.l2ToL1Calls)                                  // the entry's TOP-LEVEL calls, whole array
-totalEtherDelta = _applyStateDeltas(entry.stateDeltas)             // newState applies AFTER the calls
+totalEtherDelta = _applyStateUpdates(entry.stateUpdates)             // newState applies AFTER the calls
 
 if (_rollingHash != entry.rollingHash) revert RollingHashMismatch  // a CALL_NOT_FOUND fold surfaces here too
 if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch
@@ -667,7 +667,7 @@ Processes the WHOLE `calls` array — the entry's top-level calls, a reentrant f
 
 - If `revertNextNCalls == 0`:
   1. Fold `CALL_BEGIN` with the call's identity: `computeCrossChainCallHash(cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, MAINNET_ROLLUP_ID, cc.value, cc.data)` (L2 substitutes `ROLLUP_ID` for the target).
-  2. Derive `sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId)`; auto-create it if not registered. (No source check here — every executed call's `sourceRollupId` was validated ∈ `stateDeltas` at batch validation.)
+  2. Derive `sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId)`; auto-create it if not registered. (No source check here — every executed call's `sourceRollupId` was validated ∈ `stateUpdates` at batch validation.)
   3. Dispatch: if `cc.isStatic`, revert `StaticCallWithValue` when `cc.value != 0`, then `sourceProxy.staticcall(executeOnBehalf(target, data))`; else `sourceProxy.call{value: cc.value}(executeOnBehalf(target, data))`, and on success with `cc.value > 0`, `_entryEtherDelta -= int256(cc.value)`.
   4. Fold `CALL_END(success, retData)`; emit `CallResult(_currentEntryIndex, i, success, retData)`; `i++`.
 - If `revertNextNCalls > 0` (force-revert span):
@@ -694,7 +694,7 @@ The unconditional revert rolls back all storage and transient writes inside the 
 
 Defined on `EEZBase` with direction-neutral names. Verifies `bytes4(revertData) == ContextResult.selector` AND `revertData.length >= 100` (4 + 3×32) else `UnexpectedContextRevert(revertData)`; then assembly-loads three words at offsets 36, 68, 100 (`rollingHash`, `reentrantConsumed`, `callsProcessed`).
 
-##### `_applyStateDeltas(StateDelta[] memory deltas) → int256 totalEtherDelta`
+##### `_applyStateUpdates(StateUpdate[] memory deltas) → int256 totalEtherDelta`
 
 For each delta (the `currentState` precondition was already checked upfront in `_executeEntry`; roots are immutable mid-execution):
 - `rollups[delta.rollupId].stateRoot = delta.newState`.
@@ -743,7 +743,7 @@ Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value
 
 ##### `entryHashes` for the public-inputs preimage
 
-Each entry's contribution is `keccak256(abi.encode(entry))` — the FULL `ExecutionEntry` struct, including `stateDeltas` (which carry the entry's `currentState` precondition), `proxyEntryHash`, `l2ToL1Calls`, the unified `expectedL1ToL2Calls`, `rollingHash`, `destinationRollupId`, `success`, and `returnData`. Same for static entries (`keccak256(abi.encode(staticEntry))`). See `MULTI_PROVER_SPEC.md` for the full per-PS public-inputs construction.
+Each entry's contribution is `keccak256(abi.encode(entry))` — the FULL `ExecutionEntry` struct, including `stateUpdates` (which carry the entry's `currentState` precondition), `proxyEntryHash`, `l2ToL1Calls`, the unified `expectedL1ToL2Calls`, `rollingHash`, `destinationRollupId`, `success`, and `returnData`. Same for static entries (`keccak256(abi.encode(staticEntry))`). See `MULTI_PROVER_SPEC.md` for the full per-PS public-inputs construction.
 
 ##### Per-PS verify (inlined in `_verifyProofSystemBatch`)
 
@@ -776,7 +776,7 @@ lastLoadBlock = block.number
 emit ExecutionTableLoaded(_entries)
 ```
 
-`onlySystemAddress` reverts `Unauthorized` for any other caller. The L2 `ExecutionEntry` struct has no `destinationRollupId` and no `stateDeltas` (see §A.1 — `IEEZL2.sol`).
+`onlySystemAddress` reverts `Unauthorized` for any other caller. The L2 `ExecutionEntry` struct has no `destinationRollupId` and no `stateUpdates` (see §A.1 — `IEEZL2.sol`).
 
 #### `executeIncomingCrossChainCall` (L2 inbound delivery)
 
@@ -838,6 +838,8 @@ constructor(address _eez)
 ```
 
 One immutable: `EEZ` (`src/base/CrossChainProxy.sol`), holding the manager address (L1 `EEZ` or L2 `EEZL2`). The `(originalAddress, originalRollupId)` pair lives in the CREATE2 salt and the manager's `authorizedProxies` mapping. The proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
+
+The constructor sweeps any ether predeployed at the proxy address (otherwise stuck) to `IEEZ(_eez).RECOVERY_ADDRESS()`, best-effort — a failed transfer never blocks creation. `RECOVERY_ADDRESS()` is on the shared `IEEZ` interface: an immutable on L1 (non-zero, else `InvalidRecoveryAddress`), `SYSTEM_ADDRESS` on L2.
 
 #### `executeOnBehalf(address destination, bytes calldata data) external payable`
 
@@ -924,7 +926,7 @@ Entries in `verificationByRollup[rid].entryQueue` (or `_transientEntries` during
 ```
 entry.proxyEntryHash      == crossChainCallHash        // identity
 entry.destinationRollupId == destRid                   // routing
-every stateDeltas[i].currentState == live root         // state preconditions
+every stateUpdates[i].currentState == live root         // state preconditions
 ```
 
 The cursor is then set to `matchIndex + 1`. A non-matching entry (wrong hash, wrong routing, stale state) is **skipped**, not reverted on; the scan reverts `ExecutionNotFound` only at the end of the queue. A consumed entry with `success == false` runs, verifies, then reverts with its `returnData` — rolling back the cursor advance — so it is re-callable and only drops out of reach once a later successful consumption advances past it. There is no swap-and-pop.
@@ -1083,7 +1085,7 @@ Note the distinction inside the unified table: a **static** row's sub-array runs
 Setup (L1 names; the L2 chain is identical with `incomingCalls` / `expectedOutgoingCalls` / `_lastOutgoingCallConsumed` and the delta-less seed):
 
 ```
-entry.stateDeltas         = [ d0 ]
+entry.stateUpdates         = [ d0 ]
 entry.proxyEntryHash      = P
 entry.l2ToL1Calls         = [c0, c1]           // top-level calls
 entry.expectedL1ToL2Calls = [ R0 ]
@@ -1256,7 +1258,7 @@ Within a single `postAndVerifyBatch`:
 2. Mark `verificationByRollup[rid].lastVerifiedBlock = block.number` for every touched rollup; wipe each touched rollup's queues / cursor on every verify (`_markVerifiedBlockAndDeletePreviousEntries`).
 3. Drain the leading run of immediate L2Txs (`proxyEntryHash == 0`) via try/catch self-calls (skip-on-revert with `L2TxSkipped`; `AllImmediateL2TxsFailed` if a non-empty run had zero successes).
 4. Meta hook runs if immediate-prefix entries remain past the L2Tx run AND `msg.sender` has code — the remainder is pushed to the transient tables first (consumption advances the global `_transientEntryIndex`; per-rollup cursors stay untouched until persistent consumption).
-5. Publish the batch's remainder to per-rollup queues by `destinationRollupId` (unconditionally — even if the transient prefix wasn't fully drained; there is no drain-cleanly gate). Soundness backstop is `StateDelta.currentState`.
+5. Publish the batch's remainder to per-rollup queues by `destinationRollupId` (unconditionally — even if the transient prefix wasn't fully drained; there is no drain-cleanly gate). Soundness backstop is `StateUpdate.currentState`.
 6. Wipe transient tables; reset `_transientEntryIndex`. Emit `BatchPosted(batch.rollupIdsWithProofSystems.length)`.
 
 ### G.2 L2 Loading
@@ -1282,14 +1284,14 @@ Each `postAndVerifyBatch` wipes the touched rollups' queues (on every verify, in
 ### H.1 State Root Consistency (L1)
 
 `rollups[id].stateRoot` is updated only:
-- By `_applyStateDeltas` (during `_executeEntry`, reached from `postAndVerifyBatch`'s immediate run, the meta hook, `executeCrossChainCall`, or `executeL2Txs`).
+- By `_applyStateUpdates` (during `_executeEntry`, reached from `postAndVerifyBatch`'s immediate run, the meta hook, `executeCrossChainCall`, or `executeL2Txs`).
 - By `setStateRoot(rid, newRoot)` from the rollup's manager (subject to the same-block lockout and the mid-execution guard).
 
-The previous-state binding lives on the entry: `StateDelta.currentState` is checked both as part of the consumption match (`_entryMatches`) and as a hard gate at `_executeEntry` start (`StateRootMismatch(id)` — the gate that covers the immediate L2Tx path, which doesn't pass through `_entryMatches`). `newState` applies only **after** the entry's calls, so mid-execution reads see the pre-state. The proof itself binds to the FULL `ExecutionEntry` struct (including `stateDeltas`), so a stale builder either fails proof verification or fails the on-chain `currentState` match. This dual binding is the per-rollup-queue model's soundness backstop.
+The previous-state binding lives on the entry: `StateUpdate.currentState` is checked both as part of the consumption match (`_entryMatches`) and as a hard gate at `_executeEntry` start (`StateRootMismatch(id)` — the gate that covers the immediate L2Tx path, which doesn't pass through `_entryMatches`). `newState` applies only **after** the entry's calls, so mid-execution reads see the pre-state. The proof itself binds to the FULL `ExecutionEntry` struct (including `stateUpdates`), so a stale builder either fails proof verification or fails the on-chain `currentState` match. This dual binding is the per-rollup-queue model's soundness backstop.
 
 ### H.2 Ether Accounting (L1)
 
-For each entry: `totalEtherDelta == _entryEtherDelta`, where `totalEtherDelta` is the sum of the entry's `stateDeltas[].etherDelta` and `_entryEtherDelta` is the entry's net physical flow — ALL `msg.value` received via `executeCrossChainCall` during the entry (the entry-point call's value plus every reentrant call's; 0 for `executeL2Txs` and immediate entries unless reentrant receipts occur) MINUS the `value` of every **successful** non-static outbound call. Calls inside a `revertNextNCalls` span contribute to neither side — their ETH transfers and their `_entryEtherDelta` subtractions are rolled back by the span's revert, even though the rolling hash still records them as successful.
+For each entry: `totalEtherDelta == _entryEtherDelta`, where `totalEtherDelta` is the sum of the entry's `stateUpdates[].etherDelta` and `_entryEtherDelta` is the entry's net physical flow — ALL `msg.value` received via `executeCrossChainCall` during the entry (the entry-point call's value plus every reentrant call's; 0 for `executeL2Txs` and immediate entries unless reentrant receipts occur) MINUS the `value` of every **successful** non-static outbound call. Calls inside a `revertNextNCalls` span contribute to neither side — their ETH transfers and their `_entryEtherDelta` subtractions are rolled back by the span's revert, even though the rolling hash still records them as successful.
 
 Each entry independently balances — ether accounting is localized to a single entry rather than aggregated across the transaction — which simplifies the prover's job.
 
@@ -1328,13 +1330,13 @@ All execution entries posted in a given block must be consumed in that block —
 
 ### H.8 Per-Rollup Queue Soundness
 
-The deferred remainder of a `postAndVerifyBatch` is published unconditionally to per-rollup queues. Partial transient drain does not drop persistent entries; the soundness backstop is `StateDelta.currentState`, checked at consumption. Entries whose recorded pre-state doesn't match the on-chain state at consumption are skipped by the match scan and, if reached directly (immediate path), revert `StateRootMismatch`.
+The deferred remainder of a `postAndVerifyBatch` is published unconditionally to per-rollup queues. Partial transient drain does not drop persistent entries; the soundness backstop is `StateUpdate.currentState`, checked at consumption. Entries whose recorded pre-state doesn't match the on-chain state at consumption are skipped by the match scan and, if reached directly (immediate path), revert `StateRootMismatch`.
 
 ### H.9 Reentry Guard for `postAndVerifyBatch`
 
 `postAndVerifyBatch` re-entered from any path reverts `PostBatchReentry` — the guard is `_insideExecution() || _transientEntries.length != 0` at the top of the function (there is no separate `_inPostBatch` flag). The two terms cover every window in which a state-mutating external call is in flight: `_insideExecution()` during the immediate L2Tx run and any executing entry, `_transientEntries.length != 0` during the meta hook. The remaining external calls before the immediate run (`checkProofSystemsAndGetVkeys`, `getCustomData`, `verify`) are all `view`/STATICCALL, so a reentrant batch (which SSTOREs immediately) can't survive there regardless.
 
-Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch` calls is **permitted**: `_markVerifiedBlockAndDeletePreviousEntries` wipes the rollup's queue and cursor on every verify, so the second batch's entries REPLACE the first batch's. Safe because state only mutates at consumption and every entry is gated by `StateDelta.currentState` — discarding unconsumed-but-proven entries is a liveness choice, not a safety one.
+Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch` calls is **permitted**: `_markVerifiedBlockAndDeletePreviousEntries` wipes the rollup's queue and cursor on every verify, so the second batch's entries REPLACE the first batch's. Safe because state only mutates at consumption and every entry is gated by `StateUpdate.currentState` — discarding unconsumed-but-proven entries is a liveness choice, not a safety one.
 
 ---
 
@@ -1344,7 +1346,7 @@ Same-block re-touch of a rollup across separate (non-nested) `postAndVerifyBatch
 
 `postAndVerifyBatch` verifies one proof per `(batch, proofSystem)` pair. Each proof's public-inputs hash covers (see `MULTI_PROVER_SPEC.md` for the exact construction):
 
-- Every entry hash — `keccak256(abi.encode(entry))` over the FULL `ExecutionEntry` struct (including `stateDeltas` with `currentState`, `proxyEntryHash`, `l2ToL1Calls`, the unified `expectedL1ToL2Calls`, `rollingHash`, `destinationRollupId`, `success`, `returnData`).
+- Every entry hash — `keccak256(abi.encode(entry))` over the FULL `ExecutionEntry` struct (including `stateUpdates` with `currentState`, `proxyEntryHash`, `l2ToL1Calls`, the unified `expectedL1ToL2Calls`, `rollingHash`, `destinationRollupId`, `success`, `returnData`).
 - Every static-entry hash — `keccak256(abi.encode(staticEntry))`.
 - Every selected blob hash (for data availability).
 - Per-rollup `customData` blob fetched via `IRollupContract.getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment), hashed keyed by rollupId and bound into `sharedPublicInput` (shared across all PS, not per-PS).
@@ -1367,7 +1369,7 @@ The protocol is intentionally reentrant. `_processNCalls` calls into proxies, wh
 `postAndVerifyBatch` invokes `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` when non-L2Tx immediate entries remain and `msg.sender` has code. The hook is untrusted — it may revert, consume some entries, ignore the call, or attempt to re-enter `postAndVerifyBatch`. The protocol's defense:
 
 - **Re-entry**: blocked by `PostBatchReentry` — see §H.9 / I.2.
-- **Partial consumption**: the persistent remainder is published anyway; `StateDelta.currentState` is the soundness backstop at consumption time.
+- **Partial consumption**: the persistent remainder is published anyway; `StateUpdate.currentState` is the soundness backstop at consumption time.
 - **Hook revert**: the entire `postAndVerifyBatch` reverts (atomicity), which rolls back every write — `lastVerifiedBlock`, the queue wipes, the immediate entries, the transient stream. The next caller can re-attempt cleanly.
 
 ### I.4 Access Control Summary
@@ -1420,8 +1422,8 @@ No path exists where execution diverges from the proof and still completes succe
 
 Every proxy an entry can drive must be backed by a rollup the entry actually proved:
 
-- **Validation-time (batch)**: every entry's `destinationRollupId` and every flat call's `sourceRollupId` (top-level + each reentrant frame's sub-calls) must be ∈ the entry's `stateDeltas` rollups (`EntryDestinationNotInStateDeltas` / `CallSourceNotVerified`); every static entry's `destinationRollupId` and sub-call sources must be ∈ its `expectedStateRoots` pins (`StaticEntryDestinationNotPinned` / `CallSourceNotVerified`).
-- **Runtime**: reentrant / static-read TARGETS carry no clear-text rollup field at post time, so `_consumeNestedCall` and `staticCrossChainCall` check the calling proxy's rollup against the executing entry's allowed set `_verifiedRollupInCurrentExecutingEntry` (its `stateDeltas` rollupIds) — `ReentrantDestinationNotVerified` on failure.
+- **Validation-time (batch)**: every entry's `destinationRollupId` and every flat call's `sourceRollupId` (top-level + each reentrant frame's sub-calls) must be ∈ the entry's `stateUpdates` rollups (`EntryDestinationNotInStateUpdates` / `CallSourceNotVerified`); every static entry's `destinationRollupId` and sub-call sources must be ∈ its `expectedStateRoots` pins (`StaticEntryDestinationNotPinned` / `CallSourceNotVerified`).
+- **Runtime**: reentrant / static-read TARGETS carry no clear-text rollup field at post time, so `_consumeNestedCall` and `staticCrossChainCall` check the calling proxy's rollup against the executing entry's allowed set `_verifiedRollupInCurrentExecutingEntry` (its `stateUpdates` rollupIds) — `ReentrantDestinationNotVerified` on failure.
 
 Together these ensure a batch cannot use a proxy of a rollup it did not verify, in any position of the execution tree. L2 has no equivalent (single rollup, trusted system-loaded tables).
 
