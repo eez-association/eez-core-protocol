@@ -105,7 +105,8 @@ abstract contract BlobScenarioBase is Test {
         _assertMsgsEq(store.toMessages(), msgs, "IR round trip");
 
         // 3. Observe each L2-sourced call's `callGas` (probe calls against empty tables) —
-        //    the values the source chains fold into their outgoing keys.
+        //    the values the source chains fold into their outgoing keys. All 0 while the
+        //    managers run `useGasLeft = false`; see the probing section at the end of this file.
         _createProxies(store);
         uint64[] memory gasByNode = _probeAllCallGas(store);
 
@@ -137,54 +138,6 @@ abstract contract BlobScenarioBase is Test {
     ///         no reproducibility — it only bounds the proxy's static-context probe burn (see
     ///         `ScriptedActor._dispatchStatic`).
     uint64 internal constant STATIC_STEP_GAS = 5_000_000;
-
-    /// @notice Observes, per L2-sourced mutable node, the exact `callGas` its consuming proxy call
-    ///         will fold into the source chain's key: probes twice against an empty table (block
-    ///         gate satisfied, guaranteed no-match) — the first call warms the access path, the
-    ///         second measures it warm — reading the value from `EntryNotFound(hash, callGas)`.
-    function _probeAllCallGas(ScenarioStore store) internal returns (uint64[] memory gasByNode) {
-        uint256 n = store.nodeCount();
-        gasByNode = new uint64[](n);
-        uint256[] memory depths = new uint256[](n);
-        for (uint256 t = 0; t < store.txCount(); t++) {
-            _fillDepths(store, store.getTx(t).rootCalls, 0, depths);
-        }
-
-        bool[] memory gateLoaded = new bool[](l2ChainCount + 1);
-        for (uint256 id = 0; id < n; id++) {
-            CallNode memory node = store.getNode(id);
-            if (node.isStatic || node.fromChain == L1) continue;
-            EEZL2 m = managers[node.fromChain];
-            if (!gateLoaded[node.fromChain]) {
-                vm.prank(SYSTEM_ADDRESS);
-                m.loadExecutionTable(new L2ExecutionEntry[](0), new L2StaticExecutionEntry[](0));
-                gateLoaded[node.fromChain] = true;
-            }
-            address proxyAddr = m.computeCrossChainProxyAddress(node.toAddress, node.toChain);
-            uint64 stepGas = _gasAtDepth(depths[id]);
-            uint64 observed;
-            for (uint256 k = 0; k < 2; k++) {
-                vm.prank(node.fromAddress);
-                (bool ok, bytes memory err) = proxyAddr.call{value: node.value, gas: stepGas}(node.data);
-                require(!ok, "probe: unexpectedly matched an entry");
-                require(bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
-                assembly {
-                    observed := mload(add(err, 0x44))
-                }
-            }
-            gasByNode[id] = observed;
-        }
-    }
-
-    function _fillDepths(ScenarioStore store, uint256[] memory siblings, uint256 d, uint256[] memory depths)
-        internal
-        view
-    {
-        for (uint256 i = 0; i < siblings.length; i++) {
-            depths[siblings[i]] = d;
-            _fillDepths(store, store.getNode(siblings[i]).children, d + 1, depths);
-        }
-    }
 
     function _checkCodecRoundTrip(BlobMessage[] memory msgs) internal pure {
         (bytes memory blobPortion, bytes memory tail) = BlobCodec.encode(msgs);
@@ -573,6 +526,65 @@ abstract contract BlobScenarioBase is Test {
         assertEq(got.length, want.length, string.concat(ctx, ": message count"));
         for (uint256 i = 0; i < want.length; i++) {
             assertTrue(Msg.eq(got[i], want[i]), string.concat(ctx, ": message mismatch at index ", vm.toString(i)));
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  callGas probing — DORMANT under `useGasLeft = false`
+    // ──────────────────────────────────────────────
+    //
+    //  The harness deploys every `EEZL2` with `useGasLeft = false`, so these probes trivially
+    //  observe 0 for every node and the `gasByNode` oracle no longer influences any hash. The
+    //  phase is kept in the pipeline (`runScenario` step 3) because it is the ONLY way to build
+    //  the oracle under the future observed-gas mode (`useGasLeft = true`) — the whole flow
+    //  (probe → `TableGenerator._sourceCch` keys → stitcher callGas sidecar) stays wired and
+    //  behavior-identical the day the flag flips.
+
+    /// @notice Observes, per L2-sourced mutable node, the exact `callGas` its consuming proxy call
+    ///         will fold into the source chain's key: probes twice against an empty table (block
+    ///         gate satisfied, guaranteed no-match) — the first call warms the access path, the
+    ///         second measures it warm — reading the value from `EntryNotFound(hash, callGas)`.
+    function _probeAllCallGas(ScenarioStore store) internal returns (uint64[] memory gasByNode) {
+        uint256 n = store.nodeCount();
+        gasByNode = new uint64[](n);
+        uint256[] memory depths = new uint256[](n);
+        for (uint256 t = 0; t < store.txCount(); t++) {
+            _fillDepths(store, store.getTx(t).rootCalls, 0, depths);
+        }
+
+        bool[] memory gateLoaded = new bool[](l2ChainCount + 1);
+        for (uint256 id = 0; id < n; id++) {
+            CallNode memory node = store.getNode(id);
+            if (node.isStatic || node.fromChain == L1) continue;
+            EEZL2 m = managers[node.fromChain];
+            if (!gateLoaded[node.fromChain]) {
+                vm.prank(SYSTEM_ADDRESS);
+                m.loadExecutionTable(new L2ExecutionEntry[](0), new L2StaticExecutionEntry[](0));
+                gateLoaded[node.fromChain] = true;
+            }
+            address proxyAddr = m.computeCrossChainProxyAddress(node.toAddress, node.toChain);
+            uint64 stepGas = _gasAtDepth(depths[id]);
+            uint64 observed;
+            for (uint256 k = 0; k < 2; k++) {
+                vm.prank(node.fromAddress);
+                (bool ok, bytes memory err) = proxyAddr.call{value: node.value, gas: stepGas}(node.data);
+                require(!ok, "probe: unexpectedly matched an entry");
+                require(bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
+                assembly {
+                    observed := mload(add(err, 0x44))
+                }
+            }
+            gasByNode[id] = observed;
+        }
+    }
+
+    function _fillDepths(ScenarioStore store, uint256[] memory siblings, uint256 d, uint256[] memory depths)
+        internal
+        view
+    {
+        for (uint256 i = 0; i < siblings.length; i++) {
+            depths[siblings[i]] = d;
+            _fillDepths(store, store.getNode(siblings[i]).children, d + 1, depths);
         }
     }
 }

@@ -21,6 +21,7 @@ import {Counter, CounterAndProxy, NestedCaller} from "../../../test/mocks/Counte
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noCalls,
@@ -135,16 +136,19 @@ abstract contract DeepNestedActions {
     // SameNetworkProxy(1)), so each reentrant hash's targetRollupId is MAINNET_ROLLUP_ID. The
     // proxies still route through managerL2 to trigger nested-action consumption.
 
-    /// @dev L2 nested[1]: CAP on L2 calls counterProxyOnL2 (representing Counter on L2)
+    /// @dev L2 nested[1]: CAP on L2 calls counterProxyOnL2 (representing Counter on L2). The call
+    ///      leaves the L2, so EEZL2 keys it with the gas-folding L2-out hash (`callGas` = 0 — the
+    ///      devnet deploys `EEZL2` with `useGasLeft = false`).
     function _l2CounterActionHash(address counterL2, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
+        return crossChainCallHashL2Out(
             MAINNET_ROLLUP_ID, counterL2, 0, abi.encodeWithSelector(Counter.increment.selector), capL2, L2_ROLLUP_ID
         );
     }
 
-    /// @dev L2 nested[0]: NestedCaller on L2 calls capProxyOnL2 (representing CAP on L2)
+    /// @dev L2 nested[0]: NestedCaller on L2 calls capProxyOnL2 (representing CAP on L2). The call
+    ///      leaves the L2, so EEZL2 keys it with the gas-folding L2-out hash (`callGas` = 0).
     function _l2CapActionHash(address capL2, address ncL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
+        return crossChainCallHashL2Out(
             MAINNET_ROLLUP_ID,
             capL2,
             0,
@@ -163,7 +167,7 @@ abstract contract DeepNestedActions {
     }
 
     /// @dev L2 call inside nested[0]'s frame: manager runs CAP L2.incrementProxy() on this L2
-    ///      (target rollup = L2_ROLLUP_ID) via sourceProxy(ncL2, MAINNET). PENDING EEZL2.
+    ///      (target rollup = L2_ROLLUP_ID) via sourceProxy(ncL2, MAINNET). CALL_BEGIN fold — gas-free.
     function _l2CapCallHash(address capL2, address ncL2) internal pure returns (bytes32) {
         return crossChainCallHash(
             L2_ROLLUP_ID,
@@ -276,7 +280,8 @@ abstract contract DeepNestedActions {
     /// L2 contracts (NestedCaller → CAP → Counter) wired via cross-chain proxies on
     /// L2 that route back through managerL2, so the nested-call consumption fires
     /// identically. The rolling hash mirrors the L1 entry's structure.
-    /// NOTE: L2 rolling-hash + outgoing-call keying are PENDING EEZL2 (impl not migrated); re-verify when EEZL2.sol lands.
+    /// Outgoing reentrant rows (NC->cap, CAP->counter) key with the gas-folding L2-out hash — the
+    /// same hash EEZL2 folds into NESTED_BEGIN; CALL_BEGIN folds stay gas-free.
     function _l2Entries(address counterL2, address capL2, address ncL2, address alice)
         internal
         pure
@@ -310,7 +315,9 @@ abstract contract DeepNestedActions {
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         });
 
-        // PENDING EEZL2: rolling-hash threading + outgoing keying mirror the L1 algorithm.
+        // Rolling-hash threading mirrors the L1 algorithm. ccCap/ccCounter are gas-folding L2-out
+        // hashes — EEZL2 folds NESTED_BEGIN and keys expectedOutgoingHash with the hash it computes
+        // at executeCrossChainCall entry; the CALL_BEGIN hashes (ccOuter, ccCapCall) stay gas-free.
         bytes32 ccOuter = _l2OuterActionHash(ncL2, alice);
         bytes32 ccCap = _l2CapActionHash(capL2, ncL2);
         bytes32 ccCapCall = _l2CapCallHash(capL2, ncL2);
@@ -330,14 +337,14 @@ abstract contract DeepNestedActions {
 
         ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](2);
         nested[0] = ExpectedOutgoingCrossChainCall({
-            expectedOutgoingHash: expectedL1toL2Hash(ccCap, rhFire0), // PENDING EEZL2 keying
+            expectedOutgoingHash: expectedL1toL2Hash(ccCap, rhFire0),
             incomingCalls: capCalls,
             revertedOrStaticRollingHash: bytes32(0),
             success: true,
             returnData: ""
         });
         nested[1] = ExpectedOutgoingCrossChainCall({
-            expectedOutgoingHash: expectedL1toL2Hash(ccCounter, rhFire1), // PENDING EEZL2 keying
+            expectedOutgoingHash: expectedL1toL2Hash(ccCounter, rhFire1),
             incomingCalls: noL2Calls(),
             revertedOrStaticRollingHash: bytes32(0),
             success: true,

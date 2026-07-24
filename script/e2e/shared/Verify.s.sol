@@ -36,14 +36,16 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     // ExpectedLookup; unified expectedOutgoingCalls; trailing success flag).
     //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
     //                      proxyEntryHash  incomingCalls  expectedOutgoingCalls          rollingHash success ret
-    //   CrossChainCall  = (uint16, bool, address, uint64, address, uint256, bytes)  // leading revertNextNCalls
+    //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)  // revertNextNCalls, isStatic, gas, ...
     //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(uint16,bool,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
     );
 
-    // CrossChainCallExecuted(bytes32 crossChainCallHash, address proxy, address sourceAddress, bytes callData, uint256 value)
-    bytes32 constant SIG_CROSSCHAIN_CALL = keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
+    // L2's CrossChainCallExecuted — 6 fields, trailing uint64 callGas (topic0 differs from L1's
+    // 5-field event; this constant is only matched against L2 manager logs).
+    bytes32 constant SIG_CROSSCHAIN_CALL =
+        keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256,uint64)");
 
     function _printEntryDetailed(uint256 idx, ExecutionEntry memory e) internal pure {
         bool immediate = e.proxyEntryHash == bytes32(0);

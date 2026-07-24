@@ -15,6 +15,7 @@ import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     noStaticEntries,
     noNestedActions,
     noL2Calls,
@@ -51,8 +52,19 @@ abstract contract CounterL2Actions {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
 
-    function _callHash(address counterL1, address capL2) internal pure returns (bytes32) {
+    // The SAME logical call (CAP on L2 → Counter on L1) is hashed twice with different formulas:
+    // the destination L1 folds CALL_BEGIN with the gas-free 7-field hash, while the source L2
+    // matches the outgoing call with the gas-folding 8-field key (`callGas` = 0 — the devnet
+    // deploys `EEZL2` with `useGasLeft = false`). Same args, different digests.
+
+    /// @dev Gas-free identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
+    function _l1CallHash(address counterL1, address capL2) internal pure returns (bytes32) {
         return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), capL2, L2_ROLLUP_ID);
+    }
+
+    /// @dev Gas-folding key the SOURCE L2 matches the outgoing call with.
+    function _l2EntryKey(address counterL1, address capL2) internal pure returns (bytes32) {
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), capL2, L2_ROLLUP_ID);
     }
 
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`
@@ -63,7 +75,7 @@ abstract contract CounterL2Actions {
         pure
         returns (L2ExecutionEntry[] memory entries)
     {
-        bytes32 proxyEntryHash = _callHash(counterL1, counterAndProxyL2);
+        bytes32 proxyEntryHash = _l2EntryKey(counterL1, counterAndProxyL2);
         // Seed-only rolling hash (no incoming calls).
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
 
@@ -107,7 +119,7 @@ abstract contract CounterL2Actions {
             etherDelta: 0
         });
 
-        bytes32 ccTop = _callHash(counterL1, counterAndProxyL2);
+        bytes32 ccTop = _l1CallHash(counterL1, counterAndProxyL2);
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
         rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1)));

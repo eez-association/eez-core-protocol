@@ -20,6 +20,7 @@ import {Counter} from "../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     noStaticEntries,
     noNestedActions,
     noL2OutgoingCalls,
@@ -74,9 +75,11 @@ abstract contract RevertL2Actions {
         return abi.encode(uint256(1));
     }
 
-    /// @dev Outer action hash: alice calls counterProxy (Counter L1) on L2.
+    /// @dev Outer action hash: alice calls counterProxy (Counter L1) on L2 — an outgoing call,
+    ///      so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0 — the devnet
+    ///      deploys `EEZL2` with `useGasLeft = false`).
     function _outerActionHash(address counterL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), alice, L2_ROLLUP_ID);
     }
 
     function _l2Entries(address counterL2, address counterL1, address alice)

@@ -21,6 +21,7 @@ import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContract
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     RollingHashBuilder,
@@ -127,10 +128,12 @@ abstract contract RevertContinueActions {
         );
     }
 
-    /// @dev Inner action hash on L2: SelfCaller (on L2) calls counterProxy (Counter on MAINNET).
-    ///      Manager forces sourceRollupId=ROLLUP_ID (=L2) for L2-issued reentrant calls.
+    /// @dev Inner action hash on L2: SelfCaller (on L2) calls counterProxy (Counter on MAINNET) —
+    ///      the call LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet
+    ///      deploys EEZL2 with useGasLeft=false). Manager forces sourceRollupId=ROLLUP_ID (=L2)
+    ///      for L2-issued reentrant calls.
     function _innerActionHashL2(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
+        return crossChainCallHashL2Out(
             MAINNET_ROLLUP_ID,
             counterL1,
             0,
@@ -159,7 +162,7 @@ abstract contract RevertContinueActions {
 
         bytes32 proxyEntryHash = _outerActionHashL2(selfCallerL2, batcherL1);
         bytes32 ccInner = _innerActionHashL2(counterL1, selfCallerL2);
-        // PENDING EEZL2: top-level CALL_BEGIN on L2 folds the incoming `execute()` call hashed with the
+        // Top-level CALL_BEGIN on L2 folds the incoming `execute()` call gas-free, hashed with the
         // L2's own id as targetRollupId (== `_outerActionHashL2`, which already uses L2_ROLLUP_ID).
         (bytes32 rollingHash, bytes32 rhFire) =
             _foldRevertContinue(RollingHashBuilder.entryBeginL2(proxyEntryHash), proxyEntryHash, ccInner);
