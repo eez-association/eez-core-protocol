@@ -34,6 +34,7 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     function test_RoundTrip_WithCallsAndData() public {
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 3,
             isStatic: true,
             sourceAddress: address(0xABCD),
@@ -43,6 +44,7 @@ contract ExpectedL1ToL2CallTransientTest is Test {
             data: hex"deadbeef"
         });
         calls[1] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(0xBEEF),
@@ -68,6 +70,7 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     function test_RoundTrip_HeaderPackingExtremes() public {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: type(uint16).max,
             isStatic: true,
             sourceAddress: address(type(uint160).max),
@@ -120,14 +123,14 @@ contract ExpectedL1ToL2CallTransientTest is Test {
         cs[1].success = true;
         cs[1].returnData = hex"1234";
         cs[1].l2ToL1Calls = new L2ToL1Call[](1);
-        cs[1].l2ToL1Calls[0] = L2ToL1Call(0, false, address(0x11), 1, address(0x22), 5, hex"99");
+        cs[1].l2ToL1Calls[0] = L2ToL1Call(0, false, 0, address(0x11), 1, address(0x22), 5, hex"99");
 
         // element 2: two calls, larger data
         cs[2].expectedL1toL2Hash = keccak256("c");
         cs[2].returnData = hex"00112233445566778899aabbccddeeff00112233"; // 20 bytes
         cs[2].l2ToL1Calls = new L2ToL1Call[](2);
-        cs[2].l2ToL1Calls[0] = L2ToL1Call(1, true, address(0x33), 2, address(0x44), 0, "");
-        cs[2].l2ToL1Calls[1] = L2ToL1Call(0, false, address(0x55), 3, address(0x66), 7, hex"abcd");
+        cs[2].l2ToL1Calls[0] = L2ToL1Call(1, true, 0, address(0x33), 2, address(0x44), 0, "");
+        cs[2].l2ToL1Calls[1] = L2ToL1Call(0, false, 0, address(0x55), 3, address(0x66), 7, hex"abcd");
 
         t.storeArray(cs);
 
@@ -151,7 +154,8 @@ contract ExpectedL1ToL2CallTransientTest is Test {
             cs[i].returnData = abi.encodePacked(uint8(i));
             cs[i].l2ToL1Calls = new L2ToL1Call[](i); // 0, 1, 2 calls — variable length per element
             for (uint256 j; j < i; ++j) {
-                cs[i].l2ToL1Calls[j] = L2ToL1Call(uint16(j), false, address(0x10), uint64(j), address(0x20), j, hex"ab");
+                cs[i].l2ToL1Calls[j] =
+                    L2ToL1Call(uint16(j), false, 0, address(0x10), uint64(j), address(0x20), j, hex"ab");
             }
         }
         t.storeArray(cs);

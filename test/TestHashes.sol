@@ -39,6 +39,27 @@ abstract contract TestHashes {
         );
     }
 
+    /// @notice Mirror of `EEZL2.computeCrossChainCallHash` — the gas-folding flavour keying calls
+    ///         that leave an L2 (`callGas` between value and data).
+    function _ccHashGas(
+        bool isStatic,
+        address sourceAddress,
+        uint64 sourceRollupId,
+        address targetAddress,
+        uint64 targetRollupId,
+        uint256 value_,
+        uint64 callGas,
+        bytes memory data
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, callGas, data)
+        );
+    }
+
     /// @notice Mirror of `EEZ._rollingHashEntryBegin` (L1 seed): folds the entry's starting state
     ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
     function _hEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {

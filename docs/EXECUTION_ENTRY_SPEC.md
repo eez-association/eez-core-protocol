@@ -98,6 +98,7 @@ The seven hash inputs alone determine the hash, with no positional or contextual
 struct L2ToL1Call {
     uint16  revertNextNCalls; // >0 = force-revert the next N calls' state effects (this one included)
     bool    isStatic;         // dispatch via STATICCALL (read-only; value must be 0)
+    uint64  gas;              // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress;    // caller identity on the source rollup (used to derive sourceProxy)
     uint64  sourceRollupId;   // caller's rollup ID
     address targetAddress;    // contract to call on this chain

@@ -165,11 +165,12 @@ contract IntegrationTestBridge is IntegrationBase {
         // Fund managerL2 with ETH for the delivery
         vm.deal(address(managerL2), 1 ether);
 
-        // Build the L2 execution entry
-        bytes32 l2TriggerHash = _crossChainCallHash(MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID);
+        // Build the L2 execution entry (outgoing trigger — keyed with the gas-folding L2 hash)
+        bytes32 l2TriggerHash = _ccHashL2Out(alice, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
         l2Calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL1),
@@ -250,8 +251,9 @@ contract IntegrationTestBridge is IntegrationBase {
         // L1 deferred entry: no calls, seed-only rolling hash
         {
             StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] =
-                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0});
+            stateUpdates[0] = StateUpdate({
+                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
+            });
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0].stateUpdates = stateUpdates;
@@ -291,12 +293,13 @@ contract IntegrationTestBridge is IntegrationBase {
         // Create proxy for (bridgeL1, MAINNET) on L2
         address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
 
-        // Trigger crossChainCallHash
-        bytes32 l2TriggerHash = _crossChainCallHash(MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID);
+        // Trigger crossChainCallHash (outgoing trigger — keyed with the gas-folding L2 hash)
+        bytes32 l2TriggerHash = _ccHashL2Out(alice, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         // Entry's calls: route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET)
         CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
         l2Calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL1),
@@ -413,10 +416,11 @@ contract IntegrationTestBridge is IntegrationBase {
 
         address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
 
-        bytes32 l2FwdTriggerHash = _crossChainCallHash(MAINNET_ROLLUP_ID, address(bridgeL1), 0, "", alice, L2_ROLLUP_ID);
+        bytes32 l2FwdTriggerHash = _ccHashL2Out(alice, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         CrossChainCall[] memory fwdL2Calls = new CrossChainCall[](1);
         fwdL2Calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL1),
@@ -471,8 +475,7 @@ contract IntegrationTestBridge is IntegrationBase {
             (address(token), MAINNET_ROLLUP_ID, alice, 100e18, "Test Token", "TT", 18, L2_ROLLUP_ID)
         );
 
-        bytes32 retActionHash =
-            _crossChainCallHash(MAINNET_ROLLUP_ID, address(bridgeL1), 0, retCalldata, address(bridgeL2), L2_ROLLUP_ID);
+        bytes32 retActionHash = _ccHashL2Out(address(bridgeL2), address(bridgeL1), MAINNET_ROLLUP_ID, 0, retCalldata);
 
         {
             L2ExecutionEntry[] memory entries = new L2ExecutionEntry[](1);
@@ -508,6 +511,7 @@ contract IntegrationTestBridge is IntegrationBase {
         // The call inside the entry: proxy(bridgeL2, L2).executeOnBehalf(bridgeL1, retCalldata)
         L2ToL1Call[] memory retL1Calls = new L2ToL1Call[](1);
         retL1Calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL2),

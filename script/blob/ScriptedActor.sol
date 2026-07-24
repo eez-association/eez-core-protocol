@@ -34,6 +34,7 @@ contract ScriptedActor {
         uint8 kind;
         address target; // the cross-chain proxy (on this actor's chain) to call
         uint256 value;
+        uint64 stepGas; // explicit gas for mutable proxy calls (reproduces the probed callGas); 0 = forward all
         bytes data;
         bytes expected; // exact return / revert payload
         uint16 subCount; // STEP_SUBCONTEXT_REVERT: how many following steps the region covers
@@ -94,8 +95,9 @@ contract ScriptedActor {
 
     fallback() external payable {
         // STATICCALL detection: a tstore attempt in a self-call reverts in static
-        // context (same probe CrossChainProxy uses).
-        (bool mutableCtx,) = address(this).call(abi.encodeCall(this.staticProbe, ()));
+        // context (same probe CrossChainProxy uses, same gas cap — the static-context
+        // fault consumes everything forwarded).
+        (bool mutableCtx,) = address(this).call{gas: 1000}(abi.encodeCall(this.staticProbe, ()));
         if (mutableCtx) {
             _run(msg.data);
         } else {
@@ -161,21 +163,36 @@ contract ScriptedActor {
         bool ok;
         bytes memory ret;
         if (s.kind == STEP_CALL) {
-            (ok, ret) = s.target.call{value: s.value}(s.data);
+            (ok, ret) = _dispatch(s);
             require(ok, "ScriptedActor: expected call to succeed");
         } else if (s.kind == STEP_CALL_EXPECT_REVERT) {
-            (ok, ret) = s.target.call{value: s.value}(s.data);
+            (ok, ret) = _dispatch(s);
             require(!ok, "ScriptedActor: expected call to revert");
         } else if (s.kind == STEP_STATIC_READ) {
-            (ok, ret) = s.target.staticcall(s.data);
+            (ok, ret) = _dispatchStatic(s);
             require(ok, "ScriptedActor: expected static read to succeed");
         } else if (s.kind == STEP_STATIC_EXPECT_REVERT) {
-            (ok, ret) = s.target.staticcall(s.data);
+            (ok, ret) = _dispatchStatic(s);
             require(!ok, "ScriptedActor: expected static read to revert");
         } else {
             revert("ScriptedActor: unknown step kind");
         }
         require(keccak256(ret) == keccak256(s.expected), "ScriptedActor: unexpected return/revert data");
+    }
+
+    /// @dev Mutable proxy call with the step's explicit gas when set.
+    function _dispatch(Step storage s) internal returns (bool ok, bytes memory ret) {
+        if (s.stepGas == 0) return s.target.call{value: s.value}(s.data);
+        return s.target.call{value: s.value, gas: s.stepGas}(s.data);
+    }
+
+    /// @dev Static proxy read with the step's explicit gas when set. Capping matters: the proxy's
+    ///      static-context probe (`staticCheck`) burns everything forwarded to it inside a
+    ///      STATICCALL, so an uncapped read would torch ~63/64 of this frame's remaining gas and
+    ///      starve the explicit requests of the steps after it.
+    function _dispatchStatic(Step storage s) internal view returns (bool ok, bytes memory ret) {
+        if (s.stepGas == 0) return s.target.staticcall(s.data);
+        return s.target.staticcall{gas: s.stepGas}(s.data);
     }
 
     function _serveStatic() internal view {

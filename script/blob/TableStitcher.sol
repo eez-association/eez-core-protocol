@@ -70,12 +70,17 @@ contract TableStitcher is TestHashes {
         address fromAddress;
         uint64 toChain;
         address toAddress;
+        uint64 gas;
         bytes data;
     }
 
     SidecarTx[] internal _txMeta;
     SidecarStatic[] internal _statics;
     uint16[] internal _regionSizes;
+    // Observed callGas per L2-sourced mutable call, queued per destination-flavour hash in
+    // execution order (callGas reaches no table — it lives only inside the source-side keys).
+    mapping(bytes32 => uint64[]) internal _callGasQueue;
+    mapping(bytes32 => uint256) internal _callGasCursor;
 
     // ── stitch state ──
     ScenarioStore internal _out;
@@ -158,6 +163,10 @@ contract TableStitcher is TestHashes {
 
     function loadSidecarStatic(SidecarStatic calldata s) external {
         _statics.push(s);
+    }
+
+    function loadSidecarCallGas(bytes32 destCch, uint64 callGas) external {
+        _callGasQueue[destCch].push(callGas);
     }
 
     function loadSidecarRegionSizes(uint16[] calldata sizes) external {
@@ -271,6 +280,7 @@ contract TableStitcher is TestHashes {
         returns (uint256 nodeId)
     {
         CallParams memory p = _resolveByCch(origin, cch);
+        _consumeCallGas(p);
         nodeId = _out.newCall(txId, NONE, p);
         _out.setResult(nodeId, success, returnData);
         _stitchDestination(txId, nodeId, p, success, returnData);
@@ -287,6 +297,7 @@ contract TableStitcher is TestHashes {
             toChain: sc.toChain,
             toAddress: sc.toAddress,
             value: 0,
+            gas: sc.gas,
             data: sc.data
         });
         bytes32 cch = _cchOf(p);
@@ -374,7 +385,8 @@ contract TableStitcher is TestHashes {
                     _foldEnd(p.toChain, rSuccess, rRet);
                 }
             } else {
-                bytes32 cch = _cchOf(p);
+                bytes32 cch = _srcCchOf(p);
+                _consumeCallGas(p);
                 bytes32 fireHash = s.liveHash;
                 s.liveHash = _hNestedBegin(s.liveHash, cch);
                 s.frameRows.push(s.rowCursor - 1);
@@ -423,6 +435,7 @@ contract TableStitcher is TestHashes {
                 toChain: sc.toChain,
                 toAddress: sc.toAddress,
                 value: 0,
+                gas: sc.gas,
                 data: sc.data
             });
             if (keccak256(abi.encodePacked(_cchOf(sp), live)) == key) {
@@ -434,34 +447,50 @@ contract TableStitcher is TestHashes {
         // next pending inbound unit per chain.
         if (x != L1_CHAIN && _sim[L1_CHAIN].active) {
             (bool ok, CallParams memory cp) = _peekArrayItem(L1_CHAIN);
-            if (ok && keccak256(abi.encodePacked(_cchOf(cp), live)) == key) return (true, false, cp);
+            if (ok && keccak256(abi.encodePacked(_srcCchOf(cp), live)) == key) return (true, false, cp);
         }
         for (uint256 i = 0; i < _chains.length; i++) {
             uint64 w = _chains[i];
             if (w == x) continue;
             if (_sim[w].active) {
                 (bool ok, CallParams memory cp) = _peekArrayItem(w);
-                if (ok && keccak256(abi.encodePacked(_cchOf(cp), live)) == key) return (true, false, cp);
+                if (ok && keccak256(abi.encodePacked(_srcCchOf(cp), live)) == key) return (true, false, cp);
             } else {
                 (bool ok, CallParams memory cp) = _peekUnitInbound(w);
-                if (ok && keccak256(abi.encodePacked(_cchOf(cp), live)) == key) return (true, false, cp);
+                if (ok && keccak256(abi.encodePacked(_srcCchOf(cp), live)) == key) return (true, false, cp);
             }
         }
         return (false, false, p);
     }
 
-    /// @notice Resolves a root call's fields by its plain crossChainCallHash (origin
+    /// @notice The hash the SOURCE chain keys `p` with: gas-folding (next queued callGas for this
+    ///         shape, peeked) when the call leaves an L2, the plain formula when it leaves L1.
+    function _srcCchOf(CallParams memory p) internal view returns (bytes32) {
+        if (p.fromChain == L1_CHAIN) return _cchOf(p);
+        bytes32 destCch = _cchOf(p);
+        uint64[] storage q = _callGasQueue[destCch];
+        uint256 cur = _callGasCursor[destCch];
+        uint64 g = cur < q.length ? q[cur] : 0; // exhausted ⇒ hash can't match ⇒ candidate rejected
+        return _ccHashGas(p.isStatic, p.fromAddress, p.fromChain, p.toAddress, p.toChain, p.value, g, p.data);
+    }
+
+    /// @dev Claims the peeked callGas once a candidate is confirmed as the next node.
+    function _consumeCallGas(CallParams memory p) internal {
+        if (p.fromChain != L1_CHAIN && !p.isStatic) _callGasCursor[_cchOf(p)]++;
+    }
+
+    /// @notice Resolves a root call's fields by its source-side crossChainCallHash (origin
     ///         entries key by cch directly, not by position).
     function _resolveByCch(uint64 origin, bytes32 cch) internal view returns (CallParams memory) {
         if (origin != L1_CHAIN && _sim[L1_CHAIN].active) {
             (bool ok, CallParams memory cp) = _peekArrayItem(L1_CHAIN);
-            if (ok && _cchOf(cp) == cch) return cp;
+            if (ok && _srcCchOf(cp) == cch) return cp;
         }
         for (uint256 i = 0; i < _chains.length; i++) {
             uint64 w = _chains[i];
             if (w == origin) continue;
             (bool ok, CallParams memory cp) = _peekUnitInbound(w);
-            if (ok && _cchOf(cp) == cch) return cp;
+            if (ok && _srcCchOf(cp) == cch) return cp;
         }
         revert RoundTripMismatch("root call destination not found");
     }
@@ -594,6 +623,7 @@ contract TableStitcher is TestHashes {
                     toChain: L1_CHAIN,
                     toAddress: c.targetAddress,
                     value: c.value,
+                    gas: c.gas,
                     data: c.data
                 })
             );
@@ -614,6 +644,7 @@ contract TableStitcher is TestHashes {
                 toChain: x,
                 toAddress: c2.targetAddress,
                 value: c2.value,
+                gas: c2.gas,
                 data: c2.data
             })
         );
@@ -668,6 +699,7 @@ contract TableStitcher is TestHashes {
                 toChain: w,
                 toAddress: c.targetAddress,
                 value: c.value,
+                gas: c.gas,
                 data: c.data
             })
         );

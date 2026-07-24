@@ -62,6 +62,7 @@ A single call in a flat call array — the entry's top-level `l2ToL1Calls[]` / `
 struct L2ToL1Call {
     uint16  revertNextNCalls; // >0 force-reverts the next N calls (this one included); see §D.4
     bool    isStatic;         // dispatch via STATICCALL (read-only, no value); see §D.2
+    uint64  gas;              // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress;    // originating address on the source rollup
     uint64  sourceRollupId;   // originating rollup
     address targetAddress;    // call target on this chain
@@ -739,7 +740,34 @@ function computeCrossChainCallHash(
 }
 ```
 
-Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `data`, matching the `L2ToL1Call` struct field order. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHashFull` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
+Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHashFull` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
+
+**L2 keys outgoing calls with a DIFFERENT hash than L1.** `EEZL2.executeCrossChainCall` uses an L2-only overload that folds `callGas` between `value` and `data`:
+
+```solidity
+keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data))
+```
+
+What `callGas` is depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
+
+- `useGasLeft = true` (intended production mode, pending node support): `uint64(gasleft())` observed when `executeCrossChainCall` starts — the gas the caller forwarded with the outgoing call. Because it keys both top-level entry matching (`proxyEntryHash`) and the nested `expectedOutgoingHash`, the prover must commit to the exact forwarded gas (deterministic when replaying the block).
+- `useGasLeft = false` (current deployments and the test fixtures): `callGas` is fixed at `0`, so outgoing hashes are gas-independent and can be pre-computed without observing the forwarded gas. The 8-field encoding is still used — a zero `callGas` does NOT collapse to the gas-free 7-field formula.
+
+Either way the folded value is emitted in L2's `CrossChainCallExecuted` event.
+
+Which formula keys what:
+
+| Matching site | Formula |
+|---|---|
+| Everything on L1 | gas-free |
+| L2 inbound binding (`executeIncomingCrossChainCall` vs `entries[0].proxyEntryHash`) | gas-free |
+| L2 static matching (`staticCrossChainCall`) | gas-free |
+| Calls LEAVING an L2 (`executeCrossChainCall`, top-level + nested) | gas-folding |
+
+`callGas` and the `gas` field on `L2ToL1Call` / `CrossChainCall` are the SAME quantity seen from the two ends of a call: the field is the gas limit the destination manager puts on the target call (`0` = all remaining), and how it is filled depends on which side sourced the call:
+
+- **L1-sourced** call (delivered on an L2): L1 observes nothing — its hash is gas-free and the outgoing side carries no gas at all. The delivered `CrossChainCall.gas` is decided entirely on the L2 side by its table builder (a fixed per-L2 amount, e.g. 500k; currently `0` = all remaining).
+- **L2-sourced** call (delivered on L1 or another L2): the source L2 observes `callGas = gasleft()` at `executeCrossChainCall` (when `USE_GAS_LEFT`; `0` otherwise) and binds it into the call's identity hash. The observed amount is what gets FORWARDED into the delivered call's `gas` field (e.g. `L2ToL1Call.gas`), so the destination executes with the gas the original caller forwarded — but an L2 may opt out of forwarding and put `0` (all remaining) in the delivered field, which is what we do for now.
 
 ##### `entryHashes` for the public-inputs preimage
 

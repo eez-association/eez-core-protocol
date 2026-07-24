@@ -52,6 +52,7 @@ contract TableGenerator is TestHashes {
     error GeneratorInvariant(string reason);
 
     ScenarioStore internal _store;
+    uint64[] internal _gasByNode;
     bool internal _generated;
 
     // ── outputs: L1 ──
@@ -119,10 +120,13 @@ contract TableGenerator is TestHashes {
         return keccak256(abi.encodePacked("blobfw-genesis", rid));
     }
 
-    function generate(ScenarioStore store) external {
+    /// @param gasByNode Observed `callGas` per store node id (0 for L1-sourced and static nodes) —
+    ///        folded into the source-side keys of calls leaving an L2.
+    function generate(ScenarioStore store, uint64[] calldata gasByNode) external {
         if (_generated) revert GeneratorInvariant("already generated");
         _generated = true;
         _store = store;
+        _gasByNode = gasByNode;
 
         uint256 txN = store.txCount();
         for (uint256 t = 0; t < txN; t++) {
@@ -266,8 +270,9 @@ contract TableGenerator is TestHashes {
         } else {
             // Origin entry on the L2 origin chain, consumed by the driver's proxy call.
             uint256 unitIdx = _originUnit(origin, t);
+            bytes32 srcCch = _sourceCch(nodeId, n);
             L2ExecutionEntry storage e = _unitEntries[unitIdx].push();
-            e.proxyEntryHash = cch;
+            e.proxyEntryHash = srcCch;
             uint256 entryPos = _unitEntries[unitIdx].length - 1;
 
             Ctx storage c = _ctx[origin];
@@ -275,7 +280,7 @@ contract TableGenerator is TestHashes {
             c.hostIsL1 = false;
             c.hostUnit = unitIdx;
             c.hostEntry = entryPos;
-            c.liveHash = _hEntryBeginL2(cch);
+            c.liveHash = _hEntryBeginL2(srcCch);
             _clearFrames(c);
 
             _execCall(nodeId, n);
@@ -373,7 +378,7 @@ contract TableGenerator is TestHashes {
         Ctx storage c = _ctx[execChain];
         if (!c.hasHost) revert GeneratorInvariant("reentrant call with no host");
 
-        bytes32 cch = _nodeCch(n);
+        bytes32 cch = _sourceCch(nodeId, n);
         bytes32 fireHash = c.liveHash;
         bytes32 key = keccak256(abi.encodePacked(cch, fireHash));
 
@@ -572,7 +577,9 @@ contract TableGenerator is TestHashes {
             bytes32 cur = _ledgerGet(rid);
             bytes32 newRoot = keccak256(abi.encodePacked("blobfw-step", cur, idx));
             e.stateUpdates
-                .push(StateUpdate({rollupId: rid, currentState: cur, newState: newRoot, etherDelta: _l1Ether[idx][rid]}));
+                .push(
+                    StateUpdate({rollupId: rid, currentState: cur, newState: newRoot, etherDelta: _l1Ether[idx][rid]})
+                );
             _ledgerSet(rid, newRoot);
         }
 
@@ -779,10 +786,21 @@ contract TableGenerator is TestHashes {
         return _ccHash(n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, n.data);
     }
 
+    /// @notice The hash the SOURCE chain keys this call with: gas-folding when the call leaves an
+    ///         L2, the plain formula when it leaves L1.
+    function _sourceCch(uint256 nodeId, CallNode memory n) internal view returns (bytes32) {
+        if (n.fromChain == L1_CHAIN) return _nodeCch(n);
+        return
+            _ccHashGas(
+                n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, _gasByNode[nodeId], n.data
+            );
+    }
+
     function _l1CallStruct(CallNode memory n, uint16 span) internal pure returns (L2ToL1Call memory) {
         return L2ToL1Call({
             revertNextNCalls: span,
             isStatic: n.isStatic,
+            gas: n.gas,
             sourceAddress: n.fromAddress,
             sourceRollupId: n.fromChain,
             targetAddress: n.toAddress,
@@ -795,6 +813,7 @@ contract TableGenerator is TestHashes {
         return CrossChainCall({
             revertNextNCalls: span,
             isStatic: n.isStatic,
+            gas: n.gas,
             sourceAddress: n.fromAddress,
             sourceRollupId: n.fromChain,
             targetAddress: n.toAddress,

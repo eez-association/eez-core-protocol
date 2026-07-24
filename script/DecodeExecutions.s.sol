@@ -42,15 +42,18 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
+    // L2 flavour: carries the observed callGas folded into the L2 outgoing hash.
+    bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED_L2 =
+        keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256,uint64)");
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");
     bytes32 constant SIG_REVERT_SPAN = keccak256("CallsReverted(uint256,uint256,uint256)");
     bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint64)");
     // L2-only: new ExecutionEntry tuple (flatten model; copied verbatim from Verify.s.sol):
     //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
-    //   CrossChainCall  = (uint16, bool, address, uint64, address, uint256, bytes)
+    //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)
     //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(uint16,bool,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
         keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint64)");
@@ -135,6 +138,8 @@ contract DecodeExecutions is Script {
             _printEntryExecuted(topics, data, p);
         } else if (sig == SIG_CROSSCHAIN_CALL_EXECUTED) {
             _printCrossChainCallExecuted(topics, data, p);
+        } else if (sig == SIG_CROSSCHAIN_CALL_EXECUTED_L2) {
+            _printCrossChainCallExecutedL2(topics, data, p);
         } else if (sig == SIG_CALL_RESULT) {
             _printCallResult(topics, data, p);
         } else if (sig == SIG_REVERT_SPAN) {
@@ -280,6 +285,33 @@ contract DecodeExecutions is Script {
                 _shortAddr(sourceAddress),
                 ", value=",
                 vm.toString(value),
+                ", call=",
+                _selectorName(callData),
+                ")"
+            )
+        );
+    }
+
+    function _printCrossChainCallExecutedL2(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
+        // CrossChainCallExecuted(bytes32 indexed cchash, address indexed proxy, address sourceAddress,
+        //                        bytes callData, uint256 value, uint64 callGas)
+        bytes32 cchash = topics[1];
+        address proxy = address(uint160(uint256(topics[2])));
+        (address sourceAddress, bytes memory callData, uint256 value, uint64 callGas) =
+            abi.decode(data, (address, bytes, uint256, uint64));
+        console.log(
+            string.concat(
+                p,
+                "CrossChainCallExecuted(hash=",
+                _shortHash(cchash),
+                ", proxy=",
+                _shortAddr(proxy),
+                ", src=",
+                _shortAddr(sourceAddress),
+                ", value=",
+                vm.toString(value),
+                ", callGas=",
+                vm.toString(callGas),
                 ", call=",
                 _selectorName(callData),
                 ")"

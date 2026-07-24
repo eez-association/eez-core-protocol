@@ -31,8 +31,8 @@ enum BlobMsgType {
 /// @notice One decoded message. Per-type field usage (everything else zero):
 ///         - ChainOperation:                 chainId, data (= operations)
 ///         - InitiateCrossChainTransaction:  chainId, data (= tx_data)
-///         - Call:                           chainId (= to_chain), fromAddress, toAddress, value, data
-///         - StaticCall:                     chainId (= to_chain), fromAddress, toAddress, data
+///         - Call:                           chainId (= to_chain), fromAddress, toAddress, value, gas, data
+///         - StaticCall:                     chainId (= to_chain), fromAddress, toAddress, gas, data
 ///         - ReturnSuccess / ReturnFail:     data (= return_data)
 ///         - markers (Close/Snapshot/Revert/Finish): none
 struct BlobMessage {
@@ -41,6 +41,7 @@ struct BlobMessage {
     address fromAddress;
     address toAddress;
     uint256 value;
+    uint64 gas;
     bytes data;
 }
 
@@ -68,7 +69,23 @@ library Msg {
         m.data = txData;
     }
 
+    /// @notice Call with all remaining gas forwarded (`gas = 0`).
     function call(uint64 toChain, address fromAddress, address toAddress, uint256 value, bytes memory data)
+        internal
+        pure
+        returns (BlobMessage memory m)
+    {
+        return call(toChain, fromAddress, toAddress, value, 0, data);
+    }
+
+    function call(
+        uint64 toChain,
+        address fromAddress,
+        address toAddress,
+        uint256 value,
+        uint64 callGas,
+        bytes memory data
+    )
         internal
         pure
         returns (BlobMessage memory m)
@@ -78,10 +95,20 @@ library Msg {
         m.fromAddress = fromAddress;
         m.toAddress = toAddress;
         m.value = value;
+        m.gas = callGas;
         m.data = data;
     }
 
+    /// @notice Static call with all remaining gas forwarded (`gas = 0`).
     function staticCall(uint64 toChain, address fromAddress, address toAddress, bytes memory data)
+        internal
+        pure
+        returns (BlobMessage memory m)
+    {
+        return staticCall(toChain, fromAddress, toAddress, 0, data);
+    }
+
+    function staticCall(uint64 toChain, address fromAddress, address toAddress, uint64 callGas, bytes memory data)
         internal
         pure
         returns (BlobMessage memory m)
@@ -90,6 +117,7 @@ library Msg {
         m.chainId = toChain;
         m.fromAddress = fromAddress;
         m.toAddress = toAddress;
+        m.gas = callGas;
         m.data = data;
     }
 
@@ -142,6 +170,7 @@ library Msg {
 
     function eq(BlobMessage memory a, BlobMessage memory b) internal pure returns (bool) {
         return a.msgType == b.msgType && a.chainId == b.chainId && a.fromAddress == b.fromAddress
-            && a.toAddress == b.toAddress && a.value == b.value && keccak256(a.data) == keccak256(b.data);
+            && a.toAddress == b.toAddress && a.value == b.value && a.gas == b.gas
+            && keccak256(a.data) == keccak256(b.data);
     }
 }

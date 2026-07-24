@@ -17,6 +17,11 @@ contract CrossChainProxy {
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
     uint256 transient _staticDetector;
 
+    /// @dev Gas for the `staticCheck` probe self-call. In a static context the tstore is an
+    ///      exceptional halt that consumes everything forwarded, so the probe must be capped;
+    ///      the mutable path uses ~300 gas.
+    uint256 private constant STATIC_CHECK_GAS = 1_000;
+
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     constructor(address _eez) {
         EEZ = _eez;
@@ -40,10 +45,13 @@ contract CrossChainProxy {
     ///      When called by anyone else, routes through _fallback() (cross-chain path),
     ///      similar to OZ's TransparentProxy admin pattern.
     /// @param destination The address to call
+    /// @param callGas Gas limit for the destination call; 0 forwards all remaining gas
     /// @param data The calldata
-    function executeOnBehalf(address destination, bytes calldata data) external payable {
+    function executeOnBehalf(address destination, uint64 callGas, bytes calldata data) external payable {
         if (msg.sender == EEZ) {
-            (bool success, bytes memory result) = destination.call{value: msg.value}(data);
+            (bool success, bytes memory result) = callGas == 0
+                ? destination.call{value: msg.value}(data)  // Forward all remaining gas
+                : destination.call{value: msg.value, gas: callGas}(data); // Forward callGas
 
             assembly {
                 switch success
@@ -81,7 +89,7 @@ contract CrossChainProxy {
     function _fallback() internal {
         // Detect STATICCALL context: tstore reverts in static context, tload does not.
         // A self-call to staticCheck() isolates the tstore so we can catch the revert.
-        (bool success,) = address(this).call(abi.encodeCall(this.staticCheck, ()));
+        (bool success,) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeCall(this.staticCheck, ()));
         bytes memory result;
 
         if (!success) {

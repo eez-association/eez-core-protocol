@@ -122,6 +122,7 @@ abstract contract RevertActions {
         // its own cross-chain counterparty (rule #2).
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: alice,
@@ -163,6 +164,7 @@ abstract contract RevertActions {
     function _l2Entries(address counterL2, address alice) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: alice,

@@ -84,11 +84,19 @@ library BlobCodec {
         }
         if (t == BlobMsgType.Call) {
             return abi.encodePacked(
-                uint8(t), _le64(m.chainId), m.fromAddress, m.toAddress, _le256(m.value), _lenPrefixed(m.data)
+                uint8(t),
+                _le64(m.chainId),
+                m.fromAddress,
+                m.toAddress,
+                _le256(m.value),
+                _le64(m.gas),
+                _lenPrefixed(m.data)
             );
         }
         if (t == BlobMsgType.StaticCall) {
-            return abi.encodePacked(uint8(t), _le64(m.chainId), m.fromAddress, m.toAddress, _lenPrefixed(m.data));
+            return abi.encodePacked(
+                uint8(t), _le64(m.chainId), m.fromAddress, m.toAddress, _le64(m.gas), _lenPrefixed(m.data)
+            );
         }
         if (t == BlobMsgType.ReturnSuccess || t == BlobMsgType.ReturnFail) {
             return abi.encodePacked(uint8(t), _lenPrefixed(m.data));
@@ -177,11 +185,13 @@ library BlobCodec {
                 (m.fromAddress, pos) = _readAddress(seg, pos);
                 (m.toAddress, pos) = _readAddress(seg, pos);
                 (m.value, pos) = _readU256le(seg, pos);
+                (m.gas, pos) = _readU64le(seg, pos);
                 (m.data, pos) = _readBytes(seg, pos);
             } else if (t == BlobMsgType.StaticCall) {
                 (m.chainId, pos) = _readU64le(seg, pos);
                 (m.fromAddress, pos) = _readAddress(seg, pos);
                 (m.toAddress, pos) = _readAddress(seg, pos);
+                (m.gas, pos) = _readU64le(seg, pos);
                 (m.data, pos) = _readBytes(seg, pos);
             } else if (t == BlobMsgType.ReturnSuccess || t == BlobMsgType.ReturnFail) {
                 (m.data, pos) = _readBytes(seg, pos);

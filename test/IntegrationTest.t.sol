@@ -100,8 +100,9 @@ contract IntegrationTest is IntegrationBase {
         // L1 deferred entry: no calls, just returnData
         {
             StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] =
-                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0});
+            stateUpdates[0] = StateUpdate({
+                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
+            });
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
@@ -150,9 +151,8 @@ contract IntegrationTest is IntegrationBase {
         // proxyEntryHash: what executeCrossChainCall builds when D calls C'
         // C' proxy: originalAddress=counterL1, originalRollupId=MAINNET_ROLLUP_ID
         // sourceAddress=counterAndProxyL2 (D, msg.sender to C'), sourceRollup=L2_ROLLUP_ID
-        bytes32 crossChainCallHash = _ccHash(
-            false, address(counterAndProxyL2), L2_ROLLUP_ID, address(counterL1), MAINNET_ROLLUP_ID, 0, incrementCallData
-        );
+        bytes32 crossChainCallHash =
+            _ccHashL2Out(address(counterAndProxyL2), address(counterL1), MAINNET_ROLLUP_ID, 0, incrementCallData);
 
         // L2 execution table: one entry, no calls
         {
@@ -218,8 +218,9 @@ contract IntegrationTest is IntegrationBase {
 
         {
             StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] =
-                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0});
+            stateUpdates[0] = StateUpdate({
+                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
+            });
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
@@ -244,7 +245,7 @@ contract IntegrationTest is IntegrationBase {
         // ════════════════════════════════════════════
 
         bytes32 l2ActionHash =
-            _ccHash(false, alice, L2_ROLLUP_ID, address(counterAndProxy), MAINNET_ROLLUP_ID, 0, incrementProxyCallData);
+            _ccHashL2Out(alice, address(counterAndProxy), MAINNET_ROLLUP_ID, 0, incrementProxyCallData);
 
         // L2 rolling hash: seed (entry identity) + one top-level call (A.incrementProxy via A').
         // The call's identity folds source=(A, MAINNET) and target=this L2 (ROLLUP_ID).
@@ -265,6 +266,7 @@ contract IntegrationTest is IntegrationBase {
 
             CrossChainCall[] memory calls = new CrossChainCall[](1);
             calls[0] = CrossChainCall({
+                gas: 0,
                 revertNextNCalls: 0,
                 isStatic: false,
                 sourceAddress: address(counterAndProxy), // proxy identity = A'
@@ -332,9 +334,8 @@ contract IntegrationTest is IntegrationBase {
         //  Step 1: Prepare L2 entry for C' call
         // ════════════════════════════════════════════
 
-        bytes32 l2ActionHash = _ccHash(
-            false, address(counterAndProxyL2), L2_ROLLUP_ID, address(counterL1), MAINNET_ROLLUP_ID, 0, incrementCallData
-        );
+        bytes32 l2ActionHash =
+            _ccHashL2Out(address(counterAndProxyL2), address(counterL1), MAINNET_ROLLUP_ID, 0, incrementCallData);
 
         {
             CrossChainCall[] memory calls = new CrossChainCall[](0);
@@ -372,6 +373,7 @@ contract IntegrationTest is IntegrationBase {
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](1);
             calls[0] = L2ToL1Call({
+                gas: 0,
                 revertNextNCalls: 0,
                 isStatic: false,
                 sourceAddress: alice, // proxy identity: (alice, L2)

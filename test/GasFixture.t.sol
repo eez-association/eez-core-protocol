@@ -185,6 +185,7 @@ abstract contract GasFixture is Base {
         L2ToL1Call[] memory calls = new L2ToL1Call[](nCalls);
         for (uint256 i = 0; i < nCalls; i++) {
             calls[i] = L2ToL1Call({
+                gas: 0,
                 revertNextNCalls: 0,
                 isStatic: false,
                 sourceAddress: genericSource,
@@ -227,6 +228,7 @@ abstract contract GasFixture is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: genericSource,
@@ -349,6 +351,7 @@ abstract contract GasFixture is Base {
 
     function _sinkCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: genericSource,
@@ -361,6 +364,7 @@ abstract contract GasFixture is Base {
 
     function _erc20Call() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: tokenHolder,
@@ -373,6 +377,7 @@ abstract contract GasFixture is Base {
 
     function _uniswapCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: genericSource,
@@ -386,6 +391,7 @@ abstract contract GasFixture is Base {
     /// @notice Flat call whose target (actor) re-enters EEZ once, consuming one ExpectedL1ToL2Call.
     function _reentrantCall() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: actorCaller,
@@ -400,6 +406,7 @@ abstract contract GasFixture is Base {
     ///         so the entry needs only ONE StateUpdate (rA).
     function _reentrantCallA() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: actorCaller,

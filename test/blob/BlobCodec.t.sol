@@ -55,6 +55,19 @@ contract BlobCodecTest is Test {
         _roundTrip(_exampleFlow());
     }
 
+    /// @notice Non-zero gas limits survive the wire for both call flavours.
+    function test_roundTrip_callWithGasLimit() public pure {
+        MsgList memory l = Msg.list(8);
+        Msg.push(l, Msg.initiate(L2A, "rlp-tx"));
+        Msg.push(l, Msg.call(L2B, USER, TARGET_B, 1 ether, 250_000, "bounded"));
+        Msg.push(l, Msg.staticCall(L1, TARGET_B, TARGET_A, 30_000, "bounded-read"));
+        Msg.push(l, Msg.returnSuccess("read-result"));
+        Msg.push(l, Msg.returnSuccess("call-result"));
+        Msg.push(l, Msg.finish());
+        Msg.push(l, Msg.closeBlobStream());
+        _roundTrip(Msg.done(l));
+    }
+
     function test_roundTrip_allMessageTypes() public pure {
         MsgList memory l = Msg.list(24);
         Msg.push(l, Msg.chainOperation(L2A, hex"deadbeef"));

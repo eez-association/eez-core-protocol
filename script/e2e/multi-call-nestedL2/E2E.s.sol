@@ -87,6 +87,7 @@ abstract contract MultiCallNestedL2Actions {
     ///      inline, in order, during postAndVerifyBatch.
     function _l1Entries(address counterL1, address cap) internal pure returns (ExecutionEntry[] memory entries) {
         L2ToL1Call memory innerCall = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: cap,
@@ -149,6 +150,7 @@ abstract contract MultiCallNestedL2Actions {
         returns (L2ExecutionEntry[] memory entries)
     {
         CrossChainCall memory incoming = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,

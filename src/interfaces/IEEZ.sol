@@ -80,10 +80,10 @@ struct StateUpdate {
 }
 
 /// @notice A cross-chain call executed on L1 (sourced from an L2 rollup).
-/// @dev TODO: consider adding a gas field — especially for force inclusions (0 = all remaining gas).
 struct L2ToL1Call {
     uint16 revertNextNCalls; // number of consecutive calls (this one included) to force-revert; 0 = none
     bool isStatic; // whether to execute via STATICCALL (read-only, no value)
+    uint64 gas; // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on L1

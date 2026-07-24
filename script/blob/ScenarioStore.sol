@@ -40,6 +40,7 @@ struct CallNode {
     uint64 toChain;
     address toAddress;
     uint256 value;
+    uint64 gas;
     bytes data;
     bool success; // ReturnSuccess vs ReturnFail
     bytes returnData;
@@ -55,6 +56,7 @@ struct CallParams {
     uint64 toChain;
     address toAddress;
     uint256 value;
+    uint64 gas;
     bytes data;
 }
 
@@ -183,6 +185,7 @@ contract ScenarioStore {
         n.toChain = p.toChain;
         n.toAddress = p.toAddress;
         n.value = p.value;
+        n.gas = p.gas;
         n.data = p.data;
         if (parentId == ROOT_FRAME) {
             _txs[txId].rootCalls.push(nodeId);
@@ -258,6 +261,7 @@ contract ScenarioStore {
                         toChain: m.chainId,
                         toAddress: m.toAddress,
                         value: m.value,
+                        gas: m.gas,
                         data: m.data
                     })
                 );
@@ -376,9 +380,9 @@ contract ScenarioStore {
     function _emitSubtree(MsgList memory l, uint256 nodeId) internal view {
         CallNode storage n = _nodes[nodeId];
         if (n.isStatic) {
-            Msg.push(l, Msg.staticCall(n.toChain, n.fromAddress, n.toAddress, n.data));
+            Msg.push(l, Msg.staticCall(n.toChain, n.fromAddress, n.toAddress, n.gas, n.data));
         } else {
-            Msg.push(l, Msg.call(n.toChain, n.fromAddress, n.toAddress, n.value, n.data));
+            Msg.push(l, Msg.call(n.toChain, n.fromAddress, n.toAddress, n.value, n.gas, n.data));
         }
         _emitSiblings(l, n.children);
         Msg.push(l, n.success ? Msg.returnSuccess(n.returnData) : Msg.returnFail(n.returnData));

@@ -84,6 +84,7 @@ abstract contract HelloActions {
     function _l2Entries(address helloL2, address helloL1) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: helloL1,
