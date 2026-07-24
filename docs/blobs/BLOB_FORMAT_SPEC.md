@@ -102,8 +102,8 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 | `1` | `CloseBlobStream` | `u8 message_type` |
 | `2` | `ChainOperation` | `u8 message_type` · `u64 chain_id` · `bytes operations` |
 | `3` | `InitiateCrossChainTransaction` | `u8 message_type` · `u64 chain_id` · `bytes tx_data` |
-| `4` | `Call` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `u256 value` · `bytes data` |
-| `5` | `StaticCall` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `bytes data` |
+| `4` | `Call` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `u256 value` · `u64 gas` · `bytes data` |
+| `5` | `StaticCall` | `u8 message_type` · `u64 to_chain` · `address from_address` · `address to_address` · `u64 gas` · `bytes data` |
 | `6` | `ReturnSuccess` | `u8 message_type` · `bytes return_data` |
 | `7` | `ReturnFail` | `u8 message_type` · `bytes return_data` |
 | `8` | `Snapshot` | `u8 message_type` |
@@ -208,6 +208,7 @@ struct Call {                // type 4
     address  from_address;
     address  to_address;
     u256     value;          // 32 bytes, little-endian (§1.1)
+    u64      gas;            // gas limit forwarded to the call
     bytes    data;           // the call's exact calldata; last, length-prefixed
 }
 
@@ -216,6 +217,7 @@ struct StaticCall {          // type 5 — read-only STATICCALL
     u64      to_chain;       // target chain; from_chain is implicit — the executing chain
     address  from_address;
     address  to_address;
+    u64      gas;            // gas limit forwarded to the call
     bytes    data;           // the call's exact calldata; last, length-prefixed (no value)
 }
 ```
