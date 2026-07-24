@@ -51,48 +51,6 @@ abstract contract BaseL2 is Test, TestHashes {
     }
 
     // ──────────────────────────────────────────────
-    //  callGas probing
-    // ──────────────────────────────────────────────
-
-    /// @notice Explicit gas attached to every probed/consuming proxy call. `callGas` is captured
-    ///         from `gasleft()` at manager entry, so a call only reproduces its probed value when
-    ///         it attaches the same explicit gas.
-    uint256 internal constant CALL_GAS = 5_000_000;
-
-    /// @notice Explicit gas for a top-level proxy call whose entry fires a NESTED `{gas: CALL_GAS}`
-    ///         proxy call: large enough that the 63/64 forwarding rule still lets the nested call
-    ///         site pass its full explicit `CALL_GAS`, so the nested probe stays reproducible.
-    uint256 internal constant OUTER_CALL_GAS = 20_000_000;
-
-    /// @notice Observes the exact `callGas` a `{gas: CALL_GAS}` proxy call from `caller` will fold
-    ///         into its outgoing hash. Loads an EMPTY table (block gate, guaranteed no-match) and
-    ///         probes twice: the first call warms the access path, the second measures it warm.
-    ///         Wipes any loaded table — probe BEFORE loading the real entries.
-    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data)
-        internal
-        returns (uint64 g)
-    {
-        return _probeOutgoing(caller, proxyAddr, value, data, CALL_GAS);
-    }
-
-    /// @notice `_probeOutgoing` with an explicit attached gas — for the top-level call of a nested
-    ///         scenario, which attaches `OUTER_CALL_GAS` (see above) instead of `CALL_GAS`.
-    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data, uint256 attachedGas)
-        internal
-        returns (uint64 g)
-    {
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
-        for (uint256 i = 0; i < 2; i++) {
-            vm.prank(caller);
-            (bool ok, bytes memory err) = proxyAddr.call{value: value, gas: attachedGas}(data);
-            require(!ok && bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
-            assembly {
-                g := mload(add(err, 0x44))
-            }
-        }
-    }
-
-    // ──────────────────────────────────────────────
     //  L2 hash helpers
     // ──────────────────────────────────────────────
 
@@ -202,5 +160,53 @@ abstract contract BaseL2 is Test, TestHashes {
         entry.rollingHash = _hEntryBeginL2(proxyEntryHash); // no calls ⇒ rolling hash is just the seed
         entry.success = true;
         entry.returnData = returnData;
+    }
+
+    // ──────────────────────────────────────────────
+    //  callGas probing — DORMANT under `useGasLeft = false`
+    // ──────────────────────────────────────────────
+    //
+    //  This fixture deploys its manager with `useGasLeft = false`, so the folded `callGas` is a
+    //  fixed 0 and these probes trivially observe 0 — the hashes they feed no longer depend on
+    //  gas. The machinery is kept because it is the ONLY way to key hashes under the future
+    //  observed-gas mode (`useGasLeft = true`): `GasProbe.t.sol` deploys such a manager and keeps
+    //  the recipe validated against it.
+
+    /// @notice Explicit gas attached to every probed/consuming proxy call. Under observed-gas
+    ///         keying, `callGas` is captured from `gasleft()` at manager entry, so a call only
+    ///         reproduces its probed value when it attaches the same explicit gas.
+    uint256 internal constant CALL_GAS = 5_000_000;
+
+    /// @notice Explicit gas for a top-level proxy call whose entry fires a NESTED `{gas: CALL_GAS}`
+    ///         proxy call: large enough that the 63/64 forwarding rule still lets the nested call
+    ///         site pass its full explicit `CALL_GAS`, so the nested probe stays reproducible.
+    uint256 internal constant OUTER_CALL_GAS = 20_000_000;
+
+    /// @notice Observes the exact `callGas` a `{gas: CALL_GAS}` proxy call from `caller` will fold
+    ///         into its outgoing hash. Loads an EMPTY table (block gate, guaranteed no-match) and
+    ///         probes twice: the first call warms the access path, the second measures it warm.
+    ///         Wipes any loaded table — probe BEFORE loading the real entries.
+    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data)
+        internal
+        returns (uint64 g)
+    {
+        return _probeOutgoing(caller, proxyAddr, value, data, CALL_GAS);
+    }
+
+    /// @notice `_probeOutgoing` with an explicit attached gas — for the top-level call of a nested
+    ///         scenario, which attaches `OUTER_CALL_GAS` (see above) instead of `CALL_GAS`.
+    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data, uint256 attachedGas)
+        internal
+        returns (uint64 g)
+    {
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        for (uint256 i = 0; i < 2; i++) {
+            vm.prank(caller);
+            (bool ok, bytes memory err) = proxyAddr.call{value: value, gas: attachedGas}(data);
+            require(!ok && bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
+            assembly {
+                g := mload(add(err, 0x44))
+            }
+        }
     }
 }

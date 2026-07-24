@@ -86,6 +86,29 @@ function crossChainCallHash(
     return crossChainCallHashFull(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
+/// @notice Gas-folding hash for a mutable call LEAVING an L2 — the flavour
+///         `EEZL2.executeCrossChainCall` keys with (top-level entry matching and the cch inside
+///         nested `expectedOutgoingHash` rows). Folds `callGas` between `value` and `data`; the
+///         devnet deploys every `EEZL2` with `useGasLeft = false`, so the folded value is always 0.
+///         Same field order as `crossChainCallHash` (target first) so conversions are drop-in.
+///         NOT for: L1 keys, L2 inbound binding (`executeIncomingCrossChainCall`), static hashes,
+///         or rolling-hash CALL folds — those all stay gas-free.
+function crossChainCallHashL2Out(
+    uint256 targetRollupId,
+    address targetAddress,
+    uint256 value,
+    bytes memory data,
+    address sourceAddress,
+    uint256 sourceRollupId
+)
+    pure
+    returns (bytes32)
+{
+    return keccak256(
+        abi.encode(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, uint256(0), data)
+    );
+}
+
 /// @notice Convenience: STATIC cross-chain call hash (same field order as `crossChainCallHash`).
 function crossChainCallHashStatic(
     uint256 targetRollupId,

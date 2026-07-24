@@ -16,6 +16,7 @@ import {CallTwice} from "../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     noStaticEntries,
     noNestedActions,
     noCalls,
@@ -59,10 +60,12 @@ abstract contract MultiCallActions {
         return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), caller, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev L2-side hash: trigger proxy on L2 has originalRollupId=MAINNET, so
-    ///      the manager computes hash(MAINNET, counterL2, ..., source=callTwiceL2, L2).
+    /// @dev L2-side entry key: trigger proxy on L2 has originalRollupId=MAINNET, so the manager
+    ///      computes hash(MAINNET, counterL2, ..., source=callTwiceL2, L2). The call LEAVES the L2,
+    ///      so `EEZL2.executeCrossChainCall` keys it with the gas-folding hash (`callGas` = 0 — the
+    ///      devnet deploys `EEZL2` with `useGasLeft = false`).
     function _l2CallHash(address counterL2, address callTwiceL2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, L2_ROLLUP_ID);
     }
 
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {

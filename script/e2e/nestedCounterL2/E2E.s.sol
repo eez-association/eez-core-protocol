@@ -27,6 +27,7 @@ import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noL2StaticEntries,
@@ -75,13 +76,15 @@ abstract contract NestedL2Actions {
     // ── L2 hashes (the original anchor) ────────────────────────────────
 
     /// Inner: CAP (on L2) reentrant-calls Counter on MAINNET (outbound L2->L1, sourceRollupId=L2).
+    /// Gas-folding key — EEZL2 keys outgoing calls with `callGas` folded (0: devnet `useGasLeft = false`).
     function _l2InnerHash(address counterL1, address cap) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
     }
 
-    /// Outer (proxyEntryHash): alice calls capL1Proxy (proxy for CAP on MAINNET) on L2.
+    /// Outer (proxyEntryHash): alice calls capL1Proxy (proxy for CAP on MAINNET) on L2 — an outgoing
+    /// call, so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0).
     function _l2OuterHash(address cap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
     }
 
     /// L2 incoming top-level CALL_BEGIN hash: the call executed ON L2 (targetRollupId=L2).
@@ -105,7 +108,6 @@ abstract contract NestedL2Actions {
     /// @dev L2 mirror. Rolling hash: entryBeginL2(seed) -> CALL_BEGIN(ccTop) -> NESTED_BEGIN(ccInner)
     ///      -> NESTED_END -> CALL_END(true, ""). The nested reentry (cap -> Counter L1) returns the
     ///      cached abi.encode(1) and carries no L2 sub-calls.
-    /// NOTE: PENDING EEZL2 — L2 rolling-hash seed/fold convention unconfirmed; re-verify when EEZL2.sol lands.
     function _l2Entries(address counterL1, address cap, address alice)
         internal
         pure
@@ -126,7 +128,8 @@ abstract contract NestedL2Actions {
         bytes32 proxyEntryHash = _l2OuterHash(cap, alice);
         bytes32 ccInner = _l2InnerHash(counterL1, cap);
 
-        // PENDING EEZL2: thread the live rolling hash so the nested key uses the value at fire time.
+        // The nested key uses the live rolling hash at fire time; ccInner is the gas-folding
+        // L2-out hash EEZL2 folds into NESTED_BEGIN.
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, _l2IncomingHash(cap, alice));
         bytes32 rhFire = rh;

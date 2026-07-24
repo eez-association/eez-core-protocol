@@ -15,6 +15,7 @@ import {Counter, SelfCallerWithRevert} from "../../../test/mocks/CounterContract
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noNestedActions,
@@ -64,9 +65,10 @@ abstract contract RevertContinueL2Actions {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
 
-    /// @dev Outer action hash (proxyEntryHash): alice calls selfCallerProxy (SelfCallerWithRevert MAINNET) on L2.
+    /// @dev Outer action hash (proxyEntryHash): alice calls selfCallerProxy (SelfCallerWithRevert MAINNET)
+    ///      on L2 — an outgoing call, so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0).
     function _outerActionHash(address selfCaller, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, selfCaller, 0, _executeData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, selfCaller, 0, _executeData(), alice, L2_ROLLUP_ID);
     }
 
     /// @dev L2 incoming top-level CALL_BEGIN hash: alice -> selfCaller executed ON L2 (targetRollupId=L2).
@@ -75,9 +77,10 @@ abstract contract RevertContinueL2Actions {
     }
 
     /// @dev Inner action hash: SelfCallerWithRevert reentrant-calls counterProxy (Counter L1) on L2
-    ///      (outbound L2->L1, sourceRollupId=L2).
+    ///      (outbound L2->L1, sourceRollupId=L2). Gas-folding key — EEZL2 keys outgoing calls with
+    ///      `callGas` folded (0: devnet `useGasLeft = false`).
     function _innerActionHash(address counterL1, address selfCaller) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCaller, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), selfCaller, L2_ROLLUP_ID);
     }
 
     /// @dev L1 mirror entry: system-driven (proxyEntryHash=0) — executed as an immediate L2Tx during postAndVerifyBatch.

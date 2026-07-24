@@ -22,6 +22,7 @@ import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noL2StaticEntries,
@@ -99,10 +100,11 @@ abstract contract NestedActions {
 
     // ── L2 hashes (mirror; addresses differ) ───────────────────────────
 
-    /// Inner on L2: capL2 (on L2) reentrant-calls counterL1 on MAINNET.
+    /// Inner on L2: capL2 (on L2) reentrant-calls counterL1 on MAINNET — the call LEAVES the L2, so
+    /// it keys with the gas-folding L2-out hash (callGas=0; devnet deploys EEZL2 with useGasLeft=false).
     /// The L2 manager forces sourceRollupId=ROLLUP_ID (=L2) on the on-chain compute.
     function _l2InnerHash(address counterL1, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
+        return crossChainCallHashL2Out(
             MAINNET_ROLLUP_ID, counterL1, 0, abi.encodeWithSelector(Counter.increment.selector), capL2, L2_ROLLUP_ID
         );
     }
@@ -184,8 +186,8 @@ abstract contract NestedActions {
     }
 
     // L2 mirror entry.  The outer call is the inbound call delivered by
-    // executeIncomingCrossChainCall through the source proxy (alice on MAINNET, on L2).
-    // NOTE: L2 rolling-hash + outgoing-call keying are PENDING EEZL2 (impl not migrated); re-verify when EEZL2.sol lands.
+    // executeIncomingCrossChainCall through the source proxy (alice on MAINNET, on L2) — bound
+    // gas-free against the explicit params; only the nested outgoing reentry keys gas-folding.
     function _l2Entries(address counterL1, address capL2, address alice)
         internal
         pure
@@ -205,7 +207,7 @@ abstract contract NestedActions {
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         });
 
-        // PENDING EEZL2: incoming top-level call CALL_BEGIN hash mirrors L1 — target on this L2
+        // Incoming top-level call CALL_BEGIN hash mirrors L1 (gas-free) — target on this L2
         // (L2_ROLLUP_ID), source on MAINNET (== proxyEntryHash here). Inner reentry uses _l2InnerHash.
         bytes32 ccTop = _l2OuterHash(capL2, alice);
         bytes32 ccInner = _l2InnerHash(counterL1, capL2);
@@ -219,7 +221,7 @@ abstract contract NestedActions {
 
         ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
         nested[0] = ExpectedOutgoingCrossChainCall({
-            expectedOutgoingHash: expectedL1toL2Hash(ccInner, rhFire), // PENDING EEZL2 keying
+            expectedOutgoingHash: expectedL1toL2Hash(ccInner, rhFire), // ccInner is the gas-folding L2-out hash
             incomingCalls: noL2Calls(),
             revertedOrStaticRollingHash: bytes32(0),
             success: true,

@@ -20,6 +20,7 @@ import {Counter, CounterAndProxy} from "../../../test/mocks/CounterContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noNestedActions,
@@ -53,14 +54,16 @@ abstract contract MultiCallNestedL2Actions {
     }
 
     /// @dev Inner action hash: CAP reentrant-calls counterProxy (Counter MAINNET) on L2
-    ///      (outbound L2->L1, sourceRollupId=L2).
+    ///      (outbound L2->L1, sourceRollupId=L2). Gas-folding key — EEZL2 keys outgoing
+    ///      calls with `callGas` folded (0: devnet `useGasLeft = false`).
     function _innerActionHash(address counterL1, address cap) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
     }
 
-    /// @dev Outer action hash (proxyEntryHash): alice calls capL1Proxy (CAP MAINNET) on L2.
+    /// @dev Outer action hash (proxyEntryHash): alice calls capL1Proxy (CAP MAINNET) on L2 — an
+    ///      outgoing call, so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0).
     function _outerActionHash(address cap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
     }
 
     /// @dev L2 incoming top-level CALL_BEGIN hash: alice -> cap executed ON L2 (targetRollupId=L2).

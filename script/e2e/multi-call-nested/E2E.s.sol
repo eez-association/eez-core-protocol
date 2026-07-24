@@ -23,6 +23,7 @@ import {CallTwiceNestedAndOnce} from "../../../test/mocks/MultiCallContracts.sol
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noL2StaticEntries,
@@ -94,7 +95,7 @@ abstract contract MCNActions {
         return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap2L2, L2_ROLLUP_ID);
     }
 
-    // ── L2 hashes (PENDING EEZL2: re-verify once EEZL2.sol lands) ──
+    // ── L2 hashes ──
 
     /// @dev L2 proxy-entry / top-level call hash for app→CAP2 on L2 (target on this L2 → ROLLUP_ID).
     function _l2HashCAP2(address cap2L2, address l2App) internal pure returns (bytes32) {
@@ -105,10 +106,11 @@ abstract contract MCNActions {
         return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev Inner reentrant (outgoing) hash on L2: CAP2 (on L2) calls CounterL1 MAINNET; the L2
-    ///      manager forces sourceRollupId = ROLLUP_ID (=L2). Mirrors the L1 top-level call hash.
+    /// @dev Inner reentrant (outgoing) hash on L2: CAP2 (on L2) calls CounterL1 MAINNET — the call
+    ///      LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet deploys
+    ///      EEZL2 with useGasLeft=false). The L2 manager forces sourceRollupId = ROLLUP_ID (=L2).
     function _l2InnerHashCounterL1(address counterL1, address cap2L2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap2L2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap2L2, L2_ROLLUP_ID);
     }
 
     // ── L1 entries (3) ──
@@ -205,7 +207,7 @@ abstract contract MCNActions {
         });
     }
 
-    // ── L2 entries (3) — PENDING EEZL2: re-verify once EEZL2.sol lands ──
+    // ── L2 entries (3) ──
 
     function _l2Entries(address counterL1, address cap2L2, address counterL2, address l2App)
         internal
@@ -214,14 +216,15 @@ abstract contract MCNActions {
     {
         // Two distinct hashes per L2 entry:
         //  - proxyEntryHash (entry MATCH): what `executeCrossChainCall` computes when the trigger fires
-        //    through the L2 ingress proxy — source = l2App @ ROLLUP_ID (forced), target = the proxy's
-        //    original (cap2/counterL2 @ MAINNET). See EEZL2.executeCrossChainCall.
-        //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — target @
-        //    ROLLUP_ID (forced), source = l2App @ the call's `sourceRollupId` (MAINNET).
+        //    through the L2 ingress proxy — the call LEAVES the L2, so it is the gas-folding L2-out
+        //    hash (callGas=0): source = l2App @ ROLLUP_ID (forced), target = the proxy's original
+        //    (cap2/counterL2 @ MAINNET). See EEZL2.executeCrossChainCall.
+        //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — gas-free,
+        //    target @ ROLLUP_ID (forced), source = l2App @ the call's `sourceRollupId` (MAINNET).
         bytes32 entryHashCAP2 =
-            crossChainCallHash(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
+            crossChainCallHashL2Out(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
         bytes32 entryHashCounterL2 =
-            crossChainCallHash(MAINNET_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, L2_ROLLUP_ID);
+            crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, L2_ROLLUP_ID);
         bytes32 outerCAP2 = _l2HashCAP2(cap2L2, l2App);
         bytes32 outerCounterL2 = _l2HashCounterL2(counterL2, l2App);
         bytes32 innerCounterL1 = _l2InnerHashCounterL1(counterL1, cap2L2);
@@ -262,7 +265,7 @@ abstract contract MCNActions {
         entries = new L2ExecutionEntry[](3);
 
         // [0] / [1]: top-level CAP2 call wraps one nested (outgoing) reentry to CounterL1@MAINNET.
-        // PENDING EEZL2: rolling-hash seed/append shape mirrors L1.
+        // Rolling-hash seed/append shape mirrors L1; NESTED_BEGIN folds the gas-folding inner hash.
         bytes32 rh0 = RollingHashBuilder.entryBeginL2(entryHashCAP2);
         rh0 = RollingHashBuilder.appendCallBegin(rh0, outerCAP2);
         bytes32 rhFire0 = rh0;

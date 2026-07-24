@@ -21,6 +21,7 @@ import {Counter, SafeCounterAndProxy} from "../../../test/mocks/CounterContracts
 import {ComputeExpectedBase} from "../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
+    crossChainCallHashL2Out,
     expectedL1toL2Hash,
     noStaticEntries,
     noL2StaticEntries,
@@ -149,7 +150,6 @@ abstract contract NestedCallRevertActions {
     //  L2-side mirror — SafeCAP runs on L2; its inner call to the
     //  counterProxy (proxy on L2 for Counter on MAINNET) reverts via a
     //  `success=false` ExpectedOutgoingCrossChainCall in the entry.
-    //  PENDING EEZL2: re-verify once EEZL2.sol lands.
     // ─────────────────────────────────────────────────────────────
 
     /// @dev Outer proxy-entry / top-level hash on L2: source (batcher MAINNET) → SafeCAP (on L2).
@@ -157,10 +157,12 @@ abstract contract NestedCallRevertActions {
         return crossChainCallHash(L2_ROLLUP_ID, scapL2, 0, _incrementProxyData(), batcherL1, MAINNET_ROLLUP_ID);
     }
 
-    /// @dev Inner reentrant (outgoing) hash on L2: SafeCAP (on L2) calls Counter MAINNET.
-    ///      Manager forces sourceRollupId=ROLLUP_ID (=L2) for L2-issued reentrant calls.
+    /// @dev Inner reentrant (outgoing) hash on L2: SafeCAP (on L2) calls Counter MAINNET — the call
+    ///      LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet deploys
+    ///      EEZL2 with useGasLeft=false). Manager forces sourceRollupId=ROLLUP_ID (=L2) for
+    ///      L2-issued reentrant calls.
     function _innerActionHashL2(address counterL1, address scapL2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), scapL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), scapL2, L2_ROLLUP_ID);
     }
 
     function _l2Entries(address scapL2, address batcherL1, address counterL1)
@@ -183,7 +185,8 @@ abstract contract NestedCallRevertActions {
         bytes32 proxyEntryHash = _outerHashL2(scapL2, batcherL1);
         bytes32 innerCch = _innerActionHashL2(counterL1, scapL2);
 
-        // PENDING EEZL2: rolling-hash seed/append shape mirrors L1.
+        // Rolling-hash seed/append shape mirrors L1; the inbound top-level CALL_BEGIN folds the
+        // gas-free hash (== proxyEntryHash here).
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, proxyEntryHash);
         bytes32 rhFire = rh;
