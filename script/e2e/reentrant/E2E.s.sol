@@ -139,6 +139,7 @@ abstract contract ReentrantActions {
         // Top-level calls: just rcL1.dC(3).
         L2ToL1Call[] memory topCalls = new L2ToL1Call[](1);
         topCalls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: batcher,
@@ -151,6 +152,7 @@ abstract contract ReentrantActions {
         // Frame A's own sub-array: rcL1.dC(1) sourced from rcL2.
         L2ToL1Call[] memory frameASub = new L2ToL1Call[](1);
         frameASub[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: rcL2,
@@ -222,6 +224,7 @@ abstract contract ReentrantActions {
         // Top-level incoming call: rcL2.dC(2) from rcL1.
         CrossChainCall[] memory topCalls = new CrossChainCall[](1);
         topCalls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: rcL1,
@@ -234,6 +237,7 @@ abstract contract ReentrantActions {
         // Outgoing frame's own incoming sub-array: rcL2.dC(0) from rcL1.
         CrossChainCall[] memory frameSub = new CrossChainCall[](1);
         frameSub[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: rcL1,

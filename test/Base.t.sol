@@ -303,8 +303,9 @@ abstract contract Base is Test, TestHashes {
         returns (StateUpdate[] memory deltas)
     {
         deltas = new StateUpdate[](1);
-        deltas[0] =
-            StateUpdate({rollupId: uint64(rid), currentState: currentState, newState: newState, etherDelta: etherDelta});
+        deltas[0] = StateUpdate({
+            rollupId: uint64(rid), currentState: currentState, newState: newState, etherDelta: etherDelta
+        });
     }
 
     /// @notice An immediate entry (`proxyEntryHash == 0`) transitioning `rid` from
@@ -369,6 +370,7 @@ abstract contract Base is Test, TestHashes {
         returns (L2ToL1Call memory c)
     {
         c = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: src,

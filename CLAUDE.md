@@ -52,6 +52,7 @@ struct StateUpdate {
 struct L2ToL1Call {
     uint16  revertNextNCalls; // >0 force-reverts the next N calls (this one included)
     bool    isStatic;         // dispatch via STATICCALL (read-only, no value)
+    uint64  gas;              // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress;    // originating address on the source rollup
     uint64  sourceRollupId;
     address targetAddress;    // call target on L1
@@ -106,6 +107,7 @@ Leaner: no `StateUpdate`, no `destinationRollupId`, no `expectedStateRoots`.
 struct CrossChainCall {       // same field layout as L1's L2ToL1Call
     uint16  revertNextNCalls;
     bool    isStatic;
+    uint64  gas;
     address sourceAddress;
     uint64  sourceRollupId;
     address targetAddress;
@@ -167,11 +169,19 @@ struct ProofSystemBatchPerVerificationEntries {
 
 An `ExecutionEntry` carries a `success` flag: when false the entry is run, verified, then reverted with `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT calls are `success == false` rows in the unified reentrant table; a top-level reverting READ is a `StaticExecutionEntry { success: false }`. Inner naturally-reverting calls are still expressible: the proxy `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`.
 
-Cross-chain call hash formula (single, used everywhere; exposed as `computeCrossChainCallHash(...)` on both managers — ordered isStatic → FROM pair → TO pair → value → data):
+Cross-chain call hash — **L1 and L2 key calls DIFFERENTLY**. The gas-free formula (EEZBase, exposed on both managers) keys everything on L1 plus L2 inbound/static matching:
 
 ```solidity
 keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data))
 ```
+
+Calls **leaving an L2** (`EEZL2.executeCrossChainCall` — both top-level entry matching and nested `expectedOutgoingHash` keys) use the L2-only gas-folding overload. `callGas` depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`): when true, `uint64(gasleft())` observed at manager entry (what the caller forwarded); when false — current deployments and all test fixtures — a fixed `0`, keeping the 8-field encoding but making outgoing hashes gas-independent. The folded value is emitted in L2's `CrossChainCallExecuted`:
+
+```solidity
+keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data))
+```
+
+The two formulas are deliberately distinct: with `useGasLeft = true` an L2 outgoing call's identity binds the observed forwarded gas, so the prover must commit to it (deterministic for a sequencer replaying the block). Gas-observed keying is the intended future production mode; until the node supplies observed gas, deployments run `useGasLeft = false`.
 
 ### Key Functions (L1 — EEZ)
 
@@ -185,7 +195,7 @@ keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, tar
 
 ### Key Functions (L2 — EEZL2)
 
-Constructor: `EEZL2(uint64 rollupId != 0, address systemAddress)`. `SYSTEM_ADDRESS` is a trusted, node-controlled address (no key, not reentry-reachable).
+Constructor: `EEZL2(uint64 rollupId != 0, address systemAddress, bool useGasLeft)`. `SYSTEM_ADDRESS` is a trusted, node-controlled address (no key, not reentry-reachable). `useGasLeft` selects the `callGas` folded into outgoing call hashes: observed `gasleft()` (true) or a fixed `0` (false — what tests and current deployments use).
 
 1. **loadExecutionTable(entries, staticEntries)** — system-only. Wipes existing tables, loads new ones, sets `lastLoadBlock`. Entries are only consumable in the same block (`ExecutionNotInCurrentBlock`).
 2. **executeIncomingCrossChainCall(destination, value, data, sourceAddress, sourceRollup, entries, staticEntries)** — system-only, payable (`msg.value == value` mints the inbound ETH). Atomically replaces the table and drives `entries[0]` through the call processor; `entries[0].incomingCalls[0]` is the inbound call itself, and `entries[0].proxyEntryHash` must match the hash of the explicit params.
@@ -256,3 +266,5 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 ## Testing
 
 Tests use a `MockProofSystem` that accepts all proofs by default; `setExpectedPublicInputsHash(h)` pins the exact public input the registry must produce (and enables verification), and `setShouldVerify(true)` without a pin rejects everything. `test/Base.t.sol` is the single-PS happy-path fixture; integration tests deploy a per-rollup `Rollup` manager on the fly. L1 unit tests live in `test/EEZ.t.sol`, L2 in `test/EEZL2.t.sol`; two-sided flows in the `IntegrationTest*.t.sol` files. E2E devnet scenarios live under `script/e2e/` (shared helpers in `script/e2e/shared/`).
+
+All fixtures deploy `EEZL2` with `useGasLeft = false`, so L2-outgoing hashes fold `callGas = 0` and are pre-computable (`_outgoingCallHash` in `test/BaseL2.t.sol`, `_ccHashL2Out` in `test/IntegrationBase.t.sol`). `test/GasProbe.t.sol` deploys its own `useGasLeft = true` manager and validates the probe recipe for observed-gas keying: probe twice with the same explicit `{gas: ...}` against an empty loaded table and decode the folded `callGas` from `EntryNotFound(hash, callGas)` — the value a later identical call will fold, provided it attaches the same explicit gas (helpers `_probeOutgoing` / `CALL_GAS` in `test/BaseL2.t.sol`).

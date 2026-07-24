@@ -121,6 +121,7 @@ abstract contract MCNActions {
         // Inner call shared by entries [0] and [1]: CAP2 (logically on L2) reentrant-calls
         // CounterL1 on L1. The L1 manager auto-resolves CAP2's source-proxy and forwards.
         L2ToL1Call memory cap2CallsCounterL1 = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: cap2L2,
@@ -230,6 +231,7 @@ abstract contract MCNActions {
         // which `_processNCalls` would reject with SameNetworkProxy when auto-creating the
         // source proxy.
         CrossChainCall memory cap2RunCall = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: l2App,
@@ -240,6 +242,7 @@ abstract contract MCNActions {
         });
         // Outer call for entry [2]: app→CounterL2 on L2.
         CrossChainCall memory counterL2RunCall = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: l2App,

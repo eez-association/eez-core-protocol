@@ -31,6 +31,7 @@ pragma solidity ^0.8.28;
 struct CrossChainCall {
     uint16 revertNextNCalls; // number of consecutive calls (this one included) to force-revert; 0 = none
     bool isStatic; // whether to execute via STATICCALL (read-only, no value)
+    uint64 gas; // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on this L2

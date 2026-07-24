@@ -34,6 +34,12 @@ contract EEZL2 is EEZBase {
     ///      or swap the table mid-execution).
     address public immutable SYSTEM_ADDRESS;
 
+    /// @notice Whether the `callGas` folded into outgoing call hashes is the observed `gasleft()`.
+    /// @dev When false, `callGas` is fixed at 0 — outgoing hashes are then gas-independent and can
+    ///      be pre-computed without observing the forwarded gas. Gas-observed keying (`true`) is the
+    ///      intended production mode once the node supplies observed gas.
+    bool public immutable USE_GAS_LEFT;
+
     /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
     /// @dev On L2 this is `SYSTEM_ADDRESS` — same as the burn path in `executeCrossChainCall`.
     function RECOVERY_ADDRESS() external view returns (address) {
@@ -87,6 +93,10 @@ contract EEZL2 is EEZBase {
     /// @notice Entry 0's `proxyEntryHash` doesn't match the hash computed from the explicit params
     error EntryHashMismatch();
 
+    /// @notice No entry matched a top-level outgoing call. Carries the computed gas-folding hash and
+    ///         the observed `callGas` so the entry-builder can reproduce the key.
+    error EntryNotFound(bytes32 crossChainCallHash, uint64 callGas);
+
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
 
@@ -106,6 +116,18 @@ contract EEZL2 is EEZBase {
         uint64 sourceRollup
     );
 
+    /// @notice Emitted when a cross-chain call is executed via proxy. `callGas` is the value folded
+    ///         into the hash: the gas observed at manager entry (what the caller forwarded) when
+    ///         `USE_GAS_LEFT`, else 0.
+    event CrossChainCallExecuted(
+        bytes32 indexed crossChainCallHash,
+        address indexed proxy,
+        address sourceAddress,
+        bytes callData,
+        uint256 value,
+        uint64 callGas
+    );
+
     /// @notice Emitted after each call completes in `_processNCalls`.
     /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
@@ -121,10 +143,13 @@ contract EEZL2 is EEZBase {
 
     /// @param _rollupId Non-zero; 0 is reserved as the mainnet sentinel in call hashes.
     /// @param _systemAddress The privileged address allowed to load execution tables
-    constructor(uint64 _rollupId, address _systemAddress) {
+    /// @param _useGasLeft Whether outgoing call hashes fold the observed `gasleft()` (true) or a
+    ///        fixed 0 (false — gas-independent keying)
+    constructor(uint64 _rollupId, address _systemAddress, bool _useGasLeft) {
         if (_rollupId == 0) revert InvalidRollupId();
         ROLLUP_ID = _rollupId;
         SYSTEM_ADDRESS = _systemAddress;
+        USE_GAS_LEFT = _useGasLeft;
     }
 
     modifier onlySystemAddress() {
@@ -206,17 +231,25 @@ contract EEZL2 is EEZBase {
             if (!success) revert EtherTransferFailed();
         }
 
+        uint64 callGas = USE_GAS_LEFT ? uint64(gasleft()) : 0;
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            NOT_STATIC_CALL, sourceAddress, ROLLUP_ID, destAddress, proxyInfo.originalRollupId, msg.value, callData
+            NOT_STATIC_CALL,
+            sourceAddress,
+            ROLLUP_ID,
+            destAddress,
+            proxyInfo.originalRollupId,
+            msg.value,
+            callGas,
+            callData
         );
-        emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
+        emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value, callGas);
 
         if (_insideExecution()) {
             // Reentrant — resolve against the active entry's unified outgoing table
             return _consumeNestedCall(crossChainCallHash);
         }
 
-        return _consumeAndExecute(crossChainCallHash);
+        return _consumeAndExecute(crossChainCallHash, callGas);
     }
 
     /// @notice System-initiated execution of an incoming cross-chain call from another rollup
@@ -369,8 +402,8 @@ contract EEZL2 is EEZBase {
     ///      (`success == false`), and the static pool (`StaticExecutionEntry`) is read-only (`staticCrossChainCall`).
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
-    function _consumeAndExecute(bytes32 crossChainCallHash) internal returns (bytes memory result) {
-        uint256 idx = _findMatchingEntry(entryIndex, crossChainCallHash);
+    function _consumeAndExecute(bytes32 crossChainCallHash, uint64 callGas) internal returns (bytes memory result) {
+        uint256 idx = _findMatchingEntry(entryIndex, crossChainCallHash, callGas);
         entryIndex = idx + 1;
         ExecutionEntry storage entry = entries[idx];
 
@@ -387,14 +420,18 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice Forward-scans `entries` from `startIndex` for the FIRST entry whose `proxyEntryHash`
-    ///         matches `crossChainCallHash`, returning its index. Reverts `ExecutionNotFound` if the
+    ///         matches `crossChainCallHash`, returning its index. Reverts `EntryNotFound` if the
     ///         scan reaches the end with no match.
-    function _findMatchingEntry(uint256 startIndex, bytes32 crossChainCallHash) internal view returns (uint256) {
+    function _findMatchingEntry(uint256 startIndex, bytes32 crossChainCallHash, uint64 callGas)
+        internal
+        view
+        returns (uint256)
+    {
         uint256 queueLen = entries.length;
         for (uint256 i = startIndex; i < queueLen; i++) {
             if (entries[i].proxyEntryHash == crossChainCallHash) return i;
         }
-        revert ExecutionNotFound();
+        revert EntryNotFound(crossChainCallHash, callGas);
     }
 
     /// @notice Seeds the rolling hash, processes the entry's top-level calls, verifies the rolling
@@ -490,12 +527,12 @@ contract EEZL2 is EEZBase {
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (cc.value != 0) revert StaticCallWithValue();
                     (success, retData) = sourceProxy.staticcall(
-                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data))
+                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
                     );
                 } else {
                     (success, retData) = sourceProxy.call{
                         value: cc.value
-                    }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
+                    }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data)));
                 }
 
                 _rollingHashCallEnd(success, retData);
@@ -624,10 +661,37 @@ contract EEZL2 is EEZBase {
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
-            (bool success, bytes memory retData) =
-                sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)));
+            (bool success, bytes memory retData) = sourceProxy.staticcall(
+                abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
+            );
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
+    }
+
+    // ──────────────────────────────────────────────
+    //  Public helpers
+    // ──────────────────────────────────────────────
+
+    /// @notice Gas-folding flavour of the call hash, keying calls that LEAVE this L2: `callGas`
+    ///         folds between `value` and `data`, so an otherwise-identical call with different
+    ///         forwarded gas keys distinctly.
+    function computeCrossChainCallHash(
+        bool isStatic,
+        address sourceAddress,
+        uint64 sourceRollupId,
+        address targetAddress,
+        uint64 targetRollupId,
+        uint256 value,
+        uint64 callGas,
+        bytes memory data
+    )
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
+        );
     }
 
     // ──────────────────────────────────────────────
@@ -649,6 +713,7 @@ contract EEZL2 is EEZBase {
             span[k] = CrossChainCall({
                 revertNextNCalls: source.revertNextNCalls,
                 isStatic: source.isStatic,
+                gas: source.gas,
                 sourceAddress: source.sourceAddress,
                 sourceRollupId: source.sourceRollupId,
                 targetAddress: source.targetAddress,

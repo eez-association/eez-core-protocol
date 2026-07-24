@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev Explicit gas attached to the cross-chain proxy call sites below. L2 folds the gas observed
+///      at manager entry into the outgoing call hash, so these sites attach a fixed amount that a
+///      test-side probe with the same attach reproduces (equals `BaseL2.CALL_GAS`).
+uint256 constant PROXY_CALL_GAS = 5_000_000;
+
 contract Counter {
     uint256 public counter;
 
@@ -29,7 +34,7 @@ contract SafeCounterAndProxy {
     }
 
     function incrementProxy() external {
-        try target.increment() returns (uint256 val) {
+        try target.increment{gas: PROXY_CALL_GAS}() returns (uint256 val) {
             targetCounter = val;
         } catch {
             lastCallFailed = true;
@@ -48,7 +53,7 @@ contract CounterAndProxy {
     }
 
     function incrementProxy() external {
-        targetCounter = target.increment();
+        targetCounter = target.increment{gas: PROXY_CALL_GAS}();
         counter++;
     }
 }

@@ -73,7 +73,7 @@ abstract contract BlobScenarioBase is Test {
             uint64 rid = rollups.registerRollup(address(manager), _genesisRoot(i));
             require(rid == i, "chain id / rollup id mismatch");
             rollupManagers[i] = manager;
-            managers[i] = new EEZL2(i, SYSTEM_ADDRESS);
+            managers[i] = new EEZL2(i, SYSTEM_ADDRESS, false);
         }
         l2ChainCount = numL2s;
         vm.deal(SYSTEM_ADDRESS, 1_000_000 ether);
@@ -104,15 +104,86 @@ abstract contract BlobScenarioBase is Test {
         store.fromMessages(msgs);
         _assertMsgsEq(store.toMessages(), msgs, "IR round trip");
 
-        // 3. Blob → Table.
+        // 3. Observe each L2-sourced call's `callGas` (probe calls against empty tables) —
+        //    the values the source chains fold into their outgoing keys.
+        _createProxies(store);
+        uint64[] memory gasByNode = _probeAllCallGas(store);
+
+        // 4. Blob → Table.
         TableGenerator gen = new TableGenerator();
-        gen.generate(store);
+        gen.generate(store, gasByNode);
 
-        // 4. Table → Blob (tables + sidecar only — never the original store).
-        _checkTableRoundTrip(store, gen, msgs);
+        // 5. Table → Blob (tables + sidecar only — never the original store).
+        _checkTableRoundTrip(store, gen, msgs, gasByNode);
 
-        // 5. Live execution of the derived tables on the real managers.
+        // 6. Live execution of the derived tables on the real managers.
         _execute(store, gen);
+    }
+
+    // ──────────────────────────────────────────────
+    //  callGas observation
+    // ──────────────────────────────────────────────
+
+    /// @notice Explicit gas attached to a call fired at nesting depth `d` — a halving ladder so
+    ///         every frame can afford its children's explicit requests (and the base stays far
+    ///         below the test gas budget, so the 63/64 rule never clips a request). Probe and
+    ///         live execution use the same value, which is what makes the observed `callGas`
+    ///         reproducible.
+    function _gasAtDepth(uint256 d) internal pure returns (uint64) {
+        return uint64(200_000_000 >> d);
+    }
+
+    /// @notice Explicit gas for static read steps. Static matching is gas-free, so the value needs
+    ///         no reproducibility — it only bounds the proxy's static-context probe burn (see
+    ///         `ScriptedActor._dispatchStatic`).
+    uint64 internal constant STATIC_STEP_GAS = 5_000_000;
+
+    /// @notice Observes, per L2-sourced mutable node, the exact `callGas` its consuming proxy call
+    ///         will fold into the source chain's key: probes twice against an empty table (block
+    ///         gate satisfied, guaranteed no-match) — the first call warms the access path, the
+    ///         second measures it warm — reading the value from `EntryNotFound(hash, callGas)`.
+    function _probeAllCallGas(ScenarioStore store) internal returns (uint64[] memory gasByNode) {
+        uint256 n = store.nodeCount();
+        gasByNode = new uint64[](n);
+        uint256[] memory depths = new uint256[](n);
+        for (uint256 t = 0; t < store.txCount(); t++) {
+            _fillDepths(store, store.getTx(t).rootCalls, 0, depths);
+        }
+
+        bool[] memory gateLoaded = new bool[](l2ChainCount + 1);
+        for (uint256 id = 0; id < n; id++) {
+            CallNode memory node = store.getNode(id);
+            if (node.isStatic || node.fromChain == L1) continue;
+            EEZL2 m = managers[node.fromChain];
+            if (!gateLoaded[node.fromChain]) {
+                vm.prank(SYSTEM_ADDRESS);
+                m.loadExecutionTable(new L2ExecutionEntry[](0), new L2StaticExecutionEntry[](0));
+                gateLoaded[node.fromChain] = true;
+            }
+            address proxyAddr = m.computeCrossChainProxyAddress(node.toAddress, node.toChain);
+            uint64 stepGas = _gasAtDepth(depths[id]);
+            uint64 observed;
+            for (uint256 k = 0; k < 2; k++) {
+                vm.prank(node.fromAddress);
+                (bool ok, bytes memory err) = proxyAddr.call{value: node.value, gas: stepGas}(node.data);
+                require(!ok, "probe: unexpectedly matched an entry");
+                require(bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
+                assembly {
+                    observed := mload(add(err, 0x44))
+                }
+            }
+            gasByNode[id] = observed;
+        }
+    }
+
+    function _fillDepths(ScenarioStore store, uint256[] memory siblings, uint256 d, uint256[] memory depths)
+        internal
+        view
+    {
+        for (uint256 i = 0; i < siblings.length; i++) {
+            depths[siblings[i]] = d;
+            _fillDepths(store, store.getNode(siblings[i]).children, d + 1, depths);
+        }
     }
 
     function _checkCodecRoundTrip(BlobMessage[] memory msgs) internal pure {
@@ -122,7 +193,14 @@ abstract contract BlobScenarioBase is Test {
         _assertMsgsEq(decoded, msgs, "codec round trip");
     }
 
-    function _checkTableRoundTrip(ScenarioStore store, TableGenerator gen, BlobMessage[] memory msgs) internal {
+    function _checkTableRoundTrip(
+        ScenarioStore store,
+        TableGenerator gen,
+        BlobMessage[] memory msgs,
+        uint64[] memory gasByNode
+    )
+        internal
+    {
         TableStitcher stitcher = new TableStitcher();
 
         // Tables.
@@ -146,11 +224,14 @@ abstract contract BlobScenarioBase is Test {
             CallNode memory n = store.getNode(staticIds[i]);
             stitcher.loadSidecarStatic(
                 TableStitcher.SidecarStatic({
-                    fromAddress: n.fromAddress, toChain: n.toChain, toAddress: n.toAddress, data: n.data
+                    fromAddress: n.fromAddress, toChain: n.toChain, toAddress: n.toAddress, gas: n.gas, data: n.data
                 })
             );
         }
         stitcher.loadSidecarRegionSizes(store.regionSizesInOrder());
+        for (uint256 t = 0; t < store.txCount(); t++) {
+            _feedCallGasSidecar(stitcher, store, store.getTx(t).rootCalls, gasByNode);
+        }
         for (uint256 i = 0; i < store.chainOpCount(); i++) {
             ChainOpSpec memory op = store.getChainOp(i);
             stitcher.loadSidecarChainOp(op.chainId, op.operations, op.txsBefore);
@@ -170,6 +251,29 @@ abstract contract BlobScenarioBase is Test {
         assertEq(t2, t1, "table round trip: callData bytes");
     }
 
+    /// @dev Feeds each L2-sourced mutable call's observed callGas in execution (DFS) order,
+    ///      queued under its destination-flavour hash — callGas reaches no table, so it rides
+    ///      the sidecar like the static call fields do.
+    function _feedCallGasSidecar(
+        TableStitcher stitcher,
+        ScenarioStore store,
+        uint256[] memory siblings,
+        uint64[] memory gasByNode
+    )
+        internal
+    {
+        for (uint256 i = 0; i < siblings.length; i++) {
+            CallNode memory n = store.getNode(siblings[i]);
+            if (!n.isStatic && n.fromChain != L1) {
+                bytes32 destCch = rollups.computeCrossChainCallHash(
+                    n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, n.data
+                );
+                stitcher.loadSidecarCallGas(destCch, gasByNode[siblings[i]]);
+            }
+            _feedCallGasSidecar(stitcher, store, n.children, gasByNode);
+        }
+    }
+
     // ──────────────────────────────────────────────
     //  Live execution
     // ──────────────────────────────────────────────
@@ -181,7 +285,6 @@ abstract contract BlobScenarioBase is Test {
             _fundRollupBalance(rids[i], 10_000 ether);
         }
 
-        _createProxies(store);
         _programActors(store);
         _driveAll(store, gen);
 
@@ -230,17 +333,17 @@ abstract contract BlobScenarioBase is Test {
             ScriptedActor(payable(driver))
                 .addProgram(
                     abi.encodeCall(ScriptedActor.drive, ()),
-                    _buildSteps(store, txSpec.rootCalls, txSpec.originChain),
+                    _buildSteps(store, txSpec.rootCalls, txSpec.originChain, 0),
                     false,
                     ""
                 );
             for (uint256 k = 0; k < txSpec.rootCalls.length; k++) {
-                _programSubtree(store, txSpec.rootCalls[k]);
+                _programSubtree(store, txSpec.rootCalls[k], 0);
             }
         }
     }
 
-    function _programSubtree(ScenarioStore store, uint256 nodeId) internal {
+    function _programSubtree(ScenarioStore store, uint256 nodeId, uint256 depth) internal {
         CallNode memory n = store.getNode(nodeId);
         require(_actorChainPlus1[n.toAddress] == n.toChain + 1, "call target must be an actor on its chain");
         if (n.isStatic) {
@@ -248,15 +351,15 @@ abstract contract BlobScenarioBase is Test {
             return;
         }
         ScriptedActor(payable(n.toAddress))
-            .addProgram(n.data, _buildSteps(store, n.children, n.toChain), !n.success, n.returnData);
+            .addProgram(n.data, _buildSteps(store, n.children, n.toChain, depth + 1), !n.success, n.returnData);
         for (uint256 i = 0; i < n.children.length; i++) {
-            _programSubtree(store, n.children[i]);
+            _programSubtree(store, n.children[i], depth + 1);
         }
     }
 
     /// @notice Translates a sibling run into actor steps: one proxy call per child,
     ///         Snapshot regions as reverting sub-context wrappers.
-    function _buildSteps(ScenarioStore store, uint256[] memory siblings, uint64 execChain)
+    function _buildSteps(ScenarioStore store, uint256[] memory siblings, uint64 execChain, uint256 depth)
         internal
         view
         returns (ScriptedActor.Step[] memory steps)
@@ -275,6 +378,7 @@ abstract contract BlobScenarioBase is Test {
                     kind: 4, // STEP_SUBCONTEXT_REVERT
                     target: address(0),
                     value: 0,
+                    stepGas: 0,
                     data: "",
                     expected: "",
                     subCount: child.revertSpan
@@ -290,6 +394,7 @@ abstract contract BlobScenarioBase is Test {
                 kind: kind,
                 target: _managerOf(execChain).computeCrossChainProxyAddress(child.toAddress, child.toChain),
                 value: child.value,
+                stepGas: child.isStatic ? STATIC_STEP_GAS : _gasAtDepth(depth),
                 data: child.data,
                 expected: child.returnData,
                 subCount: 0
@@ -454,7 +559,9 @@ abstract contract BlobScenarioBase is Test {
         ScenarioStore store = new ScenarioStore();
         store.fromMessages(msgs);
         TableGenerator g = new TableGenerator();
-        g.generate(store);
+        // Shape-only derivation: a zero oracle stands in for observed callGas (hash VALUES differ
+        // from a live run, table shapes don't).
+        g.generate(store, new uint64[](store.nodeCount()));
         return (g.l1Entries(), g.unitCount(), address(g));
     }
 

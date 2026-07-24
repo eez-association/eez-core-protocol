@@ -17,11 +17,15 @@ A scenario is written as a blob message list — nothing else. `runScenario` the
                  2. IR round trip
   BlobMessage[] ──parse──▶ ScenarioStore (call forest) ──emit──▶ BlobMessage[]           ═ input
 
-                 3. Blob → Table          4. Table → Blob
+                 3. callGas probe
+  ScenarioStore ──probe calls vs empty tables──▶ per-node callGas oracle (gasByNode)
+                                                 (all 0 when useGasLeft = false)
+
+                 4. Blob → Table          5. Table → Blob
   ScenarioStore ──TableGenerator──▶ tables ──TableStitcher(+sidecar)──▶ BlobMessage[]    ═ input
                                                                         (byte-identical blob)
 
-                 5. Live execution
+                 6. Live execution
   tables ──▶ postAndVerifyBatch / loadExecutionTable / executeIncomingCrossChainCall
          ──▶ scripted actors make the real proxy calls
          ──▶ every return value, revert payload, rollback, ether delta and final
@@ -46,7 +50,7 @@ Tests (`test/blob/`):
 
 | File | Role |
 |---|---|
-| `BlobScenarioBase.sol` | Test harness: chain/actor setup, the 5-step pipeline, per-tx batch posting, unit driving |
+| `BlobScenarioBase.sol` | Test harness: chain/actor setup, the 6-step pipeline, per-tx batch posting, unit driving |
 | `BlobCodec.t.sol` | Byte-layer unit tests (round trips + one test per §5 rejection) |
 | `BlobScenarios.t.sol` | End-to-end scenarios (see below) |
 

@@ -480,6 +480,7 @@ contract EEZCoverageTest is Base {
         bytes memory cd = abi.encodeCall(SimpleTarget.setValue, (123));
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: address(this),
@@ -623,6 +624,7 @@ contract EEZCoverageTest is Base {
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 2, // span of 2 overruns the single-element array
             isStatic: false,
             sourceAddress: address(this),

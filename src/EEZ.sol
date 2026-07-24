@@ -1158,12 +1158,18 @@ contract EEZ is EEZBase {
                     if (l2ToL1Call.value != 0) revert StaticCallWithValue();
 
                     (success, retData) = sourceProxy.staticcall(
-                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.data))
+                        abi.encodeCall(
+                            CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                        )
                     );
                 } else {
                     (success, retData) = sourceProxy.call{
                         value: l2ToL1Call.value
-                    }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.data)));
+                    }(
+                        abi.encodeCall(
+                            CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                        )
+                    );
                     if (l2ToL1Call.value > 0 && success) {
                         // Safe int to uint conversion since is a value that we just transfer in the above line, i cannot be >=2^255 ether
                         _entryEtherDelta -= int256(l2ToL1Call.value);
@@ -1365,7 +1371,9 @@ contract EEZ is EEZBase {
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
             (bool success, bytes memory retData) = sourceProxy.staticcall(
-                abi.encodeCall(CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.data))
+                abi.encodeCall(
+                    CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                )
             );
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
@@ -1500,6 +1508,7 @@ contract EEZ is EEZBase {
             L2ToL1Call memory source = calls[start + k];
             span[k] = L2ToL1Call({
                 isStatic: source.isStatic,
+                gas: source.gas,
                 targetAddress: source.targetAddress,
                 value: source.value,
                 data: source.data,

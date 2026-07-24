@@ -193,6 +193,7 @@ abstract contract DeepNestedActions {
         // Top-level call: manager runs NestedCaller.callNested() on L1 via sourceProxy(alice, L2).
         L2ToL1Call[] memory topCalls = new L2ToL1Call[](1);
         topCalls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
@@ -206,6 +207,7 @@ abstract contract DeepNestedActions {
         // CAP.incrementProxy() on L1 via sourceProxy(nestedCaller, L2).
         L2ToL1Call[] memory capCalls = new L2ToL1Call[](1);
         capCalls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: nestedCaller,
@@ -285,6 +287,7 @@ abstract contract DeepNestedActions {
         // incomingCalls[0]: outer — manager runs NestedCaller@L2 via sourceProxy(alice, MAINNET).
         CrossChainCall[] memory topCalls = new CrossChainCall[](1);
         topCalls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
@@ -297,6 +300,7 @@ abstract contract DeepNestedActions {
         // nested[0]'s own sub-array: manager runs CAP@L2.incrementProxy() via sourceProxy(ncL2, MAINNET).
         CrossChainCall[] memory capCalls = new CrossChainCall[](1);
         capCalls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: ncL2,

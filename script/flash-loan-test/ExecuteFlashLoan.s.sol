@@ -274,6 +274,7 @@ contract ExecuteFlashLoanL1 is Script {
         // The return bridge call executes ON L1 as the entry's single top-level l2ToL1Call.
         L2ToL1Call[] memory entry1Calls = new L2ToL1Call[](1);
         entry1Calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: bridgeL2,

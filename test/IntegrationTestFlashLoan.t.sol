@@ -174,11 +174,11 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         //    -> crossChainCallHash = hash(address(this), L2, bridgeL1, MAINNET, "")
         //    -> entry consumed -> calls[0] routes receiveTokens to bridgeL2
 
-        bytes32 phase1L2TriggerHash =
-            _ccHash(false, address(this), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
+        bytes32 phase1L2TriggerHash = _ccHashL2Out(address(this), address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         CrossChainCall[] memory phase1L2Calls = new CrossChainCall[](1);
         phase1L2Calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL1),
@@ -319,9 +319,8 @@ contract IntegrationTestFlashLoan is IntegrationBase {
             (address(token), MAINNET_ROLLUP_ID, address(executorL1), 10_000e18, "Test Token", "TT", 18, L2_ROLLUP_ID)
         );
 
-        bytes32 l2Entry0ActionHash = _ccHash(
-            false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retReceiveCalldata
-        );
+        bytes32 l2Entry0ActionHash =
+            _ccHashL2Out(address(bridgeL2), address(bridgeL1), MAINNET_ROLLUP_ID, 0, retReceiveCalldata);
 
         // ── Build L1 Entry #1 calls ──
         L2ToL1Call[] memory l1Entry1Calls = new L2ToL1Call[](2);
@@ -330,6 +329,7 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         //   sourceProxy = rollups.proxy(executorL2, L2)
         //   Since msg.sender=EEZ (manager), proxy calls executorL2.claimAndBridgeBack(...)
         l1Entry1Calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(executorL2),
@@ -344,6 +344,7 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         //   proxy calls bridgeL1.receiveTokens(...)
         //   bridgeL1.onlyBridgeProxy(L2): checks msg.sender == rollups.proxy(bridgeL2, L2) -> MATCH
         l1Entry1Calls[1] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: address(bridgeL2),

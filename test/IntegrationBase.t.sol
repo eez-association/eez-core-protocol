@@ -71,7 +71,7 @@ abstract contract IntegrationBase is Test {
         }
 
         // ── L2 infrastructure ──
-        managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS);
+        managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS, false);
     }
 
     /// @notice Reads `rollups[rollupId].stateRoot`.
@@ -163,6 +163,25 @@ abstract contract IntegrationBase is Test {
     {
         return keccak256(
             abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data)
+        );
+    }
+
+    /// @notice Gas-folding mirror of `EEZL2.computeCrossChainCallHash`, keying calls that LEAVE the
+    ///         L2 (`executeCrossChainCall` top-level matching and `expectedOutgoingHash` rows). The
+    ///         fixture's manager runs with `useGasLeft = false`, so the folded `callGas` is always 0.
+    function _ccHashL2Out(
+        address sourceAddress,
+        address targetAddress,
+        uint64 targetRollupId,
+        uint256 value_,
+        bytes memory data
+    )
+        internal
+        view
+        returns (bytes32)
+    {
+        return managerL2.computeCrossChainCallHash(
+            false, sourceAddress, L2_ROLLUP_ID, targetAddress, targetRollupId, value_, 0, data
         );
     }
 

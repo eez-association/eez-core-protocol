@@ -88,8 +88,9 @@ contract EEZL2Test is BaseL2 {
 
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -99,7 +100,7 @@ contract EEZL2Test is BaseL2 {
         _loadSingle(entry);
         assertEq(manager.entryIndex(), 0, "cursor starts before the stored entry");
 
-        (bool success,) = proxy.call(callData);
+        (bool success,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
         assertEq(target.value(), 42);
         assertEq(manager.entryIndex(), 1, "consuming the stored entry advances the cursor");
@@ -109,8 +110,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -123,11 +125,11 @@ contract EEZL2Test is BaseL2 {
         _loadEntries(entries, new StaticExecutionEntry[](0));
 
         for (uint256 i = 0; i < 3; i++) {
-            (bool success,) = proxy.call(callData);
+            (bool success,) = proxy.call{gas: CALL_GAS}(callData);
             assertTrue(success);
         }
-        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
-        (bool s,) = proxy.call(callData);
+        vm.expectRevert(EEZL2.EntryNotFound.selector);
+        (bool s,) = proxy.call{gas: CALL_GAS}(callData);
         s;
     }
 
@@ -194,7 +196,7 @@ contract EEZL2Test is BaseL2 {
         _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
 
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
-        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
+        vm.expectRevert(EEZL2.EntryNotFound.selector);
         (bool s,) = proxy.call(callData);
         s;
     }
@@ -214,8 +216,9 @@ contract EEZL2Test is BaseL2 {
 
         bytes memory cd = abi.encodeCall(L2TestTarget.setValue, (7));
         bytes memory payload = hex"deadbeef";
-        // sourceRollupId in the L2 proxy-entry hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
-        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
+        // Gas-folding key; sourceRollupId in the L2 proxy-entry hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, cd);
+        bytes32 h = _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, cd);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0].proxyEntryHash = h;
@@ -229,13 +232,13 @@ contract EEZL2Test is BaseL2 {
 
         uint256 idxBefore = manager.entryIndex();
 
-        (bool ok, bytes memory ret) = proxy.call(cd);
+        (bool ok, bytes memory ret) = proxy.call{gas: CALL_GAS}(cd);
         assertFalse(ok);
         assertEq(ret, payload);
         assertEq(manager.entryIndex(), idxBefore, "reverting entry must not advance entryIndex");
 
         // Repeatable: a second identical call reverts identically, still no advance.
-        (ok, ret) = proxy.call(cd);
+        (ok, ret) = proxy.call{gas: CALL_GAS}(cd);
         assertFalse(ok);
         assertEq(ret, payload);
         assertEq(manager.entryIndex(), idxBefore);
@@ -254,10 +257,13 @@ contract EEZL2Test is BaseL2 {
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
 
-        bytes32 outerHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(scap), REMOTE_ROLLUP_ID, 0, outerCd);
+        // Gas-folding keys: the outer (host) call attaches OUTER_CALL_GAS so the nested site can
+        // still forward its full explicit gas; the mock's inner call site attaches CALL_GAS.
+        uint64 outerGas = _probeOutgoing(address(this), outerProxy, 0, outerCd, OUTER_CALL_GAS);
+        uint64 innerGas = _probeOutgoing(address(scap), counterProxy, 0, innerCd);
+        bytes32 outerHash = _outgoingCallHash(address(this), address(scap), REMOTE_ROLLUP_ID, 0, outerGas, outerCd);
         // L2 forces sourceRollupId = ROLLUP_ID for reentrant calls it issues.
-        bytes32 innerHash = _ccHash(NOT_STATIC_CALL, address(scap), TEST_ROLLUP_ID, counterL1, MAINNET, 0, innerCd);
+        bytes32 innerHash = _outgoingCallHash(address(scap), counterL1, MAINNET, 0, innerGas, innerCd);
 
         CrossChainCall memory cc = _cc(address(scap), 0, outerCd, address(this), REMOTE_ROLLUP_ID);
 
@@ -282,7 +288,7 @@ contract EEZL2Test is BaseL2 {
         entry.expectedOutgoingCalls = outgoing;
         _loadSingle(entry);
 
-        (bool ok,) = outerProxy.call(outerCd);
+        (bool ok,) = outerProxy.call{gas: OUTER_CALL_GAS}(outerCd);
         assertTrue(ok, "outer call must succeed");
         assertEq(scap.counter(), 1, "outer call must run");
         assertTrue(scap.lastCallFailed(), "inner call must revert via the outgoing reentrant table");
@@ -295,8 +301,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -305,7 +312,7 @@ contract EEZL2Test is BaseL2 {
         ExecutionEntry memory entry = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
         _loadSingle(entry);
 
-        (bool success, bytes memory ret) = proxy.call(callData);
+        (bool success, bytes memory ret) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
         assertEq(ret, "", "caller receives the entry's (empty) returnData, not the target's");
         assertEq(target.value(), 42);
@@ -315,8 +322,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -328,7 +336,7 @@ contract EEZL2Test is BaseL2 {
         ExecutionEntry memory entry = _buildSimpleEntry(crossChainCallHash, cc, entryReturnData, rollingHash);
         _loadSingle(entry);
 
-        (bool success, bytes memory ret) = proxy.call(callData);
+        (bool success, bytes memory ret) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
         assertEq(ret, entryReturnData);
     }
@@ -342,8 +350,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.getValue, ());
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -355,14 +364,14 @@ contract EEZL2Test is BaseL2 {
         entries[1] = _buildSimpleEntry(crossChainCallHash, cc, abi.encode(uint256(222)), rollingHash);
         _loadEntries(entries, new StaticExecutionEntry[](0));
 
-        (bool s1, bytes memory r1) = proxy.call(callData);
+        (bool s1, bytes memory r1) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(s1);
         assertEq(abi.decode(r1, (uint256)), 111);
-        (bool s2, bytes memory r2) = proxy.call(callData);
+        (bool s2, bytes memory r2) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(s2);
         assertEq(abi.decode(r2, (uint256)), 222);
-        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
-        (bool s3,) = proxy.call(callData);
+        vm.expectRevert(EEZL2.EntryNotFound.selector);
+        (bool s3,) = proxy.call{gas: CALL_GAS}(callData);
         s3;
     }
 
@@ -373,7 +382,7 @@ contract EEZL2Test is BaseL2 {
         CrossChainProxy p = CrossChainProxy(payable(proxy));
         vm.prank(address(0xDEAD));
         vm.expectRevert(EEZL2.ExecutionNotInCurrentBlock.selector);
-        p.executeOnBehalf(address(target), abi.encodeCall(L2TestTarget.setValue, (42)));
+        p.executeOnBehalf(address(target), 0, abi.encodeCall(L2TestTarget.setValue, (42)));
     }
 
     // ── Rolling hash mismatch ──
@@ -382,8 +391,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -391,7 +401,7 @@ contract EEZL2Test is BaseL2 {
         _loadSingle(entry);
 
         vm.expectRevert(EEZBase.RollingHashMismatch.selector);
-        (bool s,) = proxy.call(callData);
+        (bool s,) = proxy.call{gas: CALL_GAS}(callData);
         s;
     }
 
@@ -404,8 +414,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
@@ -425,7 +436,7 @@ contract EEZL2Test is BaseL2 {
         _loadSingle(entry);
 
         vm.expectRevert(EEZBase.RollingHashMismatch.selector);
-        (bool s,) = proxy.call(callData);
+        (bool s,) = proxy.call{gas: CALL_GAS}(callData);
         s;
     }
 
@@ -435,8 +446,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall[] memory calls = new CrossChainCall[](2);
         calls[0] = _cc(address(target), 0, abi.encodeCall(L2TestTarget.setValue, (10)), address(this), REMOTE_ROLLUP_ID);
@@ -458,7 +470,7 @@ contract EEZL2Test is BaseL2 {
 
         _loadSingle(entry);
 
-        (bool success,) = proxy.call(callData);
+        (bool success,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
         assertEq(target.value(), 20);
     }
@@ -477,11 +489,13 @@ contract EEZL2Test is BaseL2 {
         RevertingTarget revTarget = new RevertingTarget();
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: address(this),
@@ -506,7 +520,7 @@ contract EEZL2Test is BaseL2 {
 
         _loadSingle(entry);
 
-        (bool success,) = proxy.call(callData);
+        (bool success,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
     }
 
@@ -559,8 +573,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -570,7 +585,7 @@ contract EEZL2Test is BaseL2 {
         _loadSingle(entry);
 
         vm.recordLogs();
-        (bool success,) = proxy.call(callData);
+        (bool success,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -590,8 +605,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -603,9 +619,9 @@ contract EEZL2Test is BaseL2 {
         _loadEntries(entries, new StaticExecutionEntry[](0));
 
         vm.recordLogs();
-        (bool s1,) = proxy.call(callData);
+        (bool s1,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(s1);
-        (bool s2,) = proxy.call(callData);
+        (bool s2,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(s2);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -626,8 +642,9 @@ contract EEZL2Test is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
 
+        uint64 callGas = _probeOutgoing(address(this), proxy, 0, callData);
         bytes32 crossChainCallHash =
-            _ccHash(NOT_STATIC_CALL, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, callData);
+            _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, callData);
 
         CrossChainCall memory cc = _cc(address(target), 0, callData, address(this), REMOTE_ROLLUP_ID);
 
@@ -637,20 +654,23 @@ contract EEZL2Test is BaseL2 {
         _loadSingle(entry);
 
         vm.recordLogs();
-        (bool success,) = proxy.call(callData);
+        (bool success,) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(success);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 sel = EEZBase.CrossChainCallExecuted.selector;
+        bytes32 sel = EEZL2.CrossChainCallExecuted.selector;
         bool found = false;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == sel) {
                 assertEq(logs[i].topics[1], crossChainCallHash);
                 assertEq(address(uint160(uint256(logs[i].topics[2]))), proxy);
-                (address src, bytes memory cd, uint256 val) = abi.decode(logs[i].data, (address, bytes, uint256));
+                (address src, bytes memory cd, uint256 val, uint64 emittedGas) =
+                    abi.decode(logs[i].data, (address, bytes, uint256, uint64));
                 assertEq(src, address(this));
                 assertEq(cd, callData);
                 assertEq(val, 0);
+                assertEq(emittedGas, 0, "callGas is fixed 0 (fixture runs useGasLeft = false)");
+                assertEq(emittedGas, callGas, "emitted callGas equals the probed value");
                 found = true;
                 break;
             }

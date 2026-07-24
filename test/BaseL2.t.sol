@@ -30,7 +30,7 @@ abstract contract BaseL2 is Test, TestHashes {
     address internal constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
 
     function setUp() public virtual {
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false);
     }
 
     // ──────────────────────────────────────────────
@@ -51,6 +51,48 @@ abstract contract BaseL2 is Test, TestHashes {
     }
 
     // ──────────────────────────────────────────────
+    //  callGas probing
+    // ──────────────────────────────────────────────
+
+    /// @notice Explicit gas attached to every probed/consuming proxy call. `callGas` is captured
+    ///         from `gasleft()` at manager entry, so a call only reproduces its probed value when
+    ///         it attaches the same explicit gas.
+    uint256 internal constant CALL_GAS = 5_000_000;
+
+    /// @notice Explicit gas for a top-level proxy call whose entry fires a NESTED `{gas: CALL_GAS}`
+    ///         proxy call: large enough that the 63/64 forwarding rule still lets the nested call
+    ///         site pass its full explicit `CALL_GAS`, so the nested probe stays reproducible.
+    uint256 internal constant OUTER_CALL_GAS = 20_000_000;
+
+    /// @notice Observes the exact `callGas` a `{gas: CALL_GAS}` proxy call from `caller` will fold
+    ///         into its outgoing hash. Loads an EMPTY table (block gate, guaranteed no-match) and
+    ///         probes twice: the first call warms the access path, the second measures it warm.
+    ///         Wipes any loaded table — probe BEFORE loading the real entries.
+    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data)
+        internal
+        returns (uint64 g)
+    {
+        return _probeOutgoing(caller, proxyAddr, value, data, CALL_GAS);
+    }
+
+    /// @notice `_probeOutgoing` with an explicit attached gas — for the top-level call of a nested
+    ///         scenario, which attaches `OUTER_CALL_GAS` (see above) instead of `CALL_GAS`.
+    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data, uint256 attachedGas)
+        internal
+        returns (uint64 g)
+    {
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        for (uint256 i = 0; i < 2; i++) {
+            vm.prank(caller);
+            (bool ok, bytes memory err) = proxyAddr.call{value: value, gas: attachedGas}(data);
+            require(!ok && bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
+            assembly {
+                g := mload(add(err, 0x44))
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────
     //  L2 hash helpers
     // ──────────────────────────────────────────────
 
@@ -61,6 +103,23 @@ abstract contract BaseL2 is Test, TestHashes {
             _ccHash(
                 cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, TEST_ROLLUP_ID, cc.value, cc.data
             );
+    }
+
+    /// @notice Gas-folding hash of a mutable call LEAVING this L2 (source rollup = this L2) —
+    ///         the flavour `executeCrossChainCall` keys with; `callGas` comes from `_probeOutgoing`.
+    function _outgoingCallHash(
+        address src,
+        address tgt,
+        uint64 tgtRollupId,
+        uint256 value,
+        uint64 callGas,
+        bytes memory data
+    )
+        internal
+        view
+        returns (bytes32)
+    {
+        return manager.computeCrossChainCallHash(false, src, TEST_ROLLUP_ID, tgt, tgtRollupId, value, callGas, data);
     }
 
     /// @notice Position key for a unified `expectedOutgoingCalls` element:
@@ -99,6 +158,7 @@ abstract contract BaseL2 is Test, TestHashes {
         returns (CrossChainCall memory)
     {
         return CrossChainCall({
+            gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: src,

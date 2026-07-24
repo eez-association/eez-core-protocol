@@ -89,6 +89,7 @@ abstract contract RevertL2Actions {
         // hash still records the successful outcome.
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: alice,
@@ -129,6 +130,7 @@ abstract contract RevertL2Actions {
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
+            gas: 0,
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: alice,
