@@ -16,8 +16,9 @@ for the exact scripts in the test file.
 | `driver_X` | the tx's origin driver actor on chain X (fires the root calls) |
 | `target_X` | the call-target actor on chain X |
 | `cch(...)` | `computeCrossChainCallHash(isStatic, src, srcRid, dst, dstRid, value, data)` — the gas-free destination-kind hash; every hash in the L1 batch uses it |
-| `seed` | the entry's rolling-hash seed: fold of each `(rollupId, currentState)` pair, then `proxyEntryHash` |
-| `⊕ TAG(...)` | one tagged fold into the rolling hash: `CALL_BEGIN(cch)`, `CALL_END(success, retData)`, `NESTED_BEGIN(cch)`, `NESTED_END` |
+| `H(...)` | `keccak256(abi.encodePacked(...))` — one fold of the accumulator |
+| `h0 … hN` | the rolling hash after each fold, written as an explicit chain: `h0` is the seed — `H(0, rid, currentState)` per state pin, closed with `H(pins, proxyEntryHash)`; `f_` marks a reverted frame's discarded branch, `s_` the untagged static accumulator |
+| tag bytes | `1` = CALL_BEGIN · `2` = CALL_END · `3` = NESTED_BEGIN · `4` = NESTED_END (· `5` = CALL_NOT_FOUND) |
 
 Wrapper fields identical in every batch the harness posts (omitted below):
 
@@ -63,7 +64,8 @@ entries = [{
     destinationRollupId = A,
     l2ToL1Calls         = [],                     // nothing lands on L1
     expectedL1ToL2Calls = [],
-    rollingHash         = seed,                   // no folds at all
+    rollingHash         = h0:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed only — nothing folds on L1
     success             = true,
     returnData          = "",
 }]
@@ -85,7 +87,8 @@ entries = [{
     destinationRollupId = A,
     l2ToL1Calls         = [],                     // the call executes on L2_A, not L1
     expectedL1ToL2Calls = [],
-    rollingHash         = seed,
+    rollingHash         = h0:
+        h0 = H( H(0, A, G_A), proxyEntryHash )    // seed only — the call runs on L2_A, not L1
     success             = true,
     returnData          = "dsl.ret#0",            // L2_A's return, pre-computed by the prover
 }]
@@ -113,7 +116,10 @@ entries = [{
         targetAddress: target_L1, value: 0, data: callData,
     }],
     expectedL1ToL2Calls = [],
-    rollingHash         = seed ⊕ CALL_BEGIN(cch_call) ⊕ CALL_END(true, "dsl.ret#0"),
+    rollingHash         = h2:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed: state pin, then proxyEntryHash
+        h1 = H( h0, 1, cch(l2ToL1Calls[0]) )      // 1 = CALL_BEGIN — binds WHICH call ran
+        h2 = H( h1, 2, true, "dsl.ret#0" )        // 2 = CALL_END — observed success + retData
     success             = true,
     returnData          = "",
 }]
@@ -164,7 +170,10 @@ entries = [{
         targetAddress: target_L1, value: 0, data: readData,
     }],
     expectedL1ToL2Calls = [],
-    rollingHash         = seed ⊕ CALL_BEGIN(cch_read) ⊕ CALL_END(true, "dsl.ret#0"),
+    rollingHash         = h2:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed
+        h1 = H( h0, 1, cch_read )                 // 1 = CALL_BEGIN — the STATICCALL row
+        h2 = H( h1, 2, true, "dsl.ret#0" )        // 2 = CALL_END — the live L1 read result
     success             = true,
     returnData          = "",
 }]
@@ -197,7 +206,10 @@ entries = [{
         targetAddress: target_L1, value: 0, data: cbData,
     }],
     expectedL1ToL2Calls = [],
-    rollingHash         = seed ⊕ CALL_BEGIN(cch_cb) ⊕ CALL_END(true, "dsl.ret#1"),
+    rollingHash         = h2:
+        h0 = H( H(0, A, G_A), proxyEntryHash )    // seed
+        h1 = H( h0, 1, cch_cb )                   // 1 = CALL_BEGIN — the A→L1 callback
+        h2 = H( h1, 2, true, "dsl.ret#1" )        // 2 = CALL_END
     success             = true,
     returnData          = "dsl.ret#0",            // the root call's L2_A return
 }]
@@ -223,14 +235,18 @@ entries = [{
         targetAddress: target_L1, value: 0, data: rootData,
     }],
     expectedL1ToL2Calls = [{                      // unified reentrant table: SUCCESS row
-        expectedL1toL2Hash        = keccak256(cch_nested, RH_fire),
+        expectedL1toL2Hash        = H( cch_nested, h1 ),  // position key: fired right after CALL_BEGIN
         l2ToL1Calls               = [],           // the frame has no sub-calls of its own
         revertedOrStaticRollingHash = 0x0,
         success                   = true,
         returnData                = "dsl.ret#1",  // L2_A's pre-computed callback result
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(cch_root) ⊕ NESTED_BEGIN(cch_nested) ⊕ NESTED_END
-                       ⊕ CALL_END(true, "dsl.ret#0"),
+    rollingHash = h4:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed
+        h1 = H( h0, 1, cch_root )                 // 1 = CALL_BEGIN — the A→L1 root call
+        h2 = H( h1, 3, cch_nested )               // 3 = NESTED_BEGIN — the frame opens
+        h3 = H( h2, 4 )                           // 4 = NESTED_END — the frame commits
+        h4 = H( h3, 2, true, "dsl.ret#0" )        // 2 = CALL_END
     success             = true,
     returnData          = "",
 }]
@@ -239,7 +255,7 @@ immediateEntryCount = 1
 ```
 
 While `target_L1` executes, its call back into L2_A hits the reentrant table:
-the key binds `cch_nested` to `RH_fire` — the live rolling hash right after
+the key binds `cch_nested` to `h1` — the live rolling hash right after
 `CALL_BEGIN(cch_root)` — so the row can only match at that exact execution
 point. The frame opens `NESTED_BEGIN`, runs its (empty) sub-array, commits with
 `NESTED_END`, and returns the pre-computed data.
@@ -259,7 +275,10 @@ entries = [{
         targetAddress: target_L1, value: 0, data: readData,
     }],
     expectedL1ToL2Calls = [],
-    rollingHash         = seed ⊕ CALL_BEGIN(cch_read) ⊕ CALL_END(true, "dsl.ret#1"),
+    rollingHash         = h2:
+        h0 = H( H(0, A, G_A), proxyEntryHash )    // seed
+        h1 = H( h0, 1, cch_read )                 // 1 = CALL_BEGIN — the STATICCALL row
+        h2 = H( h1, 2, true, "dsl.ret#1" )        // 2 = CALL_END — the live L1 read result
     success             = true,
     returnData          = "dsl.ret#0",
 }]
@@ -288,14 +307,16 @@ entries = [{
         targetAddress: target_L1, value: 0, data: rootData,
     }],
     expectedL1ToL2Calls = [{                      // STATIC row, static-kind key
-        expectedL1toL2Hash        = keccak256(cch_read_static, RH_fire),
+        expectedL1toL2Hash        = H( cch_read_static, h1 ),  // position key: fired inside the call
         l2ToL1Calls               = [],
         revertedOrStaticRollingHash = 0x0,        // untagged accumulator of 0 sub-calls
         success                   = true,
         returnData                = "dsl.ret#1",  // the pre-computed L2_A read result
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(cch_root) ⊕ CALL_END(true, "dsl.ret#0"),
-                                                  // the read folds NOTHING on the host
+    rollingHash = h2:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed
+        h1 = H( h0, 1, cch_root )                 // 1 = CALL_BEGIN — the A→L1 root call
+        h2 = H( h1, 2, true, "dsl.ret#0" )        // 2 = CALL_END — the STATIC row folds NOTHING
     success             = true,
     returnData          = "",
 }]
@@ -327,7 +348,8 @@ staticEntries = [{
         sourceAddress: target_A, sourceRollupId: A,
         targetAddress: target_L1, value: 0, data: innerReadData,
     }],
-    rollingHash         = keccak256(0x0, true, innerResult),  // untagged schema
+    rollingHash         = s1:                     // untagged static schema
+        s1 = H( 0x0, true, innerResult )          // one fold per sub-read: H(prev, success, retData)
     success             = true,
     returnData          = "dsl.ret#0",            // the outer read's cached result
 }]
@@ -360,14 +382,16 @@ entries = [{
         targetAddress: target_L1, value: 0, data: readData,
     }],
     expectedL1ToL2Calls = [{                      // STATIC row: the sub-read of A
-        expectedL1toL2Hash        = keccak256(cch_sub_static, RH_fire),  // fire = after CALL_BEGIN
+        expectedL1toL2Hash        = H( cch_sub_static, h1 ),  // fired right after CALL_BEGIN
         l2ToL1Calls               = [],
         revertedOrStaticRollingHash = 0x0,
         success                   = true,
         returnData                = "dsl.ret#1",  // A's cached sub-read result
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(cch_read) ⊕ CALL_END(true, "dsl.ret#0"),
-                                                  // the STATIC row folds nothing
+    rollingHash = h2:
+        h0 = H( H(0, A, G_A), 0x0 )               // seed
+        h1 = H( h0, 1, cch_read )                 // 1 = CALL_BEGIN — the outer read, run live
+        h2 = H( h1, 2, true, "dsl.ret#0" )        // 2 = CALL_END — the STATIC row folds nothing
     success             = true,
     returnData          = "",
 }]
@@ -401,14 +425,18 @@ entries = [{
         targetAddress: target_L1, value: 0, data: rootData,
     }],
     expectedL1ToL2Calls = [{                      // REVERTED row
-        expectedL1toL2Hash        = keccak256(cch_toB, RH_fire),
+        expectedL1toL2Hash        = H( cch_toB, h1 ),  // position key: fired inside the root call
         l2ToL1Calls               = [],           // the failing frame's own sub-calls
-        revertedOrStaticRollingHash = RH_fire ⊕ NESTED_BEGIN(cch_toB),  // expected frame hash
+        revertedOrStaticRollingHash = f1,         // the expected frame hash (see branch below)
         success                   = false,
         returnData                = "dsl.fail#1", // the revert payload L1 catches
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(cch_root) ⊕ CALL_END(true, "dsl.ret#0"),
-                                                  // the reverted frame leaves NO folds
+    rollingHash = h2:
+        h0 = H( H( H(0, A, G_A), B, G_B ), 0x0 )  // seed: BOTH pins, then proxyEntryHash
+        h1 = H( h0, 1, cch_root )                 // 1 = CALL_BEGIN — the A→L1 root call
+        ├─ f1 = H( h1, 3, cch_toB )               // 3 = NESTED_BEGIN — the frame that REVERTS:
+        │       f1 is checked == revertedOrStaticRollingHash, then the revert DISCARDS the branch
+        h2 = H( h1, 2, true, "dsl.ret#0" )        // 2 = CALL_END — chains from h1, not f1
     success             = true,
     returnData          = "",
 }]
@@ -456,15 +484,22 @@ entries = [{
         },
     ],
     expectedL1ToL2Calls = [{                      // the nested L1→L2_B hop inside call 2
-        expectedL1toL2Hash        = keccak256(cch_toB, RH_fire_inside_span),
+        expectedL1toL2Hash        = H( cch_toB, h3 ),  // position key: fired inside call 2's span
         l2ToL1Calls               = [],
         revertedOrStaticRollingHash = 0x0,
         success                   = true,
         returnData                = "dsl.ret#2",
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(c1) ⊕ CALL_END(true, r1)
-                       ⊕ CALL_BEGIN(c2) ⊕ NESTED_BEGIN(cch_toB) ⊕ NESTED_END ⊕ CALL_END(true, r2)
-                       ⊕ CALL_BEGIN(c3) ⊕ CALL_END(true, r3),   // ALL calls fold — they all ran
+    rollingHash = h8:
+        h0 = H( H( H(0, A, G_A), B, G_B ), 0x0 )  // seed: both pins, then proxyEntryHash
+        h1 = H( h0, 1, cch_c1 )                   // CALL_BEGIN call 1
+        h2 = H( h1, 2, true, r1 )                 // CALL_END
+        h3 = H( h2, 1, cch_c2 )                   // CALL_BEGIN call 2 (revertNextNCalls = 2)
+        h4 = H( h3, 3, cch_toB )                  // NESTED_BEGIN — the L1→L2_B frame
+        h5 = H( h4, 4 )                           // NESTED_END — frame committed
+        h6 = H( h5, 2, true, r2 )                 // CALL_END call 2
+        h7 = H( h6, 1, cch_c3 )                   // CALL_BEGIN call 3
+        h8 = H( h7, 2, true, r3 )                 // CALL_END — every fold SURVIVES the span revert
     success             = true,
     returnData          = "",
 }]
@@ -498,7 +533,7 @@ entries = [{
         targetAddress: target_L1, value: 0, data: cbAData,
     }],
     expectedL1ToL2Calls = [{                      // the L1→L2_B frame, fired inside that callback
-        expectedL1toL2Hash        = keccak256(cch_toB, RH_fire),
+        expectedL1toL2Hash        = H( cch_toB, h1 ),  // position key: fired inside the callback
         l2ToL1Calls               = [{            // the frame's OWN sub-call: the B→L1 landing
             revertNextNCalls: 0, isStatic: false, gas: 0,
             sourceAddress: target_B, sourceRollupId: B,
@@ -508,11 +543,14 @@ entries = [{
         success                   = true,
         returnData                = "dsl.ret#2",  // L2_B's pre-computed return
     }],
-    rollingHash = seed ⊕ CALL_BEGIN(cch_AtoL1)
-                       ⊕ NESTED_BEGIN(cch_toB)
-                       ⊕ CALL_BEGIN(cch_BtoL1) ⊕ CALL_END(true, retB)   // inside the frame
-                       ⊕ NESTED_END
-                       ⊕ CALL_END(true, retA),
+    rollingHash = h6:
+        h0 = H( H( H(0, A, G_A), B, G_B ), proxyEntryHash )  // seed
+        h1 = H( h0, 1, cch_AtoL1 )                // CALL_BEGIN — the A→L1 callback
+        h2 = H( h1, 3, cch_toB )                  // NESTED_BEGIN — the L1→L2_B frame
+        h3 = H( h2, 1, cch_BtoL1 )                // CALL_BEGIN — the frame's own B→L1 sub-call
+        h4 = H( h3, 2, true, retB )               // CALL_END — inside the frame
+        h5 = H( h4, 4 )                           // NESTED_END — frame committed
+        h6 = H( h5, 2, true, retA )               // CALL_END — the callback's own result
     success             = true,
     returnData          = "dsl.ret#0",            // the root call's L2_A return
 }]
