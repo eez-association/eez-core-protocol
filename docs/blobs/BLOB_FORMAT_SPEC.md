@@ -268,6 +268,10 @@ back when the region's matching `Revert` (§2.7) arrives. `Snapshot` / `Revert` 
 by exactly one `Revert`, a `Revert` must have an open `Snapshot`, and each `Revert` closes
 the innermost still-open `Snapshot`.
 
+A `Snapshot` is only needed around calls that `ReturnSuccess` and must be rolled back
+later. A call that ends in `ReturnFail` already implies its effects reverted (§2.5), so a
+region whose only content is that call is unnecessary — don't emit one.
+
 A `Snapshot` can only open **inside** an open `InitiateCrossChainTransaction` …
 `FinishCrossChainTransaction` bracket — never outside a cross-chain transaction (§5,
 condition 7) — and its matching `Revert` must arrive before that bracket closes, at the
