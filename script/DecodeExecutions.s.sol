@@ -42,7 +42,7 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
-    // L2 flavour: carries the observed callGas folded into the L2 outgoing hash.
+    // L2 kind: carries the observed callGas folded into the L2 outgoing hash.
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED_L2 =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256,uint64)");
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");

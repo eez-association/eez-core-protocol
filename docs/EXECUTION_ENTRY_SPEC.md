@@ -14,7 +14,7 @@ struct ExecutionEntry {
     StateUpdate[]         stateUpdates;          // the entry's true state transition (≥1, enforced on-chain)
     bytes32              proxyEntryHash;       // inbound proxy-entry call hash; bytes32(0) = L2Tx (immediate / executeL2Txs)
     L2ToL1Call[]         l2ToL1Calls;          // the entry's TOP-LEVEL calls only (reentrant frames carry their own)
-    ExpectedL1ToL2Call[] expectedL1ToL2Calls;  // unified reentrant table: SUCCESS / STATIC / REVERTED flavours
+    ExpectedL1ToL2Call[] expectedL1ToL2Calls;  // unified reentrant table: SUCCESS / STATIC / REVERTED kinds
     bytes32              rollingHash;          // expected rolling hash over all calls + nestings
     uint64               destinationRollupId;  // routes to a per-rollup queue; must be ∈ stateUpdates
     bool                 success;              // false ⇒ the entry runs, is verified, then reverts with returnData
@@ -153,7 +153,7 @@ Three distinct revert paths, one decision tree:
 struct ExpectedL1ToL2Call {
     bytes32      expectedL1toL2Hash;           // position key: keccak256(crossChainCallHash ‖ expectedRollingHash)
     L2ToL1Call[] l2ToL1Calls;                  // the reentrant frame's OWN sub-calls, run to completion
-    bytes32      revertedOrStaticRollingHash;  // expected sub-call hash — checked for STATIC / REVERTED flavours
+    bytes32      revertedOrStaticRollingHash;  // expected sub-call hash — checked for STATIC / REVERTED kinds
     bool         success;                      // whether the reentrant call returns or reverts
     bytes        returnData;                   // pre-computed return value (revert payload when !success)
 }
@@ -161,7 +161,7 @@ struct ExpectedL1ToL2Call {
 
 L2's `ExpectedOutgoingCrossChainCall` (`IEEZL2.sol`) is field-for-field identical modulo names (`expectedOutgoingHash`, `incomingCalls`).
 
-One unified table holds **every** reentrant flavour — plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`!success`). Each is content-addressed by a single key:
+One unified table holds **every** reentrant kind — plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`!success`). Each is content-addressed by a single key:
 
 ```solidity
 expectedL1toL2Hash = keccak256(abi.encodePacked(crossChainCallHash, expectedRollingHash))
@@ -179,7 +179,7 @@ When a destination contract called by the processor calls back into a proxy (e.g
    - `success == false`: check `_rollingHash == revertedOrStaticRollingHash` (else `RollingHashMismatch`), then revert with `returnData` — the terminal revert rolls back the frame's state, hash, and cursor bump.
 3. No match: fold `CALL_NOT_FOUND(crossChainCallHash)` into `_rollingHash` and return empty bytes. The divergence surfaces as `RollingHashMismatch` at the entry boundary — it survives any intermediate `try/catch` (and any `revertNextNCalls` boundary, riding the `ContextResult` payload). On L1 there is one additional gate before all of this: the reentrant call's target rollup must be in the executing entry's proven set (`ReentrantDestinationNotVerified`).
 
-A reverted sub-execution reuses the **host table** for its own deeper reentrant calls (Solidity forbids recursive structs); the live `_rollingHash` folded into each key keeps the contexts distinct. STATIC-flavour entries in this table are matched only via `staticCrossChainCall` (their `crossChainCallHash` folds `isStatic = true`, so a CALL-keyed scan can never hit them) — see the Static Entries section.
+A reverted sub-execution reuses the **host table** for its own deeper reentrant calls (Solidity forbids recursive structs); the live `_rollingHash` folded into each key keeps the contexts distinct. STATIC-kind entries in this table are matched only via `staticCrossChainCall` (their `crossChainCallHash` folds `isStatic = true`, so a CALL-keyed scan can never hit them) — see the Static Entries section.
 
 ### Reverting reentrant calls are table entries too
 
@@ -191,12 +191,12 @@ There are no per-frame call counts and no shared flat array: each frame's array 
 
 ---
 
-## Static Entries (`StaticExecutionEntry` top-level / STATIC-flavour reentrant entries)
+## Static Entries (`StaticExecutionEntry` top-level / STATIC-kind reentrant entries)
 
 Read-only cross-chain calls (`STATICCALL`s through a proxy) resolve in two homes (full spec: `LOOKUP_SPEC.md`):
 
 ```solidity
-// NESTED — a STATIC-flavour entry in the unified reentrant table (see previous section).
+// NESTED — a STATIC-kind entry in the unified reentrant table (see previous section).
 // Keyed by expectedL1toL2Hash where crossChainCallHash folds isStatic = true and value = 0.
 // `l2ToL1Calls[]` are read-only sub-calls run via STATICCALL; `revertedOrStaticRollingHash`
 // uses the UNTAGGED static schema (starts at bytes32(0), keccak(prev, success, retData) per call).
@@ -231,7 +231,7 @@ Resolution (`_resolveStaticEntry`, shared body for both homes): run the sub-call
 |---|---|
 | Reentrant cross-chain call that **succeeds** | `success = true` entry in the unified reentrant table |
 | Reentrant cross-chain call that **reverts** (caller catches with try/catch) | `success = false` entry in the unified reentrant table |
-| Reentrant cross-chain `STATICCALL` (read-only; may return or revert) | STATIC-flavour entry in the unified reentrant table (`crossChainCallHash` folds `isStatic = true`; `success` as appropriate) |
+| Reentrant cross-chain `STATICCALL` (read-only; may return or revert) | STATIC-kind entry in the unified reentrant table (`crossChainCallHash` folds `isStatic = true`; `success` as appropriate) |
 | Top-level static read (returning **or** reverting) | Top-level `StaticExecutionEntry` in the pool (`success` as appropriate) |
 | Top-level cross-chain call that reverts (state-changing) | `ExecutionEntry` with `success = false` |
 | Inner natural revert of a non-reentrant call | Plain call in the frame's array with `revertNextNCalls = 0`; `CALL_END(false, retData)` captures it |
@@ -239,7 +239,7 @@ Resolution (`_resolveStaticEntry`, shared body for both homes): run the sub-call
 
 **How the manager picks** (for a reentrant call that hits the manager via a proxy):
 
-1. If the proxy is in a real STATICCALL frame (its `tstore` self-check reverts), the proxy routes to `staticCrossChainCall`, which computes the hash with `isStatic = true` and scans the active entry's unified table (forward from the cursor) for the key — only STATIC-flavour entries can match. Miss → `ExecutionNotFound`.
+1. If the proxy is in a real STATICCALL frame (its `tstore` self-check reverts), the proxy routes to `staticCrossChainCall`, which computes the hash with `isStatic = true` and scans the active entry's unified table (forward from the cursor) for the key — only STATIC-kind entries can match. Miss → `ExecutionNotFound`.
 2. Otherwise (normal CALL frame), the proxy routes to `executeCrossChainCall` → `_consumeNestedCall`, which computes the hash with `isStatic = false` and forward-scans for the key. A match resolves as SUCCESS or REVERTED per its `success` flag; a miss folds `CALL_NOT_FOUND` and returns empty bytes (the entry later fails `RollingHashMismatch` at its boundary) — identically on L1 and L2.
 
 ---
@@ -318,7 +318,7 @@ There are no cursor-vs-length checks: each frame's call array is run to completi
 
 A single mismatch anywhere in the execution tree changes the final hash — this catches wrong return data, wrong success/failure flags, missing or extra calls, missing reentrant frames, and incorrect nesting structure with one comparison.
 
-Static resolutions use a simpler **untagged** accumulator (`keccak256(prev, success, retData)` from `bytes32(0)`), verified against `StaticExecutionEntry.rollingHash` / the STATIC-flavour entry's `revertedOrStaticRollingHash` — the surrounding key already pins the context. For the full hash chain semantics, see `CORE_PROTOCOL_SPEC.md` §E.
+Static resolutions use a simpler **untagged** accumulator (`keccak256(prev, success, retData)` from `bytes32(0)`), verified against `StaticExecutionEntry.rollingHash` / the STATIC-kind entry's `revertedOrStaticRollingHash` — the surrounding key already pins the context. For the full hash chain semantics, see `CORE_PROTOCOL_SPEC.md` §E.
 
 ---
 

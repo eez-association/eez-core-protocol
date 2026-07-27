@@ -60,7 +60,7 @@ struct L2ToL1Call {
     bytes   data;
 }
 
-struct ExpectedL1ToL2Call {   // ONE unified reentrant table: SUCCESS, STATIC, and REVERTED flavours
+struct ExpectedL1ToL2Call {   // ONE unified reentrant table: SUCCESS, STATIC, and REVERTED kinds
     bytes32      expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, _rollingHash at fire point)
     L2ToL1Call[] l2ToL1Calls;                 // the reentrant frame's OWN sub-calls, run to completion
     bytes32      revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED
@@ -189,7 +189,7 @@ The two formulas are deliberately distinct: with `useGasLeft = true` an L2 outgo
 2. **postAndVerifyBatch(ProofSystemBatchPerVerificationEntries batch)** — (1) validates structure (sorted invariants, transient prefix bounds, proxy protection: every touched rollup ∈ the entry's `stateUpdates` / the static entry's pins), (2) fetches the vkey matrix via each rollup's `checkProofSystemsAndGetVkeys`, (3) verifies one proof per proof system against `publicInputsHash` (atomic: any failure reverts the batch), (4) marks each rollup verified this block (wiping its queues), (5-6) runs the leading run of `proxyEntryHash == 0` entries straight from calldata (`try _attemptExecuteImmediateL2Txs` — a revert emits `L2TxSkipped` and advances; all-failed reverts `AllImmediateL2TxsFailed`), (7) loads the remaining transient prefix into `_transientEntries` / `_transientStaticEntries` and fires `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` if `msg.sender` has code, (8) clears the transient tables, (9) publishes the remainder into per-rollup queues UNCONDITIONALLY via `_saveRemainderEntries` (soundness backstop: `StateUpdate.currentState` is re-checked at consumption, so orphaned entries fail `StateRootMismatch`).
 3. **executeCrossChainCall(sourceAddress, callData)** — payable entry point for proxies. Computes the call hash with `sourceRollupId = MAINNET_ROLLUP_ID` and tracks ether via `_entryEtherDelta`. Top-level → forward-scan the routed rollup's queue from its cursor (`_findMatchingEntry`: match = `proxyEntryHash` + `destinationRollupId` + live `currentState` pins, skipping non-matching candidates; transient table first while a batch is mid-flight); reentrant (`_insideExecution()`) → `_consumeNestedCall` against the unified reentrant table.
 4. **executeL2Txs(uint64 rollupId)** — permissionless. Forward-scans `rollupId`'s queue for the next matching `proxyEntryHash == bytes32(0)` entry and executes it. Not callable mid-execution.
-5. **staticCrossChainCall(sourceAddress, callData)** — view. Inside an execution: forward-scans the active host's unified `expectedL1ToL2Calls` for `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)` (the static-flavoured key; position-pinned, not consumed). Outside: scans the transient pool while a batch is mid-flight, else the routed rollup's `staticEntryQueue`, matching `proxyEntryHash` + `destinationRollupId` + live state-root pins (full scan). Runs cached sub-calls in static context, then returns `returnData` or reverts with it (when `!success`).
+5. **staticCrossChainCall(sourceAddress, callData)** — view. Inside an execution: forward-scans the active host's unified `expectedL1ToL2Calls` for `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)` (the static-kind key; position-pinned, not consumed). Outside: scans the transient pool while a batch is mid-flight, else the routed rollup's `staticEntryQueue`, matching `proxyEntryHash` + `destinationRollupId` + live state-root pins (full scan). Runs cached sub-calls in static context, then returns `returnData` or reverts with it (when `!success`).
 6. **setStateRoot(uint64 rollupId, bytes32 newStateRoot)** — manager-only (caller must equal `rollups[rid].rollupContract`). Reverts `RollupBatchActiveThisBlock` if the rollup had a verified batch this block.
 7. **Views**: `lastVerifiedBlock(rid)`, `queueLength(rid)`, `entryQueueIndex(rid)`.
 
@@ -200,7 +200,7 @@ Constructor: `EEZL2(uint64 rollupId != 0, address systemAddress, bool useGasLeft
 1. **loadExecutionTable(entries, staticEntries)** — system-only. Wipes existing tables, loads new ones, sets `lastLoadBlock`. Entries are only consumable in the same block (`ExecutionNotInCurrentBlock`).
 2. **executeIncomingCrossChainCall(destination, value, data, sourceAddress, sourceRollup, entries, staticEntries)** — system-only, payable (`msg.value == value` mints the inbound ETH). Atomically replaces the table and drives `entries[0]` through the call processor; `entries[0].incomingCalls[0]` is the inbound call itself, and `entries[0].proxyEntryHash` must match the hash of the explicit params.
 3. **executeCrossChainCall(sourceAddress, callData)** — same shape as L1, but `sourceRollupId` in the call hash is forced to `ROLLUP_ID`, and any `msg.value` is returned to `SYSTEM_ADDRESS` (burn). No state deltas, no ether accounting.
-4. **staticCrossChainCall(sourceAddress, callData)** — same nested key shape as L1 (unified table, static-flavoured hash); outside an execution it scans the single persistent `staticEntries` pool by `proxyEntryHash` alone (no state roots to pin).
+4. **staticCrossChainCall(sourceAddress, callData)** — same nested key shape as L1 (unified table, static-kind hash); outside an execution it scans the single persistent `staticEntries` pool by `proxyEntryHash` alone (no state roots to pin).
 
 Both managers share `createCrossChainProxy` / `computeCrossChainProxyAddress` from EEZBase.
 
@@ -236,13 +236,13 @@ No call/frame index is folded in: the hash is a chain, so order, count, and nest
 |---|---|
 | Reentrant call that **succeeds** | unified-table row with `success: true` (`_resolveNestedReentrant` runs its sub-array as a committing sub-execution) |
 | Reentrant call that **reverts** (caller catches with try/catch) | unified-table row with `success: false` (run as a mini-entry against `revertedOrStaticRollingHash`, then reverted) |
-| Reentrant cross-chain **STATICCALL** (read-only) | unified-table row keyed with the static-flavoured hash (resolved by `staticCrossChainCall`, position-pinned, not consumed) |
+| Reentrant cross-chain **STATICCALL** (read-only) | unified-table row keyed with the static-kind hash (resolved by `staticCrossChainCall`, position-pinned, not consumed) |
 | Top-level static read (succeeding or reverting) | pool `StaticExecutionEntry` (`success` as appropriate) |
 | Top-level call that **reverts** (state-changing) | `ExecutionEntry { success: false }` — run, verified, then reverted with `returnData` |
 | Inner natural revert of a non-reentrant call | plain sub-array call with `revertNextNCalls = 0`; `CALL_END(false, retData)` captures it |
 | Successful call(s) whose state must be force-reverted | `revertNextNCalls = N` on the first call of the span |
 
-All three reentrant flavours live in ONE table (`expectedL1ToL2Calls` / `expectedOutgoingCalls`), content-addressed by `keccak256(crossChainCallHash, _rollingHash-at-fire-point)` — the live rolling hash makes the execution position an enforced part of the key, and a reverted sub-execution reuses the host table for its own reentrant calls.
+All three reentrant kinds live in ONE table (`expectedL1ToL2Calls` / `expectedOutgoingCalls`), content-addressed by `keccak256(crossChainCallHash, _rollingHash-at-fire-point)` — the live rolling hash makes the execution position an enforced part of the key, and a reverted sub-execution reuses the host table for its own reentrant calls.
 
 ### CREATE2 Address Derivation
 

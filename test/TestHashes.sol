@@ -39,7 +39,7 @@ abstract contract TestHashes {
         );
     }
 
-    /// @notice Mirror of `EEZL2.computeCrossChainCallHash` — the gas-folding flavour keying calls
+    /// @notice Mirror of `EEZL2.computeCrossChainCallHash` — the gas-folding kind keying calls
     ///         that leave an L2 (`callGas` between value and data).
     function _ccHashGas(
         bool isStatic,

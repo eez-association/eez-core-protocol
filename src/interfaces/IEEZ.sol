@@ -92,14 +92,14 @@ struct L2ToL1Call {
 }
 
 /// @notice Pre-computed result for a reentrant cross-chain call (L1→L2) fired during execution.
-///         One unified `expectedL1ToL2Calls[]` table holds every flavour — plain SUCCESS, read-only
+///         One unified `expectedL1ToL2Calls[]` table holds every kind — plain SUCCESS, read-only
 ///         STATIC, and try/catch'd REVERTED (`!success`) — each content-addressed by a single
 ///         `expectedL1toL2Hash == keccak256(crossChainCallHash, expectedRollingHash)`. `crossChainCallHash`
 ///         folds `isStatic` (a static read keys distinctly from a state-changing call) plus the
 ///         routed rollup, so neither needs its own field; `expectedRollingHash` is `_rollingHash` at
 ///         the instant the call fires, which uniquely pins the execution point (the hash folds every
 ///         prior call / nesting boundary).
-/// @dev Every flavour carries its OWN `l2ToL1Calls[]` sub-array, run to completion (no shared
+/// @dev Every kind carries its OWN `l2ToL1Calls[]` sub-array, run to completion (no shared
 ///      partition). Resolution:
 ///        - SUCCESS  (call key, `success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
@@ -108,13 +108,13 @@ struct L2ToL1Call {
 ///        - REVERTED (call key, `!success`): `_resolveNestedReentrant` runs the sub-array as a
 ///          mini-entry (tagged hash vs `rollingHash`) then reverts.
 /// @dev A reverted sub-execution reuses the host table for its own reentrant calls (Solidity forbids
-///      recursive structs). Both flavours open the frame with NESTED_BEGIN(crossChainCallHash);
+///      recursive structs). Both kinds open the frame with NESTED_BEGIN(crossChainCallHash);
 ///      SUCCESS closes it with NESTED_END into the host's continuous hash, REVERTED's frame is rolled
 ///      back by its terminal revert.
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
     L2ToL1Call[] l2ToL1Calls; // the reentrant frame's own sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls; checked only for STATIC / REVERTED flavours
+    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls; checked only for STATIC / REVERTED kinds
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
 }

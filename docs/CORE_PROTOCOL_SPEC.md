@@ -73,7 +73,7 @@ struct L2ToL1Call {
 
 #### ExpectedL1ToL2Call (L1) / ExpectedOutgoingCrossChainCall (L2)
 
-One **unified reentrant table** per entry holds every flavour of reentrant cross-chain call fired during execution — plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`success == false`). Each row is content-addressed by a single position key:
+One **unified reentrant table** per entry holds every kind of reentrant cross-chain call fired during execution — plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`success == false`). Each row is content-addressed by a single position key:
 
 ```
 expectedL1toL2Hash == keccak256(abi.encodePacked(crossChainCallHash, expectedRollingHash))
@@ -93,7 +93,7 @@ struct ExpectedL1ToL2Call {
 }
 ```
 
-Every flavour carries its **own** `l2ToL1Calls[]` sub-array, run to completion — there is no shared flat-array partition and no `callCount` field. Resolution:
+Every kind carries its **own** `l2ToL1Calls[]` sub-array, run to completion — there is no shared flat-array partition and no `callCount` field. Resolution:
 
 - **SUCCESS** (`success == true`, matched via `_consumeNestedCall` with an `isStatic == false` key): `_resolveNestedReentrant` runs the sub-array as a COMMITTING sub-execution, folding into the host's continuous `_rollingHash` between `NESTED_BEGIN` / `NESTED_END`, then returns `returnData`.
 - **REVERTED** (`success == false`, same key shape): `_resolveNestedReentrant` runs the sub-array as a mini-entry, checks the resulting `_rollingHash` against `revertedOrStaticRollingHash`, then reverts with `returnData` — the terminal revert rolls back the frame's state, hash, and cursor.

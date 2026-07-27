@@ -180,6 +180,12 @@ abstract contract BlobScenarioBase is Test {
                     fromAddress: n.fromAddress, toChain: n.toChain, toAddress: n.toAddress, gas: n.gas, data: n.data
                 })
             );
+            // Sub-read fields live in the static entry's sub-call array (a table);
+            // only their results ride the sidecar.
+            for (uint256 c = 0; c < n.children.length; c++) {
+                CallNode memory sub = store.getNode(n.children[c]);
+                stitcher.loadSidecarStaticSubResult(sub.success, sub.returnData);
+            }
         }
         stitcher.loadSidecarRegionSizes(store.regionSizesInOrder());
         for (uint256 t = 0; t < store.txCount(); t++) {
@@ -205,7 +211,7 @@ abstract contract BlobScenarioBase is Test {
     }
 
     /// @dev Feeds each L2-sourced mutable call's observed callGas in execution (DFS) order,
-    ///      queued under its destination-flavour hash — callGas reaches no table, so it rides
+    ///      queued under its destination-kind hash — callGas reaches no table, so it rides
     ///      the sidecar like the static call fields do.
     function _feedCallGasSidecar(
         TableStitcher stitcher,
@@ -300,7 +306,17 @@ abstract contract BlobScenarioBase is Test {
         CallNode memory n = store.getNode(nodeId);
         require(_actorChainPlus1[n.toAddress] == n.toChain + 1, "call target must be an actor on its chain");
         if (n.isStatic) {
-            ScriptedActor(payable(n.toAddress)).setStaticResult(n.data, n.success, n.returnData);
+            if (n.children.length == 0) {
+                ScriptedActor(payable(n.toAddress)).setStaticResult(n.data, n.success, n.returnData);
+            } else {
+                // A read with sub-reads: when it runs live (STATICCALLed on an
+                // executing chain) the actor performs each sub-read for real.
+                ScriptedActor(payable(n.toAddress))
+                    .setStaticProgram(n.data, _buildStaticSteps(store, n.children, n.toChain), n.success, n.returnData);
+                for (uint256 i = 0; i < n.children.length; i++) {
+                    _programSubtree(store, n.children[i], depth + 1);
+                }
+            }
             return;
         }
         ScriptedActor(payable(n.toAddress))
@@ -350,6 +366,29 @@ abstract contract BlobScenarioBase is Test {
                 stepGas: child.isStatic ? STATIC_STEP_GAS : _gasAtDepth(depth),
                 data: child.data,
                 expected: child.returnData,
+                subCount: 0
+            });
+        }
+    }
+
+    /// @dev Static sub-read steps for a read's live evaluation: one static proxy read
+    ///      per child, performed on the chain the parent read executes on.
+    function _buildStaticSteps(ScenarioStore store, uint256[] memory children, uint64 execChain)
+        internal
+        view
+        returns (ScriptedActor.Step[] memory steps)
+    {
+        steps = new ScriptedActor.Step[](children.length);
+        for (uint256 i = 0; i < children.length; i++) {
+            CallNode memory sub = store.getNode(children[i]);
+            require(sub.fromChain == execChain, "static sub-read does not execute on its parent's chain");
+            steps[i] = ScriptedActor.Step({
+                kind: sub.success ? 3 : 5, // STEP_STATIC_READ / STEP_STATIC_EXPECT_REVERT
+                target: _managerOf(execChain).computeCrossChainProxyAddress(sub.toAddress, sub.toChain),
+                value: 0,
+                stepGas: STATIC_STEP_GAS,
+                data: sub.data,
+                expected: sub.returnData,
                 subCount: 0
             });
         }

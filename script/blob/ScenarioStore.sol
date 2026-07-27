@@ -18,9 +18,14 @@ import {BlobMessage, BlobMsgType, Msg, MsgList} from "./BlobMessages.sol";
 //  A storage contract (not a library) so the recursive tree can use dynamic
 //  push — instantiate one per conversion; state is append-only.
 //
-//  v1 shape restrictions (parse reverts `UnsupportedShape`; the byte codec
+//  Shape restrictions (parse reverts `UnsupportedShape`; the byte codec
 //  still accepts these streams — the limits apply to table translation only):
-//    - static calls carry no nested calls (pure lookups),
+//    - a static call nests only when it is a TOP-LEVEL read, and then only
+//      leaf static sub-reads of the reader chain (the chain that fired the
+//      read). That is exactly the shape the static entries verify: the pool
+//      entry resolves on the reader chain and re-runs its sub-read array live
+//      via STATICCALL against the untagged rolling hash — reads landing
+//      anywhere else could not be re-run there,
 //    - Snapshot/Revert regions don't nest and close between transactions is
 //      the only supported CloseBlobStream position,
 //    - a call's target is never the chain it executes on (the protocol rejects
@@ -74,6 +79,7 @@ struct ChainOpSpec {
 
 contract ScenarioStore {
     CallNode[] internal _nodes;
+    mapping(uint256 => bool) internal _isRoot; // node id → is a transaction root call
     TxSpec[] internal _txs;
     ChainOpSpec[] internal _chainOps;
     uint256 public closeTxsBefore;
@@ -118,9 +124,14 @@ contract ScenarioStore {
         return _chainOps[id];
     }
 
-    /// @notice Node ids of every static call in message (DFS) order — sidecar input
-    ///         for TableStitcher: static call fields never appear in any table (both
-    ///         sides match them by hash only), so they ride the blob, not the tables.
+    /// @notice Node ids of every top-level-or-nested static call in message (DFS)
+    ///         order, EXCLUDING sub-reads of a static read — sidecar input for
+    ///         TableStitcher: these calls' fields never appear in any table (both
+    ///         sides match them by hash only), so they ride the blob, not the
+    ///         tables. A static read's own sub-reads are different: their full
+    ///         fields live in the static entry's sub-call array, so the stitcher
+    ///         recovers them from the tables (only their RESULTS ride the sidecar —
+    ///         see `TableStitcher.loadSidecarStaticSubResult`).
     function staticNodesInOrder() external view returns (uint256[] memory ids) {
         uint256[] memory buf = new uint256[](_nodes.length);
         uint256 n = 0;
@@ -149,6 +160,8 @@ contract ScenarioStore {
     }
 
     /// @dev DFS collector: `statics` picks static nodes, otherwise region-start nodes.
+    ///      In statics mode a static node's children (its own sub-reads, always static)
+    ///      are skipped — their fields live in the static entry's sub-call array.
     function _collect(uint256[] storage siblings, uint256[] memory buf, uint256 n, bool statics)
         internal
         view
@@ -159,7 +172,9 @@ contract ScenarioStore {
             if (statics ? node.isStatic : node.revertSpan > 0) {
                 buf[n++] = siblings[i];
             }
-            n = _collect(node.children, buf, n, statics);
+            if (!(statics && node.isStatic)) {
+                n = _collect(node.children, buf, n, statics);
+            }
         }
         return n;
     }
@@ -188,10 +203,20 @@ contract ScenarioStore {
         n.gas = p.gas;
         n.data = p.data;
         if (parentId == ROOT_FRAME) {
+            _isRoot[nodeId] = true;
             _txs[txId].rootCalls.push(nodeId);
         } else {
-            if (_nodes[parentId].isStatic) revert UnsupportedShape("static calls cannot nest further calls");
-            _nodes[parentId].children.push(nodeId);
+            CallNode storage parent = _nodes[parentId];
+            if (parent.isStatic) {
+                // A static entry re-runs its sub-read array live on the chain resolving
+                // it (the reader chain) — only leaf reads landing there translate.
+                if (!p.isStatic) revert UnsupportedShape("mutable call inside a static call");
+                if (!_isRoot[parentId]) revert UnsupportedShape("static sub-reads cannot nest further");
+                if (p.toChain != parent.fromChain) {
+                    revert UnsupportedShape("static sub-read must target the reader chain");
+                }
+            }
+            parent.children.push(nodeId);
         }
     }
 

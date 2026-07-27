@@ -17,7 +17,8 @@ import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
 //  Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 //
 //      <chain> call <chain>        executor calls target; opens a frame
-//      <chain> staticCall <chain>  read-only frame (cannot nest anything)
+//      <chain> staticCall <chain>  read-only frame (a top-level one may nest
+//                                  leaf static sub-reads of the origin chain)
 //      <chain> return              closes the innermost frame with ReturnSuccess
 //      <chain> returnFail          closes it with ReturnFail
 //      <chain> snapshot            opens a forced-revert region in the current frame
@@ -245,7 +246,13 @@ abstract contract DslScenarioBase is BlobScenarioBase {
     function _dslCall(DslBuild memory b, string[] memory toks, uint64 exec, bool isStatic, uint256 lineNo) internal {
         uint64 tgt = _dslChain(toks[2], lineNo);
         if (tgt == exec) _dslFail(lineNo, "call target equals executing chain");
-        if (b.sp > 0 && b.frameStatic[b.sp - 1]) _dslFail(lineNo, "cannot nest inside a static call");
+        if (b.sp > 0 && b.frameStatic[b.sp - 1]) {
+            // Only a top-level static frame nests, and only leaf static sub-reads of
+            // the reader (origin) chain — the shape the static entries verify live.
+            if (!isStatic) _dslFail(lineNo, "cannot nest a mutable call inside a static call");
+            if (b.sp != 1) _dslFail(lineNo, "static sub-reads cannot nest further");
+            if (tgt != b.origin) _dslFail(lineNo, "static sub-read must target the reader chain");
+        }
         if (b.sp == DSL_MAX_DEPTH) _dslFail(lineNo, "call depth limit exceeded");
         if (address(dslTarget[tgt]) == address(0)) dslTarget[tgt] = newActor(tgt);
 

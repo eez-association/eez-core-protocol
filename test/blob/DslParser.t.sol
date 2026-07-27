@@ -53,8 +53,23 @@ contract DslParser is DslScenarioBase {
         _expectFail(1, "call target equals executing chain", "L1 call L1\n");
     }
 
-    function test_reject_nestingUnderStatic() public {
-        _expectFail(2, "cannot nest inside a static call", "L1 staticCall L2_A\nL2_A call L2_B\n");
+    function test_reject_mutableNestingUnderStatic() public {
+        _expectFail(2, "cannot nest a mutable call inside a static call", "L1 staticCall L2_A\nL2_A call L2_B\n");
+    }
+
+    function test_reject_staticSubReadNestingFurther() public {
+        _expectFail(
+            3, "static sub-reads cannot nest further", "L1 staticCall L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\n"
+        );
+    }
+
+    function test_reject_staticSubReadWrongTarget() public {
+        _expectFail(2, "static sub-read must target the reader chain", "L1 staticCall L2_A\nL2_A staticCall L2_B\n");
+    }
+
+    function test_reject_staticNestingUnderReentrantStatic() public {
+        // Only a TOP-LEVEL static frame may nest sub-reads; a reentrant one cannot.
+        _expectFail(3, "static sub-reads cannot nest further", "L1 call L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\n");
     }
 
     function test_reject_nestedSnapshot() public {
