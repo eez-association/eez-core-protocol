@@ -55,7 +55,7 @@ contract BlobCodecTest is Test {
         _roundTrip(_exampleFlow());
     }
 
-    /// @notice Non-zero gas limits survive the wire for both call flavours.
+    /// @notice Non-zero gas limits survive the wire for both call kinds.
     function test_roundTrip_callWithGasLimit() public pure {
         MsgList memory l = Msg.list(8);
         Msg.push(l, Msg.initiate(L2A, "rlp-tx"));

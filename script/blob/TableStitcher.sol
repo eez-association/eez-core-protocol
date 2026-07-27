@@ -74,10 +74,20 @@ contract TableStitcher is TestHashes {
         bytes data;
     }
 
+    /// @dev Result of one static sub-read, in parent-DFS order. A sub-read's FIELDS
+    ///      live in its static entry's sub-call array (a table), but its result is
+    ///      only ever hashed into the untagged accumulator — so the result alone
+    ///      rides the sidecar.
+    struct SidecarStaticResult {
+        bool success;
+        bytes returnData;
+    }
+
     SidecarTx[] internal _txMeta;
     SidecarStatic[] internal _statics;
+    SidecarStaticResult[] internal _staticSubResults;
     uint16[] internal _regionSizes;
-    // Observed callGas per L2-sourced mutable call, queued per destination-flavour hash in
+    // Observed callGas per L2-sourced mutable call, queued per destination-kind hash in
     // execution order (callGas reaches no table — it lives only inside the source-side keys).
     mapping(bytes32 => uint64[]) internal _callGasQueue;
     mapping(bytes32 => uint256) internal _callGasCursor;
@@ -90,6 +100,7 @@ contract TableStitcher is TestHashes {
     mapping(uint256 => uint256) internal _unitEntryCursor; // per (origin) unit: next entry
     mapping(uint256 => uint256) internal _unitStaticCursor;
     uint256 internal _staticCursor; // sidecar statics
+    uint256 internal _staticSubCursor; // sidecar sub-read results
     uint256 internal _regionCursor; // sidecar region sizes
 
     struct Sim {
@@ -163,6 +174,12 @@ contract TableStitcher is TestHashes {
 
     function loadSidecarStatic(SidecarStatic calldata s) external {
         _statics.push(s);
+    }
+
+    function loadSidecarStaticSubResult(bool success, bytes calldata returnData) external {
+        SidecarStaticResult storage r = _staticSubResults.push();
+        r.success = success;
+        r.returnData = returnData;
     }
 
     function loadSidecarCallGas(bytes32 destCch, uint64 callGas) external {
@@ -287,7 +304,12 @@ contract TableStitcher is TestHashes {
     }
 
     /// @notice Root static read: fields from the sidecar, result from the caller-side
-    ///         pool entry (L1 batch statics / the origin unit's statics).
+    ///         pool entry (L1 batch statics / the origin unit's statics). The pool
+    ///         entry's sub-call array holds the read's own sub-reads (full fields —
+    ///         only their results come from the sidecar), cross-checked against the
+    ///         untagged accumulator. A read targeting an executing chain (the L2Tx
+    ///         host when it targets L1) is also consumed from that chain's arrays
+    ///         with its real folds, its sub-reads matched as STATIC rows.
     function _stitchRootStatic(uint256 txId, uint64 origin, uint256 originUnit) internal returns (uint256 nodeId) {
         SidecarStatic storage sc = _statics[_staticCursor++];
         CallParams memory p = CallParams({
@@ -303,17 +325,130 @@ contract TableStitcher is TestHashes {
         bytes32 cch = _cchOf(p);
         bool success;
         bytes memory ret;
+        bytes32[] memory subCchs;
         if (origin == L1_CHAIN) {
             StaticExecutionEntry storage se = _l1Statics[_l1StaticCursor++];
             if (se.proxyEntryHash != cch) revert RoundTripMismatch("L1 static pool hash");
             (success, ret) = (se.success, se.returnData);
+            nodeId = _out.newCall(txId, NONE, p);
+            _out.setResult(nodeId, success, ret);
+            subCchs = _stitchStaticSubsL1(txId, nodeId, p, se);
         } else {
             L2StaticExecutionEntry storage se2 = _unitStatics[originUnit][_unitStaticCursor[originUnit]++];
             if (se2.proxyEntryHash != cch) revert RoundTripMismatch("L2 static pool hash");
             (success, ret) = (se2.success, se2.returnData);
+            nodeId = _out.newCall(txId, NONE, p);
+            _out.setResult(nodeId, success, ret);
+            subCchs = _stitchStaticSubsL2(txId, nodeId, p, se2);
         }
-        nodeId = _out.newCall(txId, NONE, p);
-        _out.setResult(nodeId, success, ret);
+
+        if (p.toChain == L1_CHAIN || _sim[p.toChain].active) {
+            // Live leg on the executing destination: the isStatic array item + real
+            // folds, with one STATIC row per sub-read at this exact point.
+            uint16 marker = _consumeArrayItem(p.toChain, cch);
+            _noteMarker(nodeId, marker);
+            _fold(p.toChain, cch, true);
+            Sim storage s = _sim[p.toChain];
+            for (uint256 i = 0; i < subCchs.length; i++) {
+                if (_rowKey(p.toChain, s.rowCursor) != keccak256(abi.encodePacked(subCchs[i], s.liveHash))) {
+                    revert RoundTripMismatch("static sub-read row key");
+                }
+                s.rowCursor++;
+            }
+            _foldEnd(p.toChain, success, ret);
+        }
+    }
+
+    /// @dev Rebuilds an L1 pool entry's sub-reads: fields from the sub-call array,
+    ///      results from the sidecar, the untagged accumulator cross-checked.
+    function _stitchStaticSubsL1(uint256 txId, uint256 parentNode, CallParams memory p, StaticExecutionEntry storage se)
+        internal
+        returns (bytes32[] memory subCchs)
+    {
+        subCchs = new bytes32[](se.l2ToL1Calls.length);
+        bytes32 acc = bytes32(0);
+        for (uint256 i = 0; i < se.l2ToL1Calls.length; i++) {
+            L2ToL1Call storage c = se.l2ToL1Calls[i];
+            acc = _stitchOneStaticSub(
+                txId,
+                parentNode,
+                p,
+                CallParams({
+                    isStatic: c.isStatic,
+                    fromChain: c.sourceRollupId,
+                    fromAddress: c.sourceAddress,
+                    toChain: p.fromChain, // sub-reads run on the resolving (reader) chain
+                    toAddress: c.targetAddress,
+                    value: c.value,
+                    gas: c.gas,
+                    data: c.data
+                }),
+                acc,
+                subCchs,
+                i
+            );
+        }
+        if (acc != se.rollingHash) revert RoundTripMismatch("static sub-read accumulator");
+    }
+
+    /// @dev L2-pool twin of `_stitchStaticSubsL1`.
+    function _stitchStaticSubsL2(
+        uint256 txId,
+        uint256 parentNode,
+        CallParams memory p,
+        L2StaticExecutionEntry storage se
+    )
+        internal
+        returns (bytes32[] memory subCchs)
+    {
+        subCchs = new bytes32[](se.incomingCalls.length);
+        bytes32 acc = bytes32(0);
+        for (uint256 i = 0; i < se.incomingCalls.length; i++) {
+            CrossChainCall storage c = se.incomingCalls[i];
+            acc = _stitchOneStaticSub(
+                txId,
+                parentNode,
+                p,
+                CallParams({
+                    isStatic: c.isStatic,
+                    fromChain: c.sourceRollupId,
+                    fromAddress: c.sourceAddress,
+                    toChain: p.fromChain,
+                    toAddress: c.targetAddress,
+                    value: c.value,
+                    gas: c.gas,
+                    data: c.data
+                }),
+                acc,
+                subCchs,
+                i
+            );
+        }
+        if (acc != se.rollingHash) revert RoundTripMismatch("static sub-read accumulator");
+    }
+
+    /// @dev One sub-read: shape-checked (static, fired from the parent's destination),
+    ///      appended to the rebuilt tree with its sidecar result, folded into `acc`.
+    function _stitchOneStaticSub(
+        uint256 txId,
+        uint256 parentNode,
+        CallParams memory p,
+        CallParams memory sub,
+        bytes32 acc,
+        bytes32[] memory subCchs,
+        uint256 i
+    )
+        internal
+        returns (bytes32)
+    {
+        if (!sub.isStatic || sub.fromChain != p.toChain) {
+            revert RoundTripMismatch("static sub-read shape");
+        }
+        SidecarStaticResult storage r = _staticSubResults[_staticSubCursor++];
+        uint256 subNode = _out.newCall(txId, parentNode, sub);
+        _out.setResult(subNode, r.success, r.returnData);
+        subCchs[i] = _cchOf(sub);
+        return _hStatic(acc, r.success, r.returnData);
     }
 
     // ──────────────────────────────────────────────

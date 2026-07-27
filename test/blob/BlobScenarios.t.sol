@@ -192,7 +192,7 @@ contract BlobScenarios is BlobScenarioBase {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  4. Failure flavours
+    //  4. Failure kinds
     // ═══════════════════════════════════════════════════════════════════════
 
     /// @notice Top-level ReturnFail: the L2A delivery reverts (entry runs, verifies,
@@ -254,7 +254,7 @@ contract BlobScenarios is BlobScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// @notice Reentrant static read: while A executes, it STATICCALLs a contract on
-    ///         L2B — a STATIC-flavour row on L2A's side; L2B (idle) records nothing.
+    ///         L2B — a STATIC-kind row on L2A's side; L2B (idle) records nothing.
     function test_ReentrantStaticRead() public {
         MsgList memory l = Msg.list(10);
         Msg.push(l, Msg.initiate(0, "tx-data"));

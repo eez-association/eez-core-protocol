@@ -87,7 +87,8 @@ Rules the harness enforces:
 Covered message shapes: nested calls across L1/L2A/L2B in every direction, callbacks into
 the origin (reentrant tables on both sides), sibling repeats, `ReturnFail` at top level
 (entry runs → verifies → reverts) and nested (caught, `success = false` row),
-`StaticCall` reentrant (STATIC row) and top-level (pool entry with state-root pins),
+`StaticCall` reentrant (STATIC row) and top-level (pool entry with state-root pins,
+optionally carrying its own live-verified sub-reads),
 `Snapshot`/`Revert` (destination-side `revertNextNCalls`, protocol-level rollback observed
 via `execCount`), value transfer (L1 ether-delta invariant + L2 mint), `ChainOperation`s
 and multi-transaction slots with a callData tail.
@@ -120,7 +121,7 @@ Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 | Line | Meaning |
 |---|---|
 | `<chain> call <chain>` | executor calls target; opens a frame |
-| `<chain> staticCall <chain>` | read-only frame (cannot nest anything) |
+| `<chain> staticCall <chain>` | read-only frame (a top-level one may nest leaf static sub-reads of the origin chain) |
 | `<chain> return` / `<chain> returnFail` | closes the innermost frame |
 | `<chain> snapshot` … `<chain> revert` | forced-revert region in the current frame |
 | `--` | transaction separator |
@@ -148,7 +149,9 @@ sidecar of data that *provably never reaches any table*:
 
 - per-tx metadata: origin chain, `tx_data`, root-slot kinds (tables don't delimit txs);
 - `ChainOperation` payloads and the `CloseBlobStream` position (chain-local, not cross-chain);
-- static call fields (both managers match static reads by hash only);
+- static call fields (both managers match static reads by hash only) — except a read's
+  own sub-reads, whose fields live in the static entry's sub-call array: for those only
+  the RESULTS ride the sidecar (they are only ever hashed into the untagged accumulator);
 - region sizes (destination markers can't distinguish one region over two siblings from
   two adjacent regions).
 
@@ -158,7 +161,10 @@ from the tables and cross-checked against every entry's stored `rollingHash`.
 ## v1 shape restrictions (translation layer, not the codec)
 
 The byte codec accepts any spec-valid stream; the table translation additionally requires:
-static calls carry no nested calls, `Snapshot` regions don't nest, `CloseBlobStream` sits
+a static call nests only when it is a TOP-LEVEL read, and then only leaf static sub-reads
+of the reader chain (the chain that fired the read) — that is the shape the static
+entries verify, re-running the sub-read array live on the resolving chain against the
+untagged rolling hash; `Snapshot` regions don't nest, `CloseBlobStream` sits
 between transactions, a `ReturnFail` frame carries no committed (successful mutable)
 sub-call — the frame's terminal revert rolls back its own nested consumptions on the
 executing chain, so no stored rolling hash could match live (failing or static sub-calls

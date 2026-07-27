@@ -401,20 +401,32 @@ contract TableGenerator is TestHashes {
     }
 
     // ──────────────────────────────────────────────
-    //  Static calls (v1: pure lookups, no children)
+    //  Static calls (top-level reads may carry leaf sub-reads of the reader chain)
     // ──────────────────────────────────────────────
 
     /// @notice Top-level static read fired while the origin chain is idle: a pool
-    ///         `StaticExecutionEntry` on the origin (caller) chain.
+    ///         `StaticExecutionEntry` on the origin (caller) chain, its sub-read
+    ///         array holding the read's own static children (re-run live on the
+    ///         origin during resolution, verified by the untagged accumulator).
+    ///         When the read TARGETS an executing chain (the L2Tx host when it
+    ///         targets L1), it is additionally evaluated there via STATICCALL — an
+    ///         `isStatic` row with real CALL_BEGIN/CALL_END folds, its sub-reads
+    ///         matched as STATIC rows at that exact execution point.
     function _rootStatic(uint64 origin, CallNode memory n, uint256 t) internal {
         bytes32 cch = _nodeCch(n);
         _touchRollupGlobal(n.toChain);
+        bytes32 subHash = bytes32(0); // untagged accumulator over the sub-read array
         if (origin == L1_CHAIN) {
             StaticExecutionEntry storage se = _l1Statics.push();
             _l1StaticTxIdx.push(t);
             se.proxyEntryHash = cch;
             se.destinationRollupId = n.toChain;
-            se.rollingHash = bytes32(0); // no sub-calls: untagged accumulator stays 0
+            for (uint256 i = 0; i < n.children.length; i++) {
+                CallNode memory sub = _store.getNode(n.children[i]);
+                se.l2ToL1Calls.push(_l1CallStruct(sub, 0));
+                subHash = _hStatic(subHash, sub.success, sub.returnData);
+            }
+            se.rollingHash = subHash;
             se.success = n.success;
             se.returnData = n.returnData;
             se.expectedStateRoots
@@ -423,13 +435,31 @@ contract TableGenerator is TestHashes {
             uint256 unitIdx = _originUnit(origin, t);
             L2StaticExecutionEntry storage se = _unitStatics[unitIdx].push();
             se.proxyEntryHash = cch;
-            se.rollingHash = bytes32(0);
+            for (uint256 i = 0; i < n.children.length; i++) {
+                CallNode memory sub = _store.getNode(n.children[i]);
+                se.incomingCalls.push(_l2CallStruct(sub, 0));
+                subHash = _hStatic(subHash, sub.success, sub.returnData);
+            }
+            se.rollingHash = subHash;
             se.success = n.success;
             se.returnData = n.returnData;
+
+            if (n.toChain == L1_CHAIN || _ctx[n.toChain].hasHost) {
+                // Destination executing: the read really runs there.
+                _appendCall(n.toChain, n);
+                _foldCallBegin(n.toChain, cch);
+                for (uint256 i = 0; i < n.children.length; i++) {
+                    CallNode memory sub = _store.getNode(n.children[i]);
+                    bytes32 key = keccak256(abi.encodePacked(_nodeCch(sub), _ctx[n.toChain].liveHash));
+                    uint256 rowIdx = _pushRow(n.toChain, key);
+                    _sealRow(n.toChain, rowIdx, bytes32(0), sub.success, sub.returnData);
+                }
+                _foldCallEnd(n.toChain, n.success, n.returnData);
+            }
         }
     }
 
-    /// @notice Static read fired from an executing chain: a STATIC-flavour row in the
+    /// @notice Static read fired from an executing chain: a STATIC-kind row in the
     ///         host's unified table (host hash untouched); if the destination chain is
     ///         itself executing, the read also lands in its arrays as an `isStatic`
     ///         call (evaluated at that exact execution point).

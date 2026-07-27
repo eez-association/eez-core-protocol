@@ -53,6 +53,7 @@ contract ScriptedActor {
     mapping(bytes32 => bool) internal _staticKnown; // calldata hash → static read result
     mapping(bytes32 => bool) internal _staticReverts;
     mapping(bytes32 => bytes) internal _staticReturns;
+    mapping(bytes32 => Step[]) internal _staticSteps; // sub-reads performed before answering
 
     /// @notice Committed mutable executions — a rolled-back invocation (span marker,
     ///         failed entry, forced-revert region) rolls this back with it.
@@ -81,6 +82,23 @@ contract ScriptedActor {
         _staticKnown[k] = true;
         _staticReverts[k] = !success;
         _staticReturns[k] = ret;
+    }
+
+    /// @notice Like `setStaticResult`, but the actor first performs `steps` (static
+    ///         proxy reads only — the invocation context is a STATICCALL) and asserts
+    ///         each result before answering.
+    function setStaticProgram(bytes calldata data, Step[] calldata steps, bool success, bytes calldata ret) external {
+        bytes32 k = keccak256(data);
+        _staticKnown[k] = true;
+        _staticReverts[k] = !success;
+        _staticReturns[k] = ret;
+        for (uint256 i = 0; i < steps.length; i++) {
+            require(
+                steps[i].kind == STEP_STATIC_READ || steps[i].kind == STEP_STATIC_EXPECT_REVERT,
+                "ScriptedActor: static programs allow only static reads"
+            );
+            _staticSteps[k].push(steps[i]);
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -198,6 +216,13 @@ contract ScriptedActor {
     function _serveStatic() internal view {
         bytes32 k = keccak256(msg.data);
         require(_staticKnown[k], "ScriptedActor: unknown static read");
+        Step[] storage steps = _staticSteps[k];
+        for (uint256 i = 0; i < steps.length; i++) {
+            Step storage s = steps[i];
+            (bool ok, bytes memory got) = _dispatchStatic(s);
+            require(ok == (s.kind == STEP_STATIC_READ), "ScriptedActor: unexpected static sub-read outcome");
+            require(keccak256(got) == keccak256(s.expected), "ScriptedActor: unexpected static sub-read data");
+        }
         bytes memory ret = _staticReturns[k];
         if (_staticReverts[k]) {
             assembly {

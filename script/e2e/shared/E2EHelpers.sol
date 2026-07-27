@@ -86,7 +86,7 @@ function crossChainCallHash(
     return crossChainCallHashFull(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
-/// @notice Gas-folding hash for a mutable call LEAVING an L2 — the flavour
+/// @notice Gas-folding hash for a mutable call LEAVING an L2 — the kind
 ///         `EEZL2.executeCrossChainCall` keys with (top-level entry matching and the cch inside
 ///         nested `expectedOutgoingHash` rows). Folds `callGas` between `value` and `data`; the
 ///         devnet deploys every `EEZL2` with `useGasLeft = false`, so the folded value is always 0.

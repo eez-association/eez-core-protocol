@@ -672,7 +672,7 @@ contract EEZL2 is EEZBase {
     //  Public helpers
     // ──────────────────────────────────────────────
 
-    /// @notice Gas-folding flavour of the call hash, keying calls that LEAVE this L2: `callGas`
+    /// @notice Gas-folding kind of the call hash, keying calls that LEAVE this L2: `callGas`
     ///         folds between `value` and `data`, so an otherwise-identical call with different
     ///         forwarded gas keys distinctly.
     function computeCrossChainCallHash(

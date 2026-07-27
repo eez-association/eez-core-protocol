@@ -8,8 +8,8 @@ There are **two homes**, split by execution context:
 
 | Situation | Mechanism | Lives in | Match key |
 |---|---|---|---|
-| REENTRANT static read, fired `_insideExecution()` | STATIC-flavour `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
-| REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-flavour `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
+| REENTRANT static read, fired `_insideExecution()` | STATIC-kind `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
+| REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-kind `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
 | TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the persistent `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedStateRoots` pin live (full scan); L2: `proxyEntryHash` alone |
 | TOP-LEVEL state-changing call that reverts | normal `ExecutionEntry` with `success == false` | entry queue | see `EXECUTION_ENTRY_SPEC.md` — out of scope here |
 
@@ -60,7 +60,7 @@ and branches on `_insideExecution()`: **inside** → the active entry's unified 
 ```solidity
 // L1 — src/interfaces/IEEZ.sol
 
-/// One row of the entry's UNIFIED reentrant table. Serves three flavours:
+/// One row of the entry's UNIFIED reentrant table. Serves three kinds:
 /// plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`!success`).
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, expectedRollingHash)
@@ -87,10 +87,10 @@ Notes:
 - **One `success` polarity everywhere.** `ExecutionEntry`, `ExpectedL1ToL2Call`, and
   `StaticExecutionEntry` all carry `success`; `false` always means "run/verify the sub-calls,
   then `revert(returnData)`" and `true` means "…then return `returnData`".
-- **No flavour selector on the reentrant row.** STATIC vs CALL is decided by the *key*:
+- **No kind selector on the reentrant row.** STATIC vs CALL is decided by the *key*:
   `crossChainCallHash` folds `isStatic`, so a static read can only ever match a row whose key
   was built from a static hash, and `staticCrossChainCall` / `_consumeNestedCall` each compute
-  their own side of it. SUCCESS vs REVERTED within the CALL flavour is the row's `success` flag.
+  their own side of it. SUCCESS vs REVERTED within the CALL kind is the row's `success` flag.
 - **`destinationRollupId`** (top-level, L1) routes publishing into
   `verificationByRollup[rid].staticEntryQueue` and is re-checked at match time. It is
   load-bearing for the transient pool (one global table, not queue-routed) and coherent by
@@ -142,7 +142,7 @@ success row omits its NESTED frame and diverges the entry hash.
 1. (L1 only) proxy protection: the read's target rollup must be in the executing entry's
    allowed set (`_isRollupAllowed`, from its `stateUpdates`) — else
    `ReentrantDestinationNotVerified`.
-2. Compute the key from the static-flavour `crossChainCallHash` + live `_rollingHash`; scan
+2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
 3. On match → `_resolveStaticEntry(l2ToL1Calls, revertedOrStaticRollingHash, success,
    returnData)` (§4.3). On no match → `ExecutionNotFound` (a `view` frame cannot fold a
@@ -306,7 +306,7 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
 - STATIC and REVERTED sub-arrays are verified against `revertedOrStaticRollingHash` (rows) /
   `rollingHash` (static entries); the untagged accumulator seeds at `bytes32(0)`, so an empty
   sub-array requires an expected hash of `0`.
-- STATIC and CALL flavours can never match each other's keys — `crossChainCallHash` folds
+- STATIC and CALL kinds can never match each other's keys — `crossChainCallHash` folds
   `isStatic`.
 - Matching is strictly forward from the reentrant cursor; a CALL consumes its row (cursor
   past it), a static read does not.
