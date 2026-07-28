@@ -41,6 +41,26 @@ contract MetaExecDriver is IMetaCrossChainReceiver {
     }
 }
 
+/// @notice Posts two batches back-to-back inside ONE transaction, so the second runs against whatever
+///         the first left behind in transient storage.
+contract DoublePoster {
+    EEZ public immutable eez;
+
+    constructor(EEZ _eez) {
+        eez = _eez;
+    }
+
+    function postTwice(
+        ProofSystemBatchPerVerificationEntries calldata a,
+        ProofSystemBatchPerVerificationEntries calldata b
+    )
+        external
+    {
+        eez.postAndVerifyBatch(a);
+        eez.postAndVerifyBatch(b);
+    }
+}
+
 /// @title GasExecPaths
 /// @notice Apples-to-apples gas for the FOUR ways one proven entry can be executed. Every path uses
 ///         the EXACT same entry shape — a same-rollup reentrant entry on rA: 1 StateUpdate, 1 flat
@@ -483,6 +503,23 @@ contract GasExecPaths is GasFixture {
         console.log("gross marginal (pre-refund)", grossMarginal);
         console.log("raw refund marginal        ", refundMarginal);
         console.log("NET marginal (capped)      ", net2 - net1);
+    }
+
+    /// @dev Two batches in ONE tx. The first parks a 3-row reentrant table and clears it, which only
+    ///      zeroes the length word — every row's data stays in its transient slots, and transient
+    ///      storage outlives the call. The second must resolve against its OWN 1-row table: the length
+    ///      has to be authoritative (rows 1-2 unreachable) and row 0 fully rewritten (not blended with
+    ///      the row that occupied those slots).
+    function test_Stale_TwoBatchesOneTx() public {
+        DoublePoster poster = new DoublePoster(rollups);
+        ProofSystemBatchPerVerificationEntries memory a = _buildBatch(_one(_execEntry(0, 3)), 1);
+        ProofSystemBatchPerVerificationEntries memory b = _buildBatch(_one(_execEntry(0, 1)), 1);
+
+        uint256 before = actorA.counter();
+        poster.postTwice(a, b);
+
+        // 3 reentrant calls from the first batch, 1 from the second — all resolved and executed.
+        assertEq(actorA.counter(), before + 4, "every reentrant call ran");
     }
 
     /// EIP-3529 net: gas charged = totalUsed - min(rawRefund, totalUsed / 5).
