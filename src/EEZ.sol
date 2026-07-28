@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IProofSystem} from "./interfaces/IProofSystem.sol";
 import {IRollupContract} from "./interfaces/IRollup.sol";
 import {CrossChainProxy} from "./base/CrossChainProxy.sol";
+import {ExpectedL1ToL2CallTransient} from "./base/ExpectedL1ToL2CallTransient.sol";
 import {
     StateUpdate,
     L2ToL1Call,
@@ -50,7 +51,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///
 ///      Deferred consumption: `executeCrossChainCall` (proxy entry) and `executeL2Txs(rid)` route
 ///      to `verificationByRollup[rid].entryQueue[cursor]` and advance the per-rollup cursor.
-contract EEZ is EEZBase {
+contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // ──────────────────────────────────────────────
     //  Constants
     // ──────────────────────────────────────────────
@@ -91,19 +92,10 @@ contract EEZ is EEZBase {
     ExecutionEntry[] public _transientEntries;
     StaticExecutionEntry[] public _transientStaticEntries;
 
-    /// @notice The reentrant (L1→L2) table of the ONE immediate L2Tx entry currently executing —
-    ///         the FIRST source `_getExpectedL1toL2Calls()` consults, so it holds only the in-flight
-    ///         entry's table (one at a time, not all the L2Txs at once) and is empty at every other time.
-    /// @dev The immediate L2Tx run executes its entries straight from calldata and never SSTOREs them
-    ///      whole (the point of the immediate L2Tx path); their other fields stay in memory. But a proxy re-entry
-    ///      crosses an external boundary and can't see `_executeEntry`'s memory, so this one array is
-    ///      parked in storage for the duration of the entry. Lifecycle (in `_attemptExecuteImmediateL2Txs`): pushed
-    ///      from the calldata entry before `_executeEntry`, `delete`d right after it — so it never carries
-    ///      more than the current entry's table. Commonly empty (most L2Txs make no reentrant call). A
-    ///      skipped (reverting) entry's pushes roll back with its self-call, so it is never observed
-    ///      non-empty outside the immediate L2Tx run. The meta-hook and persistent phases route their reentrant
-    ///      tables to `_transientEntries` / the per-rollup queue instead, never here.
-    ExpectedL1ToL2Call[] internal _expectedL1toL2CallsForImmediateL2Txs;
+    // The reentrant (L1→L2) table of the ONE immediate L2Tx entry currently executing lives in the
+    // transient region owned by `ExpectedL1ToL2CallTransient`, one entry's table at a
+    // time, empty otherwise. The meta-hook and persistent phases route theirs to `_transientEntries` /
+    // the per-rollup queue instead. Lifecycle: `_attemptExecuteImmediateL2Txs`.
 
     /// @notice The rollups an entry may drive proxies for (its `stateUpdates` rollupIds): pushed at
     ///         execution start, `delete`d at the end. Doubles as `_insideExecution()` (non-empty ⇔
@@ -460,26 +452,24 @@ contract EEZ is EEZBase {
     ///         postAndVerifyBatch catches and skips to the next entry instead of aborting the whole batch.
     ///         Unlike `executeInContextAndRevert`, this propagates the inner result — succeeds when
     ///         `_executeEntry` succeeds, reverts when it reverts.
-    /// @dev The full entry is NEVER SSTOREd. Only its reentrant table is parked in
-    ///      `_expectedL1toL2CallsForImmediateL2Txs` (commonly empty) so a proxy re-entry during this entry can
-    ///      resolve against it via `_getExpectedL1toL2Calls()`; it is cleared on success and rolls back
-    ///      with the frame on a skip. Neither `_currentEntryIndex` nor `_currentEntryRollupId` is set
+    /// @dev The entry never lands in storage. Only its reentrant table is held transiently (commonly
+    ///      empty) so a proxy re-entry can resolve against it via `_getExpectedL1toL2Calls()`; it is
+    ///      cleared on success, and on a skip it rolls back with the frame, so a reverting entry can
+    ///      never leave a stale table behind. Neither `_currentEntryIndex` nor `_currentEntryRollupId` is set
     ///      here: the immediate L2Tx run precedes any `_consumeAndExecuteEntry` (which leaves both 0 on exit), so
-    ///      both are already 0 — the immediate L2Tx reentrant table comes from
-    ///      `_expectedL1toL2CallsForImmediateL2Txs`, not an index into a queue. Consequence: this entry's
-    ///      events (`EntryExecuted` / `CallResult`) log `entryIndex == 0`.
+    ///      both are already 0 — the immediate L2Tx reentrant table comes from that transient region, not an
+    ///      index into a queue. Consequence: this entry's events (`EntryExecuted` / `CallResult`) log
+    ///      `entryIndex == 0`.
     function _attemptExecuteImmediateL2Txs(ExecutionEntry calldata entry) public {
         if (msg.sender != address(this)) revert NotSelf();
         if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // L2Tx entries receive no inbound value
 
-        // Park the reentrant table while `_transientEntries` stays empty (the signal that the immediate L2Tx run is active).
-        for (uint256 k = 0; k < entry.expectedL1ToL2Calls.length; k++) {
-            _expectedL1toL2CallsForImmediateL2Txs.push(entry.expectedL1ToL2Calls[k]);
-        }
+        // Hold the reentrant table while `_transientEntries` stays empty (the signal that the immediate L2Tx run is active).
+        _setTransientExpectedL1toL2Calls(entry.expectedL1ToL2Calls);
 
         _executeEntry(entry);
 
-        delete _expectedL1toL2CallsForImmediateL2Txs;
+        _clearTransientExpectedL1toL2Calls();
     }
 
     /// @notice Structural validation of the batch — no external calls, no vkey reads.
@@ -850,19 +840,19 @@ contract EEZ is EEZBase {
     //  Internal execution
     // ──────────────────────────────────────────────
 
-    /// @notice The reentrant (L1→L2) table of the entry currently being processed — the storage source a
-    ///         proxy re-entry resolves against (it crosses an external boundary and can't see the
-    ///         executing `_executeEntry`'s memory entry).
+    /// @notice The reentrant (L1→L2) table of the entry currently being processed — the source a proxy
+    ///         re-entry resolves against (it crosses an external boundary and can't see the executing
+    ///         `_executeEntry`'s memory entry).
     /// @dev Three sources, in priority order:
-    ///      (a) immediate L2Tx run — its entry never lands in storage, so only the table is parked in
-    ///          `_expectedL1toL2CallsForImmediateL2Txs` (non-empty ONLY while such an entry runs);
+    ///      (a) immediate L2Tx run — its entry never lands in storage, so only the table is held, in the
+    ///          transient region (non-empty ONLY while such an entry runs);
     ///      (b) meta-hook — a batch is mid-flight, so the transient entry at `_currentEntryIndex`;
     ///      (c) normal proxy consumption (outside any batch) — the persistent queue entry of
     ///          `_currentEntryRollupId` at `_currentEntryIndex`.
-    function _getExpectedL1toL2Calls() internal view returns (ExpectedL1ToL2Call[] storage) {
+    function _getExpectedL1toL2Calls() internal view returns (ExpectedL1ToL2Call[] memory) {
         // (a) immediate L2Tx run
-        if (_expectedL1toL2CallsForImmediateL2Txs.length != 0) {
-            return _expectedL1toL2CallsForImmediateL2Txs;
+        if (_transientExpectedL1toL2CallsLength() != 0) {
+            return _transientExpectedL1toL2Calls();
         }
         // (b) meta-hook: batch mid-flight
         if (_transientEntries.length != 0) {
@@ -895,11 +885,11 @@ contract EEZ is EEZBase {
 
         // Host table is the current entry's `expectedL1ToL2Calls`; a reverted sub-execution shares it
         // for its own reentrant calls, disambiguated by the `_rollingHash` folded into the key.
-        ExpectedL1ToL2Call[] storage expectedCalls = _getExpectedL1toL2Calls();
+        ExpectedL1ToL2Call[] memory expectedCalls = _getExpectedL1toL2Calls();
         bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
 
         for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
-            ExpectedL1ToL2Call storage expectedL1ToL2Call = expectedCalls[i];
+            ExpectedL1ToL2Call memory expectedL1ToL2Call = expectedCalls[i];
             if (expectedL1ToL2Call.expectedL1toL2Hash == expectedL1toL2Hash) {
                 // Advance the cursor PAST this match before resolving it
                 _lastL1ToL2CallConsumed = i + 1;
@@ -916,12 +906,12 @@ contract EEZ is EEZBase {
     }
 
     /// @notice Resolves a matched reentrant (L1→L2) CALL by running its OWN `l2ToL1Calls[]` sub-array.
-    /// @dev Takes the matched entry by `storage` pointer (the caller already resolved + indexed it, and
-    ///      advanced `_lastL1ToL2CallConsumed` past it). SUCCESS commits the sub-execution into the host's
+    /// @dev Takes the matched row by `memory` (the caller already resolved + indexed it, and advanced
+    ///      `_lastL1ToL2CallConsumed` past it). SUCCESS commits the sub-execution into the host's
     ///      continuous `_rollingHash` (NESTED_END) and returns `returnData`. REVERTED checks the sub-hash
     ///      against `expectedL1toL2Call.revertedOrStaticRollingHash` and reverts with `returnData`; the
     ///      terminal revert rolls back the frame's state, hash, and cursor (no save needed).
-    function _resolveNestedReentrant(ExpectedL1ToL2Call storage expectedL1toL2Call, bytes32 crossChainCallHash)
+    function _resolveNestedReentrant(ExpectedL1ToL2Call memory expectedL1toL2Call, bytes32 crossChainCallHash)
         internal
         returns (bytes memory)
     {
@@ -1297,9 +1287,9 @@ contract EEZ is EEZBase {
             bytes32 expectedL1toL2Hash = _computeExpectedL1toL2Hash(crossChainCallHash, _rollingHash);
             // Forward scan from the cursor — same strict-forward window as `_consumeNestedCall`
             // (a static read cannot advance the cursor, but it still only matches at/after it).
-            ExpectedL1ToL2Call[] storage expectedCalls = _getExpectedL1toL2Calls();
+            ExpectedL1ToL2Call[] memory expectedCalls = _getExpectedL1toL2Calls();
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
-                ExpectedL1ToL2Call storage expectedCall = expectedCalls[i];
+                ExpectedL1ToL2Call memory expectedCall = expectedCalls[i];
                 if (expectedCall.expectedL1toL2Hash == expectedL1toL2Hash) {
                     return _resolveStaticEntry(
                         expectedCall.l2ToL1Calls,
@@ -1342,7 +1332,7 @@ contract EEZ is EEZBase {
     ///         static entry's `revertedOrStaticRollingHash`), then return the cached data, or revert with it when
     ///         `!success`.
     function _resolveStaticEntry(
-        L2ToL1Call[] storage calls,
+        L2ToL1Call[] memory calls,
         bytes32 revertedOrStaticRollingHash,
         bool success,
         bytes memory returnData
