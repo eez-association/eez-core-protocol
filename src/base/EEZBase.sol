@@ -124,6 +124,12 @@ abstract contract EEZBase is IEEZ {
     ///      malformed entry. We reject it explicitly rather than silently dropping the value.
     error StaticCallWithValue();
 
+    /// @notice Error when a sub-call of a static resolution is not marked `isStatic`.
+    /// @dev Those calls run via STATICCALL whatever the flag says, and the untagged static rolling
+    ///      hash folds only `(success, retData)` — so an unchecked `false` would let a proven
+    ///      state-changing call execute read-only undetected.
+    error NonStaticSubCall();
+
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own
