@@ -47,7 +47,7 @@ Two recurring entry roles:
 
 State-root note: **every** rollup a tx touches appears in `stateUpdates` with an
 advanced root — even when the delivery on that rollup is reverted or rolled
-back (cases 12/13). The root models the L2 block that processed (and rolled
+back (cases 12/13/15). The root models the L2 block that processed (and rolled
 back) the call; only *committed effects* are undone, not the block itself.
 
 ---
@@ -563,3 +563,59 @@ The full recursion collapses into one entry: the top-level callback rides
 `l2ToL1Calls` carries the deepest L1 landing. The single rolling hash chains
 every begin/end boundary, so order, count and nesting of all five hops are
 verified with one comparison.
+
+## 15. L2a call L1 call L2b, the whole thing reverted on L2a
+
+`snapshot · L2_A call L1 · L1 call L2_B · L2_B return · L1 return · revert`
+(One root call, its nested B hop, both returning normally — then L2_A rolls
+the span back. The minimal `revertNextNCalls` shape: span = 1.)
+
+```
+entries = [{
+    stateUpdates = [
+        { rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 },
+        { rollupId: B, currentState: G_B, newState: S1_B, etherDelta: 0 },
+    ],
+    proxyEntryHash      = 0x0,                    // L2Tx host
+    destinationRollupId = A,
+    l2ToL1Calls         = [{                      // the root call A→L1, alone in the span
+        revertNextNCalls: 1, isStatic: false, gas: 0,   // 1 = itself only
+        sourceAddress: driver_A, sourceRollupId: A,
+        targetAddress: target_L1, value: 0, data: rootData,
+    }],
+    expectedL1ToL2Calls = [{                      // SUCCESS row: the L1→L2_B hop inside the span
+        expectedL1toL2Hash        = H( cch_toB, h1 ),  // position key: fired right after CALL_BEGIN
+        l2ToL1Calls               = [],
+        revertedOrStaticRollingHash = 0x0,
+        success                   = true,         // the hop SUCCEEDS — the span revert is separate
+        returnData                = "dsl.ret#1",
+    }],
+    rollingHash = h4:
+        h0 = H( H( H(0, A, G_A), B, G_B ), 0x0 )  // seed: both pins, then proxyEntryHash
+        h1 = H( h0, 1, cch_root )                 // CALL_BEGIN — the A→L1 root call
+        h2 = H( h1, 3, cch_toB )                  // NESTED_BEGIN — the L1→L2_B frame
+        h3 = H( h2, 4 )                           // NESTED_END — frame committed
+        h4 = H( h3, 2, true, "dsl.ret#0" )        // CALL_END — every fold SURVIVES the span revert
+    success             = true,
+    returnData          = "",
+}]
+staticEntries       = []
+immediateEntryCount = 1
+```
+
+Compare with case 12, the other way a nested frame can end. There the frame
+itself fails: `success = false`, the branch `f1` is checked and **discarded**,
+and the final hash chains from `h1` as if the frame never ran. Here the frame
+succeeds and commits — `NESTED_BEGIN`/`NESTED_END` stay in the chain — and what
+gets undone is the enclosing *call span*, at the protocol layer rather than the
+hash layer: `revertNextNCalls = 1` makes the manager run call 1 inside
+`executeInContextAndRevert`, so the EVM state rolls back while the rolling hash
+and cursors escape through the `ContextResult` payload. Two orthogonal axes:
+`success` decides what the *hash* records, `revertNextNCalls` decides what the
+*state* keeps.
+
+It is also case 13 stripped to its core — one call in the span instead of a
+surviving call plus a two-call region — which isolates exactly what the span
+mechanism does. Both A and B still advance their roots: their L2 blocks
+processed the calls; only the committed effects on L1 are undone (`target_L1`
+and `target_B` end with `execCount == 0`).
