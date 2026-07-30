@@ -176,12 +176,7 @@ contract ScenarioCatalog is DslScenarioBase {
     function test_Catalog15_RevertSingleRootCall_WithNestedHop() public {
         runDsl(
             string.concat(
-                "L2_A snapshot\n",
-                "L2_A call L1\n",
-                "L1 call L2_B\n",
-                "L2_B return\n",
-                "L1 return\n",
-                "L2_A revert\n"
+                "L2_A snapshot\n", "L2_A call L1\n", "L1 call L2_B\n", "L2_B return\n", "L1 return\n", "L2_A revert\n"
             )
         );
         assertEq(dslTarget[0].execCount(), 0, "the L1 landing rolled back with the region");

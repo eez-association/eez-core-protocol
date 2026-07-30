@@ -6,6 +6,7 @@ import {
     ExecutionEntry,
     StateUpdate,
     ExpectedL1ToL2Call,
+    L2ToL1Call,
     StaticExecutionEntry,
     ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
@@ -193,6 +194,48 @@ contract EEZStaticLookupTest is Base {
 
         vm.prank(proxyAddr);
         vm.expectRevert(abi.encodeWithSelector(EEZBase.StaticCallProxyNotDeployed.selector, undeployedProxy));
+        rollups.staticCrossChainCall(sourceAddr, cd);
+    }
+
+    /// @notice A static sub-call not marked `isStatic` reverts `NonStaticSubCall` — the declared
+    ///         flag must match the unconditional read-only dispatch.
+    function test_StaticLookup_SubCallNotMarkedStaticReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, "");
+        lc.l2ToL1Calls = _oneCall(_call(address(target), uint64(r.id), address(target), 0, cd));
+        lookups[0] = lc;
+        _stdBatchPost(r, lookups);
+
+        vm.prank(proxyAddr);
+        vm.expectRevert(EEZBase.NonStaticSubCall.selector);
+        rollups.staticCrossChainCall(sourceAddr, cd);
+    }
+
+    /// @notice A static sub-call carrying value reverts `StaticCallWithValue` — a STATICCALL cannot
+    ///         transfer, so the value would be silently dropped.
+    function test_StaticLookup_SubCallWithValueReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, "");
+        L2ToL1Call memory sub = _staticCall(address(target), uint64(r.id), address(target), cd);
+        sub.value = 1;
+        lc.l2ToL1Calls = _oneCall(sub);
+        lookups[0] = lc;
+        _stdBatchPost(r, lookups);
+
+        vm.prank(proxyAddr);
+        vm.expectRevert(EEZBase.StaticCallWithValue.selector);
         rollups.staticCrossChainCall(sourceAddr, cd);
     }
 

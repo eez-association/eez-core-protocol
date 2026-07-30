@@ -1365,6 +1365,11 @@ contract EEZ is EEZBase {
     function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory l2ToL1Call = calls[i];
+
+            // Dispatch is read-only unconditionally, so the declared flag and value must agree.
+            if (!l2ToL1Call.isStatic) revert NonStaticSubCall();
+            if (l2ToL1Call.value != 0) revert StaticCallWithValue();
+
             // No source check: sub-call sources are validated ∈ proven set in `_validateBatchStructure`
             // — nested reads via the entry's reentrant walk, top-level via the static entry's `expectedStateRoots`.
             address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);

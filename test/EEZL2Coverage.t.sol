@@ -439,6 +439,45 @@ contract EEZL2CoverageTest is BaseL2 {
         manager.staticCrossChainCall(address(this), cd);
     }
 
+    /// Static sub-call not marked `isStatic` reverts NonStaticSubCall — the declared flag must match
+    /// the unconditional read-only dispatch. A sub-call carrying value reverts StaticCallWithValue.
+    function test_StaticLookup_SubCallNotStaticOrWithValueReverts() public {
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
+        bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
+
+        CrossChainCall[] memory subCalls = new CrossChainCall[](1);
+        subCalls[0] = CrossChainCall({
+            gas: 0,
+            revertNextNCalls: 0,
+            isStatic: false,
+            sourceAddress: address(target),
+            sourceRollupId: REMOTE_ROLLUP_ID,
+            targetAddress: address(target),
+            value: 0,
+            data: cd
+        });
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        lookups[0].proxyEntryHash = h;
+        lookups[0].success = true;
+        lookups[0].incomingCalls = subCalls;
+        _loadEntries(new ExecutionEntry[](0), lookups);
+
+        vm.prank(proxy);
+        vm.expectRevert(EEZBase.NonStaticSubCall.selector);
+        manager.staticCrossChainCall(address(this), cd);
+
+        subCalls[0].isStatic = true;
+        subCalls[0].value = 1;
+        lookups[0].incomingCalls = subCalls;
+        _loadEntries(new ExecutionEntry[](0), lookups);
+
+        vm.prank(proxy);
+        vm.expectRevert(EEZBase.StaticCallWithValue.selector);
+        manager.staticCrossChainCall(address(this), cd);
+    }
+
     // ──────────────────────────────────────────────
     //  staticCrossChainCall — nested inside execution
     // ──────────────────────────────────────────────

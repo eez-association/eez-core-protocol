@@ -658,6 +658,11 @@ contract EEZL2 is EEZBase {
     function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];
+
+            // Dispatch is read-only unconditionally, so the declared flag and value must agree.
+            if (!cc.isStatic) revert NonStaticSubCall();
+            if (cc.value != 0) revert StaticCallWithValue();
+
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);

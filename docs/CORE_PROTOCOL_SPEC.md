@@ -709,6 +709,8 @@ For each delta (the `currentState` precondition was already checked upfront in `
 ```
 hash = bytes32(0)
 for cc in calls:
+    if (!cc.isStatic) revert NonStaticSubCall()
+    if (cc.value != 0) revert StaticCallWithValue()
     sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId)
     if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy)
     (success, retData) = sourceProxy.staticcall(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.data)))
@@ -717,6 +719,8 @@ return hash
 ```
 
 No `revertNextNCalls` handling — there are no state changes to roll back. Static context cannot deploy proxies, so all referenced proxies must already exist; a codeless proxy reverts `StaticCallProxyNotDeployed` (a STATICCALL to a codeless address silently succeeds, which the prover could otherwise pre-hash as a no-op).
+
+Dispatch here is read-only unconditionally, so the declared fields must agree with it: `isStatic == false` reverts `NonStaticSubCall` and a non-zero `value` reverts `StaticCallWithValue`. Neither field is folded into the untagged hash, so without these checks a proven state-changing call would silently execute as a STATICCALL, and a declared value would be silently dropped.
 
 This hashing scheme is **intentionally untagged** and is **distinct from** the entry-level rolling hash described in §E (no `CALL_BEGIN`/`CALL_END`/`NESTED_BEGIN`/`NESTED_END` tags). It is verified against the static entry's own accumulator (`StaticExecutionEntry.rollingHash`, or `ExpectedL1ToL2Call.revertedOrStaticRollingHash` for a nested static row), whose surrounding key already pins the context. See §E.2.
 

@@ -219,6 +219,9 @@ return returnData
   STATICCALL frame, and a STATICCALL to a codeless address silently returns `(true, "")` — so
   a codeless proxy reverts `StaticCallProxyNotDeployed` rather than letting the prover
   pre-hash a no-op.
+- Every sub-call must be marked `isStatic` with `value == 0` — dispatch is read-only whatever
+  the fields say, and the untagged hash folds neither, so a mismatch reverts (`NonStaticSubCall`
+  / `StaticCallWithValue`) instead of silently executing a proven state-changing call read-only.
 - No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert.
 
 A naturally-reverting *sub-call* is not special: the STATICCALL returns `(false, retData)` and
