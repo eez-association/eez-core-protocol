@@ -166,4 +166,25 @@ contract ScenarioCatalog is DslScenarioBase {
         assertEq(dslTarget[L2B].execCount(), 1);
         assertEq(dslTarget[0].execCount(), 2, "both L1 landings committed");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  15. One root call from L2A into L1, alone inside a Snapshot…Revert
+    //      region (revertNextNCalls = 1): the call and its nested L1 → L2B hop
+    //      execute and return normally, then the whole span rolls back.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function test_Catalog15_RevertSingleRootCall_WithNestedHop() public {
+        runDsl(
+            string.concat(
+                "L2_A snapshot\n",
+                "L2_A call L1\n",
+                "L1 call L2_B\n",
+                "L2_B return\n",
+                "L1 return\n",
+                "L2_A revert\n"
+            )
+        );
+        assertEq(dslTarget[0].execCount(), 0, "the L1 landing rolled back with the region");
+        assertEq(dslTarget[L2B].execCount(), 0, "the nested B hop rolled back with it");
+    }
 }
