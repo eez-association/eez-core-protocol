@@ -10,7 +10,7 @@ There are **two homes**, split by execution context:
 |---|---|---|---|
 | REENTRANT static read, fired `_insideExecution()` | STATIC-kind `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
 | REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-kind `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
-| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the persistent `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedStateRoots` pin live (full scan); L2: `proxyEntryHash` alone |
+| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedStateRoots` pin live (full scan); L2: `proxyEntryHash` alone, same-block only (`lastLoadBlock == block.number`) |
 | TOP-LEVEL state-changing call that reverts | normal `ExecutionEntry` with `success == false` | entry queue | see `EXECUTION_ENTRY_SPEC.md` — out of scope here |
 
 There is no separate lookup struct and no separate lookup key space: reentrant reads and
@@ -183,9 +183,10 @@ long as its state-root pins match the live roots, it resolves. Lifetime is bound
 the queue reset: every batch that verifies a rollup wipes that rollup's `staticEntryQueue`
 along with its entry queue.
 
-On L2 the pool is the single persistent `staticEntries` table (replaced wholesale by every
-`loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone,
-with no block gate and no pins.
+On L2 the pool is the single `staticEntries` table (replaced wholesale by every
+`loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone —
+but unlike L1, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
+is what bounds staleness.
 
 ### 4.3 `_resolveStaticEntry` / `_processNStaticCalls` (shared body)
 
@@ -277,10 +278,9 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
   self-relative names). The key helper (`_computeExpectedL1toL2Hash`) and the untagged
   accumulator (`_rollingHashStaticResult`) are shared in `EEZBase`.
 - **Pool**: L1 selects transient-vs-persistent by `_transientEntries.length` and matches with
-  destination + pins; L2 scans the one persistent `staticEntries` table by hash alone. Because L2
-  has no pins AND static reads are exempt from the block gate, an L2 static entry stays resolvable
-  — returning the same cached data — in every later block until the next `loadExecutionTable`
-  replaces the pool. L1's pins bound that staleness; on L2 nothing does.
+  destination + pins, with no block gate (pins bound staleness); L2 scans the one `staticEntries`
+  table by hash alone, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
+  is its staleness bound — the pool is only resolvable in the block it was loaded.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
   (see CORE_PROTOCOL_SPEC §C.2/§C.3).

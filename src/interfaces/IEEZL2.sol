@@ -81,11 +81,12 @@ struct ExecutionEntry {
 }
 
 /// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via
-///         `staticCrossChainCall` OUTSIDE any execution, from the persistent `staticEntries` pool.
+///         `staticCrossChainCall` OUTSIDE any execution, from the `staticEntries` pool.
 ///         Reverting top-level reads land here (`success == false`); state-changing top-level
 ///         calls are `ExecutionEntry`s.
 /// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
-///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` alone (L2 has no state roots to pin).
+///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` alone, same block as load only
+///      (no pins on L2 — the block gate bounds staleness).
 ///      Referenced proxies must already be deployed (CREATE2 is unavailable inside a STATICCALL frame).
 struct StaticExecutionEntry {
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); mirrors `ExecutionEntry.proxyEntryHash`

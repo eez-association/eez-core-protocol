@@ -49,7 +49,7 @@ contract EEZL2 is EEZBase {
     /// @notice Array of pre-computed entries
     ExecutionEntry[] public entries;
 
-    /// @notice Array of pre-computed top-level static entries
+    /// @notice Array of pre-computed top-level static entries; resolvable only in the load block
     StaticExecutionEntry[] public staticEntries;
 
     /// @notice Last block number when execution table was loaded
@@ -258,7 +258,8 @@ contract EEZL2 is EEZBase {
     /// @dev Atomically replaces the execution table and drives `entries[0]` through the
     ///      flat call processor. The first entry's `incomingCalls[0]` is the inbound call itself
     ///      (its `sourceAddress` / `sourceRollupId` / `targetAddress` / `value` / `data` must
-    ///      match the explicit params passed here — the prover builds them consistently).
+    ///      match the explicit params passed here — a prover obligation enforced in-circuit, not
+    ///      on-chain; same for ether conservation, L2 has no `_entryEtherDelta` check).
     ///      `_executeEntry` makes the actual proxy invocation, folds tagged events into the rolling
     ///      hash, and handles `revertNextNCalls`. Reentrant cross-chain calls during execution see
     ///      `_insideExecution() == true` and consume from `entries[0].expectedOutgoingCalls`.
@@ -583,10 +584,10 @@ contract EEZL2 is EEZBase {
     /// @dev Inside an execution: scans the active entry's unified `expectedOutgoingCalls` for an entry
     ///      whose `expectedOutgoingHash` matches `keccak256(crossChainCallHash, _rollingHash)` — the
     ///      same content-addressed key the reentrant CALLs use. The `crossChainCallHash` here folds
-    ///      `isStatic = true`, so only static entries can match. Outside: scans the persistent
-    ///      `staticEntries` pool for a top-level `StaticExecutionEntry` matching `crossChainCallHash` (L2 has no
-    ///      state roots to pin). tload works in static context, so the transient tracking variables are
-    ///      readable.
+    ///      `isStatic = true`, so only static entries can match. Outside: scans the `staticEntries`
+    ///      pool for a matching `crossChainCallHash`, gated on `lastLoadBlock == block.number`
+    ///      (no pins on L2 — the block gate bounds staleness). tload works in static context, so
+    ///      the transient tracking variables are readable.
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
@@ -629,7 +630,8 @@ contract EEZL2 is EEZBase {
             revert ExecutionNotFound();
         }
 
-        // Top-level: persistent pool, matched by hash alone (L2 has no state roots to pin).
+        // Top-level: same-block pool, matched by hash alone (no pins on L2 — the block gate bounds staleness).
+        if (lastLoadBlock != block.number) revert ExecutionNotInCurrentBlock();
         for (uint256 i = 0; i < staticEntries.length; i++) {
             StaticExecutionEntry storage staticEntry = staticEntries[i];
             if (staticEntry.proxyEntryHash == crossChainCallHash) {

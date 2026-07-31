@@ -132,7 +132,7 @@ struct ExecutionEntry {
     bytes                            returnData;
 }
 
-struct StaticExecutionEntry {   // TOP-LEVEL static entry — persistent pool; matched by proxyEntryHash alone
+struct StaticExecutionEntry {   // TOP-LEVEL static entry — matched by proxyEntryHash alone, same block as load only
     bytes32          proxyEntryHash;
     CrossChainCall[] incomingCalls;  // read-only sub-calls run via STATICCALL
     bytes32          rollingHash;    // untagged static schema
@@ -140,6 +140,8 @@ struct StaticExecutionEntry {   // TOP-LEVEL static entry — persistent pool; m
     bytes            returnData;
 }
 ```
+
+Prover obligation (L2): in `executeIncomingCrossChainCall`, `entries[0].incomingCalls[0]` must equal the inbound call (explicit params + `value`), and ether must be conserved — enforced in-circuit, not on-chain (L2 has no `_entryEtherDelta` check).
 
 ### L1 batch struct
 
@@ -196,7 +198,7 @@ Constructor: `EEZL2(uint64 rollupId != 0, address systemAddress, bool useGasLeft
 1. **loadExecutionTable(entries, staticEntries)** — system-only. Wipes existing tables, loads new ones, sets `lastLoadBlock`. Entries are only consumable in the same block (`ExecutionNotInCurrentBlock`).
 2. **executeIncomingCrossChainCall(destination, value, data, sourceAddress, sourceRollup, entries, staticEntries)** — system-only, payable (`msg.value == value` mints the inbound ETH). Atomically replaces the table and drives `entries[0]` through the call processor; `entries[0].incomingCalls[0]` is the inbound call itself, and `entries[0].proxyEntryHash` must match the hash of the explicit params.
 3. **executeCrossChainCall(sourceAddress, callData)** — same shape as L1, but `sourceRollupId` in the call hash is forced to `ROLLUP_ID`, and any `msg.value` is returned to `SYSTEM_ADDRESS` (burn). No state deltas, no ether accounting.
-4. **staticCrossChainCall(sourceAddress, callData)** — same nested key shape as L1 (unified table, static-kind hash); outside an execution it scans the single persistent `staticEntries` pool by `proxyEntryHash` alone (no state roots to pin).
+4. **staticCrossChainCall(sourceAddress, callData)** — same nested key shape as L1 (unified table, static-kind hash); outside an execution it scans the `staticEntries` pool by `proxyEntryHash` alone, gated on `lastLoadBlock == block.number` (no pins — the block gate bounds staleness).
 
 Both managers share `createCrossChainProxy` / `computeCrossChainProxyAddress` from EEZBase.
 
