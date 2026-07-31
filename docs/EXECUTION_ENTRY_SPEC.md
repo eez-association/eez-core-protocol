@@ -52,23 +52,23 @@ Loaded into `_transientEntries` (the immediate-prefix remainder, consumed via th
 
 ## Action Hash
 
-A cross-chain call is identified by **one** canonical hash — gas-free, 7 fields in order `isStatic` → `sourceAddress` → `sourceRollupId` → `targetAddress` → `targetRollupId` → `value` → `data` — computed by the `public pure` helper `computeCrossChainCallHash` on either manager. L2 adds **one extra** overload, keying only calls LEAVING an L2 (`EEZL2.executeCrossChainCall`, top-level `proxyEntryHash` match and nested `expectedOutgoingHash` alike): 8 fields, `uint64 callGas` folded between `value` and `data`. `callGas` is the observed `gasleft()` at manager entry when the L2 was deployed with `USE_GAS_LEFT`, else a fixed `0` — and **`callGas = 0` still uses the 8-field encoding**, so an L2-outgoing key never equals the gas-free hash; every fixture and current deployment runs `useGasLeft = false`, so the practical rule is: build L2-outgoing keys with 8 fields and `callGas = 0`. Exact formulas, the full matching-site table, and the off-chain helpers (`crossChainCallHashFull` / `crossChainCallHash` / `crossChainCallHashStatic` gas-free, `crossChainCallHashL2Out` gas-folding): `CORE_PROTOCOL_SPEC.md` §C.
+A cross-chain call is identified by its `crossChainCallHash`, computed by the `public pure` helper `computeCrossChainCallHash` on either manager (defined in `EEZBase`). `callGas` is `0` at every keying site except calls LEAVING an L2 (`EEZL2.executeCrossChainCall`, top-level `proxyEntryHash` match and nested `expectedOutgoingHash` alike), where `USE_GAS_LEFT` selects the observed `gasleft()` at manager entry (else `0`). Every fixture and current deployment runs `useGasLeft = false`, so build every key with `callGas = 0`. Formula, matching-site table, and off-chain helpers: `CORE_PROTOCOL_SPEC.md` §C.
 
 The on-chain contracts reconstruct the hash from the proxy's identity (`originalRollupId`, `originalAddress`) and the live call context (`msg.value`, `callData`, the proxy's caller, `MAINNET_ROLLUP_ID` on L1 or `ROLLUP_ID` on L2).
 
 ### Hash semantics by entry point
 
-| Entry point | Formula | isStatic | sourceAddress | sourceRollupId | targetAddress | targetRollupId | value | callGas | data |
-|---|---|---|---|---|---|---|---|---|---|
-| `executeCrossChainCall` (L1 proxy) | gas-free | `false` | proxy's caller | `MAINNET_ROLLUP_ID` (0) | proxy's `originalAddress` | proxy's `originalRollupId` | `msg.value` | — | original calldata |
-| `executeCrossChainCall` (L2 proxy) | **gas-folding** | `false` | proxy's caller | this L2's `ROLLUP_ID` | proxy's `originalAddress` | proxy's `originalRollupId` | `msg.value` | `gasleft()` if `USE_GAS_LEFT`, else `0` | original calldata |
-| Reentrant call (matches an `ExpectedL1ToL2Call` on L1 / `ExpectedOutgoingCrossChainCall` on L2) | same as the `executeCrossChainCall` row for the chain making the call — so gas-free from L1, **gas-folding from an L2** | same | same | same | same | same | same | same | same |
-| `executeL2Txs` | n/a — entry has `proxyEntryHash == 0` | — | — | — | — | — | — | — | — |
-| `staticCrossChainCall` (both chains) | gas-free | `true` | proxy's caller | this chain's rollup ID | proxy's `originalAddress` | proxy's `originalRollupId` | `0` (static is value-free) | — | original calldata |
-| `executeIncomingCrossChainCall` (L2, system) | gas-free | `false` | explicit `sourceAddress` param | explicit `sourceRollup` param | explicit `destination` param | this L2's `ROLLUP_ID` | explicit `value` param (`== msg.value`) | — | explicit `data` param |
-| Flat-call `CALL_BEGIN` fold (both chains) | gas-free | `cc.isStatic` | `cc.sourceAddress` | `cc.sourceRollupId` | `cc.targetAddress` | executing chain's ID | `cc.value` | — | `cc.data` |
+| Entry point | isStatic | sourceAddress | sourceRollupId | targetAddress | targetRollupId | value | callGas | data |
+|---|---|---|---|---|---|---|---|---|
+| `executeCrossChainCall` (L1 proxy) | `false` | proxy's caller | `MAINNET_ROLLUP_ID` (0) | proxy's `originalAddress` | proxy's `originalRollupId` | `msg.value` | `0` | original calldata |
+| `executeCrossChainCall` (L2 proxy) | `false` | proxy's caller | this L2's `ROLLUP_ID` | proxy's `originalAddress` | proxy's `originalRollupId` | `msg.value` | **`gasleft()` if `USE_GAS_LEFT`, else `0`** | original calldata |
+| Reentrant call (matches an `ExpectedL1ToL2Call` on L1 / `ExpectedOutgoingCrossChainCall` on L2) | same as the `executeCrossChainCall` row for the chain making the call | same | same | same | same | same | same | same |
+| `executeL2Txs` | n/a — entry has `proxyEntryHash == 0` | — | — | — | — | — | — | — |
+| `staticCrossChainCall` (both chains) | `true` | proxy's caller | this chain's rollup ID | proxy's `originalAddress` | proxy's `originalRollupId` | `0` (static is value-free) | `0` | original calldata |
+| `executeIncomingCrossChainCall` (L2, system) | `false` | explicit `sourceAddress` param | explicit `sourceRollup` param | explicit `destination` param | this L2's `ROLLUP_ID` | explicit `value` param (`== msg.value`) | `0` | explicit `data` param |
+| Flat-call `CALL_BEGIN` fold (both chains) | `cc.isStatic` | `cc.sourceAddress` | `cc.sourceRollupId` | `cc.targetAddress` | executing chain's ID | `cc.value` | `0` | `cc.data` |
 
-Note the two L2 rows that are gas-free: a static read never folds `callGas`, and a flat call is one being *delivered* on this chain rather than leaving it — its `cc.gas` caps the proxy's destination call but is not part of the identity hash.
+Note the two L2 rows that fold `callGas = 0` despite living on an L2: a static read never keys on gas, and a flat call is one being *delivered* on this chain rather than leaving it — its `cc.gas` caps the proxy's destination call but is not part of the identity hash.
 
 The hash is fully determined by the fields above; nothing else (caller depth, parent frame, position in the entry) feeds into it. Position is pinned separately, by the rolling hash — see the reentrant table's `expectedL1toL2Hash` key below.
 
@@ -77,7 +77,7 @@ The hash is fully determined by the fields above; nothing else (caller depth, pa
 When the same logical call appears on both chains, the `crossChainCallHash` is identical on both sides:
 
 - **L1→L2 proxy call** generated by `executeCrossChainCall` on L1 (e.g., user calls B's proxy on L1) has `targetRollupId = L2`, `sourceRollupId = MAINNET (0)`. `executeIncomingCrossChainCall` on L2 recomputes the same hash from its explicit params and reverts `EntryHashMismatch` if `entries[0].proxyEntryHash` diverges.
-- **Reentrant L2→L1 call** generated mid-execution on L2 (D calls C's proxy on L2) has `targetRollupId = MAINNET`, `sourceRollupId = L2`. Here the two sides do **not** share a hash: L2 folds the gas-folding form into `NESTED_BEGIN` inside its reentrant frame, while L1 folds the gas-free form into `CALL_BEGIN` for the call it actually executes. The seven shared fields are identical; only L2's extra `callGas` term differs. Build each side with its own formula.
+- **Reentrant L2→L1 call** generated mid-execution on L2 (D calls C's proxy on L2) has `targetRollupId = MAINNET`, `sourceRollupId = L2`. L2 folds its outgoing key (`callGas` = observed gas under `USE_GAS_LEFT`, else `0`) into `NESTED_BEGIN` inside its reentrant frame, while L1 folds `callGas = 0` into `CALL_BEGIN` for the call it actually executes — so the two sides share a hash exactly when the L2 runs `useGasLeft = false` (all current deployments), and diverge only in the `callGas` term otherwise.
 
 The hash inputs alone determine the hash, with no positional or contextual term mixed in. Note the two chains' **rolling hashes** are NOT equal for a mirrored flow: each side folds only the calls that execute on it, and L1 additionally seeds its hash with the entry's state-delta context. The builder must simulate both sides to predict exact `data`, return data, and `value`.
 
@@ -303,10 +303,10 @@ Never split a single cross-chain interaction into multiple execution transaction
 
 In the diagrams below, "MAINNET" means rollupId 0 (L1) and "L2" means whichever rollup ID the L2 chain has registered with the `EEZ` registry. `seed` is the per-side entry-begin seed from the Rolling Hash section. Each chain's entry lists only the calls that execute **on that chain**.
 
-Two hash notations appear, matching the two formulas from the Action Hash section:
+Two hash notations appear; they differ only in the `callGas` term:
 
-- `hash(isStatic, src, srcRollup, dest, destRollup, value, data)` — the gas-free 7-field form. Used for everything on L1, for L2 inbound bindings, for L2 static keys, and for every flat-call `CALL_BEGIN` fold on both chains.
-- `hashL2Out(isStatic, src, srcRollup, dest, destRollup, value, callGas, data)` — the gas-folding 8-field form. Used **only** for keys consumed by `EEZL2.executeCrossChainCall`: an L2 entry's top-level `proxyEntryHash` and a `expectedOutgoingHash`. The examples pass `callGas = 0` because every fixture and current deployment runs `useGasLeft = false`; the 8-field encoding still applies, so this is not the same value as `hash(...)` with the same seven fields.
+- `hash(isStatic, src, srcRollup, dest, destRollup, value, data)` — `callGas = 0`. Used for everything on L1, for L2 inbound bindings, for L2 static keys, and for every flat-call `CALL_BEGIN` fold on both chains.
+- `hashL2Out(isStatic, src, srcRollup, dest, destRollup, value, callGas, data)` — explicit `callGas`, marking keys consumed by `EEZL2.executeCrossChainCall`: an L2 entry's top-level `proxyEntryHash` and a `expectedOutgoingHash`. The examples pass `callGas = 0` (`useGasLeft = false` everywhere), where it equals `hash(...)` with the same seven fields; under `useGasLeft = true` the observed gas makes the outgoing key distinct.
 
 ### L1→L2 (simple)
 
@@ -370,7 +370,7 @@ Alice on L2 (through contract D) calls a contract C on L1.
 **L2 execution table** (`loadExecutionTable`):
 ```
 [0] DEFERRED
-    // L2-OUTGOING key ⇒ gas-folding form (callGas = 0 under useGasLeft = false)
+    // L2-OUTGOING key (callGas = 0 under useGasLeft = false)
     proxyEntryHash = hashL2Out(false, src=D, srcRollup=L2, dest=C, destRollup=MAINNET, 0, callGas=0, calldata)
     incomingCalls = []          // nothing executes on L2 — C runs on L1
     expectedOutgoingCalls = []
@@ -407,7 +407,7 @@ Alice on L1 calls D's proxy on L1 (D lives on L2). D, while executing on L2, cal
 [0] proxyEntryHash = hash(false, Alice, MAINNET, D, L2, 0, incrementProxy)
     incomingCalls = [{ src=Alice, srcRollup=MAINNET, dest=D, value=0, data=incrementProxy, ... }]
     expectedOutgoingCalls = [ {
-        // L2-OUTGOING key ⇒ gas-folding form (callGas = 0 under useGasLeft = false)
+        // L2-OUTGOING key (callGas = 0 under useGasLeft = false)
         expectedOutgoingHash = keccak256( hashL2Out(false, D, L2, C, MAINNET, 0, 0, increment)
                                           ‖ fireHash ),
         // fireHash = the L2 _rollingHash right after CALL_BEGIN of the D call — the point the
@@ -457,7 +457,7 @@ Alice on L2 calls A's proxy on L2 (A lives on L1). A, while executing on L1, cal
 **L2 execution table** (`loadExecutionTable`):
 ```
 [0] DEFERRED
-    // L2-OUTGOING key ⇒ gas-folding form (callGas = 0 under useGasLeft = false)
+    // L2-OUTGOING key (callGas = 0 under useGasLeft = false)
     proxyEntryHash = hashL2Out(false, Alice, L2, A, MAINNET, 0, 0, callBProxy)
     incomingCalls = [{ src=A, srcRollup=MAINNET, dest=B, value=0, data=increment, ... }]
                     // the A→B leg is what executes on L2

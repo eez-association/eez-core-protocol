@@ -69,19 +69,26 @@ abstract contract NestedActions {
     /// folds (target=counterL2 @ L2, source=cap @ MAINNET).
     function _l1InnerHash(address counterL2, address cap) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID, counterL2, 0, abi.encodeWithSelector(Counter.increment.selector), cap, MAINNET_ROLLUP_ID
+            false,
+            cap,
+            MAINNET_ROLLUP_ID,
+            counterL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 
     /// Outer/trigger (proxyEntryHash): alice triggers CAP via its L2-side proxy on L1.
     function _l1OuterHash(address cap, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID,
-            cap,
-            0,
-            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
+            false,
             alice,
-            MAINNET_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            cap,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         );
     }
 
@@ -89,23 +96,24 @@ abstract contract NestedActions {
     /// via the source proxy for (alice, L2) — the proven rollup. Matches `_processNCalls`'s CALL_BEGIN.
     function _l1TopCallHash(address cap, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            MAINNET_ROLLUP_ID,
-            cap,
-            0,
-            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
+            false,
             alice,
-            L2_ROLLUP_ID
+            L2_ROLLUP_ID,
+            cap,
+            MAINNET_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         );
     }
 
     // ── L2 hashes (mirror; addresses differ) ───────────────────────────
 
     /// Inner on L2: capL2 (on L2) reentrant-calls counterL1 on MAINNET — the call LEAVES the L2, so
-    /// it keys with the gas-folding L2-out hash (callGas=0; devnet deploys EEZL2 with useGasLeft=false).
+    /// it keys with the L2-outgoing hash (callGas=0; devnet deploys EEZL2 with useGasLeft=false).
     /// The L2 manager forces sourceRollupId=ROLLUP_ID (=L2) on the on-chain compute.
     function _l2InnerHash(address counterL1, address capL2) internal pure returns (bytes32) {
         return crossChainCallHashL2Out(
-            MAINNET_ROLLUP_ID, counterL1, 0, abi.encodeWithSelector(Counter.increment.selector), capL2, L2_ROLLUP_ID
+            capL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 
@@ -115,12 +123,13 @@ abstract contract NestedActions {
     /// CALL_BEGIN hash (target on this L2 = L2_ROLLUP_ID, source on MAINNET).
     function _l2OuterHash(address capL2, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID,
-            capL2,
-            0,
-            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
+            false,
             alice,
-            MAINNET_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            capL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         );
     }
 
@@ -187,7 +196,8 @@ abstract contract NestedActions {
 
     // L2 mirror entry.  The outer call is the inbound call delivered by
     // executeIncomingCrossChainCall through the source proxy (alice on MAINNET, on L2) — bound
-    // gas-free against the explicit params; only the nested outgoing reentry keys gas-folding.
+    // against the explicit params (callGas = 0); only the nested outgoing reentry can key on
+    // observed gas (devnet runs `useGasLeft = false`).
     function _l2Entries(address counterL1, address capL2, address alice)
         internal
         pure
@@ -207,7 +217,7 @@ abstract contract NestedActions {
             data: abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector)
         });
 
-        // Incoming top-level call CALL_BEGIN hash mirrors L1 (gas-free) — target on this L2
+        // Incoming top-level call CALL_BEGIN hash mirrors L1 (callGas = 0) — target on this L2
         // (L2_ROLLUP_ID), source on MAINNET (== proxyEntryHash here). Inner reentry uses _l2InnerHash.
         bytes32 ccTop = _l2OuterHash(capL2, alice);
         bytes32 ccInner = _l2InnerHash(counterL1, capL2);
@@ -221,7 +231,7 @@ abstract contract NestedActions {
 
         ExpectedOutgoingCrossChainCall[] memory nested = new ExpectedOutgoingCrossChainCall[](1);
         nested[0] = ExpectedOutgoingCrossChainCall({
-            expectedOutgoingHash: expectedL1toL2Hash(ccInner, rhFire), // ccInner is the gas-folding L2-out hash
+            expectedOutgoingHash: expectedL1toL2Hash(ccInner, rhFire), // ccInner is the L2-outgoing hash
             incomingCalls: noL2Calls(),
             revertedOrStaticRollingHash: bytes32(0),
             success: true,

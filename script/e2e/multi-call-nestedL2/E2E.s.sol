@@ -54,21 +54,21 @@ abstract contract MultiCallNestedL2Actions {
     }
 
     /// @dev Inner action hash: CAP reentrant-calls counterProxy (Counter MAINNET) on L2
-    ///      (outbound L2->L1, sourceRollupId=L2). Gas-folding key — EEZL2 keys outgoing
+    ///      (outbound L2->L1, sourceRollupId=L2). L2-outgoing key — EEZL2 keys outgoing
     ///      calls with `callGas` folded (0: devnet `useGasLeft = false`).
     function _innerActionHash(address counterL1, address cap) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(cap, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev Outer action hash (proxyEntryHash): alice calls capL1Proxy (CAP MAINNET) on L2 — an
-    ///      outgoing call, so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0).
+    ///      outgoing call, so the SOURCE L2 matches it with the L2-outgoing key (`callGas` = 0).
     function _outerActionHash(address cap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, cap, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev L2 incoming top-level CALL_BEGIN hash: alice -> cap executed ON L2 (targetRollupId=L2).
     function _l2IncomingHash(address cap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, cap, 0, _incrementProxyData(), alice, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, cap, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev L1 mirror rolling hash for a single entry — one top-level Counter.increment().
@@ -77,7 +77,7 @@ abstract contract MultiCallNestedL2Actions {
         pure
         returns (bytes32 h)
     {
-        bytes32 ccTop = crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap, L2_ROLLUP_ID);
+        bytes32 ccTop = crossChainCallHash(false, cap, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
         h = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         h = RollingHashBuilder.appendCallBegin(h, ccTop);
         h = RollingHashBuilder.appendCallEnd(h, true, abi.encode(retVal));

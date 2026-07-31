@@ -35,12 +35,13 @@ failed self-call means "static context". The proxy then routes to the manager's
 `staticCrossChainCall(msg.sender, msg.data)` via STATICCALL (a normal frame routes to
 `executeCrossChainCall` instead).
 
-`staticCrossChainCall` is `view`. It computes the call's identity with the canonical gas-free
+`staticCrossChainCall` is `view`. It computes the call's identity with the canonical
 formula (`EEZBase.computeCrossChainCallHash` — `CORE_PROTOCOL_SPEC.md` §C.3), with
 `isStatic = true` (a read keys DISTINCTLY from a state-changing call), `value = 0`,
 source = the proxy's caller on this chain's rollup ID, target = the proxy's
-(`originalAddress`, `originalRollupId`), and the original calldata. Static keys are gas-free
-on both chains — no `callGas`, even on L2. It then branches on `_insideExecution()`:
+(`originalAddress`, `originalRollupId`), and the original calldata. Static keys fold
+`callGas = 0` on both chains — a read never keys on gas, even on an L2 with
+`USE_GAS_LEFT`. It then branches on `_insideExecution()`:
 **inside** → the active entry's unified reentrant table (§4.1); **outside** → the top-level
 `StaticExecutionEntry` pool (§4.2).
 
@@ -281,9 +282,8 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
   — returning the same cached data — in every later block until the next `loadExecutionTable`
   replaces the pool. L1's pins bound that staleness; on L2 nothing does.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
-  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` always. Static keys are
-  **gas-free on both chains** — `staticCrossChainCall` uses the 7-field formula even on L2, unlike
-  the sibling `executeCrossChainCall`, which folds `callGas` (see CORE_PROTOCOL_SPEC §C.2/§C.3).
+  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
+  (see CORE_PROTOCOL_SPEC §C.2/§C.3).
 - **Proxy protection**: L1's reentrant static branch checks `_isRollupAllowed(destRid)`
   against the executing entry's `stateUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked

@@ -816,8 +816,8 @@ contract TableGenerator is TestHashes {
         return _ccHash(n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, n.data);
     }
 
-    /// @notice The hash the SOURCE chain keys this call with: gas-folding when the call leaves an
-    ///         L2, the plain formula when it leaves L1.
+    /// @notice The hash the SOURCE chain keys this call with: folds the observed callGas when the
+    ///         call leaves an L2, 0 when it leaves L1.
     function _sourceCch(uint256 nodeId, CallNode memory n) internal view returns (bytes32) {
         if (n.fromChain == L1_CHAIN) return _nodeCch(n);
         return

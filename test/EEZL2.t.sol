@@ -216,7 +216,7 @@ contract EEZL2Test is BaseL2 {
 
         bytes memory cd = abi.encodeCall(L2TestTarget.setValue, (7));
         bytes memory payload = hex"deadbeef";
-        // Gas-folding key; sourceRollupId in the L2 proxy-entry hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
+        // L2-outgoing key; sourceRollupId in the L2 proxy-entry hash is forced to ROLLUP_ID (== TEST_ROLLUP_ID).
         uint64 callGas = _probeOutgoing(address(this), proxy, 0, cd);
         bytes32 h = _outgoingCallHash(address(this), address(target), REMOTE_ROLLUP_ID, 0, callGas, cd);
 
@@ -257,7 +257,7 @@ contract EEZL2Test is BaseL2 {
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
 
-        // Gas-folding keys: the outer (host) call attaches OUTER_CALL_GAS so the nested site can
+        // Observed-gas keys: the outer (host) call attaches OUTER_CALL_GAS so the nested site can
         // still forward its full explicit gas; the mock's inner call site attaches CALL_GAS.
         uint64 outerGas = _probeOutgoing(address(this), outerProxy, 0, outerCd, OUTER_CALL_GAS);
         uint64 innerGas = _probeOutgoing(address(scap), counterProxy, 0, innerCd);

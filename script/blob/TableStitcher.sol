@@ -598,8 +598,8 @@ contract TableStitcher is TestHashes {
         return (false, false, p);
     }
 
-    /// @notice The hash the SOURCE chain keys `p` with: gas-folding (next queued callGas for this
-    ///         shape, peeked) when the call leaves an L2, the plain formula when it leaves L1.
+    /// @notice The hash the SOURCE chain keys `p` with: folds the next queued callGas for this
+    ///         shape (peeked) when the call leaves an L2, 0 when it leaves L1.
     function _srcCchOf(CallParams memory p) internal view returns (bytes32) {
         if (p.fromChain == L1_CHAIN) return _cchOf(p);
         bytes32 destCch = _cchOf(p);

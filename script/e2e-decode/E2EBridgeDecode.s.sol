@@ -119,7 +119,7 @@ contract E2EBridgeExecute is Script {
         uint64 L2_ROLLUP_ID = 1;
 
         bytes32 callHash =
-            crossChainCallHash(L2_ROLLUP_ID, destination, 1 ether, bytes(""), bridgeAddr, MAINNET_ROLLUP_ID);
+            crossChainCallHash(false, bridgeAddr, MAINNET_ROLLUP_ID, destination, L2_ROLLUP_ID, 1 ether, bytes(""));
 
         StateUpdate[] memory stateUpdates = new StateUpdate[](1);
         stateUpdates[0] = StateUpdate({

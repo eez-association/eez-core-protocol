@@ -48,6 +48,10 @@ abstract contract EEZBase is IEEZ {
     /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on static (read-only) paths.
     bool internal constant IS_STATIC = true;
 
+    /// @notice Readable `callGas` argument for `computeCrossChainCallHash` on paths that don't key
+    ///         on observed gas — every site except calls leaving an L2 with `USE_GAS_LEFT`.
+    uint64 internal constant ZERO_CALL_GAS = 0;
+
     // ──────────────────────────────────────────────
     //  Storage shared with children
     // ──────────────────────────────────────────────
@@ -185,13 +189,12 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Computes the cross-chain call hash from individual fields. Public so off-chain
-    ///         tooling can derive the hash for a planned cross-chain call. Identical formula on
-    ///         L1 and L2 so a single off-chain helper can target either chain.
-    /// @dev Formula: `keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress,
-    ///      targetRollupId, value, data))` — ordered isStatic → FROM (source pair) → TO (target pair)
-    ///      → value → data, matching the `L2ToL1Call` struct field order. Reordering would break every
-    ///      on-chain hash check and every off-chain tool that pre-computes the hash. `isStatic` makes a
-    ///      read-only call hash distinctly from an otherwise-identical state-changing one.
+    ///         tooling can derive the hash for a planned cross-chain call.
+    /// @dev Ordered isStatic → FROM (source pair) → TO (target pair) → value → callGas → data;
+    ///      reordering would break every on-chain hash check and every off-chain tool that
+    ///      pre-computes the hash. `isStatic` makes a read-only call hash distinctly from an
+    ///      otherwise-identical state-changing one. `callGas` is 0 except calls leaving an L2
+    ///      with `USE_GAS_LEFT`, where it is the `gasleft()` observed at manager entry.
     function computeCrossChainCallHash(
         bool isStatic,
         address sourceAddress,
@@ -199,6 +202,7 @@ abstract contract EEZBase is IEEZ {
         address targetAddress,
         uint64 targetRollupId,
         uint256 value,
+        uint64 callGas,
         bytes memory data
     )
         public
@@ -206,7 +210,7 @@ abstract contract EEZBase is IEEZ {
         returns (bytes32)
     {
         return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data)
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
         );
     }
 

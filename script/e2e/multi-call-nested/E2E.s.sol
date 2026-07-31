@@ -82,35 +82,35 @@ abstract contract MCNActions {
     // ── L1 proxy-entry hashes (sourceRollup=MAINNET; the trigger lives on L1) ──
 
     function _l1HashCAP2(address cap2L2, address app) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), app, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, cap2L2, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     function _l1HashCounterL2(address counterL2, address app) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementData(), app, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev L1 top-level call hash: CAP2 (logically on L2) reentrant-calls CounterL1 on L1.
     ///      Executes ON L1, so targetRollupId = MAINNET; source = CAP2 @ L2.
     function _l1TopCallCounterL1(address counterL1, address cap2L2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap2L2, L2_ROLLUP_ID);
+        return crossChainCallHash(false, cap2L2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     // ── L2 hashes ──
 
     /// @dev L2 proxy-entry / top-level call hash for app→CAP2 on L2 (target on this L2 → ROLLUP_ID).
     function _l2HashCAP2(address cap2L2, address l2App) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, l2App, MAINNET_ROLLUP_ID, cap2L2, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     function _l2HashCounterL2(address counterL2, address l2App) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, l2App, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev Inner reentrant (outgoing) hash on L2: CAP2 (on L2) calls CounterL1 MAINNET — the call
-    ///      LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet deploys
+    ///      LEAVES the L2, so it keys with the L2-outgoing hash (callGas=0; devnet deploys
     ///      EEZL2 with useGasLeft=false). The L2 manager forces sourceRollupId = ROLLUP_ID (=L2).
     function _l2InnerHashCounterL1(address counterL1, address cap2L2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), cap2L2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(cap2L2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     // ── L1 entries (3) ──
@@ -216,15 +216,15 @@ abstract contract MCNActions {
     {
         // Two distinct hashes per L2 entry:
         //  - proxyEntryHash (entry MATCH): what `executeCrossChainCall` computes when the trigger fires
-        //    through the L2 ingress proxy — the call LEAVES the L2, so it is the gas-folding L2-out
+        //    through the L2 ingress proxy — the call LEAVES the L2, so it is the L2-outgoing
         //    hash (callGas=0): source = l2App @ ROLLUP_ID (forced), target = the proxy's original
         //    (cap2/counterL2 @ MAINNET). See EEZL2.executeCrossChainCall.
-        //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — gas-free,
+        //  - outer* (CALL_BEGIN fold): what `_processNCalls` folds from `incomingCalls[0]` — callGas = 0,
         //    target @ ROLLUP_ID (forced), source = l2App @ the call's `sourceRollupId` (MAINNET).
         bytes32 entryHashCAP2 =
-            crossChainCallHashL2Out(MAINNET_ROLLUP_ID, cap2L2, 0, _incrementProxyData(), l2App, L2_ROLLUP_ID);
+            crossChainCallHashL2Out(l2App, L2_ROLLUP_ID, cap2L2, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
         bytes32 entryHashCounterL2 =
-            crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL2, 0, _incrementData(), l2App, L2_ROLLUP_ID);
+            crossChainCallHashL2Out(l2App, L2_ROLLUP_ID, counterL2, MAINNET_ROLLUP_ID, 0, _incrementData());
         bytes32 outerCAP2 = _l2HashCAP2(cap2L2, l2App);
         bytes32 outerCounterL2 = _l2HashCounterL2(counterL2, l2App);
         bytes32 innerCounterL1 = _l2InnerHashCounterL1(counterL1, cap2L2);
@@ -265,7 +265,7 @@ abstract contract MCNActions {
         entries = new L2ExecutionEntry[](3);
 
         // [0] / [1]: top-level CAP2 call wraps one nested (outgoing) reentry to CounterL1@MAINNET.
-        // Rolling-hash seed/append shape mirrors L1; NESTED_BEGIN folds the gas-folding inner hash.
+        // Rolling-hash seed/append shape mirrors L1; NESTED_BEGIN folds the inner L2-outgoing hash.
         bytes32 rh0 = RollingHashBuilder.entryBeginL2(entryHashCAP2);
         rh0 = RollingHashBuilder.appendCallBegin(rh0, outerCAP2);
         bytes32 rhFire0 = rh0;

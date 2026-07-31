@@ -74,20 +74,21 @@ contract ExecuteFlashLoanL2 is Script {
             (token, MAINNET_ROLLUP_ID, executorL1, 10_000e18, name, symbol, tokenDecimals, L2_ROLLUP_ID)
         );
 
-        // ── Compute proxy-entry hashes (new computeCrossChainCallHash formula) ──
+        // ── Compute proxy-entry hashes ──
 
         // Entry 0: receiveTokens on L2 bridge (from L1 bridge proxy)
         bytes32 actionHash0 =
-            crossChainCallHash(L2_ROLLUP_ID, bridgeL2, 0, fwdReceiveTokensCalldata, bridgeL1, MAINNET_ROLLUP_ID);
+            crossChainCallHash(false, bridgeL1, MAINNET_ROLLUP_ID, bridgeL2, L2_ROLLUP_ID, 0, fwdReceiveTokensCalldata);
 
         // Entry 1: claimAndBridgeBack on executor L2 (from executor L1 proxy)
-        bytes32 actionHash1 =
-            crossChainCallHash(L2_ROLLUP_ID, executorL2, 0, claimAndBridgeBackCalldata, executorL1, MAINNET_ROLLUP_ID);
+        bytes32 actionHash1 = crossChainCallHash(
+            false, executorL1, MAINNET_ROLLUP_ID, executorL2, L2_ROLLUP_ID, 0, claimAndBridgeBackCalldata
+        );
 
         // Entry 2: receiveTokens return on L1 bridge (from L2 bridge proxy). Consumed on L1; kept
         // in the L2 table to mirror the L1 side.
         bytes32 actionHash2 =
-            crossChainCallHash(MAINNET_ROLLUP_ID, bridgeL1, 0, retReceiveTokensCalldata, bridgeL2, L2_ROLLUP_ID);
+            crossChainCallHash(false, bridgeL2, L2_ROLLUP_ID, bridgeL1, MAINNET_ROLLUP_ID, 0, retReceiveTokensCalldata);
 
         vm.startBroadcast();
 
@@ -223,20 +224,21 @@ contract ExecuteFlashLoanL1 is Script {
             (token, MAINNET_ROLLUP_ID, executorL1, 10_000e18, name, symbol, tokenDecimals, L2_ROLLUP_ID)
         );
 
-        // ── Compute cross-chain call hashes (new computeCrossChainCallHash formula) ──
+        // ── Compute cross-chain call hashes ──
 
         // L1 entry 0: forward bridge call (bridgeTokens -> L2-bridge proxy -> executeCrossChainCall)
         bytes32 callForwardHash =
-            crossChainCallHash(L2_ROLLUP_ID, bridgeL2, 0, fwdReceiveTokensCalldata, bridgeL1, MAINNET_ROLLUP_ID);
+            crossChainCallHash(false, bridgeL1, MAINNET_ROLLUP_ID, bridgeL2, L2_ROLLUP_ID, 0, fwdReceiveTokensCalldata);
 
         // L1 entry 1: claimAndBridgeBack (executor calls executorL2 proxy)
-        bytes32 callClaimHash =
-            crossChainCallHash(L2_ROLLUP_ID, executorL2, 0, claimAndBridgeBackCalldata, executorL1, MAINNET_ROLLUP_ID);
+        bytes32 callClaimHash = crossChainCallHash(
+            false, executorL1, MAINNET_ROLLUP_ID, executorL2, L2_ROLLUP_ID, 0, claimAndBridgeBackCalldata
+        );
 
         // The return bridge runs back ON L1 (target = bridgeL1 @ MAINNET) inside entry 1's execution,
         // so it is a top-level l2ToL1Call of entry 1, not a reentrant (L1->L2) frame.
         bytes32 callReturnHash =
-            crossChainCallHash(MAINNET_ROLLUP_ID, bridgeL1, 0, retReceiveTokensCalldata, bridgeL2, L2_ROLLUP_ID);
+            crossChainCallHash(false, bridgeL2, L2_ROLLUP_ID, bridgeL1, MAINNET_ROLLUP_ID, 0, retReceiveTokensCalldata);
 
         // ── State deltas ──
         bytes32 s1 = keccak256("l2-tokens-bridged-to-executor");

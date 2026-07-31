@@ -49,7 +49,7 @@ abstract contract HelloActions {
     ///      Same on both sides — both `executeCrossChainCall` and `executeIncomingCrossChainCall`
     ///      fold targetRollupId = L2_ROLLUP_ID into `computeCrossChainCallHash`.
     function _callHash(address helloL2, address helloL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, helloL2, 0, _getWordCallData(), helloL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, helloL1, MAINNET_ROLLUP_ID, helloL2, L2_ROLLUP_ID, 0, _getWordCallData());
     }
 
     /// @dev Single L1 entry — the cross-chain call returns precomputed abi.encode("World"); the real

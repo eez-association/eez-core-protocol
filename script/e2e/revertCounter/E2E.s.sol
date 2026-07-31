@@ -88,7 +88,13 @@ abstract contract RevertActions {
     ///      This is just the trigger — it selects which entry to consume.
     function _outerActionHash(address counterL2, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID, counterL2, 0, abi.encodeWithSelector(Counter.increment.selector), alice, MAINNET_ROLLUP_ID
+            false,
+            alice,
+            MAINNET_ROLLUP_ID,
+            counterL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 
@@ -98,7 +104,13 @@ abstract contract RevertActions {
     ///      is rolled back afterward).
     function _l1InnerCallHash(address counterL1, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
-            MAINNET_ROLLUP_ID, counterL1, 0, abi.encodeWithSelector(Counter.increment.selector), alice, L2_ROLLUP_ID
+            false,
+            alice,
+            L2_ROLLUP_ID,
+            counterL1,
+            MAINNET_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 

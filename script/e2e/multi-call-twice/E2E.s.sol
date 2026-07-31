@@ -57,15 +57,15 @@ abstract contract MultiCallActions {
     }
 
     function _callHash(address counterL2, address caller) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), caller, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev L2-side entry key: trigger proxy on L2 has originalRollupId=MAINNET, so the manager
     ///      computes hash(MAINNET, counterL2, ..., source=callTwiceL2, L2). The call LEAVES the L2,
-    ///      so `EEZL2.executeCrossChainCall` keys it with the gas-folding hash (`callGas` = 0 — the
+    ///      so `EEZL2.executeCrossChainCall` keys it with the L2-outgoing hash (`callGas` = 0 — the
     ///      devnet deploys `EEZL2` with `useGasLeft = false`).
     function _l2CallHash(address counterL2, address callTwiceL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(callTwiceL2, L2_ROLLUP_ID, counterL2, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
@@ -152,7 +152,7 @@ abstract contract MultiCallActions {
         // PENDING EEZL2: L2-execution CALL_BEGIN folds the incoming call hashed with the L2's own id
         // as targetRollupId (the chain it runs on), mirroring L1 folding MAINNET. Re-verify once EEZL2 lands.
         bytes32 ccHash =
-            crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), callTwiceL2, MAINNET_ROLLUP_ID);
+            crossChainCallHash(false, callTwiceL2, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData());
         bytes32 rh = RollingHashBuilder.entryBeginL2(ah);
         rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
         rh = RollingHashBuilder.appendCallEnd(rh, true, retData);

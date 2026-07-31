@@ -27,8 +27,8 @@ contract TestToken is ERC20 {
 ///   - L2 ExecutionEntry (IEEZL2.sol) has: proxyEntryHash, incomingCalls[], expectedOutgoingCalls[],
 ///     rollingHash, success, returnData
 ///   - crossChainCallHash = keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress,
-///     targetRollupId, value, data)); the target rollup of an executed call is the chain it runs ON
-///     (MAINNET on L1, ROLLUP_ID on L2)
+///     targetRollupId, value, callGas, data)); callGas is 0 here (`useGasLeft = false`); the target
+///     rollup of an executed call is the chain it runs ON (MAINNET on L1, ROLLUP_ID on L2)
 ///   - Rolling hash seeds at the entry's (rollupId, currentState) deltas + proxyEntryHash (L1) or just
 ///     proxyEntryHash (L2), then folds tagged events: CALL_BEGIN(1), CALL_END(2), NESTED_BEGIN(3), NESTED_END(4)
 ///   - `success` selects whether an entry returns `returnData` (true) or runs, verifies, then reverts (false)
@@ -165,7 +165,7 @@ contract IntegrationTestBridge is IntegrationBase {
         // Fund managerL2 with ETH for the delivery
         vm.deal(address(managerL2), 1 ether);
 
-        // Build the L2 execution entry (outgoing trigger — keyed with the gas-folding L2 hash)
+        // Build the L2 execution entry (outgoing trigger — keyed with the L2-outgoing hash)
         bytes32 l2TriggerHash = _ccHashL2Out(alice, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         CrossChainCall[] memory l2Calls = new CrossChainCall[](1);
@@ -293,7 +293,7 @@ contract IntegrationTestBridge is IntegrationBase {
         // Create proxy for (bridgeL1, MAINNET) on L2
         address proxyBridgeL1OnL2 = managerL2.createCrossChainProxy(address(bridgeL1), MAINNET_ROLLUP_ID);
 
-        // Trigger crossChainCallHash (outgoing trigger — keyed with the gas-folding L2 hash)
+        // Trigger crossChainCallHash (outgoing trigger — keyed with the L2-outgoing hash)
         bytes32 l2TriggerHash = _ccHashL2Out(alice, address(bridgeL1), MAINNET_ROLLUP_ID, 0, "");
 
         // Entry's calls: route receiveTokens to bridgeL2 via proxy(bridgeL1, MAINNET)
