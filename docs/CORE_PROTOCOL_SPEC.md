@@ -859,7 +859,7 @@ There is no `executeL2Txs` on L2 — that mechanism lives on L1 and handles the 
 
 #### `staticCrossChainCall` (L2)
 
-Same shape as L1: inside an execution it scans the active entry's unified `expectedOutgoingCalls` for a row whose `expectedOutgoingHash` matches `keccak256(crossChainCallHash, _rollingHash)` (forward window from `_lastOutgoingCallConsumed`); outside it scans the persistent `staticEntries` pool matched by `proxyEntryHash` alone — the L2 `StaticExecutionEntry` has no `destinationRollupId` and no `expectedStateRoots` (single rollup, no state roots). `sourceRollupId` in the call hash is `ROLLUP_ID`; `isStatic = true`; `value = 0`. No block gate.
+Same shape as L1: inside an execution it scans the active entry's unified `expectedOutgoingCalls` for a row whose `expectedOutgoingHash` matches `keccak256(crossChainCallHash, _rollingHash)` (forward window from `_lastOutgoingCallConsumed`); outside it scans the `staticEntries` pool matched by `proxyEntryHash` alone, gated on `lastLoadBlock == block.number` — the L2 `StaticExecutionEntry` has no `destinationRollupId` and no `expectedStateRoots` (single rollup, no state roots), so the block gate bounds staleness. `sourceRollupId` in the call hash is `ROLLUP_ID`; `isStatic = true`; `value = 0`.
 
 #### `createCrossChainProxy` / `computeCrossChainProxyAddress`
 
@@ -1239,7 +1239,7 @@ Two reads with the same `crossChainCallHash` and **no** intervening fold compute
 
 Read-only cross-chain calls (and pre-verified reverting reentrant calls) are resolved from prover-supplied data — never executed via the normal call path. Two entry points:
 
-1. **`staticCrossChainCall`** (external view) — used when the proxy's `_fallback` detects a real STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts). Inside an execution it scans the active entry's unified reentrant table with an `isStatic = true` key; outside, the top-level static-entry pool (L1: `proxyEntryHash` + `destinationRollupId` + live state-root pins, no block gate; L2: `proxyEntryHash` alone).
+1. **`staticCrossChainCall`** (external view) — used when the proxy's `_fallback` detects a real STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts). Inside an execution it scans the active entry's unified reentrant table with an `isStatic = true` key; outside, the top-level static-entry pool (L1: `proxyEntryHash` + `destinationRollupId` + live state-root pins, no block gate; L2: `proxyEntryHash` alone, same-block only).
 2. **Reverted-frame resolution inside `_consumeNestedCall`** — not a read, but the revert twin: a normal-CALL reentrant call matching a `success == false` row runs the frame and reverts with the cached payload (§D.3). It shares the unified table, keyed with `isStatic = false`.
 
 The full specification — match keys, resolution mechanics, static sub-calls, state-root pins, L1/L2 differences, invariants — lives in **`docs/STATIC_ENTRY.md`**. Within this document: the `staticCrossChainCall` pseudocode is in §B.1, the untagged static accumulator in §E.2, and static key disambiguation in §E.4. For which structure models which situation, see `EXECUTION_ENTRY_SPEC.md` § "When to use which structure".
@@ -1270,7 +1270,7 @@ Forward-scan — per consumption, the cursor jumps to `matchIndex + 1` (per-roll
 
 ### G.4 Same-Block Restriction
 
-On L1, `executeCrossChainCall` / `executeL2Txs` revert `ExecutionNotInCurrentBlock(rollupId)` if `verificationByRollup[rollupId].lastVerifiedBlock != block.number`. On L2, same with `lastLoadBlock`. Entries that aren't consumed in the posting block are never read again (the read gate), and the queue is wiped by the next batch that verifies the rollup. **Static entries are exempt** — `staticCrossChainCall` has no block gate; a static entry stays resolvable while its state-root pins hold (L1) or until the next table load (L2).
+On L1, `executeCrossChainCall` / `executeL2Txs` revert `ExecutionNotInCurrentBlock(rollupId)` if `verificationByRollup[rollupId].lastVerifiedBlock != block.number`. On L2, same with `lastLoadBlock`. Entries that aren't consumed in the posting block are never read again (the read gate), and the queue is wiped by the next batch that verifies the rollup. **Static entries are exempt on L1 only** — no block gate there (state-root pins bound staleness); L2's top-level static path shares the `lastLoadBlock == block.number` gate (no pins).
 
 ### G.5 Table Clearing
 
