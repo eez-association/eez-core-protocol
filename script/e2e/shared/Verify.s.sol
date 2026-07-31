@@ -42,8 +42,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
     );
 
-    // L2's CrossChainCallExecuted — 6 fields, trailing uint64 callGas (topic0 differs from L1's
-    // 5-field event; this constant is only matched against L2 manager logs).
+    // L2's outgoing-call event — 6 fields, trailing uint64 callGas. Only matched against L2
+    // manager logs; L1's 5-field `CrossChainCallExecuted` overload has a different topic0.
     bytes32 constant SIG_CROSSCHAIN_CALL =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256,uint64)");
 
@@ -406,8 +406,8 @@ contract VerifyL2Calls is VerifyHelpers {
         view
         returns (bytes32[] memory)
     {
-        // Accept BOTH event signatures: CrossChainCallExecuted (emitted when a proxy on L2
-        // calls into the manager via executeL1ToL2Call) AND IncomingCrossChainCallExecuted
+        // Accept BOTH event signatures: CrossChainCallExecuted (emitted when a proxy on
+        // L2 calls into the manager via executeCrossChainCall) AND IncomingCrossChainCallExecuted
         // (emitted when SYSTEM drives executeIncomingCrossChainCall). The crossChainCallHash
         // is the first indexed param of both, so topics[1] extracts it uniformly.
         uint256 count;

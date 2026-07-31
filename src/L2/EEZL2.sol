@@ -116,9 +116,11 @@ contract EEZL2 is EEZBase {
         uint64 sourceRollup
     );
 
-    /// @notice Emitted when a cross-chain call is executed via proxy. `callGas` is the value folded
-    ///         into the hash: the gas observed at manager entry (what the caller forwarded) when
-    ///         `USE_GAS_LEFT`, else 0.
+    /// @notice Emitted when a cross-chain call LEAVING this L2 is executed via proxy. `callGas` is
+    ///         the value folded into the hash: the gas observed at manager entry (what the caller
+    ///         forwarded) when `USE_GAS_LEFT`, else 0.
+    /// @dev Overloads `EEZBase.CrossChainCallExecuted` (L1's five-field form) with an extra
+    ///      trailing `callGas`; the two signatures have different topic0s.
     event CrossChainCallExecuted(
         bytes32 indexed crossChainCallHash,
         address indexed proxy,
@@ -306,6 +308,10 @@ contract EEZL2 is EEZBase {
         //    expects (entry index 0, fresh rolling hash, reentrant cursor at 0, not executing).
         ExecutionEntry storage entry = entries[0];
         if (entry.proxyEntryHash != crossChainCallHash) revert EntryHashMismatch();
+
+        // Same consumption signal the proxy-driven path emits, so a log reader sees every entry
+        // that ran regardless of which entry point drove it.
+        emit ExecutionConsumed(crossChainCallHash, 0);
 
         _currentEntryIndex = 0;
         _executeEntry(entry);
@@ -634,7 +640,7 @@ contract EEZL2 is EEZBase {
     ///         `!success`.
     function _resolveStaticEntry(
         CrossChainCall[] storage calls,
-        bytes32 rollingHash,
+        bytes32 revertedOrStaticRollingHash,
         bool success,
         bytes memory returnData
     )
@@ -642,7 +648,7 @@ contract EEZL2 is EEZBase {
         view
         returns (bytes memory)
     {
-        if (_processNStaticCalls(calls) != rollingHash) revert RollingHashMismatch();
+        if (_processNStaticCalls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
         if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))

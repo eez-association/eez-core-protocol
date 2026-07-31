@@ -18,7 +18,7 @@ import {Vm} from "forge-std/Vm.sol";
 ///       it relies on are rich enough for almost all debugging use cases:
 ///       BatchPosted, RollupCreated, StateUpdated,
 ///       L2ExecutionPerformed, L2TxSkipped, ExecutionConsumed,
-///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted, CallResult,
+///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted (L1 + L2 kinds), CallResult,
 ///       CallsReverted, CrossChainProxyCreated,
 ///       and the L2-only ExecutionTableLoaded / IncomingCrossChainCallExecuted.
 ///       For a full pre-execution dump of entries, decode the postAndVerifyBatch tx

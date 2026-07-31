@@ -259,7 +259,7 @@ proxyAddress  = address(uint160(uint256(keccak256(0xff || manager || salt || byt
 - `docs/CORE_PROTOCOL_SPEC.md` — formal protocol specification.
 - `docs/MULTI_PROVER_SPEC.md` — design rationale for the multi-prover model.
 - `docs/EXECUTION_ENTRY_SPEC.md` — how to build execution entries.
-- `docs/LOOKUP_SPEC.md` — static entries + reverted-call resolution semantics.
+- `docs/STATIC_ENTRY.md` — static entries + reverted-call resolution semantics.
 - `docs/CAVEATS.md` — edge cases.
 
 ## Testing

@@ -21,9 +21,9 @@ pragma solidity ^0.8.28;
 //  (no `StateUpdate`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
 //  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
-//  Casing: types/events/errors are PascalCase (`CrossChainCall`, `OutgoingCallConsumed`,
-//  `UnconsumedOutgoingCalls`); variables / struct fields / params are mixedCase
-//  (`incomingCalls`, `expectedOutgoingCalls`, `_lastOutgoingCallConsumed`).
+//  Casing: types/events/errors are PascalCase (`CrossChainCall`,
+//  `CrossChainCallExecuted`, `EntryNotFound`); variables / struct fields / params are
+//  mixedCase (`incomingCalls`, `expectedOutgoingCalls`, `_lastOutgoingCallConsumed`).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice A cross-chain call executed on this L2 (sourced from a remote rollup).

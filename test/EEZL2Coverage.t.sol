@@ -204,6 +204,10 @@ contract EEZL2CoverageTest is BaseL2 {
         // The inbound call executes on this L2 with the same identity as the entry's proxyEntryHash.
         entries[0].rollingHash = _rhSingle(inboundHash, inboundHash, true, "");
 
+        // The system-driven path emits the same consumption signal as proxy-driven consumption.
+        vm.expectEmit(true, true, true, true);
+        emit EEZL2.ExecutionConsumed(inboundHash, 0);
+
         vm.prank(SYSTEM_ADDRESS);
         bytes memory ret = manager.executeIncomingCrossChainCall{
             value: value

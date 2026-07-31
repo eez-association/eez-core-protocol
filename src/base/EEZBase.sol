@@ -64,7 +64,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice The current execution entry being processed.
     /// @dev L1 uses this to index `_transientEntries` while a batch is mid-flight, otherwise
-    ///      `verificationByRollup[_currentEntryRollupId].entryQueue`. L2 always indexes `executions`.
+    ///      `verificationByRollup[_currentEntryRollupId].entryQueue`. L2 always indexes `entries`.
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
@@ -234,9 +234,11 @@ abstract contract EEZBase is IEEZ {
         }
     }
 
-    /// @notice Content-addressed position key for an `ExpectedL1ToL2Call`: the call's identity hash
-    ///         (which already folds `isStatic` and the routed rollup) bound to the live `_rollingHash`
-    ///         at the instant it fires. One comparison replaces the old (hash, rollingHash, isStatic) triple.
+    /// @notice Content-addressed position key for a row of the unified reentrant table (L1's
+    ///         `expectedL1toL2Hash`, L2's `expectedOutgoingHash` — same formula): the call's
+    ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the
+    ///         live `_rollingHash` at the instant it fires. One comparison replaces the old
+    ///         (hash, rollingHash, isStatic) triple.
     function _computeExpectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash)
         internal
         pure
@@ -249,12 +251,13 @@ abstract contract EEZBase is IEEZ {
     //  Rolling hash helpers
     // ──────────────────────────────────────────────
     //
-    // The entry-level `_rollingHash` accumulator is updated at four event points during
-    // entry execution: at the start and end of each top-level call, and at the start and
-    // end of each reentrant frame. Each event is tagged with a domain byte
-    // (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END) so the same set of inputs can't collide
-    // across event types. The final value is checked against `entry.rollingHash` at the end
-    // of execution. See `docs/CORE_PROTOCOL_SPEC.md` §E for the full specification.
+    // The entry-level `_rollingHash` accumulator is updated at five event points during
+    // entry execution: at the start and end of each top-level call, at the start and end of
+    // each reentrant frame, and when a reentrant call finds no matching row. Each event is
+    // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
+    // so the same set of inputs can't collide across event types. The final value is checked
+    // against `entry.rollingHash` at the end of execution. See `docs/CORE_PROTOCOL_SPEC.md`
+    // §E for the full specification.
     //
     // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
     // prior value), so order, count, and nesting are already bound by the chain + the tags. An
@@ -275,8 +278,9 @@ abstract contract EEZBase is IEEZ {
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
     /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateUpdate`); L2 has no
-    ///      state deltas and will get its own entry-begin. Deltas are strictly-increasing-by-rollupId,
-    ///      so the fold is deterministic.
+    ///      state deltas, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
+    ///      an empty delta prefix. Deltas are strictly-increasing-by-rollupId, so the fold is
+    ///      deterministic.
     ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
     function _rollingHashEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
