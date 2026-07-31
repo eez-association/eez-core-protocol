@@ -35,23 +35,14 @@ failed self-call means "static context". The proxy then routes to the manager's
 `staticCrossChainCall(msg.sender, msg.data)` via STATICCALL (a normal frame routes to
 `executeCrossChainCall` instead).
 
-`staticCrossChainCall` is `view`. It computes the call's identity with the shared formula
-(`EEZBase.computeCrossChainCallHash`):
-
-```
-crossChainCallHash = keccak256(abi.encode(
-    isStatic,          // true here — a read keys DISTINCTLY from a state-changing call
-    sourceAddress,     // the caller as seen by the proxy
-    sourceRollupId,    // L1: MAINNET_ROLLUP_ID (0); L2: ROLLUP_ID
-    targetAddress,     // the proxy's originalAddress
-    targetRollupId,    // the proxy's originalRollupId
-    value,             // always 0 in static context
-    data               // the original calldata
-))
-```
-
-and branches on `_insideExecution()`: **inside** → the active entry's unified reentrant table
-(§4.1); **outside** → the top-level `StaticExecutionEntry` pool (§4.2).
+`staticCrossChainCall` is `view`. It computes the call's identity with the canonical gas-free
+formula (`EEZBase.computeCrossChainCallHash` — `CORE_PROTOCOL_SPEC.md` §C.3), with
+`isStatic = true` (a read keys DISTINCTLY from a state-changing call), `value = 0`,
+source = the proxy's caller on this chain's rollup ID, target = the proxy's
+(`originalAddress`, `originalRollupId`), and the original calldata. Static keys are gas-free
+on both chains — no `callGas`, even on L2. It then branches on `_insideExecution()`:
+**inside** → the active entry's unified reentrant table (§4.1); **outside** → the top-level
+`StaticExecutionEntry` pool (§4.2).
 
 ---
 
@@ -207,7 +198,7 @@ return returnData
 
 `_processNStaticCalls` runs the sub-call array flatly in **static context**:
 
-- Each sub-call is dispatched `sourceProxy.staticcall(executeOnBehalf(target, data))` —
+- Each sub-call is dispatched `sourceProxy.staticcall(executeOnBehalf(target, cc.gas, data))` —
   read-only, no value, reverts on any state write in the target.
 - Results fold into an **untagged** accumulator seeded at `bytes32(0)`
   (`EEZBase._rollingHashStaticResult`): `hash = keccak256(prev, success, retData)` per
@@ -285,9 +276,14 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
   self-relative names). The key helper (`_computeExpectedL1toL2Hash`) and the untagged
   accumulator (`_rollingHashStaticResult`) are shared in `EEZBase`.
 - **Pool**: L1 selects transient-vs-persistent by `_transientEntries.length` and matches with
-  destination + pins; L2 scans the one persistent `staticEntries` table by hash alone.
+  destination + pins; L2 scans the one persistent `staticEntries` table by hash alone. Because L2
+  has no pins AND static reads are exempt from the block gate, an L2 static entry stays resolvable
+  — returning the same cached data — in every later block until the next `loadExecutionTable`
+  replaces the pool. L1's pins bound that staleness; on L2 nothing does.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
-  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` always.
+  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` always. Static keys are
+  **gas-free on both chains** — `staticCrossChainCall` uses the 7-field formula even on L2, unlike
+  the sibling `executeCrossChainCall`, which folds `callGas` (see CORE_PROTOCOL_SPEC §C.2/§C.3).
 - **Proxy protection**: L1's reentrant static branch checks `_isRollupAllowed(destRid)`
   against the executing entry's `stateUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
