@@ -807,7 +807,7 @@ contract EEZ is EEZBase {
         }
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            NOT_STATIC_CALL, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, msg.value, callData
+            NOT_STATIC_CALL, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, msg.value, ZERO_CALL_GAS, callData
         );
 
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
@@ -1139,6 +1139,7 @@ contract EEZ is EEZBase {
                         l2ToL1Call.targetAddress,
                         MAINNET_ROLLUP_ID,
                         l2ToL1Call.value,
+                        ZERO_CALL_GAS,
                         l2ToL1Call.data
                     )
                 );
@@ -1282,8 +1283,9 @@ contract EEZ is EEZBase {
         address destAddress = proxyInfo.originalAddress;
         uint64 destRid = proxyInfo.originalRollupId;
 
-        bytes32 crossChainCallHash =
-            computeCrossChainCallHash(IS_STATIC, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, callData);
+        bytes32 crossChainCallHash = computeCrossChainCallHash(
+            IS_STATIC, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, ZERO_CALL_GAS, callData
+        );
 
         // Nested: the active host's unified reentrant table, content-addressed by `expectedL1toL2Hash`.
         // `crossChainCallHash` was computed with `isStatic = true`, so it can only match a static

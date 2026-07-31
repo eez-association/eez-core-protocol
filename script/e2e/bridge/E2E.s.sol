@@ -62,7 +62,7 @@ contract BridgeReceiver {
 
 abstract contract BridgeActions {
     function _callHash(address l2Destination, address sender) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, l2Destination, 1 ether, "", sender, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, 1 ether, "");
     }
 
     function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {

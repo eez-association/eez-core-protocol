@@ -54,14 +54,14 @@ abstract contract TwoDiffActions {
     }
 
     function _callHash(address target, address caller) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, target, 0, _incrementCallData(), caller, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, target, L2_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev L2-side entry key: trigger proxy on L2 has originalRollupId=MAINNET. The call LEAVES
-    ///      the L2, so `EEZL2.executeCrossChainCall` keys it with the gas-folding hash (`callGas` = 0
+    ///      the L2, so `EEZL2.executeCrossChainCall` keys it with the L2-outgoing hash (`callGas` = 0
     ///      — the devnet deploys `EEZL2` with `useGasLeft = false`).
     function _l2CallHash(address target, address l2Caller) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, target, 0, _incrementCallData(), l2Caller, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(l2Caller, L2_ROLLUP_ID, target, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     function _l1Entries(address counterA, address counterB, address caller)
@@ -152,7 +152,8 @@ abstract contract TwoDiffActions {
         bytes memory retData = abi.encode(uint256(1));
         // PENDING EEZL2: L2-execution CALL_BEGIN folds the incoming call hashed with the L2's own id
         // as targetRollupId (the chain it runs on), mirroring L1 folding MAINNET. Re-verify once EEZL2 lands.
-        bytes32 ccHash = crossChainCallHash(L2_ROLLUP_ID, target, 0, _incrementCallData(), l2Caller, MAINNET_ROLLUP_ID);
+        bytes32 ccHash =
+            crossChainCallHash(false, l2Caller, MAINNET_ROLLUP_ID, target, L2_ROLLUP_ID, 0, _incrementCallData());
         bytes32 rh = RollingHashBuilder.entryBeginL2(entryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
         rh = RollingHashBuilder.appendCallEnd(rh, true, retData);

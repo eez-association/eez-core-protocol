@@ -169,19 +169,15 @@ struct ProofSystemBatchPerVerificationEntries {
 
 An `ExecutionEntry` carries a `success` flag: when false the entry is run, verified, then reverted with `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT calls are `success == false` rows in the unified reentrant table; a top-level reverting READ is a `StaticExecutionEntry { success: false }`. Inner naturally-reverting calls are still expressible: the proxy `.call` returns `(false, retData)` and the rolling hash captures it via `CALL_END`.
 
-Cross-chain call hash — **L1 and L2 key calls DIFFERENTLY**. The gas-free formula (EEZBase, exposed on both managers) keys everything on L1 plus L2 inbound/static matching:
-
-```solidity
-keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data))
-```
-
-Calls **leaving an L2** (`EEZL2.executeCrossChainCall` — both top-level entry matching and nested `expectedOutgoingHash` keys) use the L2-only gas-folding overload. `callGas` depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`): when true, `uint64(gasleft())` observed at manager entry (what the caller forwarded); when false — current deployments and all test fixtures — a fixed `0`, keeping the 8-field encoding but making outgoing hashes gas-independent. The folded value is emitted in L2's `CrossChainCallExecuted`:
+Cross-chain call hash (`EEZBase.computeCrossChainCallHash`, shared by both managers):
 
 ```solidity
 keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data))
 ```
 
-The two formulas are deliberately distinct: with `useGasLeft = true` an L2 outgoing call's identity binds the observed forwarded gas, so the prover must commit to it (deterministic for a sequencer replaying the block). Gas-observed keying is the intended future production mode; until the node supplies observed gas, deployments run `useGasLeft = false`.
+`callGas` is `0` (the `ZERO_CALL_GAS` constant) at every site except calls **leaving an L2** (`EEZL2.executeCrossChainCall` — both top-level entry matching and nested `expectedOutgoingHash` keys), where the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`) selects it: when true, `uint64(gasleft())` observed at manager entry (what the caller forwarded); when false — current deployments and all test fixtures — a fixed `0`, so every key in the system folds `0` and hashes are fully pre-computable. The folded value is emitted in L2's `CrossChainCallExecuted`.
+
+With `useGasLeft = true` an L2 outgoing call's identity binds the observed forwarded gas, so the prover must commit to it (deterministic for a sequencer replaying the block). Gas-observed keying is the intended future production mode; until the node supplies observed gas, deployments run `useGasLeft = false`.
 
 ### Key Functions (L1 — EEZ)
 

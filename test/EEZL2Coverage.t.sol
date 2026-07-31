@@ -234,7 +234,7 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes memory outerCd = abi.encodeCall(CounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
 
-        // Gas-folding keys: the outer (host) call attaches OUTER_CALL_GAS so the mock's nested
+        // Observed-gas keys: the outer (host) call attaches OUTER_CALL_GAS so the mock's nested
         // `{gas: PROXY_CALL_GAS}` site can still forward its full explicit gas.
         uint64 outerGas = _probeOutgoing(address(this), outerProxy, 0, outerCd, OUTER_CALL_GAS);
         uint64 innerGas = _probeOutgoing(address(cap), counterProxy, 0, innerCd);
@@ -504,7 +504,7 @@ contract EEZL2CoverageTest is BaseL2 {
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
         bytes memory outerData = abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
-        // Top-level mutable key folds callGas; the nested STATIC read keys gas-free.
+        // Top-level mutable key folds the observed callGas; the nested STATIC read folds callGas = 0.
         uint64 callGas = _probeOutgoing(address(0xD00D), outerProxy, 0, outerData);
         bytes32 outerHash = _outgoingCallHash(address(0xD00D), address(reader), REMOTE_ROLLUP_ID, 0, callGas, outerData);
         // Top-level outer call executed on this L2 (target rollup = ROLLUP_ID).
@@ -597,7 +597,7 @@ contract EEZL2CoverageTest is BaseL2 {
         address outerProxy = manager.createCrossChainProxy(address(fwd), REMOTE_ROLLUP_ID);
         bytes memory outerData = abi.encodeCall(OutgoingForwarderL2.fire, (innerProxy, innerData));
 
-        // Gas-folding keys: outer host attaches OUTER_CALL_GAS, the mock's inner site PROXY_CALL_GAS.
+        // Observed-gas keys: outer host attaches OUTER_CALL_GAS, the mock's inner site PROXY_CALL_GAS.
         uint64 outerGas = _probeOutgoing(address(this), outerProxy, 0, outerData, OUTER_CALL_GAS);
         uint64 innerGas = _probeOutgoing(address(fwd), innerProxy, 0, innerData);
         bytes32 outerHash = _outgoingCallHash(address(this), address(fwd), REMOTE_ROLLUP_ID, 0, outerGas, outerData);

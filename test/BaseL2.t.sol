@@ -63,8 +63,8 @@ abstract contract BaseL2 is Test, TestHashes {
             );
     }
 
-    /// @notice Gas-folding hash of a mutable call LEAVING this L2 (source rollup = this L2) —
-    ///         the kind `executeCrossChainCall` keys with; `callGas` comes from `_probeOutgoing`.
+    /// @notice Hash of a mutable call LEAVING this L2 (source rollup = this L2) — the kind
+    ///         `executeCrossChainCall` keys with; `callGas` comes from `_probeOutgoing`.
     function _outgoingCallHash(
         address src,
         address tgt,

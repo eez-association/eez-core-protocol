@@ -63,24 +63,26 @@ abstract contract RevertContinueActions {
     /// @dev Outer action hash: batcher calls selfCallerProxy.execute() on L1.
     function _outerActionHash(address selfCaller, address batcher) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID,
-            selfCaller,
-            0,
-            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
+            false,
             batcher,
-            MAINNET_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            selfCaller,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector)
         );
     }
 
     /// @dev Inner action hash: SelfCallerWithRevert calls counterProxy.increment().
     function _innerActionHash(address counterL2, address selfCaller) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID,
-            counterL2,
-            0,
-            abi.encodeWithSelector(Counter.increment.selector),
+            false,
             selfCaller,
-            MAINNET_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            counterL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 
@@ -119,27 +121,28 @@ abstract contract RevertContinueActions {
     /// @dev Outer action hash on L2: source-proxy (for batcher on MAINNET) calls SelfCaller (on L2).
     function _outerActionHashL2(address selfCallerL2, address batcherL1) internal pure returns (bytes32) {
         return crossChainCallHash(
-            L2_ROLLUP_ID,
-            selfCallerL2,
-            0,
-            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
+            false,
             batcherL1,
-            MAINNET_ROLLUP_ID
+            MAINNET_ROLLUP_ID,
+            selfCallerL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(SelfCallerWithRevert.execute.selector)
         );
     }
 
     /// @dev Inner action hash on L2: SelfCaller (on L2) calls counterProxy (Counter on MAINNET) —
-    ///      the call LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet
+    ///      the call LEAVES the L2, so it keys with the L2-outgoing hash (callGas=0; devnet
     ///      deploys EEZL2 with useGasLeft=false). Manager forces sourceRollupId=ROLLUP_ID (=L2)
     ///      for L2-issued reentrant calls.
     function _innerActionHashL2(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
         return crossChainCallHashL2Out(
-            MAINNET_ROLLUP_ID,
-            counterL1,
-            0,
-            abi.encodeWithSelector(Counter.increment.selector),
             selfCallerL2,
-            L2_ROLLUP_ID
+            L2_ROLLUP_ID,
+            counterL1,
+            MAINNET_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
         );
     }
 
@@ -162,7 +165,7 @@ abstract contract RevertContinueActions {
 
         bytes32 proxyEntryHash = _outerActionHashL2(selfCallerL2, batcherL1);
         bytes32 ccInner = _innerActionHashL2(counterL1, selfCallerL2);
-        // Top-level CALL_BEGIN on L2 folds the incoming `execute()` call gas-free, hashed with the
+        // Top-level CALL_BEGIN on L2 folds the incoming `execute()` call (callGas = 0), hashed with the
         // L2's own id as targetRollupId (== `_outerActionHashL2`, which already uses L2_ROLLUP_ID).
         (bytes32 rollingHash, bytes32 rhFire) =
             _foldRevertContinue(RollingHashBuilder.entryBeginL2(proxyEntryHash), proxyEntryHash, ccInner);
@@ -215,7 +218,8 @@ abstract contract RevertContinueActions {
         bytes32 proxyEntryHash = _outerActionHash(selfCaller, batcher);
         // CALL_BEGIN identity of the top-level `execute()` call executed ON L1 (targetRollupId = MAINNET),
         // sourced from (batcher, L2) per the call's struct fields.
-        bytes32 ccOuter = crossChainCallHash(MAINNET_ROLLUP_ID, selfCaller, 0, calls[0].data, batcher, L2_ROLLUP_ID);
+        bytes32 ccOuter =
+            crossChainCallHash(false, batcher, L2_ROLLUP_ID, selfCaller, MAINNET_ROLLUP_ID, 0, calls[0].data);
         bytes32 ccInner = _innerActionHash(counterL2, selfCaller);
         (bytes32 rollingHash, bytes32 rhFire) =
             _foldRevertContinue(RollingHashBuilder.entryBegin(deltas, proxyEntryHash), ccOuter, ccInner);

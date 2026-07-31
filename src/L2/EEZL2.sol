@@ -93,7 +93,7 @@ contract EEZL2 is EEZBase {
     /// @notice Entry 0's `proxyEntryHash` doesn't match the hash computed from the explicit params
     error EntryHashMismatch();
 
-    /// @notice No entry matched a top-level outgoing call. Carries the computed gas-folding hash and
+    /// @notice No entry matched a top-level outgoing call. Carries the computed L2-outgoing hash and
     ///         the observed `callGas` so the entry-builder can reproduce the key.
     error EntryNotFound(bytes32 crossChainCallHash, uint64 callGas);
 
@@ -297,7 +297,7 @@ contract EEZL2 is EEZBase {
 
         // 2. Compute and emit the action hash binding this top-level call
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, data
+            NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, ZERO_CALL_GAS, data
         );
         emit IncomingCrossChainCallExecuted(crossChainCallHash, destination, value, data, sourceAddress, sourceRollup);
 
@@ -517,7 +517,14 @@ contract EEZL2 is EEZBase {
                 // Fold the call's identity (target on this L2 = ROLLUP_ID, source = its rollup) into CALL_BEGIN.
                 _rollingHashCallBegin(
                     computeCrossChainCallHash(
-                        cc.isStatic, cc.sourceAddress, cc.sourceRollupId, cc.targetAddress, ROLLUP_ID, cc.value, cc.data
+                        cc.isStatic,
+                        cc.sourceAddress,
+                        cc.sourceRollupId,
+                        cc.targetAddress,
+                        ROLLUP_ID,
+                        cc.value,
+                        ZERO_CALL_GAS,
+                        cc.data
                     )
                 );
 
@@ -595,6 +602,7 @@ contract EEZL2 is EEZBase {
             destAddress,
             proxyInfo.originalRollupId,
             0, // value is always 0 in static context
+            ZERO_CALL_GAS,
             callData
         );
 
@@ -677,32 +685,6 @@ contract EEZL2 is EEZBase {
             );
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
-    }
-
-    // ──────────────────────────────────────────────
-    //  Public helpers
-    // ──────────────────────────────────────────────
-
-    /// @notice Gas-folding kind of the call hash, keying calls that LEAVE this L2: `callGas`
-    ///         folds between `value` and `data`, so an otherwise-identical call with different
-    ///         forwarded gas keys distinctly.
-    function computeCrossChainCallHash(
-        bool isStatic,
-        address sourceAddress,
-        uint64 sourceRollupId,
-        address targetAddress,
-        uint64 targetRollupId,
-        uint256 value,
-        uint64 callGas,
-        bytes memory data
-    )
-        public
-        pure
-        returns (bytes32)
-    {
-        return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
-        );
     }
 
     // ──────────────────────────────────────────────

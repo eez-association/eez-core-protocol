@@ -134,7 +134,7 @@ abstract contract BlobScenarioBase is Test {
         return uint64(200_000_000 >> d);
     }
 
-    /// @notice Explicit gas for static read steps. Static matching is gas-free, so the value needs
+    /// @notice Explicit gas for static read steps. Static matching never keys on gas, so the value needs
     ///         no reproducibility — it only bounds the proxy's static-context probe burn (see
     ///         `ScriptedActor._dispatchStatic`).
     uint64 internal constant STATIC_STEP_GAS = 5_000_000;
@@ -225,7 +225,7 @@ abstract contract BlobScenarioBase is Test {
             CallNode memory n = store.getNode(siblings[i]);
             if (!n.isStatic && n.fromChain != L1) {
                 bytes32 destCch = rollups.computeCrossChainCallHash(
-                    n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, n.data
+                    n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, 0, n.data
                 );
                 stitcher.loadSidecarCallGas(destCch, gasByNode[siblings[i]]);
             }

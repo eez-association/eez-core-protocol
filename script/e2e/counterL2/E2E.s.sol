@@ -52,19 +52,19 @@ abstract contract CounterL2Actions {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
 
-    // The SAME logical call (CAP on L2 → Counter on L1) is hashed twice with different formulas:
-    // the destination L1 folds CALL_BEGIN with the gas-free 7-field hash, while the source L2
-    // matches the outgoing call with the gas-folding 8-field key (`callGas` = 0 — the devnet
-    // deploys `EEZL2` with `useGasLeft = false`). Same args, different digests.
+    // The SAME logical call (CAP on L2 → Counter on L1) is hashed on both sides: L1's CALL_BEGIN
+    // fold and the source L2's outgoing key both fold `callGas` = 0 (devnet runs
+    // `useGasLeft = false`), so the digests coincide; under `useGasLeft = true` the outgoing key
+    // binds the observed gas and differs.
 
-    /// @dev Gas-free identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
+    /// @dev Identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
     function _l1CallHash(address counterL1, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), capL2, L2_ROLLUP_ID);
+        return crossChainCallHash(false, capL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
-    /// @dev Gas-folding key the SOURCE L2 matches the outgoing call with.
+    /// @dev L2-outgoing key the SOURCE L2 matches the outgoing call with.
     function _l2EntryKey(address counterL1, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), capL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(capL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`

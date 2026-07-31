@@ -15,7 +15,7 @@ for the exact scripts in the test file.
 | `S1_A` | L2_A's post-tx state root |
 | `driver_X` | the tx's origin driver actor on chain X (fires the root calls) |
 | `target_X` | the call-target actor on chain X |
-| `cch(...)` | `computeCrossChainCallHash(isStatic, src, srcRid, dst, dstRid, value, data)` — the gas-free destination-kind hash; every hash in the L1 batch uses it |
+| `cch(...)` | `computeCrossChainCallHash(isStatic, src, srcRid, dst, dstRid, value, 0, data)` — the destination-kind hash (`callGas = 0`); every hash in the L1 batch uses it |
 | `H(...)` | `keccak256(abi.encodePacked(...))` — one fold of the accumulator |
 | `h0 … hN` | the rolling hash after each fold, written as an explicit chain: `h0` is the seed — `H(0, rid, currentState)` per state pin, closed with `H(pins, proxyEntryHash)`; `f_` marks a reverted frame's discarded branch, `s_` the untagged static accumulator |
 | tag bytes | `1` = CALL_BEGIN · `2` = CALL_END · `3` = NESTED_BEGIN · `4` = NESTED_END (· `5` = CALL_NOT_FOUND) |

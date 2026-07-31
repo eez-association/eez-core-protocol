@@ -48,14 +48,15 @@ function getOrCreateProxy(IEEZ manager, address originalAddress, uint64 original
 // ══════════════════════════════════════════════════════════════════════
 //  Cross-chain call hash — matches `EEZBase.computeCrossChainCallHash`:
 //    keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId,
-//                         targetAddress, targetRollupId, value, data))
+//                         targetAddress, targetRollupId, value, callGas, data))
+//  `callGas` folds 0 (the devnet deploys every `EEZL2` with `useGasLeft = false`).
 //  abi.encode left-pads every integer to 32 bytes, so passing uint256
 //  rollupIds here yields identical bytes to the contract's uint64 fields.
 // ══════════════════════════════════════════════════════════════════════
 
-/// @notice Full hash builder (state-changing OR static). `isStatic` is folded into the key, so a
-///         static read keys distinctly from a state-changing call to the same target.
-function crossChainCallHashFull(
+/// @notice Hash builder (state-changing OR static) with `callGas = 0`. `isStatic` makes a
+///         static read key distinctly from a state-changing call to the same target.
+function crossChainCallHash(
     bool isStatic,
     address sourceAddress,
     uint256 sourceRollupId,
@@ -67,39 +68,21 @@ function crossChainCallHashFull(
     pure
     returns (bytes32)
 {
-    return keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data));
+    return keccak256(
+        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, uint256(0), data)
+    );
 }
 
-/// @notice Convenience: non-static cross-chain call hash. Field order mirrors the legacy helper
-///         (target first) so existing call sites keep working; `isStatic` is fixed to false.
-function crossChainCallHash(
-    uint256 targetRollupId,
-    address targetAddress,
-    uint256 value,
-    bytes memory data,
-    address sourceAddress,
-    uint256 sourceRollupId
-)
-    pure
-    returns (bytes32)
-{
-    return crossChainCallHashFull(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
-}
-
-/// @notice Gas-folding hash for a mutable call LEAVING an L2 — the kind
-///         `EEZL2.executeCrossChainCall` keys with (top-level entry matching and the cch inside
-///         nested `expectedOutgoingHash` rows). Folds `callGas` between `value` and `data`; the
-///         devnet deploys every `EEZL2` with `useGasLeft = false`, so the folded value is always 0.
-///         Same field order as `crossChainCallHash` (target first) so conversions are drop-in.
-///         NOT for: L1 keys, L2 inbound binding (`executeIncomingCrossChainCall`), static hashes,
-///         or rolling-hash CALL folds — those all stay gas-free.
+/// @notice Key for a mutable call LEAVING an L2 (`EEZL2.executeCrossChainCall` top-level matching
+///         and the cch inside nested `expectedOutgoingHash` rows) — the sites to touch if
+///         `useGasLeft` flips on; the devnet runs false, so `callGas` folds 0.
 function crossChainCallHashL2Out(
-    uint256 targetRollupId,
-    address targetAddress,
-    uint256 value,
-    bytes memory data,
     address sourceAddress,
-    uint256 sourceRollupId
+    uint256 sourceRollupId,
+    address targetAddress,
+    uint256 targetRollupId,
+    uint256 value,
+    bytes memory data
 )
     pure
     returns (bytes32)
@@ -109,19 +92,19 @@ function crossChainCallHashL2Out(
     );
 }
 
-/// @notice Convenience: STATIC cross-chain call hash (same field order as `crossChainCallHash`).
+/// @notice Convenience: STATIC cross-chain call hash.
 function crossChainCallHashStatic(
-    uint256 targetRollupId,
-    address targetAddress,
-    uint256 value,
-    bytes memory data,
     address sourceAddress,
-    uint256 sourceRollupId
+    uint256 sourceRollupId,
+    address targetAddress,
+    uint256 targetRollupId,
+    uint256 value,
+    bytes memory data
 )
     pure
     returns (bytes32)
 {
-    return crossChainCallHashFull(true, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
+    return crossChainCallHash(true, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
 // ══════════════════════════════════════════════════════════════════════

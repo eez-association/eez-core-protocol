@@ -68,20 +68,20 @@ abstract contract NestedCallRevertActions {
 
     /// @dev Proxy-entry hash: alice → SCAP via SCAP's proxy (target=SCAP @ L2, source=alice @ MAINNET).
     function _outerProxyEntryHash(address scap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, scap, 0, _incrementProxyData(), alice, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, scap, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev L1 top-level call hash for SCAP.incrementProxy executed ON L1 (target=SCAP @ MAINNET,
     ///      source=alice @ L2 — the entry sources its top-level call from the proven rollup).
     function _outerTopCallHash(address scap, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, scap, 0, _incrementProxyData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHash(false, alice, L2_ROLLUP_ID, scap, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev Inner reentrant hash: SCAP's reentrant L1→L2 call to Counter L2 that reverts.
     ///      `executeCrossChainCall` folds srcRollup=MAINNET on L1, so source=SCAP @ MAINNET,
     ///      target=Counter @ L2.
     function _innerActionHash(address counterL2, address scap) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementData(), scap, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, scap, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
     }
 
     function _l1Entries(address scap, address alice, address counterL2)
@@ -154,15 +154,15 @@ abstract contract NestedCallRevertActions {
 
     /// @dev Outer proxy-entry / top-level hash on L2: source (batcher MAINNET) → SafeCAP (on L2).
     function _outerHashL2(address scapL2, address batcherL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, scapL2, 0, _incrementProxyData(), batcherL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, batcherL1, MAINNET_ROLLUP_ID, scapL2, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev Inner reentrant (outgoing) hash on L2: SafeCAP (on L2) calls Counter MAINNET — the call
-    ///      LEAVES the L2, so it keys with the gas-folding L2-out hash (callGas=0; devnet deploys
+    ///      LEAVES the L2, so it keys with the L2-outgoing hash (callGas=0; devnet deploys
     ///      EEZL2 with useGasLeft=false). Manager forces sourceRollupId=ROLLUP_ID (=L2) for
     ///      L2-issued reentrant calls.
     function _innerActionHashL2(address counterL1, address scapL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementData(), scapL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(scapL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     function _l2Entries(address scapL2, address batcherL1, address counterL1)
@@ -186,7 +186,7 @@ abstract contract NestedCallRevertActions {
         bytes32 innerCch = _innerActionHashL2(counterL1, scapL2);
 
         // Rolling-hash seed/append shape mirrors L1; the inbound top-level CALL_BEGIN folds the
-        // gas-free hash (== proxyEntryHash here).
+        // call hash (== proxyEntryHash here).
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, proxyEntryHash);
         bytes32 rhFire = rh;

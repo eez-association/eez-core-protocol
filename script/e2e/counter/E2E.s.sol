@@ -58,7 +58,10 @@ abstract contract CounterActions {
     ///      sides — L1's executeCrossChainCall and L2's executeIncomingCrossChainCall both fold
     ///      targetRollupId = L2_ROLLUP_ID into `computeCrossChainCallHash`.
     function _callHash(address counterL2, address counterAndProxy) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), counterAndProxy, MAINNET_ROLLUP_ID);
+        return
+            crossChainCallHash(
+                false, counterAndProxy, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData()
+            );
     }
 
     /// @dev Single L1 entry — the cross-chain call returns precomputed `uint256(1)`; the real

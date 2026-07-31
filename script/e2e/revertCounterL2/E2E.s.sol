@@ -76,10 +76,10 @@ abstract contract RevertL2Actions {
     }
 
     /// @dev Outer action hash: alice calls counterProxy (Counter L1) on L2 — an outgoing call,
-    ///      so the SOURCE L2 matches it with the gas-folding key (`callGas` = 0 — the devnet
+    ///      so the SOURCE L2 matches it with the L2-outgoing key (`callGas` = 0 — the devnet
     ///      deploys `EEZL2` with `useGasLeft = false`).
     function _outerActionHash(address counterL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     function _l2Entries(address counterL2, address counterL1, address alice)
@@ -105,7 +105,8 @@ abstract contract RevertL2Actions {
         bytes32 proxyEntryHash = _outerActionHash(counterL1, alice);
         // PENDING EEZL2: L2 incoming CALL_BEGIN folds targetRollupId = L2 (ROLLUP_ID). The
         // revertNextNCalls span still folds CALL_BEGIN/CALL_END normally; only EVM state rolls back.
-        bytes32 ccTop = crossChainCallHash(L2_ROLLUP_ID, counterL2, 0, _incrementCallData(), alice, MAINNET_ROLLUP_ID);
+        bytes32 ccTop =
+            crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData());
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
         rh = RollingHashBuilder.appendCallEnd(rh, true, _successReturnData());
@@ -151,7 +152,8 @@ abstract contract RevertL2Actions {
             etherDelta: 0
         });
 
-        bytes32 ccTop = crossChainCallHash(MAINNET_ROLLUP_ID, counterL1, 0, _incrementCallData(), alice, L2_ROLLUP_ID);
+        bytes32 ccTop =
+            crossChainCallHash(false, alice, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
         rh = RollingHashBuilder.appendCallEnd(rh, true, _successReturnData());

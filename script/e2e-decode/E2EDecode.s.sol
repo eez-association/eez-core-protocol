@@ -122,7 +122,7 @@ contract E2EExecute is Script {
 
         // Cross-chain call hash: CounterAndProxy → CounterProxy → counterL2 (rollupId=1).
         bytes32 callHash = crossChainCallHash(
-            L2_ROLLUP_ID, counterL2Addr, 0, incrementCallData, counterAndProxyAddr, MAINNET_ROLLUP_ID
+            false, counterAndProxyAddr, MAINNET_ROLLUP_ID, counterL2Addr, L2_ROLLUP_ID, 0, incrementCallData
         );
 
         StateUpdate[] memory stateUpdates = new StateUpdate[](1);

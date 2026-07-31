@@ -19,8 +19,8 @@ abstract contract TestHashes {
     bool internal constant NOT_STATIC_CALL = false;
     bool internal constant IS_STATIC = true;
 
-    /// @notice Mirror of `EEZBase.computeCrossChainCallHash`. Field order:
-    ///         isStatic → source(addr,rid) → target(addr,rid) → value → data.
+    /// @notice Mirror of `EEZBase.computeCrossChainCallHash` with `callGas = 0` (use `_ccHashGas`
+    ///         for L2-outgoing calls under `USE_GAS_LEFT`).
     function _ccHash(
         bool isStatic,
         address sourceAddress,
@@ -34,13 +34,10 @@ abstract contract TestHashes {
         pure
         returns (bytes32)
     {
-        return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data)
-        );
+        return _ccHashGas(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, 0, data);
     }
 
-    /// @notice Mirror of `EEZL2.computeCrossChainCallHash` — the gas-folding kind keying calls
-    ///         that leave an L2 (`callGas` between value and data).
+    /// @notice Mirror of `EEZBase.computeCrossChainCallHash` with an explicit `callGas`.
     function _ccHashGas(
         bool isStatic,
         address sourceAddress,

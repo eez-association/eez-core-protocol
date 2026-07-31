@@ -72,56 +72,56 @@ abstract contract ReentrantActions {
     /// @dev L1 proxy-entry identity: batcher -> rcL1.dC(3). The proxy for (rcL1, L2) folds
     ///      source=batcher MAINNET, target=rcL1 L2.
     function _l1ProxyEntryHash(address rcL1, address batcher) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, rcL1, 0, _dc(3), batcher, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, batcher, MAINNET_ROLLUP_ID, rcL1, L2_ROLLUP_ID, 0, _dc(3));
     }
 
     /// @dev L1 top-level call dC(3): executed ON L1 (target rcL1 MAINNET), sourced from batcher L2
     ///      (the call's `sourceRollupId` must be in the entry's stateUpdates).
     function _cchTop3(address rcL1, address batcher) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(3), batcher, L2_ROLLUP_ID);
+        return crossChainCallHash(false, batcher, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(3));
     }
 
     /// @dev L1 reentry dC(2): rcL1 -> rcL2Proxy.dC(2). executeCrossChainCall folds source=rcL1 MAINNET,
     ///      target=rcL2 L2.
     function _cchReentry2(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(2), rcL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(2));
     }
 
     /// @dev L1 Frame-A sub-call dC(1): executed ON L1 (target rcL1 MAINNET), sourced from rcL2 L2.
     function _cchSub1(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return crossChainCallHash(MAINNET_ROLLUP_ID, rcL1, 0, _dc(1), rcL2, L2_ROLLUP_ID);
+        return crossChainCallHash(false, rcL2, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
     }
 
     /// @dev L1 reentry dC(0): rcL1 -> rcL2Proxy.dC(0). Source=rcL1 MAINNET, target=rcL2 L2.
     function _cchReentry0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(0), rcL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(0));
     }
 
     // ── L2 cross-chain call hashes (self = L2_ROLLUP_ID). Calls LEAVING the L2 (the proxy-entry
-    //    identity and the outgoing reentry) key with the gas-folding L2-out hash (`callGas` = 0 —
+    //    identity and the outgoing reentry) key with the L2-outgoing hash (`callGas` = 0 —
     //    the devnet deploys `EEZL2` with `useGasLeft = false`); calls executed ON the L2 fold
-    //    CALL_BEGIN with the gas-free hash. ──
+    //    CALL_BEGIN with callGas = 0. ──
 
     /// @dev L2 proxy-entry identity: alice -> rcL1Proxy.dC(2). The L2 manager forces source rollup =
-    ///      ROLLUP_ID (L2); target=rcL1 MAINNET. Outgoing — gas-folding key.
+    ///      ROLLUP_ID (L2); target=rcL1 MAINNET. Outgoing — L2-outgoing key.
     function _l2ProxyEntryHash(address rcL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, rcL1, 0, _dc(2), alice, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(2));
     }
 
     /// @dev L2 top-level incoming dC(2): executed ON L2 (target rcL2 L2), sourced from rcL1 MAINNET.
     function _cchL2Top2(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(2), rcL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(2));
     }
 
     /// @dev L2 outgoing reentry dC(1): rcL2 -> rcL1Proxy.dC(1). Source rollup forced to L2; target=rcL1
-    ///      MAINNET. Outgoing — gas-folding key (NESTED_BEGIN fold + expectedOutgoingHash).
+    ///      MAINNET. Outgoing — L2-outgoing key (NESTED_BEGIN fold + expectedOutgoingHash).
     function _cchL2Out1(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(MAINNET_ROLLUP_ID, rcL1, 0, _dc(1), rcL2, L2_ROLLUP_ID);
+        return crossChainCallHashL2Out(rcL2, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
     }
 
     /// @dev L2 Frame incoming sub-call dC(0): executed ON L2 (target rcL2 L2), sourced from rcL1 MAINNET.
     function _cchL2Sub0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(L2_ROLLUP_ID, rcL2, 0, _dc(0), rcL1, MAINNET_ROLLUP_ID);
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(0));
     }
 
     // ── Entry builders ──
@@ -252,9 +252,9 @@ abstract contract ReentrantActions {
             data: _dc(0)
         });
 
-        // Rolling-hash threading mirrors the L1 model. cch1 is the gas-folding L2-out hash — EEZL2
+        // Rolling-hash threading mirrors the L1 model. cch1 is the L2-outgoing hash — EEZL2
         // folds NESTED_BEGIN and keys expectedOutgoingHash with the hash it computes at
-        // executeCrossChainCall entry; the CALL_BEGIN hashes (cch2, cch0) stay gas-free.
+        // executeCrossChainCall entry; the CALL_BEGIN hashes (cch2, cch0) fold callGas = 0.
         bytes32 cch2 = _cchL2Top2(rcL2, rcL1);
         bytes32 cch1 = _cchL2Out1(rcL1, rcL2);
         bytes32 cch0 = _cchL2Sub0(rcL2, rcL1);

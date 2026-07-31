@@ -146,8 +146,8 @@ abstract contract IntegrationBase is Test {
     //  Cross-chain call hash + rolling-hash helpers (mirror EEZBase's tag scheme)
     // ──────────────────────────────────────────────
 
-    /// @notice Mirror of `EEZBase.computeCrossChainCallHash`. Field order:
-    ///         isStatic → source(addr,rid) → target(addr,rid) → value → data.
+    /// @notice Mirror of `EEZBase.computeCrossChainCallHash` with `callGas = 0` (the fixture runs
+    ///         `useGasLeft = false`, so every key folds 0).
     function _ccHash(
         bool isStatic,
         address sourceAddress,
@@ -162,13 +162,12 @@ abstract contract IntegrationBase is Test {
         returns (bytes32)
     {
         return keccak256(
-            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, data)
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value_, uint64(0), data)
         );
     }
 
-    /// @notice Gas-folding mirror of `EEZL2.computeCrossChainCallHash`, keying calls that LEAVE the
-    ///         L2 (`executeCrossChainCall` top-level matching and `expectedOutgoingHash` rows). The
-    ///         fixture's manager runs with `useGasLeft = false`, so the folded `callGas` is always 0.
+    /// @notice Key for calls that LEAVE the L2 (`executeCrossChainCall` top-level matching and
+    ///         `expectedOutgoingHash` rows) — the sites to touch if `useGasLeft` flips on.
     function _ccHashL2Out(
         address sourceAddress,
         address targetAddress,
