@@ -537,9 +537,7 @@ abstract contract BlobScenarioBase is Test {
             // Inbound delivery: the system atomically loads + drives entries[0].
             CallNode memory n = store.getNode(tag.inboundNodeId);
             vm.prank(SYSTEM_ADDRESS);
-            try manager.executeIncomingCrossChainCall{
-                value: n.value
-            }(n.toAddress, n.value, n.data, n.fromAddress, n.fromChain, entries, statics) returns (bytes memory ret) {
+            try manager.executeIncomingCrossChainCall{value: n.value}(entries, statics) returns (bytes memory ret) {
                 assertTrue(n.success, "inbound call should have reverted");
                 assertEq(ret, n.returnData, "inbound return data");
             } catch (bytes memory err) {

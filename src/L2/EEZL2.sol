@@ -87,10 +87,10 @@ contract EEZL2 is EEZBase {
     /// @notice Error when `executeIncomingCrossChainCall` is called with no entries
     error EmptyEntries();
 
-    /// @notice Error when `msg.value` attached to `executeIncomingCrossChainCall` doesn't match `value`
-    error ValueMismatch();
+    /// @notice Entry 0 has no incoming calls — `incomingCalls[0]` must be the inbound call
+    error EmptyIncomingCalls();
 
-    /// @notice Entry 0's `proxyEntryHash` doesn't match the hash computed from the explicit params
+    /// @notice Entry 0's `proxyEntryHash` doesn't match the hash of its own `incomingCalls[0]`
     error EntryHashMismatch();
 
     /// @notice No entry matched a top-level outgoing call. Carries the computed L2-outgoing hash and
@@ -106,14 +106,18 @@ contract EEZL2 is EEZBase {
     /// @notice Emitted when an execution entry is consumed
     event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryIndex);
 
-    /// @notice Emitted when the system address initiates an incoming cross-chain call from another rollup
+    /// @notice Emitted when the system address initiates an incoming cross-chain call from another
+    ///         rollup. Field order mirrors `computeCrossChainCallHash`; all fields are the inbound
+    ///         call's own (`incomingCalls[0]`), folded into its hash.
     event IncomingCrossChainCallExecuted(
         bytes32 indexed crossChainCallHash,
+        bool isStatic,
+        address sourceAddress,
+        uint64 sourceRollup,
         address destination,
         uint256 value,
-        bytes data,
-        address sourceAddress,
-        uint64 sourceRollup
+        uint64 callGas,
+        bytes data
     );
 
     /// @notice Emitted when a cross-chain call LEAVING this L2 is executed via proxy. `callGas` is
@@ -165,10 +169,14 @@ contract EEZL2 is EEZBase {
 
     /// @notice Loads execution entries and static entries into the execution table (system only)
     /// @dev Clears previous entries and stores new ones. Entries must be consumed in the same block.
+    ///      Payable: `msg.value` mints the inbound ETH the loaded entries commit. No on-chain check —
+    ///      consumption is user-driven and possibly partial; `msg.value` matching the sum of
+    ///      committed incoming values is a prover constraint.
     /// @param _entries The execution entries to load
     /// @param _staticEntries The top-level static entries to load
     function loadExecutionTable(ExecutionEntry[] calldata _entries, StaticExecutionEntry[] calldata _staticEntries)
         external
+        payable
         onlySystemAddress
     {
         _loadExecutionTable(_entries, _staticEntries);
@@ -255,28 +263,18 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice System-initiated execution of an incoming cross-chain call from another rollup
-    /// @dev Atomically replaces the execution table and drives `entries[0]` through the
-    ///      flat call processor. The first entry's `incomingCalls[0]` is the inbound call itself
-    ///      (its `sourceAddress` / `sourceRollupId` / `targetAddress` / `value` / `data` must
-    ///      match the explicit params passed here — a prover obligation enforced in-circuit, not
-    ///      on-chain; same for ether conservation, L2 has no `_entryEtherDelta` check).
-    ///      `_executeEntry` makes the actual proxy invocation, folds tagged events into the rolling
-    ///      hash, and handles `revertNextNCalls`. Reentrant cross-chain calls during execution see
-    ///      `_insideExecution() == true` and consume from `entries[0].expectedOutgoingCalls`.
-    /// @param destination The L2 destination address (target of the inbound call)
-    /// @param value The ETH value forwarded to the destination
-    /// @param data The calldata for the destination
-    /// @param sourceAddress The original caller address on the source rollup
-    /// @param sourceRollup The source rollup ID
+    /// @dev Atomically replaces the execution table and drives `entries[0]`; reentrant calls
+    ///      consume from its `expectedOutgoingCalls`. `incomingCalls[0]` IS the inbound call —
+    ///      its hash must equal `entries[0].proxyEntryHash` (checked on-chain); that it matches
+    ///      what actually arrived is a prover constraint — as is `msg.value` equalling the total
+    ///      inbound ether the committed calls consume (later entries may draw on it too, so no
+    ///      on-chain check; same model as `loadExecutionTable`). `entries[0]` stays fully general:
+    ///      `success == false` reverts the whole delivery, and `revertNextNCalls` on the inbound
+    ///      call rolls back its destination effects while the delivery commits.
     /// @param _entries The execution entries to load (entries[0] is consumed by this call)
     /// @param _staticEntries The static entries to load (used for STATICCALL reads)
     /// @return result The pre-computed return data from `entries[0]`
     function executeIncomingCrossChainCall(
-        address destination,
-        uint256 value,
-        bytes calldata data,
-        address sourceAddress,
-        uint64 sourceRollup,
         ExecutionEntry[] calldata _entries,
         StaticExecutionEntry[] calldata _staticEntries
     )
@@ -286,34 +284,46 @@ contract EEZL2 is EEZBase {
         returns (bytes memory result)
     {
         if (_entries.length == 0) revert EmptyEntries();
-        // ETH model: the system mints `value` on L2 by attaching it to msg.value. That ETH
-        // lives in the manager balance and is drawn down by `_processNCalls` when it forwards
-        // through the source proxy (`sourceProxy.call{value: cc.value}(...)`). Strict equality
-        // — not >= — so any drift between the system's intent and the prover-bound `value`
-        // surfaces here instead of as a rolling-hash mismatch deep inside `_processNCalls`.
-        if (msg.value != value) revert ValueMismatch();
+        if (_entries[0].incomingCalls.length == 0) revert EmptyIncomingCalls();
 
         // 1. Replace the execution table (same logic as loadExecutionTable)
         _loadExecutionTable(_entries, _staticEntries);
 
-        // 2. Compute and emit the action hash binding this top-level call
+        // 2. Bind the entry's identity to its own inbound call: `proxyEntryHash` must be the
+        //    hash of `incomingCalls[0]` (mirrors L1 `_consumeAndExecuteEntry`'s hash match).
+        CrossChainCall calldata inbound = _entries[0].incomingCalls[0];
         bytes32 crossChainCallHash = computeCrossChainCallHash(
-            NOT_STATIC_CALL, sourceAddress, sourceRollup, destination, ROLLUP_ID, value, ZERO_CALL_GAS, data
+            inbound.isStatic,
+            inbound.sourceAddress,
+            inbound.sourceRollupId,
+            inbound.targetAddress,
+            ROLLUP_ID,
+            inbound.value,
+            inbound.gas,
+            inbound.data
         );
-        emit IncomingCrossChainCallExecuted(crossChainCallHash, destination, value, data, sourceAddress, sourceRollup);
-
-        // 3. Bind the emitted call hash to the entry (mirrors L1 `_consumeAndExecuteEntry`).
-        //    `_currentEntryIndex`, `_rollingHash`, `_lastOutgoingCallConsumed`, `_executing` are
-        //    all `transient` and default to zero/false at the start of every tx; SYSTEM_ADDRESS
-        //    invokes this as a top-level call, once per tx, so they're already what `_executeEntry`
-        //    expects (entry index 0, fresh rolling hash, reentrant cursor at 0, not executing).
         ExecutionEntry storage entry = entries[0];
         if (entry.proxyEntryHash != crossChainCallHash) revert EntryHashMismatch();
+
+        emit IncomingCrossChainCallExecuted(
+            crossChainCallHash,
+            inbound.isStatic,
+            inbound.sourceAddress,
+            inbound.sourceRollupId,
+            inbound.targetAddress,
+            inbound.value,
+            inbound.gas,
+            inbound.data
+        );
 
         // Same consumption signal the proxy-driven path emits, so a log reader sees every entry
         // that ran regardless of which entry point drove it.
         emit ExecutionConsumed(crossChainCallHash, 0);
 
+        // 3. Execute. `_currentEntryIndex`, `_rollingHash`, `_lastOutgoingCallConsumed`,
+        //    `_executing` are all `transient` and default to zero/false at the start of every tx;
+        //    SYSTEM_ADDRESS invokes this as a top-level call, once per tx, so they're already what
+        //    `_executeEntry` expects (entry index 0, fresh rolling hash, cursor at 0, not executing).
         _currentEntryIndex = 0;
         _executeEntry(entry);
 
@@ -388,6 +398,10 @@ contract EEZL2 is EEZBase {
         _processNCalls(incomingCalls);
 
         if (expectedOutgoing.success) {
+            // Defensive check of the prover constraint: the field is unused when success.
+            if (expectedOutgoing.revertedOrStaticRollingHash != bytes32(0)) {
+                revert SuccessRowWithRevertedOrStaticHash();
+            }
             // Updates the rolling hash closing the nested call
             _rollingHashNestedEnd();
             return expectedOutgoing.returnData;
@@ -669,15 +683,18 @@ contract EEZL2 is EEZBase {
 
     /// @notice Runs the static entry's `calls[]` in static context, folding an untagged rolling hash verified
     ///         against `StaticExecutionEntry.rollingHash` / `ExpectedOutgoingCrossChainCall.revertedOrStaticRollingHash`.
-    /// @dev No `revertNextNCalls` since there are no state changes; referenced proxies must already be
-    ///      deployed (CREATE2 is unavailable inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
+    /// @dev No `revertNextNCalls` handling — there is no state to roll back (== 0 is a prover
+    ///      constraint); referenced proxies must already be deployed (CREATE2 is unavailable
+    ///      inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
     function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];
 
-            // Dispatch is read-only unconditionally, so the declared flag and value must agree.
+            // Dispatch is read-only unconditionally, so the declared flag and value must agree,
+            // and a revert span is meaningless (nothing to roll back).
             if (!cc.isStatic) revert NonStaticSubCall();
             if (cc.value != 0) revert StaticCallWithValue();
+            if (cc.revertNextNCalls != 0) revert StaticCallWithRevertSpan();
 
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.

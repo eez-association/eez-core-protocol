@@ -15,7 +15,7 @@ import {
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
-import {Counter, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
+import {Counter, CounterAndProxy, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
 
 /// @notice Simple target contract for testing
 contract TestTarget {
@@ -439,6 +439,20 @@ contract EEZTest is Base {
 
         vm.expectRevert(EEZ.ImmediateStaticEntriesWithoutImmediateEntries.selector);
         _postBatchOne(r, _emptyEntries(), lookups, 0, 1);
+    }
+
+    /// @notice L2Tx entries (`proxyEntryHash == 0`) must be canonical (`success == true`, empty
+    ///         `returnData`) — defensive check of the prover constraint; a queued violator
+    ///         would poison `executeL2Txs` for the block.
+    function test_SubBatch_L2TxEntryNotCanonicalReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(r.id, _oneDelta(r.id, bytes32(0), keccak256("x"), 0));
+        entries[0].success = false;
+
+        vm.expectRevert(abi.encodeWithSelector(EEZ.L2TxEntryNotCanonical.selector, 0));
+        _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
     }
 
     // ──────────────────────────────────────────────
@@ -1160,6 +1174,53 @@ contract EEZTest is Base {
         assertEq(scap.counter(), 1, "outer call must run");
         assertTrue(scap.lastCallFailed(), "inner reentrant call must revert via the reverted reentrant entry");
         assertEq(scap.targetCounter(), 0, "inner call must not have executed");
+    }
+
+    /// @notice Defensive check: a SUCCESS reentrant row carrying a non-zero
+    ///         `revertedOrStaticRollingHash` is rejected at resolution
+    ///         (`SuccessRowWithRevertedOrStaticHash`). The caller bubbles the revert, so the top call
+    ///         closes CALL_END(false, <selector>) — folding the exact revert data into the entry's
+    ///         rolling hash pins which error fired (any other failure diverges the hash).
+    function test_NestedSuccessLookup_RevertedOrStaticHashNonZero_Reverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
+
+        address counterL2 = address(0xC0117E6);
+        address counterProxy = rollups.createCrossChainProxy(counterL2, rid);
+        CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
+
+        bytes memory outerCd = abi.encodeCall(CounterAndProxy.incrementProxy, ());
+        bytes memory innerCd = abi.encodeCall(Counter.increment, ());
+        bytes32 innerHash = _ccHash(NOT_STATIC_CALL, address(cap), MAINNET_ROLLUP_ID, counterL2, rid, 0, innerCd);
+
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+
+        bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(cap), MAINNET_ROLLUP_ID, 0, outerCd);
+        bytes32 fireHash = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cchTop);
+
+        ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
+        reentrant[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: _expectedL1toL2Hash(innerHash, fireHash),
+            l2ToL1Calls: _emptyCalls(),
+            revertedOrStaticRollingHash: keccak256("junk"), // non-zero on a SUCCESS row — rejected
+            success: true,
+            returnData: ""
+        });
+
+        bytes memory errData = abi.encodeWithSelector(EEZBase.SuccessRowWithRevertedOrStaticHash.selector);
+        bytes32 h = _hCallEnd(fireHash, false, errData);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(cap), 0, outerCd));
+        entries[0].expectedL1ToL2Calls = reentrant;
+        entries[0].rollingHash = h;
+
+        _postBatchAutoTransient(r, entries);
+
+        assertEq(_getRollupState(rid), keccak256("s1"), "entry commits only if the exact selector was folded");
+        assertEq(cap.counter(), 0, "outer call must have reverted");
+        assertEq(cap.targetCounter(), 0, "inner call must not have executed");
     }
 
     /// @notice The reentrant position key (`keccak(crossChainCallHash, _rollingHash)`) gates the match:

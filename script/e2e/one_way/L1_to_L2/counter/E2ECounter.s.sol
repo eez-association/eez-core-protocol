@@ -194,15 +194,7 @@ contract ExecuteL2 is Script, CounterActions {
 
         vm.startBroadcast();
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                counterL2Addr,
-                0,
-                _incrementCallData(),
-                capAddr,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL2Addr, capAddr),
-                new L2StaticExecutionEntry[](0)
-            );
+            .executeIncomingCrossChainCall(_l2Entries(counterL2Addr, capAddr), new L2StaticExecutionEntry[](0));
 
         console.log("done");
         console.log("L2 counter=%s", Counter(counterL2Addr).counter());

@@ -228,15 +228,7 @@ contract ExecuteL2 is Script, CounterMultiTxActions {
         vm.startBroadcast();
         for (uint256 n = 1; n <= NUM_TXS; n++) {
             EEZL2(managerAddr)
-                .executeIncomingCrossChainCall(
-                    counterL2Addr,
-                    0,
-                    _incrementCallData(),
-                    capAddr,
-                    MAINNET_ROLLUP_ID,
-                    _l2TableForTx(counterL2Addr, capAddr, n),
-                    new L2StaticExecutionEntry[](0)
-                );
+                .executeIncomingCrossChainCall(_l2TableForTx(counterL2Addr, capAddr, n), new L2StaticExecutionEntry[](0));
         }
 
         console.log("done");

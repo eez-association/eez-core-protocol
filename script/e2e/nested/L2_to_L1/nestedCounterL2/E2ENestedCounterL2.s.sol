@@ -269,10 +269,7 @@ contract ExecuteL2 is Script, NestedL2Actions {
 
         L2ExecutionEntry[] memory incoming = new L2ExecutionEntry[](1);
         incoming[0] = _l2IncomingEntry(counterL2Addr, capL1Addr);
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                counterL2Addr, 0, _incrementData(), capL1Addr, MAINNET_ROLLUP_ID, incoming, noL2StaticEntries()
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(incoming, noL2StaticEntries());
 
         console.log("done");
         console.log("counterL2=%s (expected 1)", Counter(counterL2Addr).counter());

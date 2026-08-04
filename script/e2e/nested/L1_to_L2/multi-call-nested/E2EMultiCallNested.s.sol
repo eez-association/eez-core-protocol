@@ -421,25 +421,9 @@ contract ExecuteL2 is Script, MCNActions {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
         for (uint256 n = 1; n <= 2; n++) {
-            manager.executeIncomingCrossChainCall(
-                cap2,
-                0,
-                _incrementProxyData(),
-                app,
-                MAINNET_ROLLUP_ID,
-                _l2TableForCap2(counterL1, cap2, app, n),
-                noL2StaticEntries()
-            );
+            manager.executeIncomingCrossChainCall(_l2TableForCap2(counterL1, cap2, app, n), noL2StaticEntries());
         }
-        manager.executeIncomingCrossChainCall(
-            counterL2,
-            0,
-            _incrementData(),
-            app,
-            MAINNET_ROLLUP_ID,
-            _l2TableForCounter(counterL2, app),
-            noL2StaticEntries()
-        );
+        manager.executeIncomingCrossChainCall(_l2TableForCounter(counterL2, app), noL2StaticEntries());
 
         console.log("done");
         console.log("cap2.counter=%s (expected 2)", CounterAndProxy(cap2).counter());

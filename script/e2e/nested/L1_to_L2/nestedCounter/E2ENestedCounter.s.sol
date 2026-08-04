@@ -267,15 +267,7 @@ contract ExecuteL2 is Script, NestedActions {
         console.log("ExecuteL2: alice=%s capL2=%s counterL1=%s", alice, capL2Addr, counterL1Addr);
 
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                capL2Addr,
-                0,
-                abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
-                alice,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL1Addr, capL2Addr, alice),
-                noL2StaticEntries()
-            );
+            .executeIncomingCrossChainCall(_l2Entries(counterL1Addr, capL2Addr, alice), noL2StaticEntries());
 
         console.log("done");
         console.log("capL2.counter=%s", CounterAndProxy(capL2Addr).counter());

@@ -57,7 +57,7 @@ source = the proxy's caller on this chain's rollup ID, target = the proxy's
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, expectedRollingHash)
     L2ToL1Call[] l2ToL1Calls;            // this frame's OWN sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED
+    bytes32 revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED; must be 0 for SUCCESS
     bool success;                        // whether resolution returns or reverts
     bytes returnData;                    // returned on success / reverted-with when !success
 }
@@ -215,7 +215,7 @@ return returnData
 - Every sub-call must be marked `isStatic` with `value == 0` — dispatch is read-only whatever
   the fields say, and the untagged hash folds neither, so a mismatch reverts (`NonStaticSubCall`
   / `StaticCallWithValue`) instead of silently executing a proven state-changing call read-only.
-- No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert.
+- No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert; `== 0` on static sub-calls is a prover constraint.
 
 A naturally-reverting *sub-call* is not special: the STATICCALL returns `(false, retData)` and
 the untagged hash captures it. The entry-level `success == false` is for the *whole read*

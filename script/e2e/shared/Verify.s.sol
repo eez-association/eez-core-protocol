@@ -53,7 +53,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
 
     // IncomingCrossChainCallExecuted on L2: emitted by `executeIncomingCrossChainCall`.
     bytes32 constant SIG_INCOMING_CROSSCHAIN_CALL =
-        keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint64)");
+        keccak256("IncomingCrossChainCallExecuted(bytes32,bool,address,uint64,address,uint256,uint64,bytes)");
 
     // ExecutionTableLoaded(ExecutionEntry[] entries) — L2 only (IEEZL2 structs; no
     // StateUpdate[] / destinationRollupId on L2).

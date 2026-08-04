@@ -239,6 +239,28 @@ contract EEZStaticLookupTest is Base {
         rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
+    /// @notice A static sub-call carrying a `revertNextNCalls` span reverts `StaticCallWithRevertSpan`
+    ///         — static resolution has no state to roll back.
+    function test_StaticLookup_SubCallWithRevertSpanReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, "");
+        L2ToL1Call memory sub = _staticCall(address(target), uint64(r.id), address(target), cd);
+        sub.revertNextNCalls = 1;
+        lc.l2ToL1Calls = _oneCall(sub);
+        lookups[0] = lc;
+        _stdBatchPost(r, lookups);
+
+        vm.prank(proxyAddr);
+        vm.expectRevert(EEZBase.StaticCallWithRevertSpan.selector);
+        rollups.staticCrossChainCall(sourceAddr, cd);
+    }
+
     // ──────────────────────────────────────────────
     //  Reentrant static read (inside execution)
     // ──────────────────────────────────────────────

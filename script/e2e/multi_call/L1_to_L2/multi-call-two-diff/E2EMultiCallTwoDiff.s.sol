@@ -36,7 +36,8 @@ import {
 //  Destination side (ExecuteL2 on L2):
 //    Each top-level call is delivered as its OWN executeIncomingCrossChainCall
 //    tx carrying a 1-entry table (the delivery unit is the top-level call —
-//    see EXECUTION_ENTRY_SPEC §1-to-1 rule). Each entry shares its L1 twin's
+//    see EXECUTION_ENTRY_SPEC §1-to-1 rule); the inbound call is
+//    entries[0].incomingCalls[0]. Each entry shares its L1 twin's
 //    proxyEntryHash (plain hash, source = the L1 CallTwoDifferent contract).
 //    Each counter goes 0->1.
 // ═══════════════════════════════════════════════════════════════════════
@@ -212,15 +213,7 @@ contract ExecuteL2 is Script, TwoDiffActions {
         address[2] memory targets = [counterA, counterB];
         for (uint256 i = 0; i < targets.length; i++) {
             EEZL2(managerAddr)
-                .executeIncomingCrossChainCall(
-                    targets[i],
-                    0,
-                    _incrementCallData(),
-                    callerAddr,
-                    MAINNET_ROLLUP_ID,
-                    _l2TableForCall(targets[i], callerAddr),
-                    noL2StaticEntries()
-                );
+                .executeIncomingCrossChainCall(_l2TableForCall(targets[i], callerAddr), noL2StaticEntries());
         }
 
         console.log("done");

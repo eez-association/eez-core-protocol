@@ -282,6 +282,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         backstop, so it's rejected at validation.
     error EntryHasNoStateUpdates();
 
+    /// @notice Error when an L2Tx entry (`proxyEntryHash == 0`) is not canonical: `success` must be
+    ///         true and `returnData` empty — no proxy consumer observes them. Defensive check of
+    ///         a prover constraint (spec §C).
+    error L2TxEntryNotCanonical(uint256 entryIndex);
+
     /// @notice An entry's `destinationRollupId` (the queue it routes to) is not among its own
     ///         `stateUpdates` — so it could be parked in a non-participating rollup's queue. Rejected
     ///         at validation: the routing target must be a rollup this entry actually proved.
@@ -523,6 +528,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             ExecutionEntry calldata entry = batch.entries[i];
             StateUpdate[] calldata deltas = entry.stateUpdates;
             if (deltas.length == 0) revert EntryHasNoStateUpdates(); // must be state-pinned to the backstop
+
+            // Defensive check for L2Tx entries
+            if (entry.proxyEntryHash == bytes32(0) && (!entry.success || entry.returnData.length != 0)) {
+                revert L2TxEntryNotCanonical(i);
+            }
 
             uint64[] memory verifiedRollups = new uint64[](deltas.length);
             uint64 prevDeltaRid = MAINNET_ROLLUP_ID;
@@ -923,6 +933,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         _processNCalls(l2ToL1Calls);
 
         if (expectedL1toL2Call.success) {
+            // Defensive check of the prover constraint: the field is unused when success.
+            if (expectedL1toL2Call.revertedOrStaticRollingHash != bytes32(0)) {
+                revert SuccessRowWithRevertedOrStaticHash();
+            }
             // Updates the rolling hash closing the nested call
             _rollingHashNestedEnd();
             return expectedL1toL2Call.returnData;
@@ -1352,15 +1366,18 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
 
     /// @notice Runs the static entry's `calls[]` in static context, folding an untagged rolling hash verified
     ///         against `StaticExecutionEntry.rollingHash` (source checked in validateStructure).
-    /// @dev No `revertNextNCalls` since there are not changes on state; referenced proxies must already be deployed (CREATE2 is unavailable
+    /// @dev No `revertNextNCalls` handling — there is no state to roll back (== 0 is a prover
+    ///      constraint); referenced proxies must already be deployed (CREATE2 is unavailable
     ///      inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
     function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory l2ToL1Call = calls[i];
 
-            // Dispatch is read-only unconditionally, so the declared flag and value must agree.
+            // Dispatch is read-only unconditionally, so the declared flag and value must agree,
+            // and a revert span is meaningless (nothing to roll back).
             if (!l2ToL1Call.isStatic) revert NonStaticSubCall();
             if (l2ToL1Call.value != 0) revert StaticCallWithValue();
+            if (l2ToL1Call.revertNextNCalls != 0) revert StaticCallWithRevertSpan();
 
             // No source check: sub-call sources are validated ∈ proven set in `_validateBatchStructure`
             // — nested reads via the entry's reentrant walk, top-level via the static entry's `expectedStateRoots`.

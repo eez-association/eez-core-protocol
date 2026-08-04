@@ -195,13 +195,7 @@ contract ExecuteL2 is Script, MultiCallActions {
         for (uint256 n = 1; n <= 2; n++) {
             EEZL2(managerAddr)
                 .executeIncomingCrossChainCall(
-                    counterL2Addr,
-                    0,
-                    _incrementCallData(),
-                    callerAddr,
-                    MAINNET_ROLLUP_ID,
-                    _l2TableForCall(counterL2Addr, callerAddr, n),
-                    new L2StaticExecutionEntry[](0)
+                    _l2TableForCall(counterL2Addr, callerAddr, n), new L2StaticExecutionEntry[](0)
                 );
         }
 

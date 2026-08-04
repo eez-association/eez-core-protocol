@@ -176,17 +176,7 @@ contract ExecuteL2 is Script, BridgeActions {
 
         vm.startBroadcast();
         EEZL2(managerAddr)
-        .executeIncomingCrossChainCall{
-            value: 1 ether
-        }(
-            l2DestAddr,
-            1 ether,
-            "",
-            senderAddr,
-            MAINNET_ROLLUP_ID,
-            _l2Entries(l2DestAddr, senderAddr),
-            noL2StaticEntries()
-        );
+        .executeIncomingCrossChainCall{value: 1 ether}(_l2Entries(l2DestAddr, senderAddr), noL2StaticEntries());
 
         console.log("done");
         console.log("L2 receiver balance=%s", l2DestAddr.balance);

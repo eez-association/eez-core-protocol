@@ -348,13 +348,7 @@ contract ExecuteL2 is Script, RevertContinueActions {
 
         EEZL2(managerAddr)
             .executeIncomingCrossChainCall(
-                selfCallerL2,
-                0,
-                abi.encodeWithSelector(SelfCallerWithRevert.execute.selector),
-                triggerSource,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(selfCallerL2, counterL1, triggerSource),
-                new L2StaticExecutionEntry[](0)
+                _l2Entries(selfCallerL2, counterL1, triggerSource), new L2StaticExecutionEntry[](0)
             );
 
         console.log("ExecuteL2: done");

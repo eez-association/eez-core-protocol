@@ -304,15 +304,7 @@ contract ExecuteL2 is Script, DeepNestedActions {
         vm.startBroadcast();
         address alice = msg.sender;
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                ncL2Addr,
-                0,
-                _callNestedData(),
-                alice,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL2Addr, capL1Addr, ncL2Addr, alice),
-                noL2StaticEntries()
-            );
+            .executeIncomingCrossChainCall(_l2Entries(counterL2Addr, capL1Addr, ncL2Addr, alice), noL2StaticEntries());
 
         console.log("done");
         console.log("counterL2=%s (expected 1)", Counter(counterL2Addr).counter());

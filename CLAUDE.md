@@ -63,7 +63,7 @@ struct L2ToL1Call {
 struct ExpectedL1ToL2Call {   // ONE unified reentrant table: SUCCESS, STATIC, and REVERTED kinds
     bytes32      expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, _rollingHash at fire point)
     L2ToL1Call[] l2ToL1Calls;                 // the reentrant frame's OWN sub-calls, run to completion
-    bytes32      revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED
+    bytes32      revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED; must be 0 for SUCCESS (defensive check on-chain)
     bool         success;                     // false ⇒ the reentrant call reverts with returnData
     bytes        returnData;
 }
@@ -97,7 +97,7 @@ struct StaticExecutionEntry {  // TOP-LEVEL static entry — read-only, resolved
 
 There is no flat-array partition: every reentrant frame carries its own `l2ToL1Calls[]` sub-array, run to completion. The unified `expectedL1ToL2Calls[]` table is content-addressed — `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)` binds each reentrant result to the exact execution point (the live rolling hash folds every prior call and nesting boundary), and `crossChainCallHash` folds `isStatic`, so static reads key distinctly from state-changing calls.
 
-Prover obligation (L1): `stateUpdates` must be the entry's true state transition; at least one `StateUpdate` is enforced on-chain (`EntryHasNoStateUpdates`), and every rollup an entry touches (destination + every call's source) must be in its `stateUpdates` set (proxy protection).
+Prover obligation (L1): `stateUpdates` must be the entry's true state transition; at least one `StateUpdate` is enforced on-chain (`EntryHasNoStateUpdates`), and every rollup an entry touches (destination + every call's source) must be in its `stateUpdates` set (proxy protection). L2Tx entries (`proxyEntryHash == 0`) have no proxy consumer, so they must be canonical: `success == true`, empty `returnData` — checked defensively at batch validation (`L2TxEntryNotCanonical`).
 
 ### Data Types (L2 — IEEZL2.sol)
 
@@ -141,7 +141,7 @@ struct StaticExecutionEntry {   // TOP-LEVEL static entry — matched by proxyEn
 }
 ```
 
-Prover obligation (L2): in `executeIncomingCrossChainCall`, `entries[0].incomingCalls[0]` must equal the inbound call (explicit params + `value`), and ether must be conserved — enforced in-circuit, not on-chain (L2 has no `_entryEtherDelta` check).
+Prover obligation (L2): in `executeIncomingCrossChainCall`, `entries[0].incomingCalls[0]` must equal the call that actually arrived from the source rollup, and `msg.value` must equal the sum of committed incoming values (no on-chain balance check — later entries may draw on it); enforced in-circuit (full list: CORE spec §C "Prover constraints"). On-chain the contract checks internal consistency: `entries[0].proxyEntryHash` equals the hash of `incomingCalls[0]` (non-empty; folds its own `gas`). `entries[0]` stays fully general — `success == false` reverts the whole delivery; `revertNextNCalls` on the inbound call rolls back its destination effects while the delivery commits.
 
 ### L1 batch struct
 
@@ -177,7 +177,7 @@ Cross-chain call hash (`EEZBase.computeCrossChainCallHash`, shared by both manag
 keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data))
 ```
 
-`callGas` is `0` (the `ZERO_CALL_GAS` constant) at every site except calls **leaving an L2** (`EEZL2.executeCrossChainCall` — both top-level entry matching and nested `expectedOutgoingHash` keys), where the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`) selects it: when true, `uint64(gasleft())` observed at manager entry (what the caller forwarded); when false — current deployments and all test fixtures — a fixed `0`, so every key in the system folds `0` and hashes are fully pre-computable. The folded value is emitted in L2's `CrossChainCallExecuted`.
+`callGas` is `0` (the `ZERO_CALL_GAS` constant) at every site except the L2 inbound binding (`executeIncomingCrossChainCall` folds `incomingCalls[0].gas` into `proxyEntryHash`, echoed in `IncomingCrossChainCallExecuted`) and calls **leaving an L2** (`EEZL2.executeCrossChainCall` — both top-level entry matching and nested `expectedOutgoingHash` keys), where the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`) selects it: when true, `uint64(gasleft())` observed at manager entry (what the caller forwarded); when false — current deployments and all test fixtures — a fixed `0`, so every key in the system folds `0` and hashes are fully pre-computable. The folded value is emitted in L2's `CrossChainCallExecuted`.
 
 With `useGasLeft = true` an L2 outgoing call's identity binds the observed forwarded gas, so the prover must commit to it (deterministic for a sequencer replaying the block). Gas-observed keying is the intended future production mode; until the node supplies observed gas, deployments run `useGasLeft = false`.
 
@@ -195,8 +195,8 @@ With `useGasLeft = true` an L2 outgoing call's identity binds the observed forwa
 
 Constructor: `EEZL2(uint64 rollupId != 0, address systemAddress, bool useGasLeft)`. `SYSTEM_ADDRESS` is a trusted, node-controlled address (no key, not reentry-reachable). `useGasLeft` selects the `callGas` folded into outgoing call hashes: observed `gasleft()` (true) or a fixed `0` (false — what tests and current deployments use).
 
-1. **loadExecutionTable(entries, staticEntries)** — system-only. Wipes existing tables, loads new ones, sets `lastLoadBlock`. Entries are only consumable in the same block (`ExecutionNotInCurrentBlock`).
-2. **executeIncomingCrossChainCall(destination, value, data, sourceAddress, sourceRollup, entries, staticEntries)** — system-only, payable (`msg.value == value` mints the inbound ETH). Atomically replaces the table and drives `entries[0]` through the call processor; `entries[0].incomingCalls[0]` is the inbound call itself, and `entries[0].proxyEntryHash` must match the hash of the explicit params. One such tx per top-level inbound call — N top-level calls from one source tx arrive as N separate system txs.
+1. **loadExecutionTable(entries, staticEntries)** — system-only, payable (`msg.value` mints the inbound ETH the loaded entries commit; no conservation check — consumption may be partial, so the match is a prover constraint). Wipes existing tables, loads new ones, sets `lastLoadBlock`. Entries are only consumable in the same block (`ExecutionNotInCurrentBlock`).
+2. **executeIncomingCrossChainCall(entries, staticEntries)** — system-only, payable (`msg.value` mints the TOTAL inbound ETH — the inbound call's value plus any nested incoming values; prover-constrained, no balance check). Atomically replaces the table and drives `entries[0]` through the call processor; `entries[0].incomingCalls[0]` is the inbound call itself (non-empty enforced) and its hash — folding its own `gas` — must equal `entries[0].proxyEntryHash`.
 3. **executeCrossChainCall(sourceAddress, callData)** — same shape as L1, but `sourceRollupId` in the call hash is forced to `ROLLUP_ID`, and any `msg.value` is returned to `SYSTEM_ADDRESS` (burn). No state deltas, no ether accounting.
 4. **staticCrossChainCall(sourceAddress, callData)** — same nested key shape as L1 (unified table, static-kind hash); outside an execution it scans the `staticEntries` pool by `proxyEntryHash` alone, gated on `lastLoadBlock == block.number` (no pins — the block gate bounds staleness).
 

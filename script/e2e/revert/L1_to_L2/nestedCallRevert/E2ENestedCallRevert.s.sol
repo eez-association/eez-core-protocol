@@ -329,15 +329,7 @@ contract ExecuteL2 is Script, NestedCallRevertActions {
         console.log("ExecuteL2: manager=%s scapL2=%s triggerSource=%s", managerAddr, scapL2, triggerSource);
 
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                scapL2,
-                0,
-                abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector),
-                triggerSource,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(scapL2, triggerSource, counterL1),
-                noL2StaticEntries()
-            );
+            .executeIncomingCrossChainCall(_l2Entries(scapL2, triggerSource, counterL1), noL2StaticEntries());
 
         console.log("ExecuteL2: done");
         console.log("scapL2.counter=%s", SafeCounterAndProxy(scapL2).counter());

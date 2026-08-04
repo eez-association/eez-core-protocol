@@ -57,9 +57,8 @@ import {
 //       commits to a successful call.
 //
 //  L2 side (ExecuteL2) — system-driven mirror:
-//    1. SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(
-//         counterL2, 0, increment, alice, MAINNET, l2Entries, lookups
-//       ) which loads ONE entry whose incomingCalls[0] targets the real Counter
+//    1. SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(l2Entries, lookups)
+//       which loads ONE entry whose incomingCalls[0] targets the real Counter
 //       on L2 with revertSpan=1.
 //    2. _processNCalls runs the inner span; Counter on L2 increments,
 //       executeInContext reverts, state rolled back.
@@ -166,11 +165,13 @@ abstract contract RevertActions {
     }
 
     /// @dev L2 mirror entry — same shape, with the inner call targeting the real
-    /// Counter on L2. proxyEntryHash matches the outer trigger that SYSTEM passes
-    /// to executeIncomingCrossChainCall (counterL2 destination, alice on Mainnet
-    /// as the source). The mirror is independent of the L1 side; the cryptographic
-    /// tie is the call hash of the OUTER call (destination + sourceAddress +
-    /// sourceRollupId), which each side computes from its own broadcaster.
+    /// Counter on L2. proxyEntryHash is the hash of the outer trigger carried in
+    /// incomingCalls[0] (counterL2 destination, alice on Mainnet as the source),
+    /// checked by executeIncomingCrossChainCall.
+    /// The mirror is independent of the L1 side; it does not need
+    /// to share alice with the L1 batcher, since the cryptographic tie is the call
+    /// hash of the OUTER call (destination + sourceAddress + sourceRollupId), which
+    /// each side computes from its own broadcaster.
     /// NOTE: L2 rolling hash is PENDING EEZL2 (impl not migrated); re-verify when EEZL2.sol lands.
     function _l2Entries(address counterL2, address alice) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -308,16 +309,7 @@ contract ExecuteL2 is Script, RevertActions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                counterL2,
-                0,
-                abi.encodeWithSelector(Counter.increment.selector),
-                alice,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL2, alice),
-                new L2StaticExecutionEntry[](0)
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(_l2Entries(counterL2, alice), new L2StaticExecutionEntry[](0));
 
         uint256 finalCounter = Counter(counterL2).counter();
         require(finalCounter == 0, "revertSpan must roll back successful state changes on L2");

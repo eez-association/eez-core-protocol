@@ -134,6 +134,15 @@ abstract contract EEZBase is IEEZ {
     ///      state-changing call execute read-only undetected.
     error NonStaticSubCall();
 
+    /// @notice Error when a static-resolution sub-call carries a `revertNextNCalls` span — there is
+    ///         no state to roll back. Defensive check of a prover constraint (spec §C).
+    error StaticCallWithRevertSpan();
+
+    /// @notice Error when a SUCCESS row of the unified reentrant table carries a non-zero
+    ///         `revertedOrStaticRollingHash` — the field is only read on the STATIC / REVERTED
+    ///         paths. Defensive check of a prover constraint (spec §C).
+    error SuccessRowWithRevertedOrStaticHash();
+
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own

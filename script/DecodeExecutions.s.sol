@@ -56,7 +56,7 @@ contract DecodeExecutions is Script {
         "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
-        keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint64)");
+        keccak256("IncomingCrossChainCallExecuted(bytes32,bool,address,uint64,address,uint256,uint64,bytes)");
 
     // ──────────────────── Public entry points ────────────────────
 
@@ -378,23 +378,26 @@ contract DecodeExecutions is Script {
     }
 
     function _printIncomingCall(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // IncomingCrossChainCallExecuted(bytes32 indexed cchash, address dest, uint256 value, bytes data, address src, uint256 srcRollup)
+        // IncomingCrossChainCallExecuted(bytes32 indexed cchash, bool isStatic, address src, uint64 srcRollup, address dest, uint256 value, uint64 callGas, bytes data) — hash-formula field order
         bytes32 cchash = topics[1];
-        (address dest, uint256 value, bytes memory innerData, address src, uint256 srcRollup) =
-            abi.decode(data, (address, uint256, bytes, address, uint256));
+        (bool isStatic, address src, uint256 srcRollup, address dest, uint256 value, uint256 callGas, bytes memory innerData)
+        = abi.decode(data, (bool, address, uint256, address, uint256, uint256, bytes));
         console.log(
             string.concat(
                 p,
                 "IncomingCrossChainCallExecuted(hash=",
                 _shortHash(cchash),
-                ", dest=",
-                _shortAddr(dest),
-                ", value=",
-                vm.toString(value),
+                isStatic ? ", static" : "",
                 ", src=",
                 _shortAddr(src),
                 ", srcRollup=",
                 vm.toString(srcRollup),
+                ", dest=",
+                _shortAddr(dest),
+                ", value=",
+                vm.toString(value),
+                ", gas=",
+                vm.toString(callGas),
                 ", call=",
                 _selectorName(innerData),
                 ")"

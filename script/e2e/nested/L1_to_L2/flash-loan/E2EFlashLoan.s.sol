@@ -431,18 +431,12 @@ contract ExecuteL2 is FlashLoanEnv, FlashLoanActions {
 
         // Delivery 1: forward receiveTokens — deploys WrappedToken, mints 10k to executorL2.
         single[0] = entries[0];
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                a.bridge, 0, _fwdReceiveData(a), a.bridge, MAINNET_ROLLUP_ID, single, noL2StaticEntries()
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(single, noL2StaticEntries());
 
         // Delivery 2: claimAndBridgeBack — claims the NFT, burns the wrapped 10k, and its
         // outgoing return leg is matched against expectedOutgoingCalls[0].
         single[0] = entries[1];
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                a.executorL2, 0, _claimData(a), a.executorL1, MAINNET_ROLLUP_ID, single, noL2StaticEntries()
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(single, noL2StaticEntries());
 
         console.log("done");
         console.log("nft claimed by executorL2=%s", FlashLoanersNFT(a.nftL2).hasClaimed(a.executorL2));
