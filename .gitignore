@@ -14,3 +14,5 @@ node_modules
 blob/
 tmp*
 gas-report/
+faucet.txt
+.faucet.lock
