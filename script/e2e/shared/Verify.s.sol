@@ -739,6 +739,26 @@ abstract contract VerifyHelpers is Script {
         }
     }
 
+    /// @dev Match key for pairing posted <-> expected entries. (proxyEntryHash,
+    ///      rollingHash) alone collides across parallel jobs running the same
+    ///      scenario against a shared devnet: the rolling hash only folds
+    ///      (callNumber, success, retData), never call addresses or calldata, and
+    ///      immediate entries all share proxyEntryHash == 0 — so identical
+    ///      scenarios batched together are indistinguishable and every job would
+    ///      match the first such posted entry. Fold the flat-call content too.
+    ///      isStatic is excluded: the legacy ABI does not encode it.
+    function _postedMatchHash(ExecutionEntry memory e) internal pure returns (bytes32 h) {
+        h = keccak256(abi.encode(e.proxyEntryHash, e.rollingHash));
+        for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
+            L2ToL1Call memory call = e.l2ToL1Calls[c];
+            h = keccak256(
+                abi.encode(
+                    h, call.targetAddress, call.value, call.data, call.sourceAddress, call.sourceRollupId, call.revertSpan
+                )
+            );
+        }
+    }
+
     function _verifyL1PostedEntries(
         ExecutionEntry[] memory posted,
         address rollupsAddr,
@@ -752,15 +772,15 @@ abstract contract VerifyHelpers is Script {
         ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
         ExecutionEntry[] memory matched = new ExecutionEntry[](expected.length);
         uint256 nMatched;
-        // Entries are queue-consumed in order and (proxyEntryHash, rollingHash) is NOT
-        // unique (e.g. two identical increments) — match each posted entry at most once,
-        // in posting order.
+        // Entries are queue-consumed in order and the match key is NOT unique
+        // (e.g. two identical increments in one job) — match each posted entry
+        // at most once, in posting order.
         bool[] memory used = new bool[](posted.length);
         ok = true;
         for (uint256 i = 0; i < expected.length; i++) {
             bool found = false;
             for (uint256 j = 0; j < posted.length; j++) {
-                if (used[j] || _entryHash(posted[j]) != _entryHash(expected[i])) continue;
+                if (used[j] || _postedMatchHash(posted[j]) != _postedMatchHash(expected[i])) continue;
                 used[j] = true;
                 found = true;
                 matched[nMatched++] = posted[j];
@@ -768,7 +788,7 @@ abstract contract VerifyHelpers is Script {
                 break;
             }
             if (!found) {
-                console.log("FAIL: expected entry %s not in posted batch (no (proxyEntryHash, rollingHash) match)", i);
+                console.log("FAIL: expected entry %s not in posted batch (no (proxyEntryHash, rollingHash, calls) match)", i);
                 ok = false;
             }
         }
@@ -1496,18 +1516,40 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
         console.log(
             "PASS: %s/%s expected L1 entries executed in range", expectedEntryHashes.length, expectedEntryHashes.length
         );
-        // Pin the block/tx of the first matching EntryExecuted.
+        // Pin the block/tx of the first matching EntryExecuted, and emit EVERY
+        // distinct settlement tx with a matching event as a candidate. Parallel
+        // runs of the same scenario are indistinguishable at the event level —
+        // EntryExecuted only carries the rolling hash, which never folds call
+        // addresses — so the first match may be a sibling job's batch; the
+        // runner disambiguates by checking each candidate tx's calldata.
+        bytes32[] memory seenTxs = new bytes32[](logs.length);
+        uint256 nSeen;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
             (bytes32 rollingHash,,) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
             bytes32 h = keccak256(abi.encode(bytes32(0), rollingHash));
+            bool matched = false;
             for (uint256 j = 0; j < expectedEntryHashes.length; j++) {
                 if (h == expectedEntryHashes[j]) {
-                    console.log("L1_MATCH_BLOCK=%s", logs[i].blockNumber);
-                    console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
-                    return;
+                    matched = true;
+                    break;
                 }
             }
+            if (!matched) continue;
+            bool dup = false;
+            for (uint256 k = 0; k < nSeen; k++) {
+                if (seenTxs[k] == logs[i].transactionHash) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            seenTxs[nSeen++] = logs[i].transactionHash;
+            if (nSeen == 1) {
+                console.log("L1_MATCH_BLOCK=%s", logs[i].blockNumber);
+                console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
+            }
+            console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
         }
     }
 }
