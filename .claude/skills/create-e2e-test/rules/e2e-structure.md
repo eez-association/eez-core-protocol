@@ -29,19 +29,18 @@ abstract contract FooActions {
 contract Deploy is Script { ... }     // runs on L1 RPC (default)
 contract DeployL2 is Script { ... }   // runs on L2 RPC (name contains "L2")
 
-// 4. Batcher — postAndVerifyBatch (+ user action) in ONE tx; inherits FooActions so
-//    the nested ExecutionEntry[] never crosses a call boundary (via-ir stack limit)
-contract Batcher is FooActions { ... }        // or ImmediateL2TXBatcher for L2→L1
-
-// 5. ExecuteL2 (L2-side local driver) / Execute (L1-side local driver)
+// 4. ExecuteL2 (L2-side local driver) / Execute (L1-side local driver).
+//    Execute posts postAndVerifyBatch(immediateSingleRollupBatch(...)) then makes the
+//    user trigger, as top-level broadcast calls — the runner mines them in one block
+//    (execute_l1_same_block), so every trigger comes from the broadcaster EOA.
 contract ExecuteL2 is Script, FooActions { ... }
-contract Execute is Script { ... }
+contract Execute is Script, FooActions { ... }
 
-// 6. ExecuteNetwork OR ExecuteNetworkL2 (view-only tx-shape oracle; the "L2" name
+// 5. ExecuteNetwork OR ExecuteNetworkL2 (view-only tx-shape oracle; the "L2" name
 //    is the direction switch the runners grep for)
 contract ExecuteNetwork is Script { ... }
 
-// 7. ComputeExpected (view-only, drives ALL verification)
+// 6. ComputeExpected (view-only, drives ALL verification)
 contract ComputeExpected is ComputeExpectedBase, FooActions { ... }
 ```
 
@@ -88,8 +87,7 @@ the runner re-exports them as env vars for later contracts (`_export_outputs`).
 Screaming-snake-case with a chain suffix: `COUNTER_L1`, `COUNTER_PROXY_L2`,
 `CALL_TWICE_L2`, … Infrastructure vars come from `DeployInfra.s.sol`: `ROLLUPS`,
 `PROOF_SYSTEM`, `MANAGER_L2`, `L2_ROLLUP_ID`. `RLP_ENCODED_TX` is the pre-signed
-trigger tx set by the runner. `BATCHER_L1` must be printed by `Execute` whenever the
-L1 user call is made by a Batcher (see `rules/entry-construction.md`).
+trigger tx set by the runner.
 
 ## ComputeExpected output protocol
 
@@ -133,6 +131,6 @@ that file is the reference for what the runtime emits; don't restate them here.
 
 Entries are only consumable in the block their table landed (L1: `lastVerifiedBlock`
 gate per rollup; L2: `lastLoadBlock` → `ExecutionNotInCurrentBlock`). Local mode
-satisfies it with a `Batcher` (one tx: `postAndVerifyBatch` + user action) on L1 and
-`execute_l2_same_block` (automine off → both broadcasts → one mined block, `--isolate`)
-on L2. Network mode relies on the composer bundling the intercepted trigger.
+satisfies it symmetrically on both chains with the `execute_same_block` wrapper
+(automine off → all of the Execute contract's broadcast txs → one mined block,
+`--isolate`). Network mode relies on the composer bundling the intercepted trigger.

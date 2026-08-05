@@ -2,14 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../../../../../src/EEZ.sol";
+import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -25,6 +20,7 @@ import {
     noNestedActions,
     noL2OutgoingCalls,
     noL2StaticEntries,
+    immediateSingleRollupBatch,
     RollingHashBuilder
 } from "../../../shared/E2EHelpers.sol";
 
@@ -256,58 +252,13 @@ contract ExecuteNetworkL2 is Script {
     }
 }
 
-/// @notice Inline L2-TX batcher — posts the batch with the leading zero-hash run
-///         marked immediate, so the entry executes inline during postAndVerifyBatch.
-contract ImmediateL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries
-    )
-        external
-    {
-        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
-        uint256 ic = 0;
-        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
-            ic++;
-        }
-
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: ic,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false
-        });
-        rollups.postAndVerifyBatch(batch);
-    }
-}
-
 /// @title Execute — local mode: postBatch with the immediate L2Tx entry on L1.
 /// @dev Destination-side mirror of the L2-originated cross-chain call. The L1
 ///      anvil holds the real Counter contract; the immediate entry contains a
 ///      revertNextNCalls=1 call targeting it. _processNCalls runs Counter.increment()
 ///      inside executeInContext, which reverts and rolls back the state — net
-///      effect: Counter.counter() == 0 on L1.
+///      effect: Counter.counter() == 0 on L1. `immediateEntryCount` covers the
+///      leading zero-hash run, so the entry executes inline during postAndVerifyBatch.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L1, COUNTER_L2
 contract Execute is Script, RevertL2Actions {
     function run() external {
@@ -319,10 +270,12 @@ contract Execute is Script, RevertL2Actions {
         vm.startBroadcast();
         address alice = msg.sender;
 
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(
-            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, alice), noStaticEntries()
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, alice), noStaticEntries()
+                )
+            );
 
         uint256 finalCounter = Counter(counterL1).counter();
         require(finalCounter == 0, "revertNextNCalls must roll back successful state changes on L1");

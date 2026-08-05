@@ -18,9 +18,8 @@ and those owners win whenever this file disagrees:
 
 Every scenario defines one `abstract contract <Name>Actions` exposing `_l1Entries(...)`
 and `_l2Entries(...)` (plus the call-hash helpers), parameterized by address. `Execute`,
-`ExecuteL2` (or their Batcher), and `ComputeExpected` all inherit it — the entries that
-execute and the entries that are verified must come from the same code. Never duplicate
-an entry literal.
+`ExecuteL2`, and `ComputeExpected` all inherit it — the entries that execute and the
+entries that are verified must come from the same code. Never duplicate an entry literal.
 
 ## Call identity
 
@@ -35,11 +34,12 @@ crossChainCallHash(isStatic, sourceAddress, sourceRollupId, targetAddress, targe
 - L2→L1 scenarios: the L2 source entry's key is `crossChainCallHashL2Out(...)` (same
   digest under `useGasLeft = false`); the L1 destination entry is system-driven with
   `proxyEntryHash = bytes32(0)` and the inbound calls in `l2ToL1Calls[]`.
-- The L1-side caller is whoever actually makes the user call ON L1. Locally that is
-  usually the scenario's `Batcher` contract — `Execute` must print `BATCHER_L1=` and
-  `ComputeExpected` must use `vm.envOr("BATCHER_L1", msg.sender)` for the L1-side
-  source address (network mode falls back to the EOA). Getting this wrong shifts every
-  L1 hash. See `deepNested` / `nestedCallRevert` for the pattern.
+- The L1-side caller is whoever actually makes the user call ON L1. Script-made
+  triggers come from the broadcaster EOA in both modes: `Execute` builds entries with
+  `msg.sender` inside `vm.startBroadcast()` and `ComputeExpected` uses `msg.sender`
+  (the runners pass `--sender`). Triggers routed through a scenario contract (e.g. a
+  `CounterAndProxy`) key on that contract's env-exported address instead. Getting this
+  wrong shifts every L1 hash. See `deepNested` / `nestedCallRevert` for the pattern.
 
 ## Rolling hash
 
@@ -67,9 +67,9 @@ call's `sourceRollupId`) must be in the update set (proxy protection, on-chain).
 ## Immediate vs deferred (L1)
 
 A leading `proxyEntryHash == 0` run MUST be covered by `immediateEntryCount`
-(`ImmediateCountStrandsLeadingL2Tx`) — use `immediateSingleRollupBatch` or the shared
-`L2TXBatcher` from `E2EHelpers.sol`, which auto-count it. There is no "defer the
-zero-hash entry and drain via `executeL2Txs`" pattern for leading L2Txs.
+(`ImmediateCountStrandsLeadingL2Tx`) — use `immediateSingleRollupBatch` from
+`E2EHelpers.sol`, which auto-counts it. There is no "defer the zero-hash entry and
+drain via `executeL2Txs`" pattern for leading L2Txs.
 
 ## ComputeExpected output contract
 

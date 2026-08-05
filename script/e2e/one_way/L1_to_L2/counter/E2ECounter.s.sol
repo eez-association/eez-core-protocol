@@ -135,22 +135,6 @@ abstract contract CounterActions {
     }
 }
 
-/// @notice Batcher: postAndVerifyBatch + incrementProxy in one tx (local mode only).
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        CounterAndProxy cap
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        cap.incrementProxy();
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 //  Deploys
 // ═══════════════════════════════════════════════════════════════════════
@@ -225,7 +209,10 @@ contract ExecuteL2 is Script, CounterActions {
     }
 }
 
-/// @title Execute — local mode: postAndVerifyBatch + incrementProxy via Batcher
+/// @title Execute — local mode: postAndVerifyBatch tx + incrementProxy tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate — mirroring how ExecuteL2 pairs loadExecutionTable
+///        with its trigger.
 /// Env: ROLLUPS, COUNTER_L2, COUNTER_AND_PROXY
 contract Execute is Script, CounterActions {
     function run() external {
@@ -235,14 +222,13 @@ contract Execute is Script, CounterActions {
         address capAddr = vm.envAddress("COUNTER_AND_PROXY");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL2Addr, capAddr),
-            noStaticEntries(),
-            CounterAndProxy(capAddr)
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, capAddr), noStaticEntries()
+                )
+            );
+        CounterAndProxy(capAddr).incrementProxy();
 
         console.log("done");
         console.log("counter=%s", CounterAndProxy(capAddr).counter());
@@ -251,7 +237,7 @@ contract Execute is Script, CounterActions {
     }
 }
 
-/// @title ExecuteNetwork — network mode: outputs user tx fields (no Batcher)
+/// @title ExecuteNetwork — network mode: outputs user tx fields
 /// Env: COUNTER_AND_PROXY
 contract ExecuteNetwork is Script {
     function run() external view {

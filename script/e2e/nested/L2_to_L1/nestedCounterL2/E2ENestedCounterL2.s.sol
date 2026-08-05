@@ -3,19 +3,13 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../../../../../src/EEZ.sol";
+import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    ExecutionEntry,
-    StaticExecutionEntry
+    ExecutionEntry
 } from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
@@ -34,6 +28,7 @@ import {
     noCalls,
     noL2Calls,
     getOrCreateProxy,
+    immediateSingleRollupBatch,
     RollingHashBuilder
 } from "../../../shared/E2EHelpers.sol";
 
@@ -317,54 +312,9 @@ contract ExecuteL2 is Script, NestedL2Actions {
     }
 }
 
-/// Inline L2-TX batcher — posts the batch with the leading zero-hash run marked
-/// immediate, so the entry executes inline during postAndVerifyBatch.
-contract ImmediateL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries
-    )
-        external
-    {
-        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
-        uint256 ic = 0;
-        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
-            ic++;
-        }
-
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: ic,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false
-        });
-        rollups.postAndVerifyBatch(batch);
-    }
-}
-
 /// Execute — L1 mirror: postBatch executes the immediate entry inline, running
-/// the nested-call pattern entirely on L1.
+/// the nested-call pattern entirely on L1. `immediateEntryCount` covers the
+/// leading zero-hash run, so the entry executes inline during postAndVerifyBatch.
 contract Execute is Script, NestedL2Actions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -374,14 +324,15 @@ contract Execute is Script, NestedL2Actions {
         address capL2Addr = vm.envAddress("COUNTER_AND_PROXY_L2");
 
         vm.startBroadcast();
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            L2_ROLLUP_ID,
-            _l1Entries(counterL2TargetAddr, capL1Addr, capL2Addr),
-            noStaticEntries()
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr,
+                    L2_ROLLUP_ID,
+                    _l1Entries(counterL2TargetAddr, capL1Addr, capL2Addr),
+                    noStaticEntries()
+                )
+            );
 
         console.log("done");
         console.log("capL1.counter=%s", CounterAndProxy(capL1Addr).counter());

@@ -39,7 +39,7 @@ import {
 //    return ++count
 //
 //  NEW (flatten) model — L1 (1 entry, 1 top-level call, 2 expectedL1ToL2Calls):
-//    l2ToL1Calls[0]: rcL1.dC(3) from batcher (top-level, executed ON L1)
+//    l2ToL1Calls[0]: rcL1.dC(3) from alice (top-level, executed ON L1)
 //      -> reenters rcL2Proxy.dC(2)  => expectedL1ToL2Calls[0] (Frame A), keyed at rhFireA
 //         Frame A sub-array = [ rcL1.dC(1) from rcL2 ]
 //           -> reenters rcL2Proxy.dC(0)  => expectedL1ToL2Calls[1] (Frame B), keyed at rhFireB
@@ -69,16 +69,16 @@ abstract contract ReentrantActions {
 
     // ── L1 cross-chain call hashes ──
 
-    /// @dev L1 proxy-entry identity: batcher -> rcL1.dC(3). The proxy for (rcL1, L2) folds
-    ///      source=batcher MAINNET, target=rcL1 L2.
-    function _l1ProxyEntryHash(address rcL1, address batcher) internal pure returns (bytes32) {
-        return crossChainCallHash(false, batcher, MAINNET_ROLLUP_ID, rcL1, L2_ROLLUP_ID, 0, _dc(3));
+    /// @dev L1 proxy-entry identity: alice -> rcL1.dC(3). The proxy for (rcL1, L2) folds
+    ///      source=alice MAINNET, target=rcL1 L2.
+    function _l1ProxyEntryHash(address rcL1, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, rcL1, L2_ROLLUP_ID, 0, _dc(3));
     }
 
-    /// @dev L1 top-level call dC(3): executed ON L1 (target rcL1 MAINNET), sourced from batcher L2
+    /// @dev L1 top-level call dC(3): executed ON L1 (target rcL1 MAINNET), sourced from alice L2
     ///      (the call's `sourceRollupId` must be in the entry's stateUpdates).
-    function _cchTop3(address rcL1, address batcher) internal pure returns (bytes32) {
-        return crossChainCallHash(false, batcher, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(3));
+    function _cchTop3(address rcL1, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(false, alice, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(3));
     }
 
     /// @dev L1 reentry dC(2): rcL1 -> rcL2Proxy.dC(2). executeCrossChainCall folds source=rcL1 MAINNET,
@@ -126,7 +126,7 @@ abstract contract ReentrantActions {
 
     // ── Entry builders ──
 
-    function _l1Entries(address rcL1, address rcL2, address batcher)
+    function _l1Entries(address rcL1, address rcL2, address alice)
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -139,7 +139,7 @@ abstract contract ReentrantActions {
             etherDelta: 0
         });
 
-        bytes32 proxyEntryHash = _l1ProxyEntryHash(rcL1, batcher);
+        bytes32 proxyEntryHash = _l1ProxyEntryHash(rcL1, alice);
 
         // Top-level calls: just rcL1.dC(3).
         L2ToL1Call[] memory topCalls = new L2ToL1Call[](1);
@@ -147,7 +147,7 @@ abstract contract ReentrantActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: batcher,
+            sourceAddress: alice,
             sourceRollupId: L2_ROLLUP_ID,
             targetAddress: rcL1,
             value: 0,
@@ -169,7 +169,7 @@ abstract contract ReentrantActions {
 
         // Rolling hash — thread `rh`, capturing the fire-time value at each reentry so the
         // expectedL1toL2Hash keys use the exact running hash the contract sees.
-        bytes32 cch3 = _cchTop3(rcL1, batcher);
+        bytes32 cch3 = _cchTop3(rcL1, alice);
         bytes32 cch2 = _cchReentry2(rcL2, rcL1);
         bytes32 cch1 = _cchSub1(rcL1, rcL2);
         bytes32 cch0 = _cchReentry0(rcL2, rcL1);
@@ -393,22 +393,6 @@ contract ExecuteL2 is Script, ReentrantActions {
 //  Execute L1
 // ═══════════════════════════════════════════════════════════════════════
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address rcL1ProxyOnL1
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (bool ok,) = rcL1ProxyOnL1.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)));
-        require(ok, "L1 trigger failed");
-    }
-}
-
 contract Execute is Script, ReentrantActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -418,17 +402,17 @@ contract Execute is Script, ReentrantActions {
         address rcL1ProxyOnL1 = vm.envAddress("RC_L1_PROXY_ON_L1");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        // exported by run-local.sh so ComputeExpected can reproduce the L1-side caller
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(rcL1Addr, rcL2Addr, address(batcher)),
-            noStaticEntries(),
-            rcL1ProxyOnL1
-        );
+        // The broadcaster EOA is the L1 caller (alice) — batch + trigger are separate txs
+        // mined in one block by the runner (execute_l1_same_block).
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(rcL1Addr, rcL2Addr, msg.sender), noStaticEntries()
+                )
+            );
+        // Trigger: alice calls rcL1ProxyOnL1.deepCall(3)
+        (bool ok,) = rcL1ProxyOnL1.call(abi.encodeWithSelector(ReentrantCounter.deepCall.selector, uint256(3)));
+        require(ok, "L1 trigger failed");
 
         console.log("done");
         console.log("rcL1.count=%s", ReentrantCounter(rcL1Addr).count());
@@ -464,12 +448,10 @@ contract ComputeExpected is ComputeExpectedBase, ReentrantActions {
     function run() external view {
         address rcL1Addr = vm.envAddress("REENTRANT_L1");
         address rcL2Addr = vm.envAddress("REENTRANT_L2");
+        // Both sides use the broadcaster EOA as the caller.
         address alice = msg.sender;
-        // L1-side caller: the local Batcher makes the user call (run-local exports BATCHER_L1);
-        // in network mode the trigger is the EOA itself.
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
 
-        ExecutionEntry[] memory l1 = _l1Entries(rcL1Addr, rcL2Addr, aliceL1);
+        ExecutionEntry[] memory l1 = _l1Entries(rcL1Addr, rcL2Addr, alice);
         bytes32 l1Hash = _entryHash(l1[0]);
 
         L2ExecutionEntry[] memory l2 = _l2Entries(rcL1Addr, rcL2Addr, alice);

@@ -3,13 +3,8 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {
-    EEZ,
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../../../../../src/EEZ.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {EEZ} from "../../../../../src/EEZ.sol";
+import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -26,6 +21,7 @@ import {
     noNestedActions,
     noL2Calls,
     noL2StaticEntries,
+    immediateSingleRollupBatch,
     RollingHashBuilder
 } from "../../../shared/E2EHelpers.sol";
 
@@ -291,55 +287,10 @@ contract ExecuteL2 is Script, MultiCallNestedL2Actions {
     }
 }
 
-/// @notice L1-side batcher: posts the batch with both zero-hash entries marked immediate.
-/// @dev immediateEntryCount covers the full leading zero-hash run, so both entries
-///      execute inline, in order, during postAndVerifyBatch.
-contract ImmediateL2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries
-    )
-        external
-    {
-        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
-        uint256 ic = 0;
-        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
-            ic++;
-        }
-
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: ic,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false
-        });
-        rollups.postAndVerifyBatch(batch);
-    }
-}
-
 /// @title Execute - L1-side mirror. Runs the two L2-anchored inner Counter.increment()
 ///        calls on the real L1 Counter as immediate L2Txs inside one postAndVerifyBatch.
+/// @dev immediateEntryCount covers the full leading zero-hash run, so both entries
+///      execute inline, in order, during postAndVerifyBatch.
 contract Execute is Script, MultiCallNestedL2Actions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -348,8 +299,10 @@ contract Execute is Script, MultiCallNestedL2Actions {
         address cap = vm.envAddress("COUNTER_AND_PROXY_L2");
 
         vm.startBroadcast();
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap), noStaticEntries());
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap), noStaticEntries())
+            );
 
         console.log("Execute: done");
         console.log("L1 counter=%s (expected 2)", Counter(counterL1).counter());

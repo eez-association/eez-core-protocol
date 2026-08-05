@@ -183,34 +183,45 @@ trace_failed_txs() {
     fi
 }
 
-# ── Execute L2 with same-block guarantee (local mode only) ──
-execute_l2_same_block() {
-    local sol="$1" l2_rpc="$2" pk="$3"
+# ── Run one Execute contract with a same-block guarantee (local mode only) ──
+# All txs the contract broadcasts (e.g. postAndVerifyBatch + the user trigger, or
+# loadExecutionTable + the proxy call) land in ONE mined block, satisfying the
+# managers' same-block consumption gates without any helper contract on-chain.
+execute_same_block() {
+    local sol="$1" contract="$2" rpc="$3" pk="$4"
     local tmpfile
     tmpfile=$(mktemp)
 
-    cast rpc evm_setAutomine false --rpc-url "$l2_rpc" > /dev/null 2>&1
+    cast rpc evm_setAutomine false --rpc-url "$rpc" > /dev/null 2>&1
 
     # --isolate: simulate each broadcast call as its OWN transaction (fresh
     # transient storage), matching on-chain execution — without it, scenarios
     # that make multiple system deliveries in one script (multi-call) fail the
     # pre-broadcast simulation with a false RollingHashMismatch.
-    forge script "$sol:ExecuteL2" --rpc-url "$l2_rpc" --broadcast --isolate --private-key "$pk" > "$tmpfile" 2>&1 &
+    forge script "$sol:$contract" --rpc-url "$rpc" --broadcast --isolate --private-key "$pk" > "$tmpfile" 2>&1 &
     local forge_pid=$!
     _E2E_PIDS+=("$forge_pid")
 
     sleep 3
 
-    cast rpc evm_mine --rpc-url "$l2_rpc" > /dev/null 2>&1
+    cast rpc evm_mine --rpc-url "$rpc" > /dev/null 2>&1
 
     wait "$forge_pid" 2>/dev/null
     local exit_code=$?
 
-    cast rpc evm_setAutomine true --rpc-url "$l2_rpc" > /dev/null 2>&1
+    cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1
 
     cat "$tmpfile"
     rm -f "$tmpfile"
     return "$exit_code"
+}
+
+execute_l2_same_block() {
+    execute_same_block "$1" "ExecuteL2" "$2" "$3"
+}
+
+execute_l1_same_block() {
+    execute_same_block "$1" "Execute" "$2" "$3"
 }
 
 # ── Get block number from forge broadcast JSON ──

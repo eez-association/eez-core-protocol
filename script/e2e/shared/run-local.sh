@@ -8,7 +8,7 @@
 # Standard contracts in E2E.s.sol (all read args from env vars):
 #   Deploy* contracts  → auto-discovered, run in file order (L2 suffix → L2 RPC)
 #   ExecuteL2          → L2 execution (load table on L2 and trigger any L2 user tx)
-#   Execute            → L1 execution (postAndVerifyBatch + user action via Batcher)
+#   Execute            → L1 execution (postAndVerifyBatch + user action, same-block)
 source "$(dirname "$0")/E2EBase.sh"
 
 SOL="$1"; shift || { echo "Usage: run-local.sh <E2E.s.sol>"; exit 1; }
@@ -98,15 +98,15 @@ fi
 
 if grep -q 'contract Execute ' "$SOL"; then
     echo ""
-    echo "====== Execute L1 ======"
+    echo "====== Execute L1 (same-block) ======"
     set +e
-    EXEC_L1=$(forge script "$SOL:Execute" --rpc-url "$L1_RPC" --broadcast --private-key "$PK" 2>&1)
+    EXEC_L1=$(execute_l1_same_block "$SOL" "$L1_RPC" "$PK")
     L1_EXIT=$?
     set -e
     if [[ $L1_EXIT -eq 0 ]]; then
         echo "L1 execution succeeded"
         echo "$EXEC_L1" | grep -E "complete|done|counter" || true
-        # Auto-export any KEY=VALUE lines (e.g. BATCHER_L1=<addr>) so ComputeExpected can read them.
+        # Auto-export any KEY=VALUE lines so ComputeExpected can read them.
         _export_outputs "$EXEC_L1"
     else
         echo "L1 execution FAILED (exit=$L1_EXIT) — full output below:"

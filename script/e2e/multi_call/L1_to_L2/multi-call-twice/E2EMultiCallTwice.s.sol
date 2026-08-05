@@ -218,23 +218,6 @@ contract Deploy is Script {
     }
 }
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        CallTwice caller,
-        address counterProxy
-    )
-        external
-        returns (uint256 first, uint256 second)
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (first, second) = caller.callCounterTwice(counterProxy);
-    }
-}
-
 /// @title ExecuteL2 — local mode: drive Counter.increment() twice on L2 via a trigger contract.
 /// @dev SYSTEM loads the two-entry table; CallTwiceL2 calls the trigger proxy twice.
 ///      Each proxy call forwards to managerL2.executeCrossChainCall which consumes the next
@@ -257,6 +240,9 @@ contract ExecuteL2 is Script, MultiCallActions {
     }
 }
 
+/// @title Execute — local mode: postAndVerifyBatch tx + callCounterTwice tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate.
 contract Execute is Script, MultiCallActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -266,15 +252,13 @@ contract Execute is Script, MultiCallActions {
         address callerAddr = vm.envAddress("CALL_TWICE");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        (uint256 first, uint256 second) = batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL2Addr, callerAddr),
-            noStaticEntries(),
-            CallTwice(callerAddr),
-            counterProxy
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, callerAddr), noStaticEntries()
+                )
+            );
+        (uint256 first, uint256 second) = CallTwice(callerAddr).callCounterTwice(counterProxy);
         console.log("done");
         console.log("first=%s second=%s", first, second);
         vm.stopBroadcast();

@@ -471,22 +471,6 @@ contract Deploy is Script {
     }
 }
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address ncProxy
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (bool ok,) = ncProxy.call(abi.encodeWithSelector(NestedCaller.callNested.selector));
-        require(ok, "outer call failed");
-    }
-}
-
 contract Execute is Script, DeepNestedActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -497,16 +481,16 @@ contract Execute is Script, DeepNestedActions {
         address ncProxy = vm.envAddress("NESTED_CALLER_PROXY");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL2, capAddr, ncAddr, address(batcher)),
-            noStaticEntries(),
-            ncProxy
-        );
+        // The broadcaster EOA is the L1 caller (alice) — batch + trigger are separate txs
+        // mined in one block by the runner (execute_l1_same_block).
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2, capAddr, ncAddr, msg.sender), noStaticEntries()
+                )
+            );
+        (bool ok,) = ncProxy.call(abi.encodeWithSelector(NestedCaller.callNested.selector));
+        require(ok, "outer call failed");
 
         console.log("done");
         console.log("nc.counter=%s", NestedCaller(ncAddr).counter());
@@ -587,20 +571,15 @@ contract ComputeExpected is ComputeExpectedBase, DeepNestedActions {
         address ncAddr = vm.envAddress("NESTED_CALLER");
         address capL2 = vm.envAddress("CAP_L2");
         address ncL2 = vm.envAddress("NESTED_CALLER_L2");
-        // The L1 hashes fold the address that actually calls the L1 proxy (the manager's view
-        // of sourceAddress). Local mode: the Batcher — batch + trigger share one tx, so the
-        // proxy's caller is the Batcher contract Execute deploys (exported as BATCHER_L1).
-        // Network mode: no Batcher exists — the EOA sends the trigger straight to the proxy,
-        // and ComputeExpected runs with --sender <EOA>, so msg.sender is the right fallback.
-        // Fail-closed: a missing/incorrect export diverges every hash and verification fails.
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
-        // L2 side: the broadcaster drives the system delivery, so msg.sender is the caller.
-        address aliceL2 = msg.sender;
+        // The L1 caller is the broadcaster EOA in both local and network mode, and the L2
+        // side uses the same broadcaster as the system-delivery source — so msg.sender
+        // (ComputeExpected runs with --sender <EOA>) is the caller on both sides.
+        address alice = msg.sender;
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL2, capAddr, ncAddr, aliceL1);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL2, capAddr, ncAddr, alice);
         bytes32 l1Hash = _entryHash(l1[0]);
 
-        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, capL2, ncL2, aliceL2);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, capL2, ncL2, alice);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));

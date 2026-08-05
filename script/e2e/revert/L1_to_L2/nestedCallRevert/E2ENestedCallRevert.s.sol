@@ -152,9 +152,9 @@ abstract contract NestedCallRevertActions {
     //  `success=false` ExpectedOutgoingCrossChainCall in the entry.
     // ─────────────────────────────────────────────────────────────
 
-    /// @dev Outer proxy-entry / top-level hash on L2: source (batcher MAINNET) → SafeCAP (on L2).
-    function _outerHashL2(address scapL2, address batcherL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, batcherL1, MAINNET_ROLLUP_ID, scapL2, L2_ROLLUP_ID, 0, _incrementProxyData());
+    /// @dev Outer proxy-entry / top-level hash on L2: source (alice on MAINNET) → SafeCAP (on L2).
+    function _outerHashL2(address scapL2, address aliceL1) internal pure returns (bytes32) {
+        return crossChainCallHash(false, aliceL1, MAINNET_ROLLUP_ID, scapL2, L2_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// @dev Inner reentrant (outgoing) hash on L2: SafeCAP (on L2) calls Counter MAINNET — the call
@@ -165,7 +165,7 @@ abstract contract NestedCallRevertActions {
         return crossChainCallHashL2Out(scapL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
-    function _l2Entries(address scapL2, address batcherL1, address counterL1)
+    function _l2Entries(address scapL2, address aliceL1, address counterL1)
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -175,14 +175,14 @@ abstract contract NestedCallRevertActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: batcherL1,
+            sourceAddress: aliceL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
             targetAddress: scapL2,
             value: 0,
             data: _incrementProxyData()
         });
 
-        bytes32 proxyEntryHash = _outerHashL2(scapL2, batcherL1);
+        bytes32 proxyEntryHash = _outerHashL2(scapL2, aliceL1);
         bytes32 innerCch = _innerActionHashL2(counterL1, scapL2);
 
         // Rolling-hash seed/append shape mirrors L1; the inbound top-level CALL_BEGIN folds the
@@ -309,22 +309,6 @@ contract DeployL2Step2 is Script {
 //  Execute
 // ═══════════════════════════════════════════════════════════════════════
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address scapProxy
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (bool ok,) = scapProxy.call(abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector));
-        require(ok, "outer call failed");
-    }
-}
-
 // ExecuteL2 - L2-side mirror. SYSTEM-driven via executeIncomingCrossChainCall:
 // loads the L2 entry (with the success=false ExpectedOutgoingCrossChainCall), then runs
 // SafeCAP (on L2) incrementProxy(). SafeCAP's inner reentrant call hits managerL2._consumeNestedCall,
@@ -338,11 +322,9 @@ contract ExecuteL2 is Script, NestedCallRevertActions {
         address scapL2 = vm.envAddress("SAFE_CAP_L2");
 
         vm.startBroadcast();
-        // The L1-side `_l1Entries` was built with `sourceAddress = address(batcher)` — but the
-        // Batcher contract lives on L1 and is created per-tx, so we can't reference it from L2.
-        // Instead we mirror the structural shape: source = msg.sender (the broadcaster acting as
-        // the L1 trigger). The two halves do NOT need identical sourceAddresses because each side
-        // is a separate proof; only the rolling-hash / call-shape / lookup key matter.
+        // source = msg.sender (the broadcaster acting as the L1 trigger). The two halves do
+        // NOT need identical sourceAddresses because each side is a separate proof; only the
+        // rolling-hash / call-shape / lookup key matter.
         address triggerSource = msg.sender;
         console.log("ExecuteL2: manager=%s scapL2=%s triggerSource=%s", managerAddr, scapL2, triggerSource);
 
@@ -374,17 +356,16 @@ contract Execute is Script, NestedCallRevertActions {
         address counterL2 = vm.envAddress("COUNTER_L2");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        // exported by run-local.sh so ComputeExpected can reproduce the L1-side caller
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(scapAddr, address(batcher), counterL2),
-            noStaticEntries(),
-            scapProxy
-        );
+        // The broadcaster EOA is the L1 caller (alice) — batch + trigger are separate txs
+        // mined in one block by the runner (execute_l1_same_block).
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(scapAddr, msg.sender, counterL2), noStaticEntries()
+                )
+            );
+        (bool ok,) = scapProxy.call(abi.encodeWithSelector(SafeCounterAndProxy.incrementProxy.selector));
+        require(ok, "outer call failed");
 
         console.log("done");
         console.log("scap.counter=%s", SafeCounterAndProxy(scapAddr).counter());
@@ -425,12 +406,10 @@ contract ComputeExpected is ComputeExpectedBase, NestedCallRevertActions {
         address counterL2 = vm.envAddress("COUNTER_L2");
         address counterL1 = vm.envAddress("COUNTER_L1");
         address scapL2 = vm.envAddress("SAFE_CAP_L2");
+        // Both sides use the broadcaster EOA as the caller.
         address alice = msg.sender;
-        // L1-side caller: the local Batcher makes the user call (run-local exports BATCHER_L1);
-        // in network mode the trigger is the EOA itself.
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
 
-        ExecutionEntry[] memory l1 = _l1Entries(scapAddr, aliceL1, counterL2);
+        ExecutionEntry[] memory l1 = _l1Entries(scapAddr, alice, counterL2);
         L2ExecutionEntry[] memory l2 = _l2Entries(scapL2, alice, counterL1);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);

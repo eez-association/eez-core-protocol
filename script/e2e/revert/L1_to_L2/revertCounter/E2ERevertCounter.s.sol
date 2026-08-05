@@ -168,10 +168,9 @@ abstract contract RevertActions {
     /// @dev L2 mirror entry — same shape, with the inner call targeting the real
     /// Counter on L2. proxyEntryHash matches the outer trigger that SYSTEM passes
     /// to executeIncomingCrossChainCall (counterL2 destination, alice on Mainnet
-    /// as the source). The mirror is independent of the L1 side; it does not need
-    /// to share alice with the L1 batcher, since the cryptographic tie is the call
-    /// hash of the OUTER call (destination + sourceAddress + sourceRollupId), which
-    /// each side computes from its own broadcaster.
+    /// as the source). The mirror is independent of the L1 side; the cryptographic
+    /// tie is the call hash of the OUTER call (destination + sourceAddress +
+    /// sourceRollupId), which each side computes from its own broadcaster.
     /// NOTE: L2 rolling hash is PENDING EEZL2 (impl not migrated); re-verify when EEZL2.sol lands.
     function _l2Entries(address counterL2, address alice) internal pure returns (L2ExecutionEntry[] memory entries) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -249,24 +248,9 @@ contract Deploy is Script {
 //  Execute
 // ═══════════════════════════════════════════════════════════════════════
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address counterProxy
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        // Trigger: call counterProxy.increment() — consumes the entry.
-        // The inner call in the entry runs inside executeInContext and is force-reverted.
-        (bool ok,) = counterProxy.call(abi.encodeWithSelector(Counter.increment.selector));
-        require(ok, "trigger should succeed (revertSpan rolls back the inner call's state, not the outer flow)");
-    }
-}
-
+/// @title Execute — local mode: postAndVerifyBatch tx + trigger tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate. The broadcaster EOA is the L1 caller (alice).
 contract Execute is Script, RevertActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -276,19 +260,17 @@ contract Execute is Script, RevertActions {
         address counterProxy = vm.envAddress("COUNTER_PROXY");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        // Export the Batcher's address so run-local.sh re-exports it as BATCHER_L1 env;
-        // ComputeExpected then uses the same address as alice (msg.sender into the proxy).
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        // alice = batcher (msg.sender into the proxy)
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL1, counterL2, address(batcher)),
-            noStaticEntries(),
-            counterProxy
-        );
+        // alice = msg.sender (the broadcaster EOA — the caller into the proxy)
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, msg.sender), noStaticEntries()
+                )
+            );
+        // Trigger: call counterProxy.increment() — consumes the entry.
+        // The inner call in the entry runs inside executeInContext and is force-reverted.
+        (bool ok,) = counterProxy.call(abi.encodeWithSelector(Counter.increment.selector));
+        require(ok, "trigger should succeed (revertSpan rolls back the inner call's state, not the outer flow)");
 
         // Invariant: counter on L1 stays at 0 — the increment ran, returned 1,
         // but executeInContext's revert rolled the state change back. The
@@ -365,16 +347,14 @@ contract ComputeExpected is ComputeExpectedBase, RevertActions {
     function run() external view {
         address counterL2 = vm.envAddress("COUNTER_L2");
         address counterL1 = vm.envAddress("COUNTER_L1");
-        // The L1 trigger goes batcher → counterProxy directly; the on-chain consumed
-        // hash uses Batcher as sourceAddress. If run-local.sh has exported BATCHER_L1
-        // (set by Execute), use it; otherwise fall back to msg.sender (network mode).
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
-        address aliceL2 = msg.sender; // L2 path uses SYSTEM (broadcaster) as source
+        // Both sides use the broadcaster EOA as the caller: msg.sender into the L1
+        // proxy, and the system-delivery source on L2.
+        address alice = msg.sender;
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, aliceL1);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, alice);
         bytes32 l1Hash = _entryHash(l1[0]);
 
-        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, aliceL2);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, alice);
         bytes32 l2Hash = _entryHash(l2[0]);
 
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));

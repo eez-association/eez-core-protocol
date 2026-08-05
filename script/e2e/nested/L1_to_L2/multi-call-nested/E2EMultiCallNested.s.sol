@@ -330,28 +330,6 @@ abstract contract MCNActions {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Batchers (one tx each → all consumption lands in the same block)
-// ═══════════════════════════════════════════════════════════════════════
-
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        CallTwiceNestedAndOnce app,
-        address nestedProxy,
-        address simpleProxy
-    )
-        external
-        returns (uint256)
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        return app.execute(nestedProxy, simpleProxy);
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
 //  Deploys
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -430,7 +408,9 @@ contract Deploy2 is Script {
 //  Executes
 // ═══════════════════════════════════════════════════════════════════════
 
-/// @title Execute — L1 local mode: postAndVerifyBatch (3 entries) + app.execute() via Batcher
+/// @title Execute — L1 local mode: postAndVerifyBatch tx (3 entries) + app.execute() tx from
+///        the EOA. The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate.
 contract Execute is Script, MCNActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -443,19 +423,16 @@ contract Execute is Script, MCNActions {
         address app = vm.envAddress("CALL_TWICE_NESTED");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap2, counterL2, app), noStaticEntries()
+                )
+            );
 
-        // sourceAddress = the app contract: Batcher → app → proxy, so msg.sender at the
+        // sourceAddress = the app contract: EOA → app → proxy, so msg.sender at the
         // proxy is `app`. That's what the L1 entries' crossChainCallHashes commit to.
-        uint256 simpleResult = batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL1, cap2, counterL2, app),
-            noStaticEntries(),
-            CallTwiceNestedAndOnce(app),
-            cap2ProxyL1,
-            counterL2ProxyL1
-        );
+        uint256 simpleResult = CallTwiceNestedAndOnce(app).execute(cap2ProxyL1, counterL2ProxyL1);
 
         console.log("done");
         console.log("counterL1=%s (expected 2)", Counter(counterL1).counter());

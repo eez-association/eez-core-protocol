@@ -204,36 +204,26 @@ contract ExecuteL2 is Script, CounterL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — posts the batch with the zero-hash entry marked immediate.
-/// @dev Builds the L1 entry INTERNALLY (inherits `CounterL2Actions`) so the caller never ABI-encodes
-///      the nested `ExecutionEntry[]` across the call boundary — only the single batch encode
-///      for `postAndVerifyBatch` remains, keeping clear of the via-ir stack limit. `immediateEntryCount`
-///      covers the leading zero-hash run, so the entry executes inline during `postAndVerifyBatch`.
-contract ImmediateL2TXBatcher is CounterL2Actions {
-    function execute(EEZ rollups, address proofSystem, address counterL1, address capL2) external {
-        rollups.postAndVerifyBatch(
-            immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, capL2), noStaticEntries())
-        );
-    }
-}
-
 /// @title Execute — local mode: postBatch with the immediate L2Tx entry on L1.
-/// @dev Drives the L1-side simulation of the L2-originated cross-chain call. The lazily-created source
-///      proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1 and is created inside `_processNCalls` during
-///      the immediate L2Tx run.
+/// @dev Drives the L1-side simulation of the L2-originated cross-chain call. `immediateEntryCount`
+///      covers the leading zero-hash run, so the entry executes inline during `postAndVerifyBatch`.
+///      The lazily-created source proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1 and is created
+///      inside `_processNCalls` during the immediate L2Tx run.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L1, COUNTER_AND_PROXY_L2
-contract Execute is Script {
+contract Execute is Script, CounterL2Actions {
     function run() external {
         address counterL1 = vm.envAddress("COUNTER_L1");
 
         vm.startBroadcast();
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(
-            EEZ(vm.envAddress("ROLLUPS")),
-            vm.envAddress("PROOF_SYSTEM"),
-            counterL1,
-            vm.envAddress("COUNTER_AND_PROXY_L2")
-        );
+        EEZ(vm.envAddress("ROLLUPS"))
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    vm.envAddress("PROOF_SYSTEM"),
+                    L2_ROLLUP_ID,
+                    _l1Entries(counterL1, vm.envAddress("COUNTER_AND_PROXY_L2")),
+                    noStaticEntries()
+                )
+            );
 
         console.log("done");
         console.log("L1 counterL1=%s", Counter(counterL1).counter());

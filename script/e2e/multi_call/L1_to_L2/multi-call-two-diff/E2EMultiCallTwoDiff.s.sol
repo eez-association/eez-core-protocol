@@ -231,24 +231,6 @@ contract Deploy is Script {
     }
 }
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        CallTwoDifferent caller,
-        address pA,
-        address pB
-    )
-        external
-        returns (uint256 a, uint256 b)
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (a, b) = caller.callBothCounters(pA, pB);
-    }
-}
-
 /// @title ExecuteL2 — local mode: drive Counter.increment() once on each of the two L2 counters
 ///        via a CallTwoDifferent trigger on L2.
 /// Env: MANAGER_L2, COUNTER_A_L2, COUNTER_B_L2, TRIGGER_PROXY_A_L2, TRIGGER_PROXY_B_L2, CALL_TWO_DIFF_L2
@@ -272,6 +254,9 @@ contract ExecuteL2 is Script, TwoDiffActions {
     }
 }
 
+/// @title Execute — local mode: postAndVerifyBatch tx + callBothCounters tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate.
 contract Execute is Script, TwoDiffActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -283,16 +268,13 @@ contract Execute is Script, TwoDiffActions {
         address callerAddr = vm.envAddress("CALL_TWO_DIFF");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        (uint256 a, uint256 b) = batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterA, counterB, callerAddr),
-            noStaticEntries(),
-            CallTwoDifferent(callerAddr),
-            proxyA,
-            proxyB
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterA, counterB, callerAddr), noStaticEntries()
+                )
+            );
+        (uint256 a, uint256 b) = CallTwoDifferent(callerAddr).callBothCounters(proxyA, proxyB);
         console.log("done");
         console.log("a=%s b=%s", a, b);
         vm.stopBroadcast();

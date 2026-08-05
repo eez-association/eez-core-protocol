@@ -267,33 +267,24 @@ contract ExecuteL2 is Script, RevertContinueL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — posts the batch with the zero-hash entry marked immediate.
-/// @dev Builds the L1 entry INTERNALLY (inherits `RevertContinueL2Actions`) so the caller never
-///      ABI-encodes the nested `ExecutionEntry[]` across the call boundary — only the single
-///      batch encode for `postAndVerifyBatch` remains, keeping clear of the via-ir stack
-///      limit. `immediateEntryCount` covers the leading zero-hash run, so the entry executes
-///      inline during `postAndVerifyBatch`.
-contract ImmediateL2TXBatcher is RevertContinueL2Actions {
-    function execute(EEZ rollups, address proofSystem, address counterL1, address selfCallerL2) external {
-        rollups.postAndVerifyBatch(
-            immediateSingleRollupBatch(
-                proofSystem, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticEntries()
-            )
-        );
-    }
-}
-
 /// @title Execute - L1-side mirror. postBatch executes the immediate entry inline, running the
 ///        actual Counter.increment() on L1 (the destination of the L2-anchored inner reentrant call).
-contract Execute is Script {
+/// @dev `immediateEntryCount` covers the leading zero-hash run, so the entry executes inline
+///      during `postAndVerifyBatch`.
+contract Execute is Script, RevertContinueL2Actions {
     function run() external {
         address counterL1 = vm.envAddress("COUNTER_L1");
 
         vm.startBroadcast();
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(
-            EEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PROOF_SYSTEM"), counterL1, vm.envAddress("SELF_CALLER")
-        );
+        EEZ(vm.envAddress("ROLLUPS"))
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    vm.envAddress("PROOF_SYSTEM"),
+                    L2_ROLLUP_ID,
+                    _l1Entries(counterL1, vm.envAddress("SELF_CALLER")),
+                    noStaticEntries()
+                )
+            );
 
         console.log("Execute: done");
         console.log("L1 counter=%s", Counter(counterL1).counter());

@@ -163,23 +163,6 @@ contract Deploy is Script {
     }
 }
 
-/// @notice Batcher: postAndVerifyBatch + bridge() with value in one tx.
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        BridgeSender sender
-    )
-        external
-        payable
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        sender.bridge{value: msg.value}();
-    }
-}
-
 /// @title ExecuteL2 — local mode: system-driven L2 simulation of the bridged ETH.
 /// @dev SYSTEM_ADDRESS attaches the same `value` as the L1 entry; managerL2 forwards
 ///      it through the lazily-created source proxy into BridgeReceiver.receive().
@@ -210,7 +193,9 @@ contract ExecuteL2 is Script, BridgeActions {
     }
 }
 
-/// @title Execute — local mode
+/// @title Execute — local mode: postAndVerifyBatch tx + bridge{value: 1 ether}() tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate.
 contract Execute is Script, BridgeActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -219,16 +204,13 @@ contract Execute is Script, BridgeActions {
         address senderAddr = vm.envAddress("BRIDGE_SENDER");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        batcher.execute{
-            value: 1 ether
-        }(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(l2DestAddr, senderAddr),
-            noStaticEntries(),
-            BridgeSender(senderAddr)
-        );
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(l2DestAddr, senderAddr), noStaticEntries()
+                )
+            );
+        BridgeSender(senderAddr).bridge{value: 1 ether}();
         console.log("done");
         vm.stopBroadcast();
     }

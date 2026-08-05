@@ -199,39 +199,25 @@ contract ExecuteL2 is Script, MultiCallTwoDiffL2Actions {
     }
 }
 
-/// @notice Inline L2-TX batcher — posts the batch with the zero-hash entry marked immediate.
-/// @dev Builds the L1 entry INTERNALLY (inherits the Actions mixin) so the caller never
-///      ABI-encodes the nested `ExecutionEntry[]` across a call boundary (via-ir stack limit).
-///      A leading zero-hash entry MUST be covered by `immediateEntryCount`
-///      (`ImmediateCountStrandsLeadingL2Tx`), so it executes inline during `postAndVerifyBatch`.
-contract ImmediateL2TXBatcher is MultiCallTwoDiffL2Actions {
-    function execute(EEZ rollups, address proofSystem, address counterA, address counterB, address callerL2)
-        external
-    {
-        rollups.postAndVerifyBatch(
-            immediateSingleRollupBatch(
-                proofSystem, L2_ROLLUP_ID, _l1Entries(counterA, counterB, callerL2), noStaticEntries()
-            )
-        );
-    }
-}
-
 /// @title Execute — local mode: postBatch with the immediate L2Tx entry on L1.
+/// @dev A leading zero-hash entry MUST be covered by `immediateEntryCount`
+///      (`ImmediateCountStrandsLeadingL2Tx`), so it executes inline during `postAndVerifyBatch`.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_A_L1, COUNTER_B_L1, CALL_TWO_DIFF_L2
-contract Execute is Script {
+contract Execute is Script, MultiCallTwoDiffL2Actions {
     function run() external {
         address counterA = vm.envAddress("COUNTER_A_L1");
         address counterB = vm.envAddress("COUNTER_B_L1");
 
         vm.startBroadcast();
-        ImmediateL2TXBatcher batcher = new ImmediateL2TXBatcher();
-        batcher.execute(
-            EEZ(vm.envAddress("ROLLUPS")),
-            vm.envAddress("PROOF_SYSTEM"),
-            counterA,
-            counterB,
-            vm.envAddress("CALL_TWO_DIFF_L2")
-        );
+        EEZ(vm.envAddress("ROLLUPS"))
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    vm.envAddress("PROOF_SYSTEM"),
+                    L2_ROLLUP_ID,
+                    _l1Entries(counterA, counterB, vm.envAddress("CALL_TWO_DIFF_L2")),
+                    noStaticEntries()
+                )
+            );
 
         console.log("done");
         console.log("L1 counterA=%s counterB=%s", Counter(counterA).counter(), Counter(counterB).counter());

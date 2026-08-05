@@ -62,12 +62,12 @@ Common flatten-model errors (decode any selector with `cast 4byte <sel>` or grep
 
 | Selector | Error | Cause |
 |---|---|---|
-| `0xf3a3b67c` | `RollingHashMismatch` | Expected rolling hash ≠ computed. Recompute using `RollingHashBuilder` with exact tag ordering (seed → CALL_BEGIN/NESTED pairs/CALL_END); no index is folded. Wrong caller address (EOA vs Batcher) is the usual root cause. |
+| `0xf3a3b67c` | `RollingHashMismatch` | Expected rolling hash ≠ computed. Recompute using `RollingHashBuilder` with exact tag ordering (seed → CALL_BEGIN/NESTED pairs/CALL_END); no index is folded. A wrong caller address (an intermediate contract instead of the broadcaster EOA) is the usual root cause. |
 | `0x7a5c2981` | `EntryNotFound(bytes32,uint64)` | L2: no table entry matches the outgoing call's key from the cursor onward — recompute with `crossChainCallHashL2Out`; check `sourceAddress` is the contract that called the proxy. |
 | `0xc2098b88` | `EntryHashMismatch` | L2 `executeIncomingCrossChainCall`: `entries[0].proxyEntryHash` ≠ hash of the explicit params. |
-| `0xf9d330ad` | `ExecutionNotInCurrentBlock` | `lastVerifiedBlock` (L1, per rollup) or `lastLoadBlock` (L2) ≠ current block. Use `execute_l2_same_block` / a Batcher so table + trigger share a block. |
+| `0xf9d330ad` | `ExecutionNotInCurrentBlock` | `lastVerifiedBlock` (L1, per rollup) or `lastLoadBlock` (L2) ≠ current block. The runner's `execute_same_block` wrapper must mine table + trigger together — don't roll blocks inside `Execute`/`ExecuteL2`. |
 | `0xfa3021e5` | `AllImmediateL2TxsFailed` | Every immediate L2Tx entry reverted inside `postAndVerifyBatch` — usually a `RollingHashMismatch` inside the entry (check the inner revert via `trace_failed_txs` / `cast run`). |
-| `0xa296e78c` | `ImmediateCountStrandsLeadingL2Tx` | A leading zero-hash entry was left out of `immediateEntryCount` — use `immediateSingleRollupBatch` / `L2TXBatcher`. |
+| `0xa296e78c` | `ImmediateCountStrandsLeadingL2Tx` | A leading zero-hash entry was left out of `immediateEntryCount` — use `immediateSingleRollupBatch`, which auto-counts it. |
 | `0x29c3b7ee` | `NotSelf` | `executeInContextAndRevert` invoked by someone other than the manager itself (must be `address(this)` self-call). |
 
 On failure, `bash script/e2e/shared/decode-block.sh --l1-block <N> ...` dumps the actual execution table for comparison with `forge script <SOL>:ComputeExpected`.

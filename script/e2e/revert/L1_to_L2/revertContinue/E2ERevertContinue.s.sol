@@ -60,11 +60,11 @@ uint64 constant MAINNET_ROLLUP_ID = 0;
 abstract contract RevertContinueActions {
     using RollingHashBuilder for bytes32;
 
-    /// @dev Outer action hash: batcher calls selfCallerProxy.execute() on L1.
-    function _outerActionHash(address selfCaller, address batcher) internal pure returns (bytes32) {
+    /// @dev Outer action hash: alice calls selfCallerProxy.execute() on L1.
+    function _outerActionHash(address selfCaller, address alice) internal pure returns (bytes32) {
         return crossChainCallHash(
             false,
-            batcher,
+            alice,
             MAINNET_ROLLUP_ID,
             selfCaller,
             L2_ROLLUP_ID,
@@ -118,11 +118,11 @@ abstract contract RevertContinueActions {
     //  shape as the L1 side.
     // ─────────────────────────────────────────────────────────────
 
-    /// @dev Outer action hash on L2: source-proxy (for batcher on MAINNET) calls SelfCaller (on L2).
-    function _outerActionHashL2(address selfCallerL2, address batcherL1) internal pure returns (bytes32) {
+    /// @dev Outer action hash on L2: source-proxy (for alice on MAINNET) calls SelfCaller (on L2).
+    function _outerActionHashL2(address selfCallerL2, address aliceL1) internal pure returns (bytes32) {
         return crossChainCallHash(
             false,
-            batcherL1,
+            aliceL1,
             MAINNET_ROLLUP_ID,
             selfCallerL2,
             L2_ROLLUP_ID,
@@ -146,7 +146,7 @@ abstract contract RevertContinueActions {
         );
     }
 
-    function _l2Entries(address selfCallerL2, address counterL1, address batcherL1)
+    function _l2Entries(address selfCallerL2, address counterL1, address aliceL1)
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -156,14 +156,14 @@ abstract contract RevertContinueActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: batcherL1,
+            sourceAddress: aliceL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
             targetAddress: selfCallerL2,
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector)
         });
 
-        bytes32 proxyEntryHash = _outerActionHashL2(selfCallerL2, batcherL1);
+        bytes32 proxyEntryHash = _outerActionHashL2(selfCallerL2, aliceL1);
         bytes32 ccInner = _innerActionHashL2(counterL1, selfCallerL2);
         // Top-level CALL_BEGIN on L2 folds the incoming `execute()` call (callGas = 0), hashed with the
         // L2's own id as targetRollupId (== `_outerActionHashL2`, which already uses L2_ROLLUP_ID).
@@ -190,7 +190,7 @@ abstract contract RevertContinueActions {
         });
     }
 
-    function _l1Entries(address selfCaller, address counterL2, address batcher)
+    function _l1Entries(address selfCaller, address counterL2, address alice)
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -208,18 +208,18 @@ abstract contract RevertContinueActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: batcher,
+            sourceAddress: alice,
             sourceRollupId: L2_ROLLUP_ID,
             targetAddress: selfCaller,
             value: 0,
             data: abi.encodeWithSelector(SelfCallerWithRevert.execute.selector)
         });
 
-        bytes32 proxyEntryHash = _outerActionHash(selfCaller, batcher);
+        bytes32 proxyEntryHash = _outerActionHash(selfCaller, alice);
         // CALL_BEGIN identity of the top-level `execute()` call executed ON L1 (targetRollupId = MAINNET),
-        // sourced from (batcher, L2) per the call's struct fields.
+        // sourced from (alice, L2) per the call's struct fields.
         bytes32 ccOuter =
-            crossChainCallHash(false, batcher, L2_ROLLUP_ID, selfCaller, MAINNET_ROLLUP_ID, 0, calls[0].data);
+            crossChainCallHash(false, alice, L2_ROLLUP_ID, selfCaller, MAINNET_ROLLUP_ID, 0, calls[0].data);
         bytes32 ccInner = _innerActionHash(counterL2, selfCaller);
         (bytes32 rollingHash, bytes32 rhFire) =
             _foldRevertContinue(RollingHashBuilder.entryBegin(deltas, proxyEntryHash), ccOuter, ccInner);
@@ -331,22 +331,6 @@ contract DeployL2Step2 is Script {
 //  Execute
 // ═══════════════════════════════════════════════════════════════════════
 
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address selfCallerProxy
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (bool ok,) = selfCallerProxy.call(abi.encodeWithSelector(SelfCallerWithRevert.execute.selector));
-        require(ok, "outer call failed");
-    }
-}
-
 // ExecuteL2 - L2-side mirror. SYSTEM-driven via executeIncomingCrossChainCall:
 // loads the L2 entry (1 outer call + 1 ExpectedOutgoingCrossChainCall) and runs SelfCaller (on L2) execute().
 // execute() does try this.innerCall() catch {} then target.increment(). innerCall consumes the
@@ -388,17 +372,16 @@ contract Execute is Script, RevertContinueActions {
         address selfCallerProxy = vm.envAddress("SELF_CALLER_PROXY");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        // exported by run-local.sh so ComputeExpected can reproduce the L1-side caller
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(selfCallerAddr, counterL2, address(batcher)),
-            noStaticEntries(),
-            selfCallerProxy
-        );
+        // The broadcaster EOA is the L1 caller (alice) — batch + trigger are separate txs
+        // mined in one block by the runner (execute_l1_same_block).
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(selfCallerAddr, counterL2, msg.sender), noStaticEntries()
+                )
+            );
+        (bool ok,) = selfCallerProxy.call(abi.encodeWithSelector(SelfCallerWithRevert.execute.selector));
+        require(ok, "outer call failed");
 
         console.log("done");
         console.log("selfCaller.lastResult=%s", SelfCallerWithRevert(selfCallerAddr).lastResult());
@@ -437,12 +420,10 @@ contract ComputeExpected is ComputeExpectedBase, RevertContinueActions {
         address selfCallerAddr = vm.envAddress("SELF_CALLER");
         address counterL1 = vm.envAddress("COUNTER_L1");
         address selfCallerL2 = vm.envAddress("SELF_CALLER_L2");
+        // Both sides use the broadcaster EOA as the caller.
         address alice = msg.sender;
-        // L1-side caller: the local Batcher makes the user call (run-local exports BATCHER_L1);
-        // in network mode the trigger is the EOA itself.
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
 
-        ExecutionEntry[] memory l1 = _l1Entries(selfCallerAddr, counterL2, aliceL1);
+        ExecutionEntry[] memory l1 = _l1Entries(selfCallerAddr, counterL2, alice);
         L2ExecutionEntry[] memory l2 = _l2Entries(selfCallerL2, counterL1, alice);
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);

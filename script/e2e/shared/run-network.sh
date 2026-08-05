@@ -74,11 +74,6 @@ done
 
 export L2_ROLLUP_ID="${L2_ROLLUP_ID:-1}"
 
-# Local-mode-only export: on a network the trigger comes from the EOA, so ComputeExpected's
-# vm.envOr("BATCHER_L1", msg.sender) must take the fallback. A stale value inherited from
-# the shell (e.g. after a local debug run) would shift every L1 hash.
-unset BATCHER_L1
-
 for var in RPC PK ROLLUPS L2_RPC MANAGER_L2; do
     if [[ -z "${!var:-}" ]]; then
         echo "Missing required arg: --$(echo "$var" | tr '_' '-' | tr '[:upper:]' '[:lower:]')"

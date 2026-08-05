@@ -15,7 +15,7 @@ Pick the destination-side pattern by where the user-trigger lives:
 | Source-side trigger | Destination-side simulation |
 |---|---|
 | L1 (`postAndVerifyBatch` + user tx) | `managerL2.executeIncomingCrossChainCall(dest, value, data, src, srcRollup, entries, staticEntries)` from `SYSTEM_ADDRESS` — atomically replaces the table and drives `entries[0]`, lazily creating the source proxy on L2 |
-| L2 (`loadExecutionTable` + user tx) | L1 batcher posting an entry with `proxyEntryHash = bytes32(0)` covered by `immediateEntryCount` — the entry executes inline during `postAndVerifyBatch` as an immediate L2Tx |
+| L2 (`loadExecutionTable` + user tx) | L1 `postAndVerifyBatch` posting an entry with `proxyEntryHash = bytes32(0)` covered by `immediateEntryCount` — the entry executes inline as an immediate L2Tx |
 
 There is no `executeIncomingCrossChainCall` on L1 — the L1-side analog for system-driven execution is the immediate-L2Tx path. Note the batch-structure rule: the leading run of `proxyEntryHash == 0` entries **must** be covered by `immediateEntryCount` (`ImmediateCountStrandsLeadingL2Tx` otherwise); `executeL2Txs(rollupId)` only serves zero-hash entries that sit *behind* a non-zero-hash entry in the queue.
 
@@ -34,7 +34,7 @@ contract ComputeExpected             // computes expected tables — DRIVES all 
                                      // (its EXPECTED_* output lines switch every check on/off)
 ```
 
-`run-local.sh` auto-runs `ExecuteL2` first, then `Execute`. If only one is present the other phase is skipped — keep both for two-sided.
+`run-local.sh` auto-runs `ExecuteL2` first, then `Execute` — each under a same-block wrapper (`execute_same_block`: automine off, broadcast, mine once), so a script's txs (`postAndVerifyBatch`/`loadExecutionTable` + the user trigger) land in one block and every trigger comes from the broadcaster EOA, on both chains and in both modes. If only one Execute contract is present the other phase is skipped — keep both for two-sided.
 
 ## Patterns
 
@@ -48,7 +48,7 @@ For entry construction and the rolling-hash schema (tagged folds, seeded with en
 
 - **No `@L1` / `@L2` in `///` docblocks.** Solidity natspec parses `@…` as a tag. Use `(CAP on L1, MAINNET)` phrasing in `///` blocks; `//` comments are fine.
 - **Strict `msg.value` match** for `executeIncomingCrossChainCall` — even `value=0` requires `msg.value=0`.
-- **Same-block requirement** on both chains. `run-local.sh`'s `execute_l2_same_block` wrapper disables automine, queues txs, and mines them together — don't roll blocks manually in `Execute`/`ExecuteL2`.
+- **Same-block requirement** on both chains. `run-local.sh` runs `Execute` and `ExecuteL2` through the `execute_same_block` wrapper (disables automine, queues txs, mines them together) — don't roll blocks manually in `Execute`/`ExecuteL2`.
 - **Strict ascending order** for `proofSystems` and `rollupIdsWithProofSystems` in the batch. The `E2EHelpers.sol` builders handle the single-prover / single-rollup case.
 
 ## Verification

@@ -326,24 +326,6 @@ contract Deploy2 is Script {
 //  Executes
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Batcher: postAndVerifyBatch + trigger the outer entry via capL2Proxy.
-///          Alice is the batcher itself (msg.sender into the proxy) in local mode.
-contract Batcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries,
-        address capL2Proxy
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, L2_ROLLUP_ID, entries, staticEntries));
-        (bool ok,) = capL2Proxy.call(abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector));
-        require(ok, "outer call failed");
-    }
-}
-
 /// ExecuteL2 — local mode: SYSTEM-driven L2 simulation of the inbound nested call.
 /// `_processNCalls` lazily creates the source proxy for (alice, MAINNET) on first use,
 /// then forwards capL2.incrementProxy() through it; capL2's reentrant call to its
@@ -377,7 +359,9 @@ contract ExecuteL2 is Script, NestedActions {
     }
 }
 
-/// Execute — local mode: postAndVerifyBatch + trigger via Batcher.
+/// Execute — local mode: postAndVerifyBatch tx + outer trigger tx from the EOA.
+/// The runner mines both in one block (execute_l1_same_block), satisfying the
+/// same-block consumption gate.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L2, COUNTER_AND_PROXY, CAP_L2_PROXY
 contract Execute is Script, NestedActions {
     function run() external {
@@ -388,18 +372,16 @@ contract Execute is Script, NestedActions {
         address capL2Proxy = vm.envAddress("CAP_L2_PROXY");
 
         vm.startBroadcast();
-        Batcher batcher = new Batcher();
-        console.log("BATCHER_L1=%s", address(batcher));
-
-        // Alice = the Batcher contract itself (msg.sender into capL2Proxy).
-        // The outer entry's crossChainCallHash must use alice = address(batcher).
-        batcher.execute(
-            EEZ(rollupsAddr),
-            proofSystemAddr,
-            _l1Entries(counterL2Addr, capAddr, address(batcher)),
-            noStaticEntries(),
-            capL2Proxy
-        );
+        // Alice = the broadcaster EOA (msg.sender into capL2Proxy).
+        // The outer entry's crossChainCallHash must use alice = msg.sender.
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, capAddr, msg.sender), noStaticEntries()
+                )
+            );
+        (bool ok,) = capL2Proxy.call(abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector));
+        require(ok, "outer call failed");
 
         console.log("done");
         console.log("cap.counter=%s", CounterAndProxy(capAddr).counter());
@@ -441,14 +423,11 @@ contract ComputeExpected is ComputeExpectedBase, NestedActions {
         address counterL1Addr = vm.envAddress("COUNTER_L1");
         address capAddr = vm.envAddress("COUNTER_AND_PROXY");
         address capL2Addr = vm.envAddress("COUNTER_AND_PROXY_L2");
-        // L1 source is the Batcher contract Execute deploys; L2 source is the script
-        // broadcaster (SYSTEM) acting as alice. BATCHER_L1 is exported by run-local.sh
-        // from Execute's output.
-        address aliceL1 = vm.envOr("BATCHER_L1", msg.sender);
-        address aliceL2 = msg.sender;
+        // Both sides' trigger source is the script broadcaster EOA acting as alice.
+        address alice = msg.sender;
 
-        ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, capAddr, aliceL1);
-        L2ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capL2Addr, aliceL2);
+        ExecutionEntry[] memory l1 = _l1Entries(counterL2Addr, capAddr, alice);
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL1Addr, capL2Addr, alice);
 
         bytes32 l1Hash = _entryHash(l1[0]);
         bytes32 l2Hash = _entryHash(l2[0]);
