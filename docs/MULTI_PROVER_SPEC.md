@@ -234,7 +234,8 @@ During `postAndVerifyBatch`, the leading `batch.immediateEntryCount` entries for
 IMMEDIATE prefix. Its leading run of L2Tx entries (`proxyEntryHash == 0`) executes straight
 from calldata — never SSTOREd. Only the prefix REMAINDER (the entries past the L2Tx run) is
 copied into `_transientEntries`, together with the leading `immediateStaticEntryCount` static
-entries into `_transientStaticEntries`, and only when `msg.sender` has code to drive them.
+entries into `_transientStaticEntries`; `msg.sender` must have code to drive them
+(`MetaEntriesWithoutReceiver` otherwise).
 The transient stream is consumed via the global `_transientEntryIndex` cursor (with the same
 forward-scan matching as the persistent path).
 
@@ -280,8 +281,9 @@ state-root match if they depended on it.
    `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }`
    and advance. If the run was non-empty and EVERY entry reverted, the whole post is unwound
    with `AllImmediateL2TxsFailed`.
-7. **Meta hook**: if immediate-prefix entries remain past the L2Tx run AND
-   `msg.sender.code.length > 0`, push them into `_transientEntries` (and the leading
+7. **Meta hook**: if immediate-prefix entries remain past the L2Tx run, `msg.sender` must have
+   code to receive the hook (`MetaEntriesWithoutReceiver` otherwise); push them into
+   `_transientEntries` (and the leading
    `immediateStaticEntryCount` static entries into `_transientStaticEntries`), then fire
    `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` so the caller can
    drive them via cross-chain proxy calls.

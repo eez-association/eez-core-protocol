@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  IEEZ — shared cross-chain interface + L1 (EEZ) execution structs.
@@ -11,7 +11,7 @@ pragma solidity ^0.8.28;
 
 /// @notice A participating rollup + the subset of the batch's `proofSystems[]` it accepts.
 struct RollupIdWithProofSystems {
-    uint64 rollupId; // the participating rollup
+    uint64 rollupId; // the rollup id
     uint64[] proofSystemIndexes; // indices into the batch's `proofSystems[]` selecting the systems this rollup will be verified against; strictly increasing
 }
 
@@ -29,6 +29,7 @@ struct ExpectedStateRootPerRollup {
 ///      `[0, proofSystems.length)` and must meet that rollup's threshold (checked by its manager).
 /// @dev `immediateEntryCount` / `immediateStaticEntryCount` are UNPROVEN dispatch params — not folded
 ///      into the public input, so the immediate/persistent split can be re-tuned without re-proving.
+///      One invariant id enforced on-chain: the leading run of L2Txs always executes immediately.
 struct ProofSystemBatchPerVerificationEntries {
     ExpectedStateRootPerRollup[] expectedStateRootPerRollup; // optional state-root assertions from the composer; any mismatch reverts the tx
     ExecutionEntry[] entries; // execution entries: immediate entries are executed in this call, remainder are saved in storage

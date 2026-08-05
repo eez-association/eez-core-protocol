@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 /// @title IRollupContract
 /// @notice Per-rollup contract interface — the canonical (or custom) handle that owns proof

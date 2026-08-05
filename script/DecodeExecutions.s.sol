@@ -18,7 +18,7 @@ import {Vm} from "forge-std/Vm.sol";
 ///       it relies on are rich enough for almost all debugging use cases:
 ///       BatchPosted, RollupCreated, StateUpdated,
 ///       L2ExecutionPerformed, L2TxSkipped, ExecutionConsumed,
-///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted (L1 + L2 kinds), CallResult,
+///       L2TxExecuted, EntryExecuted, CrossChainCallExecuted (L1 + L2 kinds), CallResult,
 ///       CallsReverted, CrossChainProxyCreated,
 ///       and the L2-only ExecutionTableLoaded / IncomingCrossChainCallExecuted.
 ///       For a full pre-execution dump of entries, decode the postAndVerifyBatch tx
@@ -30,7 +30,7 @@ import {Vm} from "forge-std/Vm.sol";
 contract DecodeExecutions is Script {
     // ── Event signatures (L1 + L2 share most of these) ──
     // New flatten model: rollupIds are uint64; ImmediateEntrySkipped→L2TxSkipped;
-    // RevertSpanExecuted→CallsReverted; L2TXExecuted carries only the rollupId.
+    // RevertSpanExecuted→CallsReverted; L2TxExecuted carries only the rollupId.
     bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
     bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint64,address,bytes32)");
     bytes32 constant SIG_STATE_UPDATED = keccak256("StateUpdated(uint64,bytes32)");
@@ -38,7 +38,7 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_IMMEDIATE_SKIPPED = keccak256("L2TxSkipped(uint256,bytes)");
     bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint64,uint256)");
     bytes32 constant SIG_EXECUTION_CONSUMED_L2 = keccak256("ExecutionConsumed(bytes32,uint256)");
-    bytes32 constant SIG_L2TX_EXECUTED = keccak256("L2TXExecuted(uint64)");
+    bytes32 constant SIG_L2TX_EXECUTED = keccak256("L2TxExecuted(uint64)");
     bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
@@ -133,7 +133,7 @@ contract DecodeExecutions is Script {
         } else if (sig == SIG_EXECUTION_CONSUMED_L2) {
             _printExecutionConsumedL2(topics, p);
         } else if (sig == SIG_L2TX_EXECUTED) {
-            _printL2TXExecuted(topics, p);
+            _printL2TxExecuted(topics, p);
         } else if (sig == SIG_ENTRY_EXECUTED) {
             _printEntryExecuted(topics, data, p);
         } else if (sig == SIG_CROSSCHAIN_CALL_EXECUTED) {
@@ -241,10 +241,10 @@ contract DecodeExecutions is Script {
         );
     }
 
-    function _printL2TXExecuted(bytes32[] memory topics, string memory p) internal pure {
-        // L2TXExecuted(uint64 indexed rollupId) — cursor no longer emitted in the flatten model.
+    function _printL2TxExecuted(bytes32[] memory topics, string memory p) internal pure {
+        // L2TxExecuted(uint64 indexed rollupId) — cursor no longer emitted in the flatten model.
         uint256 rollupId = uint256(topics[1]);
-        console.log(string.concat(p, "L2TXExecuted(rollup=", vm.toString(rollupId), ")"));
+        console.log(string.concat(p, "L2TxExecuted(rollup=", vm.toString(rollupId), ")"));
     }
 
     function _printEntryExecuted(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
@@ -380,8 +380,15 @@ contract DecodeExecutions is Script {
     function _printIncomingCall(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
         // IncomingCrossChainCallExecuted(bytes32 indexed cchash, bool isStatic, address src, uint64 srcRollup, address dest, uint256 value, uint64 callGas, bytes data) — hash-formula field order
         bytes32 cchash = topics[1];
-        (bool isStatic, address src, uint256 srcRollup, address dest, uint256 value, uint256 callGas, bytes memory innerData)
-        = abi.decode(data, (bool, address, uint256, address, uint256, uint256, bytes));
+        (
+            bool isStatic,
+            address src,
+            uint256 srcRollup,
+            address dest,
+            uint256 value,
+            uint256 callGas,
+            bytes memory innerData
+        ) = abi.decode(data, (bool, address, uint256, address, uint256, uint256, bytes));
         console.log(
             string.concat(
                 p,

@@ -441,6 +441,23 @@ contract EEZTest is Base {
         _postBatchOne(r, _emptyEntries(), lookups, 0, 1);
     }
 
+    /// @notice Meta-hook entries (immediate prefix past the leading L2Tx run) are never persisted,
+    ///         so a poster without code to receive the hook would silently drop them —
+    ///         `MetaEntriesWithoutReceiver` rejects the post.
+    function test_SubBatch_MetaEntriesWithoutReceiverReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(r.id, _oneDelta(r.id, bytes32(0), keccak256("x"), 0));
+        entries[0].proxyEntryHash = keccak256("proxy-entry"); // not an L2Tx → meta-hook prefix
+
+        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(r, entries, _emptyStaticEntries(), 1, 0);
+
+        vm.prank(makeAddr("eoaPoster"));
+        vm.expectRevert(EEZ.MetaEntriesWithoutReceiver.selector);
+        rollups.postAndVerifyBatch(batch);
+    }
+
     /// @notice L2Tx entries (`proxyEntryHash == 0`) must be canonical (`success == true`, empty
     ///         `returnData`) — defensive check of the prover constraint; a queued violator
     ///         would poison `executeL2Txs` for the block.

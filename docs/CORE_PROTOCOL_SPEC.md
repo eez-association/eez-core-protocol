@@ -384,7 +384,7 @@ Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proof
 3. **Fetch + verify**: `_getVerificationKeysPerRollup(batch)` calls each rollup's manager via `IRollupContract.checkProofSystemsAndGetVkeys(subset)` (a `view` call; the manager enforces threshold + per-PS membership internally and must return exactly one vkey per subset entry, else `InvalidProofSystemConfig`). Then `_verifyProofSystemBatch(batch, vkMatrix)` computes the public inputs and calls `IProofSystem.verify(...)` for each PS.
 4. **Mark verified-this-block** (`_markVerifiedBlockAndDeletePreviousEntries(rid)` for each rollup): sets `verificationByRollup[rid].lastVerifiedBlock = block.number` AND **wipes the rollup's `entryQueue` / `staticEntryQueue` / `entryQueueIndex` on EVERY verify** — a same-block re-verify REPLACES (does not append to) the prior batch's entries for that rollup. Done before any non-view external CALL so (a) `executeCrossChainCall` / `executeL2Txs(rid)` work during the meta hook, and (b) `setStateRoot` is locked out until the next block.
 5. **Drain the leading run of immediate L2Txs straight from calldata**: while `i < immediateEntryCount` and `batch.entries[i].proxyEntryHash == bytes32(0)`, self-call `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }` and advance — a skip is not a hard error, but if at least one L2Tx was attempted and NONE succeeded, revert `AllImmediateL2TxsFailed` (a fully-failed immediate prefix unwinds the whole post). These entries are never SSTOREd whole; only each entry's reentrant table is parked in `_expectedL1toL2CallsForImmediateL2Txs` for the duration of that entry.
-6. **Meta hook**: if entries remain in the immediate prefix past the leading L2Tx run (`i < immediateEntryCount`) AND `msg.sender.code.length > 0`: push `entries[i..immediateEntryCount)` into `_transientEntries` and `staticEntries[0..immediateStaticEntryCount)` into `_transientStaticEntries`, then call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2Txs(rid)` to consume the transient stream.
+6. **Meta hook**: if entries remain in the immediate prefix past the leading L2Tx run (`i < immediateEntryCount`), `msg.sender` must have code to receive the hook (revert `MetaEntriesWithoutReceiver` otherwise — the never-persisted prefix would be silently dropped): push `entries[i..immediateEntryCount)` into `_transientEntries` and `staticEntries[0..immediateStaticEntryCount)` into `_transientStaticEntries`, then call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2Txs(rid)` to consume the transient stream.
 7. **Publish the remainder** (`_saveRemainderEntries(batch)`): push `entries[immediateEntryCount..]` into `verificationByRollup[entry.destinationRollupId].entryQueue` and `staticEntries[immediateStaticEntryCount..]` into the matching `staticEntryQueue`, **unconditionally** (even if the meta hook left transient entries unconsumed — there is no drain-cleanly gate). Soundness backstop: each entry's `StateUpdate.currentState` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers.
 8. **Cleanup transient tables**: `delete _transientEntries; delete _transientStaticEntries; _transientEntryIndex = 0` (emptying `_transientEntries` also closes the reentry window). Finally, `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
 
@@ -443,9 +443,9 @@ Permissionless. Consumes the next entry on `rollupId`'s queue whose `proxyEntryH
 
 ```solidity
 if (verificationByRollup[rollupId].lastVerifiedBlock != uint64(block.number)) revert ExecutionNotInCurrentBlock(rollupId);
-if (_insideExecution()) revert L2TXNotAllowedDuringExecution();
+if (_insideExecution()) revert L2TxNotAllowedDuringExecution();
 if (_entryEtherDelta != 0) revert ResidualEntryEtherIn();   // non-payable + never mid-entry — dirty accumulator = bug
-emit L2TXExecuted(rollupId);
+emit L2TxExecuted(rollupId);
 return _consumeAndExecuteEntry(rollupId, bytes32(0));
 ```
 
@@ -1272,7 +1272,7 @@ Within a single `postAndVerifyBatch`:
 1. Reentry guard: `_insideExecution() || _transientEntries.length != 0` (revert `PostBatchReentry` otherwise). Check composer state-root pins. Validate structure (including per-entry proxy-protection). Verify proofs (`checkProofSystemsAndGetVkeys` + `getCustomData` per rollup — both `view` — then `IProofSystem.verify` per PS).
 2. Mark `verificationByRollup[rid].lastVerifiedBlock = block.number` for every touched rollup; wipe each touched rollup's queues / cursor on every verify (`_markVerifiedBlockAndDeletePreviousEntries`).
 3. Drain the leading run of immediate L2Txs (`proxyEntryHash == 0`) via try/catch self-calls (skip-on-revert with `L2TxSkipped`; `AllImmediateL2TxsFailed` if a non-empty run had zero successes).
-4. Meta hook runs if immediate-prefix entries remain past the L2Tx run AND `msg.sender` has code — the remainder is pushed to the transient tables first (consumption advances the global `_transientEntryIndex`; per-rollup cursors stay untouched until persistent consumption).
+4. Meta hook runs if immediate-prefix entries remain past the L2Tx run (`msg.sender` must have code — `MetaEntriesWithoutReceiver` otherwise) — the remainder is pushed to the transient tables first (consumption advances the global `_transientEntryIndex`; per-rollup cursors stay untouched until persistent consumption).
 5. Publish the batch's remainder to per-rollup queues by `destinationRollupId` (unconditionally — even if the transient prefix wasn't fully drained; there is no drain-cleanly gate). Soundness backstop is `StateUpdate.currentState`.
 6. Wipe transient tables; reset `_transientEntryIndex`. Emit `BatchPosted(batch.rollupIdsWithProofSystems.length)`.
 
@@ -1381,7 +1381,7 @@ The protocol is intentionally reentrant. `_processNCalls` calls into proxies, wh
 
 ### I.3 Untrusted Meta Hook
 
-`postAndVerifyBatch` invokes `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` when non-L2Tx immediate entries remain and `msg.sender` has code. The hook is untrusted — it may revert, consume some entries, ignore the call, or attempt to re-enter `postAndVerifyBatch`. The protocol's defense:
+`postAndVerifyBatch` invokes `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()` when non-L2Tx immediate entries remain (a codeless sender reverts `MetaEntriesWithoutReceiver` — the never-persisted prefix would be silently dropped). The hook is untrusted — it may revert, consume some entries, ignore the call, or attempt to re-enter `postAndVerifyBatch`. The protocol's defense:
 
 - **Re-entry**: blocked by `PostBatchReentry` — see §H.9 / I.2.
 - **Partial consumption**: the persistent remainder is published anyway; `StateUpdate.currentState` is the soundness backstop at consumption time.

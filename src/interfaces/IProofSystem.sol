@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 /// @title IProofSystem
 /// @notice Interface for proof-verifying systems referenced from a per-rollup `IRollupContract`

@@ -32,7 +32,7 @@ contract SimpleTarget {
 }
 
 /// @notice Re-enters `executeL2Txs` from inside an entry's call to exercise the
-///         `L2TXNotAllowedDuringExecution` guard.
+///         `L2TxNotAllowedDuringExecution` guard.
 contract L2TXReenter {
     EEZ public immutable eez;
     uint256 public immutable rid;
@@ -43,7 +43,7 @@ contract L2TXReenter {
     }
 
     function poke() external {
-        // The inner call reverts `L2TXNotAllowedDuringExecution`; swallow it so the outer
+        // The inner call reverts `L2TxNotAllowedDuringExecution`; swallow it so the outer
         // cross-chain call resolves with a deterministic (empty) return.
         try eez.executeL2Txs(uint64(rid)) {} catch {}
     }
@@ -519,7 +519,7 @@ contract EEZCoverageTest is Base {
     }
 
     /// @notice `executeL2Txs` re-entered from inside an entry call reverts with
-    ///         `L2TXNotAllowedDuringExecution` — swallowed by the target as a failed inner call.
+    ///         `L2TxNotAllowedDuringExecution` — swallowed by the target as a failed inner call.
     function test_Execution_L2TXDuringExecutionGuard() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         L2TXReenter reenter = new L2TXReenter(rollups, r.id);

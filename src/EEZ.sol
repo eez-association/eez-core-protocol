@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 import {IProofSystem} from "./interfaces/IProofSystem.sol";
 import {IRollupContract} from "./interfaces/IRollup.sol";
@@ -24,7 +24,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 /// @title EEZ
 /// @notice L1 contract managing rollup state roots, multi-prover batch posting, and cross-chain call execution
 /// @dev EARLY-STAGE IMPLEMENTATION — NOT PRODUCTION READY.
-///      This is a first implementation of the sync-rollups protocol. It has NOT undergone an
+///      This is a first implementation of the EEZ protocol. It has NOT undergone an
 ///      external security audit. Interfaces, storage layout, error semantics, and execution
 ///      flow are expected to change in the near term as design issues are fixed and the
 ///      protocol is iterated on. Do not rely on this code for value-bearing deployments,
@@ -67,7 +67,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // ──────────────────────────────────────────────
 
     /// @notice Counter for generating rollup IDs
-    uint256 public rollupCounter;
+    uint64 public rollupCounter;
 
     /// @notice Mapping from rollup ID to rollup configuration (state root + ether + manager pointer)
     /// @dev The rollupContract is the source of truth for "is this id registered" — a zero
@@ -89,8 +89,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // calldata, so it stays empty until (and unless) the meta-hook remainder is loaded — the immediate L2Tx run's
     // own re-entry window is covered by `_insideExecution()` instead.
     // TODO: promote to real `transient` once Solidity supports it for these types.
-    ExecutionEntry[] public _transientEntries;
-    StaticExecutionEntry[] public _transientStaticEntries;
+    ExecutionEntry[] internal _transientEntries;
+    StaticExecutionEntry[] internal _transientStaticEntries;
 
     // The reentrant (L1→L2) table of the ONE immediate L2Tx entry currently executing lives in the
     // transient region owned by `ExpectedL1ToL2CallTransient`, one entry's table at a
@@ -147,7 +147,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     );
 
     /// @notice Emitted when a precomputed L2 transaction is executed
-    event L2TXExecuted(uint64 indexed rollupId);
+    event L2TxExecuted(uint64 indexed rollupId);
 
     /// @notice Emitted when a batch is posted, carrying the number of rollups verified
     event BatchPosted(uint256 indexed rollupCount);
@@ -209,7 +209,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     error ExecutionNotInCurrentBlock(uint64 rollupId);
 
     /// @notice Error when executeL2Txs is called while already inside a cross-chain execution
-    error L2TXNotAllowedDuringExecution();
+    error L2TxNotAllowedDuringExecution();
 
     /// @notice Error when the manager's `setStateRoot` escape hatch is invoked while a cross-chain
     ///         execution is in progress (e.g., the manager is reached via a cross-chain call that
@@ -225,6 +225,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when immediate static entries come without any immediate entries (unreachable —
     ///         no entries means no immediate L2Tx run and no meta hook, so nothing can consume them)
     error ImmediateStaticEntriesWithoutImmediateEntries();
+
+    /// @notice Error when meta-hook entries remain past the leading L2Tx run but `msg.sender` has no
+    ///         code to receive the hook — the never-persisted prefix would be silently dropped
+    error MetaEntriesWithoutReceiver();
 
     /// @notice Error when the first entry left OUT of the immediate prefix is itself an L2Tx
     ///         (`proxyEntryHash == 0`) — the poster truncated `immediateEntryCount` and stranded a
@@ -248,9 +252,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when an entry's destinationRollupId, a state delta's rollupId, or a
     ///         static entry's destinationRollupId references a rollup not in the batch
     error RollupNotInBatch(uint64 rollupId);
-
-    /// @notice Error when not all L2→L1 calls (`entry.l2ToL1Calls`) were consumed after execution
-    error UnconsumedL2ToL1Calls();
 
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
@@ -328,8 +329,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     function registerRollup(address rollupContract, bytes32 initialState) external returns (uint64 rollupId) {
         if (rollupContract == address(0) || rollupContract == address(this)) revert InvalidRollupContract();
 
-        // Sequential ids stay well below 2^64 — required: ProxyInfo.originalRollupId narrows to uint64.
-        rollupId = uint64(++rollupCounter);
+        rollupId = ++rollupCounter;
         rollups[rollupId] = RollupConfig({rollupContract: rollupContract, stateRoot: initialState, etherBalance: 0});
 
         // One-shot callback informing the manager of its rollupId. Manager must accept this
@@ -349,9 +349,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @dev Steps: (1) validate structure, (2) fetch per-rollup vkeys, (3) verify all proofs
     ///      atomically, (4) mark rollups verified-this-block, (5+6) run the leading L2Tx
     ///      (`proxyEntryHash == 0`) entries immediately, straight from calldata, (7) fire the meta hook —
-    ///      load the remaining transient-prefix entries and trigger `msg.sender`'s hook (if it has code)
-    ///      to consume them, presumably via account abstraction, (8) clear transient tables, (9) publish
-    ///      the remainder executions to per-rollup queues. See the inline comments for the per-step rationale.
+    ///      load the remaining transient-prefix entries and trigger `msg.sender`'s hook (which it must
+    ///      implement) to consume them, presumably via account abstraction, (8) publish the remainder
+    ///      executions to per-rollup queues, (9) clear transient tables. See the inline comments for
+    ///      the per-step rationale.
     /// @param batch entries, static entries, per-rollup PS subsets, proofs, transient prefix bounds,
     ///        and the L1 `blockNumber` the batch binds to.
     function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external {
@@ -361,8 +362,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         // during the immediate L2Tx run AND any executing entry, `_transientEntries.length != 0` during
         // the meta hook. The remaining external calls before the immediate L2Tx run
         // (`checkProofSystemsAndGetVkeys`, `getCustomData`, `verify`) are all `view`/STATICCALL, so a
-        // reentrant batch (which SSTOREs immediately) can't survive there regardless
-        // If in a future there are allowed reentranat calls, e.g making getCustomData non-view, we might need an explicit mutex
+        // reentrant batch (which SSTOREs immediately) can't survive there regardless. If reentrant
+        // calls are ever allowed there (e.g. a non-view `getCustomData`), an explicit mutex is needed.
         if (_insideExecution() || _transientEntries.length != 0) revert PostBatchReentry();
 
         // 1a. OPTIONAL composer assertion: every `expectedStateRootPerRollup` pin must equal the live root.
@@ -417,10 +418,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         // poster executing a smaller slice. `i != 0` ⇔ at least one L2Tx was attempted.
         if (i != 0 && !anyExecuted) revert AllImmediateL2TxsFailed();
 
-        // 7. Meta hook — if transient-prefix entries remain past the leading L2Tx run and the caller has
-        //    code, load the remainder (entries[i..immediateEntryCount] plus the static-entry
-        //    pool) into the transient tables and let the caller drive them via proxy calls.
-        if (i < immediateEntryCount && msg.sender.code.length > 0) {
+        // 7. Meta hook — if transient-prefix entries remain past the leading L2Tx run, load the
+        //    remainder (entries[i..immediateEntryCount] plus the static-entry pool) into the
+        //    transient tables and let the caller drive them via proxy calls. The prefix is never
+        //    persisted, so a caller without code (nothing to receive the hook) would silently drop
+        //    the proven entries — reject instead.
+        if (i < immediateEntryCount) {
+            if (msg.sender.code.length == 0) revert MetaEntriesWithoutReceiver();
             for (uint256 j = i; j < immediateEntryCount; j++) {
                 _transientEntries.push(batch.entries[j]);
             }
@@ -837,12 +841,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         }
 
         // This function is for starting L2 transactions, and cannot be called in the middle of another execution
-        if (_insideExecution()) revert L2TXNotAllowedDuringExecution();
+        if (_insideExecution()) revert L2TxNotAllowedDuringExecution();
 
         // Non-payable and non mid-entry — a dirty _entryEtherDelta here is a bug.
         if (_entryEtherDelta != 0) revert ResidualEntryEtherIn();
 
-        emit L2TXExecuted(rollupId);
+        emit L2TxExecuted(rollupId);
         return _consumeAndExecuteEntry(rollupId, bytes32(0));
     }
 
@@ -1176,7 +1180,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
                         )
                     );
                     if (l2ToL1Call.value > 0 && success) {
-                        // Safe int to uint conversion since is a value that we just transfer in the above line, i cannot be >=2^255 ether
+                        // Safe uint→int cast: the value was just physically transferred, so it is far below 2^255.
                         _entryEtherDelta -= int256(l2ToL1Call.value);
                     }
                 }
@@ -1318,8 +1322,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
 
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
-        // `destRid`'s persistent queue.
-        // Note that static calls do not obsolete after a block passes. As long as the state roots matches it can be execute
+        // `destRid`'s persistent queue. Static entries do not expire with the block: they stay
+        // resolvable for as long as their state-root pins hold.
         StaticExecutionEntry[] storage staticEntries =
             _transientEntries.length != 0 ? _transientStaticEntries : verificationByRollup[destRid].staticEntryQueue;
         for (uint256 i = 0; i < staticEntries.length; i++) {
@@ -1396,7 +1400,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice True while inside a cross-chain call execution — backed by the allowed-rollups array
     ///         (non-empty ⇔ executing, since every entry has ≥1 delta and the array is `delete`d at the
     ///         end of `_executeEntry`).
-    // review we could check rolling hash instead too
     function _insideExecution() internal view returns (bool) {
         return _verifiedRollupInCurrentExecutingEntry.length != 0;
     }
@@ -1508,10 +1511,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         return false;
     }
 
-    /// @notice Copies the `n`-call span at `start` into a fresh memory array. Explicit field copy
-    ///         (not element assignment) so the fresh structs don't alias the caller's array. The
-    ///         caller zeroes the trigger's `revertNextNCalls` before slicing (so `span[0]` copies 0
-    ///         and the isolated re-run won't recurse into the same span).
+    /// @notice Copies the `n`-call span at `start` into a fresh memory array (field-by-field, so
+    ///         the structs don't alias the caller's). The caller zeroes the trigger's
+    ///         `revertNextNCalls` before slicing, so the isolated re-run won't recurse into the same span.
     function _sliceL2ToL1Calls(L2ToL1Call[] memory calls, uint256 start, uint256 n)
         internal
         pure

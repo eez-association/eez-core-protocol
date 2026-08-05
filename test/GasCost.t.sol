@@ -5,6 +5,12 @@ import {console} from "forge-std/Test.sol";
 import {GasFixture, ArrayStore} from "./GasFixture.t.sol";
 import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 
+/// @notice Minimal meta-hook receiver: accepts the callback and returns without consuming,
+///         so a posted transient prefix is loaded but never run.
+contract NoopMetaReceiver {
+    function executeMetaCrossChainTransactions() external {}
+}
+
 /// @title GasCost
 /// @notice L1-only gas measurements for the EEZ flows. Two kinds of cost:
 ///         (1) POSTING a table (`postAndVerifyBatch`), and
@@ -21,6 +27,9 @@ import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../sr
 ///           bare entry -> +1 L2ToL1Call -> +1 reentrant ExpectedL1ToL2Call
 ///           -> erc20 / uniswap directly -> erc20 + uniswap + reentrant combined.
 contract GasCost is GasFixture {
+    /// @notice Poster for meta-prefix batches (deployed here, outside any measured window).
+    NoopMetaReceiver internal noopMetaReceiver = new NoopMetaReceiver();
+
     /// @notice Steady-state post of one rS entry of the given shape. Caller ensures the queue
     ///         already holds one same-shape entry (the "previous block") so it is delete+push over
     ///         non-zero originals. Colds slots first. Entries are built before the measured
@@ -318,9 +327,9 @@ contract GasCost is GasFixture {
         L2ToL1Call[] memory calls = _calls(_reentrantCall());
         (bytes32 h, ExpectedL1ToL2Call[] memory exp) = _foldExec(_hEntryBegin(deltas, peh), calls, _rets(""), true);
         ExecutionEntry memory e = _entry(deltas, peh, calls, exp, "", h);
-        // Post as an EOA: a contract sender would get the meta-hook callback when an unexecuted
-        // transient entry remains (the !execute case), which the test contract doesn't implement.
-        vm.prank(alice);
+        // The !execute case leaves an unexecuted transient prefix, so the poster must implement
+        // the meta hook (`MetaEntriesWithoutReceiver`); the no-op receiver loads it and returns.
+        vm.prank(execute ? alice : address(noopMetaReceiver));
         _postBatchTwoT(rA.id, rB.id, _one(e), 1); // immediateEntryCount = 1
     }
 
@@ -344,7 +353,13 @@ contract GasCost is GasFixture {
 
         console.log("transient_batch_with_exec   ", withExec);
         console.log("transient_batch_without_exec", withoutExec);
-        console.log("  immediate execution cost  ", withExec - withoutExec);
+        // The !execute baseline pays the transient load (SSTORE pushes + hook) the execute case
+        // skips, so the delta can be negative.
+        if (withExec >= withoutExec) {
+            console.log("  immediate execution cost  ", withExec - withoutExec);
+        } else {
+            console.log("  immediate execution cost  -", withoutExec - withExec);
+        }
     }
 
     // Same-rollup (1 StateUpdate) reentrant entry loaded into the transient table; proxyEntryHash==0
