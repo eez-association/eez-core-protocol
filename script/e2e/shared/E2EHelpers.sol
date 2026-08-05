@@ -37,11 +37,15 @@ uint64 constant MAINNET_ROLLUP_ID = 0;
 // ══════════════════════════════════════════════════════════════════════
 
 /// @notice Returns existing proxy if already deployed, otherwise creates it.
+/// @dev Compute-first, NOT try/create/catch: a create that succeeds in forge's
+///      local simulation but collides on-chain (the same proxy identity created
+///      by an earlier run — proxy salts have no chain/domain separation, so
+///      identities recur across scenarios) gets RECORDED and then hard-fails
+///      the on-chain simulation replay.
 function getOrCreateProxy(IEEZ manager, address originalAddress, uint64 originalRollupId) returns (address proxy) {
-    try manager.createCrossChainProxy(originalAddress, originalRollupId) returns (address p) {
-        proxy = p;
-    } catch {
-        proxy = manager.computeCrossChainProxyAddress(originalAddress, originalRollupId);
+    proxy = manager.computeCrossChainProxyAddress(originalAddress, originalRollupId);
+    if (proxy.code.length == 0) {
+        proxy = manager.createCrossChainProxy(originalAddress, originalRollupId);
     }
 }
 

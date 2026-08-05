@@ -5,38 +5,29 @@ allowed-tools: Read, Write, Edit, Bash
 
 # Skill: create-e2e-test
 
-Generate a new `script/e2e/<scenario>/E2E.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
+Generate a new `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
 
 ## Before writing anything
 
 1. Load the two rules files into context — they are authoritative:
-   - `.claude/skills/create-e2e-test/rules/e2e-structure.md` — file/contract layout
-   - `.claude/skills/create-e2e-test/rules/entry-construction.md` — how to build `ExecutionEntry` / `StaticCall` / `NestedAction` / `CrossChainCall` in the flatten model
-2. Read the closest existing test as a template. Good starting points:
-   - Simple L1→L2 with precomputed return: `script/e2e/counter/E2E.s.sol`
-   - Simple L2→L1: `script/e2e/counterL2/E2E.s.sol`
-   - Value + ether delta: `script/e2e/bridge/E2E.s.sol`
-   - Rich return data: `script/e2e/helloWorld/E2E.s.sol`
-   - Same actionHash consumed twice: `script/e2e/multi-call-twice/E2E.s.sol`
-   - Different actionHashes consumed sequentially: `script/e2e/multi-call-two-diff/E2E.s.sol`
-   - `calls[]` + `nestedActions[]` with rolling-hash replay: `script/e2e/nestedCounter/E2E.s.sol`
-3. Read `src/Rollups.sol` and `src/EEZL2.sol` — the on-chain bookkeeping is the ground truth for every hash you compute off-chain. `_computeActionInputHash`, `_processNCalls`, `_consumeNestedAction`, and the entry-hash formula in `_computeEntryHashes` should be mirrored exactly by your off-chain builders (use the helpers in `script/e2e/shared/E2EHelpers.sol`).
+   - `.claude/skills/create-e2e-test/rules/e2e-structure.md` — file/contract layout, runner contract, output protocol
+   - `.claude/skills/create-e2e-test/rules/entry-construction.md` — how to build the entry tables (and which docs/specs own each formula)
+2. Read the closest existing test as a template — use the pattern index at the end of `rules/entry-construction.md` to pick it.
+3. Read `src/EEZ.sol` and `src/L2/EEZL2.sol` — the on-chain bookkeeping is the ground truth for every hash you compute off-chain. `computeCrossChainCallHash`, `_processNCalls`, `_consumeNestedCall`, and the rolling-hash folds in `src/base/EEZBase.sol` are mirrored exactly by `script/e2e/shared/E2EHelpers.sol` — always use those helpers.
 
 ## Design the tables on paper first
 
 Before any code, list:
 
-- **Trigger source** — who/what starts the chain? A proxy call on L1? An L2 user tx? A batcher?
-- **On which chain** each `ExecutionEntry` lives (L1 via `postBatch`, L2 via `loadExecutionTable`).
-- For each entry:
-  - `actionHash` — the action that will trigger its consumption. `bytes32(0)` means immediate (first entry only).
-  - `stateDeltas[]` — L1 entries track rollup state + `etherDelta`. L2 entries must be `new StateDelta[](0)`.
-  - `calls[]` — inline cross-chain calls run by the manager as part of entry consumption. Flat list; executed in order.
-  - `nestedActions[]` — precomputed return values for reentrant `executeCrossChainCall` invocations that happen *during* `calls[]` processing. Consumed sequentially by index.
-  - `callCount` — number of top-level `calls[]` iterations per trigger. Usually `calls.length`; smaller if a later revert span is triggered separately.
-  - `returnData` — precomputed return data the proxy surfaces back to the caller.
-  - `failed` — when true, after the entry commits, `_consumeAndExecute` replays `returnData` as a revert.
-  - `rollingHash` — final expected tagged-hash tape. Compute using `RollingHashBuilder` in exactly the order the on-chain loop will produce.
+- **Trigger source** — who/what starts the chain? A proxy call on L1? An L2 user tx? A batcher? (The actual caller address is part of every hash — see `BATCHER_L1` in `rules/entry-construction.md`.)
+- **On which chain** each `ExecutionEntry` lives (L1 via `postAndVerifyBatch`, L2 via `loadExecutionTable` / `executeIncomingCrossChainCall`).
+- For each entry (current struct fields — see `src/interfaces/IEEZ.sol` / `IEEZL2.sol`):
+  - `proxyEntryHash` — the cross-chain call hash that triggers its consumption; `bytes32(0)` = system-driven L2Tx entry (L1 only, leading run must be immediate).
+  - `stateUpdates[]` — L1 entries only (≥1; placeholder roots; every touched rollup in the set). L2 entries have none.
+  - `l2ToL1Calls[]` / `incomingCalls[]` — the entry's TOP-LEVEL calls; each reentrant frame carries its own sub-array.
+  - `expectedL1ToL2Calls[]` / `expectedOutgoingCalls[]` — the unified reentrant table, content-addressed by `expectedL1toL2Hash(ccHash, rollingHashAtFire)`.
+  - `success` + `returnData` — `success: false` means the entry runs, verifies, then reverts with `returnData`.
+  - `rollingHash` — final expected tagged tape; build with `RollingHashBuilder` in exactly the order the on-chain loop folds.
 
 Do not start writing Solidity until the tables are on paper. Rolling-hash mismatches waste far more time than this planning step.
 
@@ -50,7 +41,7 @@ Strictly follow `rules/e2e-structure.md`. Contracts appear in this order inside 
 4. **Execute** — L1-side local-mode driver.
 5. **ExecuteL2** — L2-side local-mode driver. Omit entirely if the test only needs L1.
 6. **ExecuteNetwork / ExecuteNetworkL2** — view-only, outputs `TARGET`, `VALUE`, `CALLDATA` for the network-mode runner to broadcast.
-7. **ComputeExpected** — prints `EXPECTED_L1_HASHES=[…]`, `EXPECTED_L2_HASHES=[…]`, optional `EXPECTED_L2_CALL_HASHES=[…]`, plus a human-readable table.
+7. **ComputeExpected** — prints the full machine-parsed output protocol (`EXPECTED_L1_[CALL_]HASHES`, `EXPECTED_L2_[CALL_]HASHES`, the `EXPECTED_*_TABLE` blobs, optional `ABSENT_L2_HASHES`) plus a human-readable table — see `rules/e2e-structure.md`. These lines drive ALL verification; a missing one silently downgrades checks.
 
 ## Env var naming conventions
 
@@ -62,20 +53,19 @@ When adding new contracts, pick a consistent noun + chain suffix (`_L1`, `_L2`) 
 ## Verification loop
 
 1. `forge build` must be clean before running any shell.
-2. `bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
-3. Only after local passes, try `bash script/e2e/shared/run-network.sh script/e2e/<scenario>/E2E.s.sol` against the devnet. Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
+2. `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
+3. Only after local passes, try `bash script/e2e/shared/run-network.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` against the devnet. Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
 4. Compare `forge script <SOL>:ComputeExpected` output against `decode-block.sh` output — any divergence is a bug in the precomputation.
 
 ## Common pitfalls (flatten-specific)
 
-- **Rolling-hash drift** — `RollingHashMismatch` is the most common failure. Replay the tagged sequence exactly: CALL_BEGIN(n) → (any NESTED pairs for reentrant calls that happen during this call) → CALL_END(n, success, retData). Don't forget `retData` for CALL_END comes from the raw `destination.call` return, which is *empty* for functions that return nothing.
-- **`actionHash` encoding** — `keccak256(abi.encode(rollupId, destination, value, data, sourceAddress, sourceRollup))`. Missing one field or getting `sourceRollup` vs `rollupId` mixed up breaks the match. Use `actionHash(Action{...})` from `E2EHelpers.sol` instead of hand-rolling.
-- **Empty `stateDeltas` on L2** — L2 entries must have `new StateDelta[](0)`. Only the L1 manager tracks rollup state.
-- **`callCount` vs `calls.length`** — they match for normal entries. A non-zero `revertSpan` on one of the calls doesn't change `callCount`; it just groups how many calls execute in the isolated context.
-- **Reentrant calls must succeed** — a revert inside a nested action would roll back the `_lastNestedActionConsumed++` and corrupt verification. Use `StaticCall[]` for calls that revert, or wrap them in a `revertSpan`.
-- **Same-block requirement** — `postBatch` / `loadExecutionTable` and the triggering user tx MUST land in the same block. Local mode uses `execute_l2_same_block` and `Batcher`; network mode relies on the sequencer intercepting the user tx and sandwiching `postBatch` in the same block.
-- **Proxy auto-creation** — `_processNCalls` auto-creates the source proxy via CREATE2 on first use if missing. That silent behavior hides deploy-order bugs; prefer explicit `createCrossChainProxy` or `getOrCreateProxy` in `Deploy*`.
-- **`failed: true` entries block the table** — a failed entry reverts *after* `executionIndex++`, which rolls back the increment, so the entry is never consumed. Don't use `failed: true` on entries that aren't the last one to be triggered. For recoverable failures, use `StaticCall` + `staticCrossChainCall` (the proxy's static-context detection routes to it automatically).
+- **Rolling-hash drift** — `RollingHashMismatch` is the most common failure. Replay the tagged sequence exactly: CALL_BEGIN(ccHash) → (any NESTED pairs for committing reentrant frames during this call) → CALL_END(success, retData). `retData` comes from the raw `destination.call` return, which is *empty* for functions that return nothing. No call/frame index is ever folded.
+- **Call-hash encoding** — use `crossChainCallHash(isStatic, source, sourceRollupId, target, targetRollupId, value, data)` from `E2EHelpers.sol` (callGas folds 0); never hand-roll. Wrong `sourceAddress` (proxy instead of original caller, or EOA instead of the local Batcher) is the classic mistake.
+- **L1-side caller identity** — locally the Batcher makes the L1 user call; `Execute` must print `BATCHER_L1=` and `ComputeExpected` must use `vm.envOr("BATCHER_L1", msg.sender)` for the L1 arrays.
+- **Reverting reentrants** — a reverting reentrant call is a `success: false` row in the unified table (run against `revertedOrStaticRollingHash`, then reverted); a forced rollback of successful calls is `revertNextNCalls = N`; a naturally-reverting plain sub-call just folds `CALL_END(false, retData)`. See the case table in `CLAUDE.md`.
+- **Same-block requirement** — `postAndVerifyBatch` / `loadExecutionTable` and the triggering user tx MUST land in the same block. Local mode uses `execute_l2_same_block` (with `--isolate`) and a `Batcher`; network mode relies on the composer bundling the intercepted trigger.
+- **Leading zero-hash entries must be immediate** — `ImmediateCountStrandsLeadingL2Tx`; use `immediateSingleRollupBatch` / `L2TXBatcher`, which auto-count them.
+- **Proxy creation** — use `getOrCreateProxy` (compute-first) in `Deploy*`; try/create/catch records creates that collide on-chain replay.
 
 ## After the test passes
 

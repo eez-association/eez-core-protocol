@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run every script/e2e/<scenario>/E2E.s.sol via run-local.sh in parallel.
+# Run every script/e2e/<category>/<direction>/<scenario>/E2E*.s.sol via run-local.sh in parallel.
+# Scenarios are addressed by their directory name (e.g. "counter"); the script
+# resolves each name to its E2E*.s.sol wherever it lives in the category tree.
 # Each scenario gets a unique (L1_PORT, L2_PORT, L1_CHAIN_ID, L2_CHAIN_ID) quadruple
 # so anvil instances and forge broadcast/ dirs don't collide.
 #
@@ -20,15 +22,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Default list: every scenario dir with an E2E.s.sol. Order is irrelevant for
-# parallel dispatch, so plain glob order is used.
+# Default list: every scenario in the category tree. Order is irrelevant for
+# parallel dispatch, so plain find order is used.
 DEFAULT_TESTS=()
-for _sol in script/e2e/*/E2E.s.sol; do
+while IFS= read -r _sol; do
     DEFAULT_TESTS+=("$(basename "$(dirname "$_sol")")")
-done
+done < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
 
 if [[ $# -gt 0 ]]; then
-    TESTS=("$@")
+    # Each arg may be a scenario name (counter), a category (one_way, multi_call,
+    # nested, reentrant, revert), or a category/direction (one_way/L2_to_L1) —
+    # categories expand to every scenario under them.
+    TESTS=()
+    for arg in "$@"; do
+        if [[ -d "script/e2e/$arg" && "$arg" != */E2E* ]]; then
+            while IFS= read -r sol; do
+                TESTS+=("$(basename "$(dirname "$sol")")")
+            done < <(find "script/e2e/$arg" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
+        else
+            TESTS+=("$arg")
+        fi
+    done
 else
     TESTS=("${DEFAULT_TESTS[@]}")
 fi
@@ -40,14 +54,20 @@ BASE_CHAIN_ID="${BASE_CHAIN_ID:-41337}"
 mkdir -p tmp/e2e-parallel tmp/e2e-success tmp/e2e-failures
 rm -f tmp/e2e-parallel/*.log tmp/e2e-parallel/*.status
 
+# Resolve a scenario name to its script path anywhere under script/e2e/.
+resolve_sol() {
+    find script/e2e -mindepth 3 -path "*/$1/E2E*.s.sol" -not -path '*/shared/*' | head -1
+}
+
 run_one() {
     local idx="$1" name="$2"
-    local sol="script/e2e/$name/E2E.s.sol"
+    local sol
+    sol="$(resolve_sol "$name")"
     local log="tmp/e2e-parallel/$name.log"
     local status="tmp/e2e-parallel/$name.status"
-    if [[ ! -f "$sol" ]]; then
+    if [[ -z "$sol" || ! -f "$sol" ]]; then
         echo "SKIP" > "$status"
-        echo "  [$name] SKIP (missing $sol)" >&2
+        echo "  [$name] SKIP (no script/e2e/*/*/$name/E2E*.s.sol found)" >&2
         return 0
     fi
     local l1_port=$((BASE_PORT + idx * 2))

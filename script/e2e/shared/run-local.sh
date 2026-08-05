@@ -138,52 +138,99 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
     EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
     EXPECTED_L2_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_CALL_HASHES")
+    # Full expected tables (abi-encoded) — optional; "0x" = hash-only fallback.
+    EXPECTED_L1_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L1_TABLE")
+    EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
+    EXPECTED_L2_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L2_TABLE")
+    EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
+    if [[ "$EXPECTED_L1_TABLE" != "0x" ]]; then
+        echo "L1 expected table: $((${#EXPECTED_L1_TABLE} / 2 - 1)) bytes (field-level checks ON)"
+    else
+        echo "NOTE: no EXPECTED_L1_TABLE printed - L1 field-level checks OFF (hash-only)"
+    fi
+    if [[ "$EXPECTED_L2_TABLE" != "0x" ]]; then
+        echo "L2 expected table: $((${#EXPECTED_L2_TABLE} / 2 - 1)) bytes (field-level checks ON)"
+    else
+        echo "NOTE: no EXPECTED_L2_TABLE printed - L2 field-level checks OFF (hash-only)"
+    fi
     [[ -n "$EXPECTED_L1_HASHES"      ]] && echo "EXPECTED_L1_HASHES=$EXPECTED_L1_HASHES"
     [[ -n "$EXPECTED_L2_HASHES"      ]] && echo "EXPECTED_L2_HASHES=$EXPECTED_L2_HASHES"
     [[ -n "$EXPECTED_L1_CALL_HASHES" ]] && echo "EXPECTED_L1_CALL_HASHES=$EXPECTED_L1_CALL_HASHES"
     [[ -n "$EXPECTED_L2_CALL_HASHES" ]] && echo "EXPECTED_L2_CALL_HASHES=$EXPECTED_L2_CALL_HASHES"
 
+    VERIFIERS_RUN=0
+
     # ── Verify L1 batch consumption ──
-    # VerifyL1Batch takes the list of crossChainCallHashes that should have been consumed
-    # (BatchPosted no longer carries entries on this branch; ExecutionConsumed is the
-    # primary signal). For scenarios with proxyEntryHash==0 (executeL2TX path) there's no
-    # L1-side call hash to check — skip in that case.
+    # Proxy-consumed entries (EXPECTED_L1_CALL_HASHES): ExecutionConsumed carries the call
+    # hash — VerifyL1Batch on the execution block. System-driven zero-hash entries
+    # (EXPECTED_L1_HASHES only): no call hash exists — match EntryExecuted rolling hashes
+    # via verify_l1_zero_hash, same as network mode.
     if [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
-        if verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        if verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
         else
             echo "L1 VERIFICATION FAILED"
             echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
+    elif [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_HASHES" && "$EXPECTED_L1_HASHES" != "[]" ]]; then
+        echo ""
+        echo "====== Verify L1 Zero-Hash Entries (block $L1_BLOCK) ======"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        if verify_l1_zero_hash "$L1_RPC" "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_HASHES" "$EXPECTED_L1_TABLE"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
+        else
+            echo "L1 VERIFICATION FAILED"
+            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
+            FAILED=true
+        fi
+    else
+        echo ""
+        echo "====== Verify L1 (SKIP: no L1 block or no EXPECTED_L1_[CALL_]HASHES printed) ======"
     fi
 
     # ── Verify L2 ExecutionTableLoaded entries ──
     if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
-        if verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        if verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
         else
             echo "L2 TABLE VERIFICATION FAILED"
             echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
+    else
+        echo ""
+        echo "====== Verify L2 Table (SKIP: no L2 block or no EXPECTED_L2_HASHES printed) ======"
     fi
 
     # ── Verify L2 CrossChainCallExecuted events ──
     if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_CALL_HASHES" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L2 Calls (block $L2_BLOCK) ======"
-        if verify_l2_calls "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*PASS" || echo "  PASS"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        if verify_l2_calls "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"; then
+            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
         else
             echo "L2 CALL VERIFICATION FAILED"
             echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
             FAILED=true
         fi
+    else
+        echo ""
+        echo "====== Verify L2 Calls (SKIP: no L2 block or no EXPECTED_L2_CALL_HASHES printed) ======"
+    fi
+
+    # A ComputeExpected that drives zero verifiers means the run asserted nothing on-chain.
+    if [[ "$VERIFIERS_RUN" -eq 0 ]]; then
+        echo ""
+        echo "ERROR: ComputeExpected present but 0 verifiers ran - nothing was verified"
+        FAILED=true
     fi
 else
     echo ""

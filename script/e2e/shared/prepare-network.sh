@@ -39,21 +39,21 @@ echo "Current L2 balance: $L2_BALANCE wei"
 MIN_BALANCE="10000000000000000"
 
 if [[ "$L2_BALANCE" == "0" ]] || [[ $(echo "$L2_BALANCE < $MIN_BALANCE" | bc) -eq 1 ]]; then
-    echo "L2 balance is insufficient, bridging 1 ETH from L1..."
+    echo "L2 balance is insufficient, bridging 0.05 ETH from L1..."
 
-    cast send "$ROLLUPS" "createCrossChainProxy(address,uint256)" \
+    cast send "$ROLLUPS" "createCrossChainProxy(address,uint64)" \
         "$SENDER_ADDRESS" 1 \
         --private-key "$PK" --rpc-url "$L1_RPC" > /dev/null 2>&1 || true
 
     PROXY_ADDRESS=$(cast call "$ROLLUPS" \
-        "computeCrossChainProxyAddress(address,uint256)(address)" \
+        "computeCrossChainProxyAddress(address,uint64)(address)" \
         "$SENDER_ADDRESS" 1 \
         --rpc-url "$L1_RPC")
     echo "Proxy address: $PROXY_ADDRESS"
 
-    echo "Sending 1 ETH to proxy on L1 (triggers bridge)..."
+    echo "Sending 0.05 ETH to proxy on L1 (triggers bridge)..."
     cast send "$PROXY_ADDRESS" \
-        --value 1ether \
+        --value 0.05ether \
         --gas-limit 500000 \
         --private-key "$PK" --rpc-url "$L1_RPC" > /dev/null 2>&1 || true
 

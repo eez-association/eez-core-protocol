@@ -25,6 +25,8 @@ abstract contract ComputeExpectedBase is Script {
     //  Entry identity hash used by Verify.s.sol for subset matching.
     //  The flatten model binds all execution behaviour into rollingHash,
     //  so (proxyEntryHash, rollingHash) is a stable identifier for an entry.
+    //  NOT the protocol's entry hash (keccak256 of the whole struct, folded
+    //  into the proof public input) — this is a test-side identity only.
     // ══════════════════════════════════════════════════════════════════
 
     function _entryHash(bytes32 proxyEntryHash, bytes32 rollingHash) internal pure returns (bytes32) {
@@ -37,6 +39,60 @@ abstract contract ComputeExpectedBase is Script {
 
     function _entryHash(L2ExecutionEntry memory e) internal pure returns (bytes32) {
         return _entryHash(e.proxyEntryHash, e.rollingHash);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  Full expected tables — ABI-encoded blobs consumed by Verify.s.sol
+    //  for field-by-field comparison (picked up by run-network.sh /
+    //  run-local.sh via the EXPECTED_*_TABLE output lines).
+    // ══════════════════════════════════════════════════════════════════
+
+    function _printL1Table(ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L1_TABLE=%s", blob);
+    }
+
+    function _printL2Table(L2ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L2_TABLE=%s", blob);
+    }
+
+    /// @dev Separate frame for the hex conversion + log — keeps the via-ir stack of
+    ///      callers that print both tables under the limit.
+    function _printTableLine(string memory label, bytes memory blob) private pure {
+        string memory hexStr = vm.toString(blob);
+        console.log(label, hexStr);
+    }
+
+    /// @dev Prints EXPECTED_L1_CALL_HASHES from the entries' non-zero proxyEntryHash keys —
+    ///      the hash `ExecutionConsumed` emits per proxy-driven consumption. Zero-hash (L2Tx)
+    ///      entries are skipped: they emit no call hash and are matched via EntryExecuted
+    ///      instead (VerifyL1ZeroHashEntriesInRange keyed by EXPECTED_L1_HASHES). The runners
+    ///      route on this line's presence, so print it whenever any L1 entry is proxy-keyed.
+    function _printL1CallHashes(ExecutionEntry[] memory entries) internal pure {
+        string memory acc = "";
+        bool any;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].proxyEntryHash == bytes32(0)) continue;
+            acc = any ? string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash)) : vm.toString(entries[i].proxyEntryHash);
+            any = true;
+        }
+        if (any) console.log("EXPECTED_L1_CALL_HASHES=[%s]", acc);
+    }
+
+    /// @dev Prints EXPECTED_L2_CALL_HASHES from the entries' proxyEntryHash keys — the hash
+    ///      every L2 consumption route emits (`CrossChainCallExecuted` for proxy-driven
+    ///      outgoing calls, `IncomingCrossChainCallExecuted` for system-driven inbound ones),
+    ///      so VerifyL2Calls / VerifyL2CallsInRange can match them. Duplicates are fine
+    ///      (subset semantics).
+    function _printL2CallHashes(L2ExecutionEntry[] memory entries) internal pure {
+        string memory acc = "";
+        for (uint256 i = 0; i < entries.length; i++) {
+            acc = i == 0
+                ? vm.toString(entries[i].proxyEntryHash)
+                : string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash));
+        }
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", acc);
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -124,8 +180,8 @@ abstract contract ComputeExpectedBase is Script {
     /// @notice L1 deferred entry (with state deltas + rolling hash).
     function _logEntry(uint256 idx, ExecutionEntry memory e) internal view {
         bytes32 hash = _entryHash(e);
-        bool immediate = e.proxyEntryHash == bytes32(0);
-        console.log("  [%s] %s  entryHash=%s", idx, immediate ? "IMMEDIATE" : "DEFERRED", vm.toString(hash));
+        bool l2tx = e.proxyEntryHash == bytes32(0);
+        console.log("  [%s] %s  entryHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(hash));
         console.log("      proxyEntryHash:  %s", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(

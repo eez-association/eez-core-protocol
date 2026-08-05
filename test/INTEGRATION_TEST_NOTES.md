@@ -44,7 +44,7 @@ Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
    deltas, and negative deltas (rollup sends ETH out). (`IntegrationTestBridge` covers some
    value flow; the delta-accounting matrix is not systematic.)
 2. **Deeper nesting**: 3+ levels of same-manager reentry and multiple sibling reentrant calls
-   (partial coverage exists in `script/e2e/deepNested/`).
+   (partial coverage exists in `script/e2e/nested/L1_to_L2/deepNested/`).
 3. **Multiple rollups**: cross-chain calls spanning 3+ rollups with interleaved per-rollup
    queues (unit-level coverage exists in `test/EEZ.t.sol`; no integration scenario).
 4. **Many-entry batches**: batches mixing immediate (`proxyEntryHash == 0`) and deferred

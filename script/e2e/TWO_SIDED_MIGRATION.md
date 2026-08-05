@@ -1,6 +1,6 @@
 # Two-sided e2e scenarios
 
-How a two-sided scenario exercises **both** anvil chains, and which pattern to pick per direction. Living references: `counter/E2E.s.sol` (L1→L2) and `counterL2/E2E.s.sol` (L2→L1) — when this doc and the code disagree, the code wins.
+How a two-sided scenario exercises **both** anvil chains, and which pattern to pick per direction. Living references: `one_way/L1_to_L2/counter/E2ECounter.s.sol` (L1→L2) and `one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol` (L2→L1) — when this doc and the code disagree, the code wins.
 
 ## Why two-sided
 
@@ -19,7 +19,7 @@ Pick the destination-side pattern by where the user-trigger lives:
 
 There is no `executeIncomingCrossChainCall` on L1 — the L1-side analog for system-driven execution is the immediate-L2Tx path. Note the batch-structure rule: the leading run of `proxyEntryHash == 0` entries **must** be covered by `immediateEntryCount` (`ImmediateCountStrandsLeadingL2Tx` otherwise); `executeL2Txs(rollupId)` only serves zero-hash entries that sit *behind* a non-zero-hash entry in the queue.
 
-## File anatomy — the contracts in each `E2E.s.sol`
+## File anatomy — the contracts in each scenario script (`E2E<Name>.s.sol`)
 
 ```
 abstract contract <Scenario>Actions {
@@ -30,14 +30,15 @@ contract Deploy{,L2}                 // deploy contracts on each chain (run-loca
 contract ExecuteL2                   // L2-side trigger / simulation
 contract Execute                     // L1-side trigger / simulation
 contract ExecuteNetwork{,L2}         // network-mode user-tx helpers (only `view` — emit envs)
-contract ComputeExpected             // print expected tables (verification aid)
+contract ComputeExpected             // computes expected tables — DRIVES all verification
+                                     // (its EXPECTED_* output lines switch every check on/off)
 ```
 
 `run-local.sh` auto-runs `ExecuteL2` first, then `Execute`. If only one is present the other phase is skipped — keep both for two-sided.
 
 ## Patterns
 
-- **Pattern A — L1→L2** (`counter`, `bridge`, `helloWorld`): one `ExecutionEntry` per side with **matching `proxyEntryHash`**. The L1 (source) entry has no calls (`rollingHash` is just the seeded accumulator); the L2 (destination) entry carries the real inbound call in `incomingCalls[0]` and is driven by `executeIncomingCrossChainCall`.
+- **Pattern A — L1→L2** (`counter`, `bridge`): one `ExecutionEntry` per side with **matching `proxyEntryHash`**. The L1 (source) entry has no calls (`rollingHash` is just the seeded accumulator); the L2 (destination) entry carries the real inbound call in `incomingCalls[0]` and is driven by `executeIncomingCrossChainCall`.
 - **Pattern B — L2→L1** (`counterL2`, `revertCounterL2`): the L2 side is the source (zero-call entry via `loadExecutionTable` + proxy trigger); the L1 side executes for real via an immediate `proxyEntryHash = bytes32(0)` entry whose `l2ToL1Calls[0]` is the destination call.
 - **Pattern C — multi-entry destination** (`multi-call-twice`, `multi-call-two-diff`, `multi-call-nested`): `executeIncomingCrossChainCall` drives one entry per transaction, so N-entry destinations instead use `loadExecutionTable` + an L2 trigger contract that fires the proxy calls. The trigger contract's L2 address becomes the entries' `sourceAddress`, so L1/L2 `proxyEntryHash` values necessarily diverge — the cross-chain tie is asserting real destination state at the end of `ExecuteL2`.
 
@@ -53,7 +54,7 @@ For entry construction and the rolling-hash schema (tagged folds, seeded with en
 ## Verification
 
 ```bash
-L1_PORT=<port> L2_PORT=<port+1> bash script/e2e/shared/run-local.sh script/e2e/<scenario>/E2E.s.sol
+L1_PORT=<port> L2_PORT=<port+1> bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol
 ```
 
 A green two-sided run shows the source-side events on one chain, the destination-side events on the other, the same cross-chain hash in both event groups, and real destination state advanced. On failure, decode the block with `shared/decode-block.sh` and compare against `forge script <SOL>:ComputeExpected`.
