@@ -15,3 +15,5 @@ node_modules
 tmp*
 gas-report/
 docs_and_slides/
+faucet.txt
+.faucet.lock

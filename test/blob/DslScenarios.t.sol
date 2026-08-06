@@ -169,6 +169,43 @@ contract DslScenarios is DslScenarioBase {
         assertEq(dslTarget[L2A].execCount(), 1);
     }
 
+    /// @notice Value transfer L1 → L2A: the target actor really receives the minted
+    ///         ether and the rollup's L1 balance is credited (mirrors test_CallWithValue).
+    function test_Dsl_CallWithValue_L1ToL2() public {
+        uint256 balBefore;
+        // Target deploys lazily inside runDsl, so read the balance via compile-first.
+        dslCompile("L1 call L2_A value 1 ether\nL2_A return\n");
+        balBefore = address(dslTarget[L2A]).balance;
+        runDsl("L1 call L2_A value 1 ether\nL2_A return\n");
+        assertEq(address(dslTarget[L2A]).balance - balBefore, 1 ether, "value minted and delivered on L2A");
+        (,, uint256 rollupBalance) = rollups.rollups(L2A);
+        assertEq(rollupBalance, 10_000 ether + 1 ether, "L2A rollup balance credited on L1");
+    }
+
+    /// @notice Value transfer L2A → L1: the L1 target receives ether paid out of the
+    ///         rollup's L1 balance (negative etherDelta on the entry).
+    function test_Dsl_CallWithValue_L2ToL1() public {
+        dslCompile("L2_A call L1 value 3 gwei\nL1 return\n");
+        uint256 balBefore = address(dslTarget[0]).balance;
+        runDsl("L2_A call L1 value 3 gwei\nL1 return\n");
+        assertEq(address(dslTarget[0]).balance - balBefore, 3 gwei, "value paid out on L1");
+        (,, uint256 rollupBalance) = rollups.rollups(L2A);
+        assertEq(rollupBalance, 10_000 ether - 3 gwei, "L2A rollup balance debited on L1");
+    }
+
+    /// @notice Value transfer L2A → L2B: balances shift between the two rollups on L1,
+    ///         net zero across the manager.
+    function test_Dsl_CallWithValue_L2ToL2() public {
+        dslCompile("L2_A call L2_B value 5 wei\nL2_B return\n");
+        uint256 balBefore = address(dslTarget[L2B]).balance;
+        runDsl("L2_A call L2_B value 5 wei\nL2_B return\n");
+        assertEq(address(dslTarget[L2B]).balance - balBefore, 5 wei, "value minted on L2B");
+        (,, uint256 balA) = rollups.rollups(L2A);
+        (,, uint256 balB) = rollups.rollups(L2B);
+        assertEq(balA, 10_000 ether - 5 wei, "L2A debited");
+        assertEq(balB, 10_000 ether + 5 wei, "L2B credited");
+    }
+
     /// @notice Locks the compiled message stream: exact order, actor wiring, and
     ///         auto-generated payloads.
     function test_Dsl_CompiledMessages() public {

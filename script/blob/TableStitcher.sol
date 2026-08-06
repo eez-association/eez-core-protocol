@@ -16,6 +16,14 @@ import {
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {ScenarioStore, CallParams} from "./ScenarioStore.sol";
+import {
+    UNIT_KIND_ORIGIN_GROUP,
+    UNIT_KIND_INBOUND,
+    ROOT_KIND_CALL,
+    ROOT_KIND_STATIC,
+    NO_NODE,
+    NO_CHAIN
+} from "./BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TableStitcher — the Table → Blob direction.
@@ -43,16 +51,20 @@ import {ScenarioStore, CallParams} from "./ScenarioStore.sol";
 
 contract TableStitcher is TestHashes {
     uint64 internal constant L1_CHAIN = 0;
-    uint256 internal constant NONE = type(uint256).max;
+    uint256 internal constant NONE = NO_NODE; // also ScenarioStore's ROOT_FRAME parent sentinel
 
-    error RoundTripMismatch(string what);
+    /// @dev Every mismatch carries a locator: the chain being simulated (NO_CHAIN
+    ///      when none applies), the relevant entry/unit/cursor index, and the
+    ///      expected vs got words (hashes, or scalars widened to bytes32; zero
+    ///      when the check has no meaningful pair).
+    error RoundTripMismatch(string what, uint64 chain, uint256 index, bytes32 expected, bytes32 got);
 
     // ── inputs: tables ──
     ExecutionEntry[] internal _l1Entries;
     StaticExecutionEntry[] internal _l1Statics;
 
     uint64[] internal _unitChain;
-    uint8[] internal _unitKind; // 1 = origin group, 2 = inbound delivery
+    uint8[] internal _unitKind; // UNIT_KIND_ORIGIN_GROUP / UNIT_KIND_INBOUND
     mapping(uint256 => L2ExecutionEntry[]) internal _unitEntries;
     mapping(uint256 => L2StaticExecutionEntry[]) internal _unitStatics;
 
@@ -63,7 +75,7 @@ contract TableStitcher is TestHashes {
     struct SidecarTx {
         uint64 originChain;
         bytes txData;
-        uint8[] rootKinds; // 0 = mutable call, 1 = static call
+        uint8[] rootKinds; // ROOT_KIND_CALL / ROOT_KIND_STATIC per root slot
     }
 
     struct SidecarStatic {
@@ -83,10 +95,20 @@ contract TableStitcher is TestHashes {
         bytes returnData;
     }
 
+    struct SidecarChainOp {
+        uint64 chainId;
+        bytes operations;
+        uint256 txsBefore;
+    }
+
     SidecarTx[] internal _txMeta;
     SidecarStatic[] internal _statics;
     SidecarStaticResult[] internal _staticSubResults;
     uint16[] internal _regionSizes;
+    SidecarChainOp[] internal _outChainOps;
+    bool internal _hasClose;
+    uint256 internal _closeTxsBefore;
+    uint256 internal _closeOpsBefore;
     // Observed callGas per L2-sourced mutable call, queued per destination-kind hash in
     // execution order (callGas reaches no table — it lives only inside the source-side keys).
     mapping(bytes32 => uint64[]) internal _callGasQueue;
@@ -94,6 +116,7 @@ contract TableStitcher is TestHashes {
 
     // ── stitch state ──
     ScenarioStore internal _out;
+    bool internal _stitched; // stitch() is single-shot, like TableGenerator.generate
     uint256 internal _l1Cursor; // next L1 entry
     uint256 internal _l1StaticCursor;
     mapping(uint64 => uint256) internal _unitScan; // per-chain scan position over units
@@ -130,6 +153,12 @@ contract TableStitcher is TestHashes {
 
     // ──────────────────────────────────────────────
     //  Loading (harness feeds the generator's outputs + the sidecar)
+    //
+    //  ORDER MATTERS on every loader below: tables and sidecar rows are consumed
+    //  by cursor during the stitch, so each stream must be fed in the order the
+    //  generator produced it — units in execution order, sidecar txs in message
+    //  order, statics in `staticNodesInOrder` order (their sub-read results in
+    //  parent-DFS order), callGas rows in execution (DFS) order per key.
     // ──────────────────────────────────────────────
 
     function loadL1(ExecutionEntry[] calldata entries, StaticExecutionEntry[] calldata statics) external {
@@ -200,17 +229,6 @@ contract TableStitcher is TestHashes {
         op.txsBefore = txsBefore;
     }
 
-    struct SidecarChainOp {
-        uint64 chainId;
-        bytes operations;
-        uint256 txsBefore;
-    }
-
-    SidecarChainOp[] internal _outChainOps;
-    bool internal _hasClose;
-    uint256 internal _closeTxsBefore;
-    uint256 internal _closeOpsBefore;
-
     function loadSidecarClose(uint256 txsBefore, uint256 opsBefore) external {
         _hasClose = true;
         _closeTxsBefore = txsBefore;
@@ -222,6 +240,8 @@ contract TableStitcher is TestHashes {
     // ──────────────────────────────────────────────
 
     function stitch(ScenarioStore out) external {
+        if (_stitched) revert RoundTripMismatch("already stitched", NO_CHAIN, 0, 0, 0);
+        _stitched = true;
         _out = out;
         for (uint256 i = 0; i < _outChainOps.length; i++) {
             out.addChainOp(_outChainOps[i].chainId, _outChainOps[i].operations, _outChainOps[i].txsBefore);
@@ -231,7 +251,11 @@ contract TableStitcher is TestHashes {
         for (uint256 t = 0; t < _txMeta.length; t++) {
             _stitchTx(t);
         }
-        if (_l1Cursor != _l1Entries.length) revert RoundTripMismatch("unconsumed L1 entries");
+        if (_l1Cursor != _l1Entries.length) {
+            revert RoundTripMismatch(
+                "unconsumed L1 entries", L1_CHAIN, _l1Cursor, bytes32(_l1Entries.length), bytes32(_l1Cursor)
+            );
+        }
     }
 
     function _stitchTx(uint256 t) internal {
@@ -244,7 +268,9 @@ contract TableStitcher is TestHashes {
             // The tx's L2Tx host commitment on L1.
             l1HostIdx = _l1Cursor++;
             if (_l1Entries[l1HostIdx].proxyEntryHash != bytes32(0)) {
-                revert RoundTripMismatch("expected L2Tx host entry");
+                revert RoundTripMismatch(
+                    "expected L2Tx host entry", L1_CHAIN, l1HostIdx, bytes32(0), _l1Entries[l1HostIdx].proxyEntryHash
+                );
             }
             _openL1Sim(l1HostIdx);
         }
@@ -253,25 +279,35 @@ contract TableStitcher is TestHashes {
         uint256 regionRemaining = 0;
         for (uint256 k = 0; k < meta.rootKinds.length; k++) {
             uint256 nodeId;
-            if (meta.rootKinds[k] == 1) {
-                if (origin != L1_CHAIN && originUnit == NONE) originUnit = _nextUnit(origin, 1);
+            if (meta.rootKinds[k] == ROOT_KIND_STATIC) {
+                if (origin != L1_CHAIN && originUnit == NONE) originUnit = _nextUnit(origin, UNIT_KIND_ORIGIN_GROUP);
                 nodeId = _stitchRootStatic(txId, origin, originUnit);
             } else {
                 if (origin == L1_CHAIN) {
                     uint256 idx = _l1Cursor++;
                     ExecutionEntry storage e = _l1Entries[idx];
-                    if (e.proxyEntryHash == bytes32(0)) revert RoundTripMismatch("unexpected L2Tx entry");
+                    if (e.proxyEntryHash == bytes32(0)) {
+                        revert RoundTripMismatch("unexpected L2Tx entry", L1_CHAIN, idx, 0, 0);
+                    }
                     _openL1Sim(idx);
                     nodeId = _stitchRootCall(txId, origin, e.proxyEntryHash, e.success, e.returnData);
-                    if (_sim[L1_CHAIN].liveHash != e.rollingHash) revert RoundTripMismatch("L1 root rollingHash");
+                    if (_sim[L1_CHAIN].liveHash != e.rollingHash) {
+                        revert RoundTripMismatch(
+                            "L1 root rollingHash", L1_CHAIN, idx, e.rollingHash, _sim[L1_CHAIN].liveHash
+                        );
+                    }
                     _sim[L1_CHAIN].active = false;
                 } else {
-                    if (originUnit == NONE) originUnit = _nextUnit(origin, 1);
+                    if (originUnit == NONE) originUnit = _nextUnit(origin, UNIT_KIND_ORIGIN_GROUP);
                     uint256 pos = _unitEntryCursor[originUnit]++;
                     L2ExecutionEntry storage e2 = _unitEntries[originUnit][pos];
                     _openL2Sim(origin, originUnit, pos, _hEntryBeginL2(e2.proxyEntryHash), 0);
                     nodeId = _stitchRootCall(txId, origin, e2.proxyEntryHash, e2.success, e2.returnData);
-                    if (_sim[origin].liveHash != e2.rollingHash) revert RoundTripMismatch("origin rollingHash");
+                    if (_sim[origin].liveHash != e2.rollingHash) {
+                        revert RoundTripMismatch(
+                            "origin rollingHash", origin, pos, e2.rollingHash, _sim[origin].liveHash
+                        );
+                    }
                     _sim[origin].active = false;
                 }
             }
@@ -284,7 +320,13 @@ contract TableStitcher is TestHashes {
 
         if (origin != L1_CHAIN) {
             if (_sim[L1_CHAIN].liveHash != _l1Entries[l1HostIdx].rollingHash) {
-                revert RoundTripMismatch("L2Tx host rollingHash");
+                revert RoundTripMismatch(
+                    "L2Tx host rollingHash",
+                    L1_CHAIN,
+                    l1HostIdx,
+                    _l1Entries[l1HostIdx].rollingHash,
+                    _sim[L1_CHAIN].liveHash
+                );
             }
             _sim[L1_CHAIN].active = false;
         }
@@ -328,14 +370,20 @@ contract TableStitcher is TestHashes {
         bytes32[] memory subCchs;
         if (origin == L1_CHAIN) {
             StaticExecutionEntry storage se = _l1Statics[_l1StaticCursor++];
-            if (se.proxyEntryHash != cch) revert RoundTripMismatch("L1 static pool hash");
+            if (se.proxyEntryHash != cch) {
+                revert RoundTripMismatch("L1 static pool hash", L1_CHAIN, _l1StaticCursor - 1, cch, se.proxyEntryHash);
+            }
             (success, ret) = (se.success, se.returnData);
             nodeId = _out.newCall(txId, NONE, p);
             _out.setResult(nodeId, success, ret);
             subCchs = _stitchStaticSubsL1(txId, nodeId, p, se);
         } else {
             L2StaticExecutionEntry storage se2 = _unitStatics[originUnit][_unitStaticCursor[originUnit]++];
-            if (se2.proxyEntryHash != cch) revert RoundTripMismatch("L2 static pool hash");
+            if (se2.proxyEntryHash != cch) {
+                revert RoundTripMismatch(
+                    "L2 static pool hash", origin, _unitStaticCursor[originUnit] - 1, cch, se2.proxyEntryHash
+                );
+            }
             (success, ret) = (se2.success, se2.returnData);
             nodeId = _out.newCall(txId, NONE, p);
             _out.setResult(nodeId, success, ret);
@@ -347,11 +395,17 @@ contract TableStitcher is TestHashes {
             // folds, with one STATIC row per sub-read at this exact point.
             uint16 marker = _consumeArrayItem(p.toChain, cch);
             _noteMarker(nodeId, marker);
-            _fold(p.toChain, cch, true);
+            _fold(p.toChain, cch);
             Sim storage s = _sim[p.toChain];
             for (uint256 i = 0; i < subCchs.length; i++) {
                 if (_rowKey(p.toChain, s.rowCursor) != keccak256(abi.encodePacked(subCchs[i], s.liveHash))) {
-                    revert RoundTripMismatch("static sub-read row key");
+                    revert RoundTripMismatch(
+                        "static sub-read row key",
+                        p.toChain,
+                        s.rowCursor,
+                        keccak256(abi.encodePacked(subCchs[i], s.liveHash)),
+                        _rowKey(p.toChain, s.rowCursor)
+                    );
                 }
                 s.rowCursor++;
             }
@@ -388,7 +442,9 @@ contract TableStitcher is TestHashes {
                 i
             );
         }
-        if (acc != se.rollingHash) revert RoundTripMismatch("static sub-read accumulator");
+        if (acc != se.rollingHash) {
+            revert RoundTripMismatch("static sub-read accumulator", L1_CHAIN, _l1StaticCursor - 1, se.rollingHash, acc);
+        }
     }
 
     /// @dev L2-pool twin of `_stitchStaticSubsL1`.
@@ -424,7 +480,9 @@ contract TableStitcher is TestHashes {
                 i
             );
         }
-        if (acc != se.rollingHash) revert RoundTripMismatch("static sub-read accumulator");
+        if (acc != se.rollingHash) {
+            revert RoundTripMismatch("static sub-read accumulator", p.fromChain, _staticCursor - 1, se.rollingHash, acc);
+        }
     }
 
     /// @dev One sub-read: shape-checked (static, fired from the parent's destination),
@@ -442,7 +500,7 @@ contract TableStitcher is TestHashes {
         returns (bytes32)
     {
         if (!sub.isStatic || sub.fromChain != p.toChain) {
-            revert RoundTripMismatch("static sub-read shape");
+            revert RoundTripMismatch("static sub-read shape", sub.fromChain, _staticSubCursor, 0, 0);
         }
         SidecarStaticResult storage r = _staticSubResults[_staticSubCursor++];
         uint256 subNode = _out.newCall(txId, parentNode, sub);
@@ -472,20 +530,24 @@ contract TableStitcher is TestHashes {
         if (dest == L1_CHAIN || _sim[dest].active) {
             uint16 marker = _consumeArrayItem(dest, cch);
             _noteMarker(nodeId, marker);
-            _fold(dest, cch, true);
+            _fold(dest, cch);
             _stitchChildren(txId, nodeId, dest);
             _foldEnd(dest, success, returnData);
         } else {
-            uint256 unitIdx = _nextUnit(dest, 2);
+            uint256 unitIdx = _nextUnit(dest, UNIT_KIND_INBOUND);
             L2ExecutionEntry storage e = _unitEntries[unitIdx][0];
-            if (e.proxyEntryHash != cch) revert RoundTripMismatch("inbound proxyEntryHash");
+            if (e.proxyEntryHash != cch) {
+                revert RoundTripMismatch("inbound proxyEntryHash", dest, unitIdx, cch, e.proxyEntryHash);
+            }
             _noteMarker(nodeId, e.incomingCalls[0].revertNextNCalls);
             // incomingCalls[0] is the inbound call itself — start the top cursor past it.
             _openL2Sim(dest, unitIdx, 0, _hEntryBeginL2(cch), 1);
-            _fold(dest, cch, true);
+            _fold(dest, cch);
             _stitchChildren(txId, nodeId, dest);
             _foldEnd(dest, e.success, e.returnData);
-            if (_sim[dest].liveHash != e.rollingHash) revert RoundTripMismatch("inbound rollingHash");
+            if (_sim[dest].liveHash != e.rollingHash) {
+                revert RoundTripMismatch("inbound rollingHash", dest, unitIdx, e.rollingHash, _sim[dest].liveHash);
+            }
             _sim[dest].active = false;
         }
     }
@@ -516,7 +578,7 @@ contract TableStitcher is TestHashes {
                 if (p.toChain == L1_CHAIN || _sim[p.toChain].active) {
                     bytes32 cch = _cchOf(p);
                     _consumeArrayItem(p.toChain, cch);
-                    _fold(p.toChain, cch, true);
+                    _fold(p.toChain, cch);
                     _foldEnd(p.toChain, rSuccess, rRet);
                 }
             } else {
@@ -534,7 +596,9 @@ contract TableStitcher is TestHashes {
                 if (rSuccess) {
                     s.liveHash = _hNestedEnd(s.liveHash);
                 } else {
-                    if (s.liveHash != rSubHash) revert RoundTripMismatch("reverted frame sub-hash");
+                    if (s.liveHash != rSubHash) {
+                        revert RoundTripMismatch("reverted frame sub-hash", x, s.rowCursor - 1, rSubHash, s.liveHash);
+                    }
                     s.liveHash = fireHash;
                 }
             }
@@ -627,7 +691,7 @@ contract TableStitcher is TestHashes {
             (bool ok, CallParams memory cp) = _peekUnitInbound(w);
             if (ok && _srcCchOf(cp) == cch) return cp;
         }
-        revert RoundTripMismatch("root call destination not found");
+        revert RoundTripMismatch("root call destination not found", origin, 0, cch, 0);
     }
 
     // ──────────────────────────────────────────────
@@ -706,8 +770,10 @@ contract TableStitcher is TestHashes {
         while (i < _unitChain.length && _unitChain[i] != chain) {
             i++;
         }
-        if (i >= _unitChain.length) revert RoundTripMismatch("missing unit");
-        if (_unitKind[i] != kind) revert RoundTripMismatch("unit kind");
+        if (i >= _unitChain.length) revert RoundTripMismatch("missing unit", chain, i, bytes32(uint256(kind)), 0);
+        if (_unitKind[i] != kind) {
+            revert RoundTripMismatch("unit kind", chain, i, bytes32(uint256(kind)), bytes32(uint256(_unitKind[i])));
+        }
         _unitScan[chain] = i + 1;
         return i;
     }
@@ -789,8 +855,11 @@ contract TableStitcher is TestHashes {
     ///         returns its span marker for region reconstruction.
     function _consumeArrayItem(uint64 x, bytes32 cch) internal returns (uint16 marker) {
         (bool ok, CallParams memory p) = _peekArrayItem(x);
-        if (!ok || _cchOf(p) != cch) revert RoundTripMismatch("array item mismatch");
         Sim storage s = _sim[x];
+        if (!ok || _cchOf(p) != cch) {
+            uint256 cur = s.frameRows.length == 0 ? s.topCursor : s.frameCursors[s.frameCursors.length - 1];
+            revert RoundTripMismatch("array item mismatch", x, cur, cch, ok ? _cchOf(p) : bytes32(0));
+        }
         marker = _peekMarker(x);
         if (s.frameRows.length == 0) {
             s.topCursor++;
@@ -823,7 +892,7 @@ contract TableStitcher is TestHashes {
         while (i < _unitChain.length && _unitChain[i] != w) {
             i++;
         }
-        if (i >= _unitChain.length || _unitKind[i] != 2) return (false, p);
+        if (i >= _unitChain.length || _unitKind[i] != UNIT_KIND_INBOUND) return (false, p);
         CrossChainCall storage c = _unitEntries[i][0].incomingCalls[0];
         return (
             true,
@@ -840,7 +909,7 @@ contract TableStitcher is TestHashes {
         );
     }
 
-    function _fold(uint64 x, bytes32 cch, bool /*begin*/) internal {
+    function _fold(uint64 x, bytes32 cch) internal {
         _sim[x].liveHash = _hCallBegin(_sim[x].liveHash, cch);
     }
 

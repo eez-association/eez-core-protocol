@@ -32,3 +32,5 @@ Start with [`CLAUDE.md`](CLAUDE.md) — a condensed architecture reference (cont
 - [`docs/STATIC_ENTRY.md`](docs/STATIC_ENTRY.md) — static entries + reverted-call resolution semantics (nested + top-level)
 - [`docs/MULTI_PROVER_SPEC.md`](docs/MULTI_PROVER_SPEC.md) — multi-prover design rationale
 - [`docs/CAVEATS.md`](docs/CAVEATS.md) — edge cases
+- [`script/blob/README.md`](script/blob/README.md) — blob ⇄ table framework: wire codec, table derivation, scenario DSL, file-based tools
+- [`test/blob/SCENARIO_CATALOG.md`](test/blob/SCENARIO_CATALOG.md) — the L1 batch every basic cross-chain shape produces, case by case

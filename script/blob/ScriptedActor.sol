@@ -20,15 +20,30 @@ pragma solidity ^0.8.28;
 //  transient-store probe `CrossChainProxy` uses.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import {
+    STEP_CALL,
+    STEP_CALL_EXPECT_REVERT,
+    STEP_STATIC_READ,
+    STEP_SUBCONTEXT_REVERT,
+    STEP_STATIC_EXPECT_REVERT
+} from "./BlobConstants.sol";
+
 contract ScriptedActor {
     /// @dev Sentinel a forced-revert sub-context terminates with.
     error ForcedRevert();
 
-    uint8 public constant STEP_CALL = 1; // call target; expect success + exact return data
-    uint8 public constant STEP_CALL_EXPECT_REVERT = 2; // call target; expect revert with exact payload
-    uint8 public constant STEP_STATIC_READ = 3; // staticcall target; expect success + exact return data
-    uint8 public constant STEP_SUBCONTEXT_REVERT = 4; // run the next `subCount` steps, then roll them back (Snapshot…Revert)
-    uint8 public constant STEP_STATIC_EXPECT_REVERT = 5; // staticcall target; expect revert with exact payload
+    /// @dev The most common authoring error: an invocation found no (further) program
+    ///      for its calldata — usually a repeated identical call draining the queue.
+    error NoProgramQueued(address actor, bytes invokeData, uint256 queued, uint256 consumed);
+    /// @dev A step's proxy call had the wrong success/revert outcome. `result` is the
+    ///      raw return/revert payload observed.
+    error StepOutcomeMismatch(uint256 stepIndex, address target, bool expectedSuccess, bytes result);
+    /// @dev A step's return/revert payload differed from the scripted expectation.
+    error StepDataMismatch(uint256 stepIndex, address target, bytes expected, bytes got);
+    /// @dev A Snapshot span self-call ended without the ForcedRevert sentinel AND
+    ///      without an inner failure to bubble (it returned successfully).
+    error SpanDidNotRevert();
+    error UnknownStaticRead(address actor, bytes data);
 
     struct Step {
         uint8 kind;
@@ -143,7 +158,9 @@ contract ScriptedActor {
     function _run(bytes memory invokeData) internal {
         bytes32 k = keccak256(invokeData);
         uint256[] storage q = _queue[k];
-        require(_queueCursor[k] < q.length, "ScriptedActor: no program queued for calldata");
+        if (_queueCursor[k] >= q.length) {
+            revert NoProgramQueued(address(this), invokeData, q.length, _queueCursor[k]);
+        }
         uint256 id = q[_queueCursor[k]++];
         execCount++;
 
@@ -168,34 +185,35 @@ contract ScriptedActor {
             if (s.kind == STEP_SUBCONTEXT_REVERT) {
                 (bool ok, bytes memory ret) =
                     address(this).call(abi.encodeCall(this.runSpanAndRevert, (programId, i + 1, s.subCount)));
-                require(!ok && bytes4(ret) == ForcedRevert.selector, "ScriptedActor: span did not revert cleanly");
+                if (ok) revert SpanDidNotRevert();
+                if (bytes4(ret) != ForcedRevert.selector) {
+                    // A step INSIDE the span failed — bubble its revert so the real
+                    // mismatch surfaces instead of a generic span error.
+                    assembly {
+                        revert(add(ret, 0x20), mload(ret))
+                    }
+                }
                 i += 1 + s.subCount;
             } else {
-                _runStep(s);
+                _runStep(s, i);
                 i++;
             }
         }
     }
 
-    function _runStep(Step storage s) internal {
+    function _runStep(Step storage s, uint256 stepIndex) internal {
         bool ok;
         bytes memory ret;
-        if (s.kind == STEP_CALL) {
+        bool expectSuccess = s.kind == STEP_CALL || s.kind == STEP_STATIC_READ;
+        if (s.kind == STEP_CALL || s.kind == STEP_CALL_EXPECT_REVERT) {
             (ok, ret) = _dispatch(s);
-            require(ok, "ScriptedActor: expected call to succeed");
-        } else if (s.kind == STEP_CALL_EXPECT_REVERT) {
-            (ok, ret) = _dispatch(s);
-            require(!ok, "ScriptedActor: expected call to revert");
-        } else if (s.kind == STEP_STATIC_READ) {
+        } else if (s.kind == STEP_STATIC_READ || s.kind == STEP_STATIC_EXPECT_REVERT) {
             (ok, ret) = _dispatchStatic(s);
-            require(ok, "ScriptedActor: expected static read to succeed");
-        } else if (s.kind == STEP_STATIC_EXPECT_REVERT) {
-            (ok, ret) = _dispatchStatic(s);
-            require(!ok, "ScriptedActor: expected static read to revert");
         } else {
             revert("ScriptedActor: unknown step kind");
         }
-        require(keccak256(ret) == keccak256(s.expected), "ScriptedActor: unexpected return/revert data");
+        if (ok != expectSuccess) revert StepOutcomeMismatch(stepIndex, s.target, expectSuccess, ret);
+        if (keccak256(ret) != keccak256(s.expected)) revert StepDataMismatch(stepIndex, s.target, s.expected, ret);
     }
 
     /// @dev Mutable proxy call with the step's explicit gas when set.
@@ -215,13 +233,13 @@ contract ScriptedActor {
 
     function _serveStatic() internal view {
         bytes32 k = keccak256(msg.data);
-        require(_staticKnown[k], "ScriptedActor: unknown static read");
+        if (!_staticKnown[k]) revert UnknownStaticRead(address(this), msg.data);
         Step[] storage steps = _staticSteps[k];
         for (uint256 i = 0; i < steps.length; i++) {
             Step storage s = steps[i];
             (bool ok, bytes memory got) = _dispatchStatic(s);
-            require(ok == (s.kind == STEP_STATIC_READ), "ScriptedActor: unexpected static sub-read outcome");
-            require(keccak256(got) == keccak256(s.expected), "ScriptedActor: unexpected static sub-read data");
+            if (ok != (s.kind == STEP_STATIC_READ)) revert StepOutcomeMismatch(i, s.target, !ok, got);
+            if (keccak256(got) != keccak256(s.expected)) revert StepDataMismatch(i, s.target, s.expected, got);
         }
         bytes memory ret = _staticReturns[k];
         if (_staticReverts[k]) {

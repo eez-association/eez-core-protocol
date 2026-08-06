@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import {DslScenarioBase} from "./ScenarioDSL.sol";
 import {Msg, MsgList} from "../../script/blob/BlobMessages.sol";
+import {TableGenerator} from "../../script/blob/TableGenerator.sol";
+import {ExecutionEntry, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 
 /// @title ScenarioCatalog
 /// @notice The canonical direction catalog: one test per basic cross-chain shape,
@@ -11,10 +13,24 @@ import {Msg, MsgList} from "../../script/blob/BlobMessages.sol";
 ///         round trip, Blob → Table, Table → Blob, live execution on EEZ/EEZL2.
 ///
 ///         The L1 batch (`ProofSystemBatchPerVerificationEntries`) each scenario
-///         produces is documented case by case in `SCENARIO_CATALOG.md`.
+///         produces is documented case by case in `SCENARIO_CATALOG.md`; the
+///         `_shape` assertions below pin the documented batch SHAPE (entry roles,
+///         call/row counts, delta sets, span markers) so the doc cannot silently
+///         rot when the generator changes.
 contract ScenarioCatalog is DslScenarioBase {
     uint64 constant L2A = 1;
     uint64 constant L2B = 2;
+
+    /// @dev Blob → Table only (zero callGas oracle — shapes are oracle-independent),
+    ///      for asserting the documented batch shape before the full live run.
+    function _shape(string memory script)
+        internal
+        returns (ExecutionEntry[] memory entries, StaticExecutionEntry[] memory statics)
+    {
+        address gen;
+        (entries,, gen) = _generateTables(dslCompile(script));
+        statics = TableGenerator(gen).l1StaticEntries();
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     //  1. L2-only transaction — no cross-chain calls at all.
@@ -29,6 +45,14 @@ contract ScenarioCatalog is DslScenarioBase {
         Msg.push(l, Msg.initiate(L2A, "l2-only-rlp-tx"));
         Msg.push(l, Msg.finish());
         Msg.push(l, Msg.closeBlobStream());
+
+        (ExecutionEntry[] memory es,,) = _generateTables(Msg.done(l));
+        assertEq(es.length, 1, "one L2Tx host entry");
+        assertEq(es[0].proxyEntryHash, bytes32(0), "pure L2 tx host");
+        assertEq(es[0].destinationRollupId, L2A);
+        assertEq(es[0].l2ToL1Calls.length, 0, "nothing lands on L1");
+        assertEq(es[0].stateUpdates.length, 1, "only A advances");
+
         runScenario(Msg.done(l));
     }
 
@@ -37,23 +61,54 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog02_L1CallL2() public {
-        runDsl(string.concat("L1 call L2_A\n", "L2_A return\n"));
+        string memory s = "L1 call L2_A\nL2_A return\n";
+        (ExecutionEntry[] memory es, StaticExecutionEntry[] memory ss) = _shape(s);
+        assertEq(es.length, 1, "one deferred origin entry");
+        assertTrue(es[0].proxyEntryHash != bytes32(0), "keyed by the root call");
+        assertEq(es[0].destinationRollupId, L2A);
+        assertEq(es[0].l2ToL1Calls.length, 0, "the call executes on L2A, not L1");
+        assertEq(es[0].expectedL1ToL2Calls.length, 0);
+        assertEq(ss.length, 0);
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 1, "delivered on L2A");
     }
 
     function test_Catalog03_L2CallL1() public {
-        runDsl(string.concat("L2_A call L1\n", "L1 return\n"));
+        string memory s = "L2_A call L1\nL1 return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].proxyEntryHash, bytes32(0));
+        assertEq(es[0].l2ToL1Calls.length, 1, "the call REALLY runs on L1");
+        assertEq(es[0].expectedL1ToL2Calls.length, 0);
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 1, "executed on L1");
         assertEq(dslDriver[L2A].execCount(), 1, "origin driver ran once");
     }
 
     function test_Catalog04_L1StaticCallL2() public {
-        runDsl(string.concat("L1 staticCall L2_A\n", "L2_A return\n"));
+        string memory s = "L1 staticCall L2_A\nL2_A return\n";
+        (ExecutionEntry[] memory es, StaticExecutionEntry[] memory ss) = _shape(s);
+        assertEq(es.length, 0, "a read changes nothing - no ExecutionEntry");
+        assertEq(ss.length, 1, "one pool StaticExecutionEntry");
+        assertEq(ss[0].expectedStateRoots.length, 1, "pinned to A's live root");
+        assertEq(ss[0].expectedStateRoots[0].rollupId, L2A);
+        assertEq(ss[0].l2ToL1Calls.length, 0, "no sub-reads");
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 0, "a static read commits nothing");
     }
 
     function test_Catalog05_L2StaticCallL1() public {
-        runDsl(string.concat("L2_A staticCall L1\n", "L1 return\n"));
+        string memory s = "L2_A staticCall L1\nL1 return\n";
+        (ExecutionEntry[] memory es, StaticExecutionEntry[] memory ss) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the read of L1 runs live on the host");
+        assertTrue(es[0].l2ToL1Calls[0].isStatic, "dispatched via STATICCALL");
+        assertEq(ss.length, 0, "the pool entry lives on the L2A side");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 0, "a static read commits nothing");
     }
 
@@ -62,13 +117,28 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog06_L1CallL2CallL1() public {
-        runDsl(string.concat("L1 call L2_A\n", "L2_A call L1\n", "L1 return\n", "L2_A return\n"));
+        string memory s = "L1 call L2_A\nL2_A call L1\nL1 return\nL2_A return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1);
+        assertTrue(es[0].proxyEntryHash != bytes32(0), "origin entry");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the A->L1 callback runs on consumption");
+        assertEq(es[0].expectedL1ToL2Calls.length, 0);
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 1);
         assertEq(dslTarget[0].execCount(), 1, "callback really ran on L1");
     }
 
     function test_Catalog07_L2CallL1CallL2() public {
-        runDsl(string.concat("L2_A call L1\n", "L1 call L2_A\n", "L2_A return\n", "L1 return\n"));
+        string memory s = "L2_A call L1\nL1 call L2_A\nL2_A return\nL1 return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the A->L1 root call");
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "the reentrant L1->A frame");
+        assertTrue(es[0].expectedL1ToL2Calls[0].success, "SUCCESS row");
+        assertEq(es[0].expectedL1ToL2Calls[0].l2ToL1Calls.length, 0, "frame has no own sub-calls");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 1);
         assertEq(dslTarget[L2A].execCount(), 1, "callback really ran on L2A");
     }
@@ -78,13 +148,27 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog08_L1CallL2StaticCallL1() public {
-        runDsl(string.concat("L1 call L2_A\n", "L2_A staticCall L1\n", "L1 return\n", "L2_A return\n"));
+        string memory s = "L1 call L2_A\nL2_A staticCall L1\nL1 return\nL2_A return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "origin entry");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the read of L1 is a REAL L1 read");
+        assertTrue(es[0].l2ToL1Calls[0].isStatic);
+        assertEq(es[0].expectedL1ToL2Calls.length, 0);
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 1);
         assertEq(dslTarget[0].execCount(), 0, "the read commits nothing on L1");
     }
 
     function test_Catalog09_L2CallL1StaticCallL2() public {
-        runDsl(string.concat("L2_A call L1\n", "L1 staticCall L2_A\n", "L2_A return\n", "L1 return\n"));
+        string memory s = "L2_A call L1\nL1 staticCall L2_A\nL2_A return\nL1 return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the A->L1 root call");
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "STATIC row for the read of A");
+        assertTrue(es[0].expectedL1ToL2Calls[0].success);
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 1);
         assertEq(dslTarget[L2A].execCount(), 0, "the read commits nothing on L2A");
     }
@@ -99,13 +183,27 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog10_L1StaticL2StaticL1() public {
-        runDsl(string.concat("L1 staticCall L2_A\n", "L2_A staticCall L1\n", "L1 return\n", "L2_A return\n"));
+        string memory s = "L1 staticCall L2_A\nL2_A staticCall L1\nL1 return\nL2_A return\n";
+        (ExecutionEntry[] memory es, StaticExecutionEntry[] memory ss) = _shape(s);
+        assertEq(es.length, 0);
+        assertEq(ss.length, 1, "one pool entry");
+        assertEq(ss[0].l2ToL1Calls.length, 1, "carries the sub-read, re-run live");
+        assertTrue(ss[0].l2ToL1Calls[0].isStatic);
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 0, "reads commit nothing");
         assertEq(dslTarget[0].execCount(), 0, "reads commit nothing");
     }
 
     function test_Catalog11_L2StaticL1StaticL2() public {
-        runDsl(string.concat("L2_A staticCall L1\n", "L1 staticCall L2_A\n", "L2_A return\n", "L1 return\n"));
+        string memory s = "L2_A staticCall L1\nL1 staticCall L2_A\nL2_A return\nL1 return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the outer read, run live on L1");
+        assertTrue(es[0].l2ToL1Calls[0].isStatic);
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "STATIC row: the sub-read of A");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 0, "reads commit nothing");
         assertEq(dslTarget[L2A].execCount(), 0, "reads commit nothing");
     }
@@ -115,7 +213,14 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog12_L2aCallL1_CallRevertL2b() public {
-        runDsl(string.concat("L2_A call L1\n", "L1 call L2_B\n", "L2_B returnFail\n", "L1 return\n"));
+        string memory s = "L2_A call L1\nL1 call L2_B\nL2_B returnFail\nL1 return\n";
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].stateUpdates.length, 2, "B advances too (its block processed the revert)");
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "REVERTED row");
+        assertFalse(es[0].expectedL1ToL2Calls[0].success, "success = false");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 1, "L1 caught the failure and committed");
         assertEq(dslTarget[L2B].execCount(), 0, "B's failed delivery left no state");
     }
@@ -127,20 +232,27 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog13_ThreeRootCalls_RevertLastTwo() public {
-        runDsl(
-            string.concat(
-                "L2_A call L1\n",
-                "L1 return\n",
-                "L2_A snapshot\n",
-                "L2_A call L1\n",
-                "L1 call L2_B\n",
-                "L2_B return\n",
-                "L1 return\n",
-                "L2_A call L1\n",
-                "L1 return\n",
-                "L2_A revert\n"
-            )
+        string memory s = string.concat(
+            "L2_A call L1\n",
+            "L1 return\n",
+            "L2_A snapshot\n",
+            "L2_A call L1\n",
+            "L1 call L2_B\n",
+            "L2_B return\n",
+            "L1 return\n",
+            "L2_A call L1\n",
+            "L1 return\n",
+            "L2_A revert\n"
         );
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 3, "three root calls land on L1");
+        assertEq(es[0].l2ToL1Calls[0].revertNextNCalls, 0, "call 1 survives");
+        assertEq(es[0].l2ToL1Calls[1].revertNextNCalls, 2, "call 2 opens the span: itself + call 3");
+        assertEq(es[0].l2ToL1Calls[2].revertNextNCalls, 0);
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "the nested L1->B hop inside the span");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 1, "only the first L1 call survives the region");
         assertEq(dslTarget[L2B].execCount(), 0, "the nested B hop rolled back with the region");
     }
@@ -150,18 +262,24 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog14_Nested_L1_L2a_L1_L2b_L1() public {
-        runDsl(
-            string.concat(
-                "L1 call L2_A\n",
-                "L2_A call L1\n",
-                "L1 call L2_B\n",
-                "L2_B call L1\n",
-                "L1 return\n",
-                "L2_B return\n",
-                "L1 return\n",
-                "L2_A return\n"
-            )
+        string memory s = string.concat(
+            "L1 call L2_A\n",
+            "L2_A call L1\n",
+            "L1 call L2_B\n",
+            "L2_B call L1\n",
+            "L1 return\n",
+            "L2_B return\n",
+            "L1 return\n",
+            "L2_A return\n"
         );
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the whole recursion collapses into one origin entry");
+        assertEq(es[0].stateUpdates.length, 2, "A and B both advance");
+        assertEq(es[0].l2ToL1Calls.length, 1, "the A->L1 callback");
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "the L1->B frame");
+        assertEq(es[0].expectedL1ToL2Calls[0].l2ToL1Calls.length, 1, "the frame's OWN B->L1 landing");
+
+        runDsl(s);
         assertEq(dslTarget[L2A].execCount(), 1);
         assertEq(dslTarget[L2B].execCount(), 1);
         assertEq(dslTarget[0].execCount(), 2, "both L1 landings committed");
@@ -174,11 +292,17 @@ contract ScenarioCatalog is DslScenarioBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog15_RevertSingleRootCall_WithNestedHop() public {
-        runDsl(
-            string.concat(
-                "L2_A snapshot\n", "L2_A call L1\n", "L1 call L2_B\n", "L2_B return\n", "L1 return\n", "L2_A revert\n"
-            )
+        string memory s = string.concat(
+            "L2_A snapshot\n", "L2_A call L1\n", "L1 call L2_B\n", "L2_B return\n", "L1 return\n", "L2_A revert\n"
         );
+        (ExecutionEntry[] memory es,) = _shape(s);
+        assertEq(es.length, 1, "the L2Tx host");
+        assertEq(es[0].l2ToL1Calls.length, 1);
+        assertEq(es[0].l2ToL1Calls[0].revertNextNCalls, 1, "span = the root call alone");
+        assertEq(es[0].expectedL1ToL2Calls.length, 1, "SUCCESS row: the hop itself commits");
+        assertTrue(es[0].expectedL1ToL2Calls[0].success, "the span revert is a separate axis");
+
+        runDsl(s);
         assertEq(dslTarget[0].execCount(), 0, "the L1 landing rolled back with the region");
         assertEq(dslTarget[L2B].execCount(), 0, "the nested B hop rolled back with it");
     }

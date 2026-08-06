@@ -45,14 +45,58 @@ Framework core (this folder, `script/blob/`):
 | `TableGenerator.sol` | **Blob → Table**: walks the forest once and builds the L1 batch entries (L2Tx hosts, origin entries, static pool, state-delta ledger, ether invariant) and each L2's units (origin groups / inbound deliveries), simulating every chain's rolling hash exactly |
 | `TableStitcher.sol` | **Table → Blob**: rebuilds the forest from tables + sidecar, matching reentrant rows by their content-addressed keys against a re-simulated live hash, and cross-checking every stored `rollingHash` |
 | `ScriptedActor.sol` | Programmable stand-in for application contracts; performs the real nested proxy calls and asserts returns in-flight |
+| `BlobTranslator.sol` | One-call facade: blob ⇄ byte stream ⇄ tables (each direction a single function — see below) |
+| `BlobConstants.sol` | Shared scalar vocabulary: unit kinds, root kinds, actor step kinds, sentinels, `MAX_CALL_DEPTH` |
+| `BlobTools.s.sol` + `examples/` | File-based tools: DSL file → tables + wire bytes, blob hex → tables (see below) |
 
 Tests (`test/blob/`):
 
 | File | Role |
 |---|---|
 | `BlobScenarioBase.sol` | Test harness: chain/actor setup, the 6-step pipeline, per-tx batch posting, unit driving |
+| `ScenarioDSL.sol` | The DSL compiler (`DslScenarioBase`): script → messages, auto chain/actor setup, auto `execCount` asserts |
+| `DslExamples.t.sol` | Commented walkthrough examples — the place to START reading |
+| `ScenarioCatalog.t.sol` + `SCENARIO_CATALOG.md` | The direction catalog: one test per basic cross-chain shape; the MD documents the exact L1 batch each shape produces, and the test pins that shape with assertions |
+| `DslScenarios.t.sol` | End-to-end scenarios authored in the DSL (several mirror `BlobScenarios` raw-message twins) |
+| `BlobScenarios.t.sol` | End-to-end scenarios authored as raw message lists (shapes the DSL can't express: chain ops, callData tail, custom payloads) |
+| `DslParser.t.sol` | DSL rejection tests — every parse error with its exact `DSL line <n>: <reason>` message |
 | `BlobCodec.t.sol` | Byte-layer unit tests (round trips + one test per §5 rejection) |
-| `BlobScenarios.t.sol` | End-to-end scenarios (see below) |
+| `BlobTranslator.t.sol` | Facade round trips: blob → data → tables → data → blob, byte-identical |
+
+## One-call conversions: `BlobTranslator`
+
+`BlobTranslator.sol` is a facade over the pipeline — each direction is a single call,
+no store/generator/stitcher orchestration at the call site:
+
+| Call | Conversion |
+|---|---|
+| `blobsToData(blobs)` | EIP-4844 blobs → logical byte stream (§4 unpack; padding included, the codec skips it) |
+| `dataToBlobs(blobData)` | byte stream (blob portion) → full-size blobs (§4 pack) |
+| `dataToTables(blobData, callDataTail)` | byte stream → `Tables` (decode → parse → generate) |
+| `tablesToData(tables)` | `Tables` → byte stream + callData tail (stitch → emit → encode; byte-identical to the source stream) |
+| `blobsToTables` / `tablesToBlobs` | the two composed end to end |
+| `messagesToTables` / `tablesToMessages` | same directions at the `BlobMessage[]` level |
+
+`Tables` bundles the L1 batch artifacts, every L2 chain's units in execution order, and
+the sidecar — so `dataToTables` output feeds `tablesToData` directly and round-trips to
+the exact input bytes. Tables are derived with a zero callGas oracle (correct while
+deployments run `useGasLeft = false`; the observed-gas mode needs the harness's probe
+phase instead). Round-trip tests: `test/blob/BlobTranslator.t.sol`.
+
+## Files in, tables out: `BlobTools.s.sol`
+
+Scenarios can live in `.dsl` files (see `examples/showcase.dsl`) and be turned into
+tables from the command line:
+
+```bash
+# DSL file → messages, wire bytes, and every chain's tables
+forge script script/blob/BlobTools.s.sol --sig "run(string)" script/blob/examples/showcase.dsl
+
+# blob-portion hex file (0x…, padding optional) → messages and tables
+forge script script/blob/BlobTools.s.sol --sig "runBlob(string)" my-blob.hex
+```
+
+Needs `fs_permissions` read access (set in `foundry.toml`).
 
 ## Writing a new scenario
 
@@ -120,7 +164,7 @@ Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 
 | Line | Meaning |
 |---|---|
-| `<chain> call <chain>` | executor calls target; opens a frame |
+| `<chain> call <chain> [value <amount> [wei\|gwei\|ether]]` | executor calls target; opens a frame (optionally carrying ether — default unit wei) |
 | `<chain> staticCall <chain>` | read-only frame (a top-level one may nest leaf static sub-reads of the origin chain) |
 | `<chain> return` / `<chain> returnFail` | closes the innermost frame |
 | `<chain> snapshot` … `<chain> revert` | forced-revert region in the current frame |
@@ -136,7 +180,7 @@ are auto-generated and globally unique (`dsl.tx#i`, `dsl.call#k`, `dsl.ret#k`,
 returns the compiled `BlobMessage[]` without executing, for message-level
 assertions.
 
-DSL limits (beyond the v1 shape restrictions below): no value transfer, no
+DSL limits (beyond the v1 shape restrictions below): no
 `ChainOperation`s, and one `runDsl` per test (a second run would diverge from a
 fresh generator's genesis-derived state roots). Scenarios live in
 `test/blob/DslScenarios.t.sol`; parser rejection tests in

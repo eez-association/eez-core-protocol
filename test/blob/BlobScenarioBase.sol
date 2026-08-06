@@ -23,6 +23,16 @@ import {ScenarioStore, CallNode, TxSpec, ChainOpSpec} from "../../script/blob/Sc
 import {TableGenerator} from "../../script/blob/TableGenerator.sol";
 import {TableStitcher} from "../../script/blob/TableStitcher.sol";
 import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
+import {
+    ROOT_KIND_CALL,
+    ROOT_KIND_STATIC,
+    UNIT_KIND_ORIGIN_GROUP,
+    STEP_CALL,
+    STEP_CALL_EXPECT_REVERT,
+    STEP_STATIC_READ,
+    STEP_SUBCONTEXT_REVERT,
+    STEP_STATIC_EXPECT_REVERT
+} from "../../script/blob/BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BlobScenarioBase — the scenario harness. A test builds a blob message list
@@ -69,7 +79,9 @@ abstract contract BlobScenarioBase is Test {
             psList[0] = address(ps);
             bytes32[] memory vks = new bytes32[](1);
             vks[0] = keccak256("blobfw-vk");
-            Rollup manager = new Rollup(address(rollups), address(this), 1, psList, vks);
+            // Named owner (not address(this)): no blob test exercises the owner path,
+            // and forge script forbids address(this) in script contracts (BlobTools).
+            Rollup manager = new Rollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
             uint64 rid = rollups.registerRollup(address(manager), _genesisRoot(i));
             require(rid == i, "chain id / rollup id mismatch");
             rollupManagers[i] = manager;
@@ -168,7 +180,7 @@ abstract contract BlobScenarioBase is Test {
             TxSpec memory txSpec = store.getTx(t);
             uint8[] memory kinds = new uint8[](txSpec.rootCalls.length);
             for (uint256 k = 0; k < txSpec.rootCalls.length; k++) {
-                kinds[k] = store.getNode(txSpec.rootCalls[k]).isStatic ? 1 : 0;
+                kinds[k] = store.getNode(txSpec.rootCalls[k]).isStatic ? ROOT_KIND_STATIC : ROOT_KIND_CALL;
             }
             stitcher.loadSidecarTx(txSpec.originChain, txSpec.txData, kinds);
         }
@@ -344,7 +356,7 @@ abstract contract BlobScenarioBase is Test {
             require(child.fromChain == execChain, "child does not execute on its parent's chain");
             if (child.revertSpan > 0) {
                 steps[w++] = ScriptedActor.Step({
-                    kind: 4, // STEP_SUBCONTEXT_REVERT
+                    kind: STEP_SUBCONTEXT_REVERT,
                     target: address(0),
                     value: 0,
                     stepGas: 0,
@@ -355,9 +367,9 @@ abstract contract BlobScenarioBase is Test {
             }
             uint8 kind;
             if (child.isStatic) {
-                kind = child.success ? 3 : 5; // STEP_STATIC_READ / STEP_STATIC_EXPECT_REVERT
+                kind = child.success ? STEP_STATIC_READ : STEP_STATIC_EXPECT_REVERT;
             } else {
-                kind = child.success ? 1 : 2; // STEP_CALL / STEP_CALL_EXPECT_REVERT
+                kind = child.success ? STEP_CALL : STEP_CALL_EXPECT_REVERT;
             }
             steps[w++] = ScriptedActor.Step({
                 kind: kind,
@@ -383,7 +395,7 @@ abstract contract BlobScenarioBase is Test {
             CallNode memory sub = store.getNode(children[i]);
             require(sub.fromChain == execChain, "static sub-read does not execute on its parent's chain");
             steps[i] = ScriptedActor.Step({
-                kind: sub.success ? 3 : 5, // STEP_STATIC_READ / STEP_STATIC_EXPECT_REVERT
+                kind: sub.success ? STEP_STATIC_READ : STEP_STATIC_EXPECT_REVERT,
                 target: _managerOf(execChain).computeCrossChainProxyAddress(sub.toAddress, sub.toChain),
                 value: 0,
                 stepGas: STATIC_STEP_GAS,
@@ -513,7 +525,7 @@ abstract contract BlobScenarioBase is Test {
         L2StaticExecutionEntry[] memory statics = gen.unitStatics(i);
         EEZL2 manager = managers[tag.chainId];
 
-        if (tag.kind == 1) {
+        if (tag.kind == UNIT_KIND_ORIGIN_GROUP) {
             // Origin group: load the table, then the origin driver's own tx consumes it.
             vm.prank(SYSTEM_ADDRESS);
             manager.loadExecutionTable(entries, statics);

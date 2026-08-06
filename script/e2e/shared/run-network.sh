@@ -354,31 +354,67 @@ fi
 #      L1 events never carry the entries, but the settlement tx's
 #      postAndVerifyBatch calldata does: decode it and field-match every
 #      expected entry (the L1 analogue of the L2 table comparison).
+#
+#      Call hashes are not unique across runs — parallel or repeated jobs of
+#      the same scenario can emit identical rolling hashes — so the pinned
+#      L1_BATCH_TX may be a sibling job's batch. Try every candidate tx the
+#      range scan emitted, and (L2 trigger) re-scan the growing range for
+#      late settlements until the deadline.
 # ══════════════════════════════════════════════
 if [[ "${FAILED:-false}" != true && -z "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE" != "0x" ]]; then
     echo ""
     echo "NOTE: no settlement tx identified (no BatchPosted in the scanned logs) - skipping posted-batch calldata comparison"
 fi
 if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE" != "0x" ]]; then
+    _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
+    [[ -z "$_CANDIDATES" ]] && _CANDIDATES="$L1_BATCH_TX"
     echo ""
-    echo "====== Verify L1 Posted Batch Calldata (tx $L1_BATCH_TX) ======"
-    _BATCH_TO=$(cast tx "$L1_BATCH_TX" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    _BATCH_INPUT=$(cast tx "$L1_BATCH_TX" input --rpc-url "$RPC" 2>/dev/null)
-    if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
-        # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
-        echo "NOTE: settlement tx targets ${_BATCH_TO:-<unknown>} (not the registry) - skipping calldata comparison"
-    elif [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]]; then
-        echo "NOTE: could not fetch settlement tx input - skipping calldata comparison"
-    else
-        if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
+    echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx) ======"
+    _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-180} ))
+    _CALLDATA_OK=false
+    _LAST_FAIL=""
+    while true; do
+        for _TX in $_CANDIDATES; do
+            _BATCH_TO=$(cast tx "$_TX" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+            _BATCH_INPUT=$(cast tx "$_TX" input --rpc-url "$RPC" 2>/dev/null)
+            if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
+                # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
+                echo "NOTE: candidate $_TX targets ${_BATCH_TO:-<unknown>} (not the registry) - skipped"
+                continue
+            fi
+            [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
+            if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
+                --rpc-url "$RPC" \
+                --sig "run(bytes,address,bytes)" \
+                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" 2>&1); then
+                echo "Matched settlement tx $_TX"
+                echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
+                L1_BATCH_TX="$_TX"   # step 5 decodes L2 blocks from this tx
+                _CALLDATA_OK=true
+                break 2
+            fi
+            _LAST_FAIL="$BATCH_VERIFY"
+        done
+        # No candidate contained our entries. For L2 triggers our entry may
+        # simply not have settled yet — re-scan the growing range for new
+        # settlement txs until the deadline.
+        [[ $(date +%s) -ge $_CD_DEADLINE || "$_TRIGGER_CHAIN" != "L2" ]] && break
+        sleep 10
+        _L1_CUR=$(cast block-number --rpc-url "$RPC")
+        L1_RESCAN=$(forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
             --rpc-url "$RPC" \
-            --sig "run(bytes,address,bytes)" \
-            "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" 2>&1); then
-            echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
+            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+            "$L1_BLOCK_BEFORE" "$_L1_CUR" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1) || continue
+        _NEW=$(echo "$L1_RESCAN" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
+        [[ -n "$_NEW" ]] && _CANDIDATES="$_NEW"
+    done
+    if ! $_CALLDATA_OK; then
+        if [[ -z "$_LAST_FAIL" ]]; then
+            echo "NOTE: no comparable settlement tx (non-registry target or missing input) - skipping calldata comparison"
         else
             FAILED=true
-            echo "$BATCH_VERIFY" | grep -E "FAIL|NOTE|Error|call\[" | head -30
-            echo "L1 BATCH CALLDATA VERIFICATION FAILED"
+            echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
+            echo "L1 BATCH CALLDATA VERIFICATION FAILED (no candidate settlement tx contained the expected entries)"
         fi
     fi
 fi

@@ -323,6 +323,60 @@ contract BlobCodecTest is Test {
         this.decodeExternal(p, t);
     }
 
+    function test_reject_emptyStream() public {
+        vm.expectRevert(BlobCodec.EmptyStream.selector);
+        this.decodeExternal("", "");
+    }
+
+    function test_reject_varintTooLong() public {
+        // Lengths fit a u32 (1–5 varint bytes); a 6th continuation byte is invalid.
+        bytes memory stream = abi.encodePacked(
+            uint8(0), // version
+            uint8(2), // ChainOperation
+            BlobCodec._le64(7),
+            hex"808080808080" // 6 continuation bytes
+        );
+        vm.expectRevert(BlobCodec.VarintTooLong.selector);
+        this.decodeExternal(stream, "");
+    }
+
+    /// @notice A literal second CloseBlobStream byte in the blob portion is caught by
+    ///         the PADDING rule (everything after the close must be zero), not by
+    ///         `DuplicateCloseBlobStream` — that error is a defensive guard which no
+    ///         input can reach through `decode` (the first close consumes the rest of
+    ///         its segment, and a close in the tail is `CloseBlobStreamInCallData`).
+    function test_reject_secondCloseInBlobPortion() public {
+        bytes memory stream = abi.encodePacked(uint8(0), uint8(1), uint8(1));
+        vm.expectRevert(abi.encodeWithSelector(BlobCodec.NonZeroPadding.selector, 2));
+        this.decodeExternal(stream, "");
+    }
+
+    function test_reject_returnCrossesSnapshot() public {
+        // §5 condition: a Return may not close a call opened BEFORE the innermost
+        // open Snapshot.
+        MsgList memory l = Msg.list(8);
+        Msg.push(l, Msg.initiate(L1, ""));
+        Msg.push(l, Msg.call(L2A, USER, TARGET_A, 0, ""));
+        Msg.push(l, Msg.snapshot());
+        Msg.push(l, Msg.returnSuccess(""));
+        (bytes memory p, bytes memory t) = BlobCodec.encode(Msg.done(l));
+        vm.expectRevert(BlobCodec.ReturnCrossesSnapshot.selector);
+        this.decodeExternal(p, t);
+    }
+
+    function test_reject_depthLimitExceeded() public {
+        // Initiate pushes the root context; 63 more calls fill the 64-slot stack,
+        // and the 64th call overflows it.
+        MsgList memory l = Msg.list(70);
+        Msg.push(l, Msg.initiate(L1, ""));
+        for (uint256 i = 0; i < 64; i++) {
+            Msg.push(l, Msg.call(i % 2 == 0 ? L2A : L1, USER, TARGET_A, 0, ""));
+        }
+        (bytes memory p, bytes memory t) = BlobCodec.encode(Msg.done(l));
+        vm.expectRevert(BlobCodec.DepthLimitExceeded.selector);
+        this.decodeExternal(p, t);
+    }
+
     function test_reject_invalidFieldElement() public {
         bytes32[][] memory blobs = new bytes32[][](1);
         blobs[0] = new bytes32[](BlobPacking.FIELD_ELEMENTS_PER_BLOB);

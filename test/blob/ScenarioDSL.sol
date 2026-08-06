@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {BlobScenarioBase} from "./BlobScenarioBase.sol";
 import {BlobMessage, Msg, MsgList} from "../../script/blob/BlobMessages.sol";
 import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
+import {MAX_CALL_DEPTH} from "../../script/blob/BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  DslScenarioBase — pseudo-code authoring layer over BlobScenarioBase.
@@ -16,7 +17,10 @@ import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
 //
 //  Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 //
-//      <chain> call <chain>        executor calls target; opens a frame
+//      <chain> call <chain> [value <amount> [wei|gwei|ether]]
+//                                  executor calls target; opens a frame. The
+//                                  optional value clause attaches ether (default
+//                                  unit wei); reads can't carry value
 //      <chain> staticCall <chain>  read-only frame (a top-level one may nest
 //                                  leaf static sub-reads of the origin chain)
 //      <chain> return              closes the innermost frame with ReturnSuccess
@@ -34,14 +38,14 @@ import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
 //  are auto-generated and globally unique ("dsl.tx#i", "dsl.call#k",
 //  "dsl.ret#k", …), so repeated shapes never re-match a rolled-back entry.
 //
-//  Limits: no value transfer, no ChainOperations, one open region at a time,
+//  Limits: no ChainOperations, one open region at a time,
 //  no committed (successful mutable) call inside a returnFail frame (both
 //  ScenarioStore v1 rules), one `runDsl` per test.
 // ─────────────────────────────────────────────────────────────────────────────
 
 abstract contract DslScenarioBase is BlobScenarioBase {
     uint64 internal constant DSL_MAX_CHAIN = 26; // L2_a .. L2_z
-    uint256 internal constant DSL_MAX_DEPTH = 64; // mirrors ScenarioStore's frame stack
+    uint256 internal constant DSL_MAX_DEPTH = MAX_CALL_DEPTH; // same brackets as the codec/store stacks
 
     /// @notice Per-chain origin driver / call target, deployed lazily by the compiler.
     mapping(uint64 => ScriptedActor) internal dslDriver;
@@ -113,8 +117,20 @@ abstract contract DslScenarioBase is BlobScenarioBase {
             uint64 exec = _dslChain(toks[0], lineNo);
             if (exec > maxChain) maxChain = exec;
             if (toks.length < 2) _dslFail(lineNo, "missing verb");
-            if (_dslEq(toks[1], "call") || _dslEq(toks[1], "staticcall")) {
-                if (toks.length != 3) _dslFail(lineNo, string.concat("expected: <chain> ", toks[1], " <chain>"));
+            if (_dslEq(toks[1], "call")) {
+                if (toks.length != 3 && toks.length != 5 && toks.length != 6) {
+                    _dslFail(lineNo, "expected: <chain> call <chain> [value <amount> [wei|gwei|ether]]");
+                }
+                if (toks.length > 3) _dslValue(toks, lineNo); // validates the clause
+                uint64 tgt = _dslChain(toks[2], lineNo);
+                if (tgt > maxChain) maxChain = tgt;
+            } else if (_dslEq(toks[1], "staticcall")) {
+                if (toks.length != 3) {
+                    if (toks.length > 3 && _dslEq(toks[3], "value")) {
+                        _dslFail(lineNo, "static calls cannot carry value");
+                    }
+                    _dslFail(lineNo, "expected: <chain> staticcall <chain>");
+                }
                 uint64 tgt = _dslChain(toks[2], lineNo);
                 if (tgt > maxChain) maxChain = tgt;
             } else if (
@@ -246,6 +262,7 @@ abstract contract DslScenarioBase is BlobScenarioBase {
     function _dslCall(DslBuild memory b, string[] memory toks, uint64 exec, bool isStatic, uint256 lineNo) internal {
         uint64 tgt = _dslChain(toks[2], lineNo);
         if (tgt == exec) _dslFail(lineNo, "call target equals executing chain");
+        uint256 value = (!isStatic && toks.length > 3) ? _dslValue(toks, lineNo) : 0;
         if (b.sp > 0 && b.frameStatic[b.sp - 1]) {
             // Only a top-level static frame nests, and only leaf static sub-reads of
             // the reader (origin) chain — the shape the static entries verify live.
@@ -261,7 +278,7 @@ abstract contract DslScenarioBase is BlobScenarioBase {
         if (isStatic) {
             Msg.push(b.l, Msg.staticCall(tgt, from, address(dslTarget[tgt]), data));
         } else {
-            Msg.push(b.l, Msg.call(tgt, from, address(dslTarget[tgt]), 0, data));
+            Msg.push(b.l, Msg.call(tgt, from, address(dslTarget[tgt]), value, data));
         }
         b.frameChain[b.sp] = tgt;
         b.frameStatic[b.sp] = isStatic;
@@ -349,6 +366,34 @@ abstract contract DslScenarioBase is BlobScenarioBase {
         for (uint256 i = 0; i < parts.length; i++) {
             if (bytes(parts[i]).length != 0) toks[w++] = parts[i];
         }
+    }
+
+    /// @dev Parses the `value <amount> [wei|gwei|ether]` clause of a call line
+    ///      (tokens 3..5; presence already established). Amount is a decimal
+    ///      integer; the default unit is wei.
+    function _dslValue(string[] memory toks, uint256 lineNo) internal pure returns (uint256) {
+        if (!_dslEq(toks[3], "value")) {
+            _dslFail(lineNo, string.concat("expected 'value', got '", toks[3], "'"));
+        }
+        bytes memory amt = bytes(toks[4]);
+        uint256 v = 0;
+        for (uint256 i = 0; i < amt.length; i++) {
+            if (amt[i] < "0" || amt[i] > "9") {
+                _dslFail(lineNo, string.concat("bad value amount '", toks[4], "' (want a decimal integer)"));
+            }
+            v = v * 10 + (uint8(amt[i]) - 48);
+        }
+        if (amt.length == 0) _dslFail(lineNo, "bad value amount '' (want a decimal integer)");
+        if (toks.length == 6) {
+            if (_dslEq(toks[5], "ether")) {
+                v *= 1 ether;
+            } else if (_dslEq(toks[5], "gwei")) {
+                v *= 1 gwei;
+            } else if (!_dslEq(toks[5], "wei")) {
+                _dslFail(lineNo, string.concat("bad value unit '", toks[5], "' (want wei, gwei, or ether)"));
+            }
+        }
+        return v;
     }
 
     function _dslChain(string memory tok, uint256 lineNo) internal pure returns (uint64) {

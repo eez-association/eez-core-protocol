@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {BlobMessage, BlobMsgType} from "./BlobMessages.sol";
+import {MAX_CALL_DEPTH} from "./BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  BlobCodec — wire codec for the standardized message format (version 00).
@@ -24,7 +25,7 @@ import {BlobMessage, BlobMsgType} from "./BlobMessages.sol";
 
 library BlobCodec {
     uint8 internal constant PROTOCOL_VERSION = 0x00;
-    uint256 internal constant MAX_DEPTH = 64; // context-stack / snapshot-stack capacity
+    uint256 internal constant MAX_DEPTH = MAX_CALL_DEPTH; // context-stack / snapshot-stack capacity
 
     error EmptyStream();
     error UnknownProtocolVersion(uint8 version);

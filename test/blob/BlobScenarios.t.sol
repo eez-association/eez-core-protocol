@@ -74,7 +74,7 @@ contract BlobScenarios is BlobScenarioBase {
         Msg.push(l, Msg.closeBlobStream());
         BlobMessage[] memory msgs = Msg.done(l);
 
-        (ExecutionEntry[] memory entries,,) = _generateOnly(msgs);
+        (ExecutionEntry[] memory entries,,) = _generateTables(msgs);
         assertEq(entries.length, 1, "one L1 entry (the origin root call)");
         assertEq(entries[0].destinationRollupId, L2A, "routed to L2A's queue");
         assertEq(entries[0].l2ToL1Calls.length, 0, "nothing executes on L1");
@@ -356,17 +356,5 @@ contract BlobScenarios is BlobScenarioBase {
         assertEq(actorA.execCount(), 1);
         assertEq(actorB.execCount(), 1);
         assertEq(actorC.execCount(), 1);
-    }
-
-    // ──────────────────────────────────────────────
-    //  Helper: run only the Blob→Table direction (for table-shape assertions)
-    // ──────────────────────────────────────────────
-
-    function _generateOnly(BlobMessage[] memory msgs)
-        internal
-        returns (ExecutionEntry[] memory l1, uint256 units, address gen)
-    {
-        // Local imports avoided: mirror runScenario's first steps.
-        return _generateTables(msgs);
     }
 }

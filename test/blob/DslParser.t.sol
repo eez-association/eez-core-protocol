@@ -4,8 +4,11 @@ pragma solidity ^0.8.28;
 import {DslScenarioBase} from "./ScenarioDSL.sol";
 
 /// @title DslParser
-/// @notice Negative tests for the DSL compiler: every structural or lexical error
-///         reverts with an exact `DSL line <n>: <reason>` message.
+/// @notice Negative tests for the DSL compiler (`DslScenarioBase` in
+///         `ScenarioDSL.sol`): structural and lexical errors revert with an exact
+///         `DSL line <n>: <reason>` message — except the two script-level checks
+///         (empty script, one-runDsl-per-test), which have no line to point at
+///         and revert with a plain `DSL: <reason>`.
 contract DslParser is DslScenarioBase {
     /// @dev External wrapper so `vm.expectRevert` sees the compiler's revert.
     function compileExternal(string calldata script) external {
@@ -30,7 +33,23 @@ contract DslParser is DslScenarioBase {
     }
 
     function test_reject_missingCallTarget() public {
-        _expectFail(1, "expected: <chain> call <chain>", "L1 call\n");
+        _expectFail(1, "expected: <chain> call <chain> [value <amount> [wei|gwei|ether]]", "L1 call\n");
+    }
+
+    function test_reject_valueOnStaticCall() public {
+        _expectFail(1, "static calls cannot carry value", "L1 staticCall L2_A value 1 ether\n");
+    }
+
+    function test_reject_valueBadAmount() public {
+        _expectFail(1, "bad value amount 'abc' (want a decimal integer)", "L1 call L2_A value abc\n");
+    }
+
+    function test_reject_valueBadUnit() public {
+        _expectFail(1, "bad value unit 'szabo' (want wei, gwei, or ether)", "L1 call L2_A value 1 szabo\n");
+    }
+
+    function test_reject_valueMissingKeyword() public {
+        _expectFail(1, "expected 'value', got 'with'", "L1 call L2_A with 1 ether\n");
     }
 
     function test_reject_missingVerb() public {

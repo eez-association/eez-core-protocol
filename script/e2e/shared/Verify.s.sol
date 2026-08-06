@@ -1171,19 +1171,41 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
         console.log(
             "PASS: %s/%s expected L1 entries executed in range", expectedEntryHashes.length, expectedEntryHashes.length
         );
-        // Pin the block/tx of the first matching EntryExecuted.
+        // Pin the block/tx of the first matching EntryExecuted, and emit EVERY
+        // distinct settlement tx with a matching event as a candidate. Call hashes
+        // are not unique across runs — parallel or repeated jobs of the same
+        // scenario can emit identical rolling hashes — so the first match may be
+        // a sibling job's batch; the runner disambiguates by checking each
+        // candidate tx's calldata.
+        bytes32[] memory seenTxs = new bytes32[](logs.length);
+        uint256 nSeen;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
             if (logs[i].data.length < 96) continue; // foreign layout — don't decode
             (bytes32 rollingHash,,) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
             bytes32 h = keccak256(abi.encode(bytes32(0), rollingHash));
+            bool matched = false;
             for (uint256 j = 0; j < expectedEntryHashes.length; j++) {
                 if (h == expectedEntryHashes[j]) {
-                    console.log("L1_MATCH_BLOCK=%s", logs[i].blockNumber);
-                    console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
-                    return;
+                    matched = true;
+                    break;
                 }
             }
+            if (!matched) continue;
+            bool dup = false;
+            for (uint256 k = 0; k < nSeen; k++) {
+                if (seenTxs[k] == logs[i].transactionHash) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            seenTxs[nSeen++] = logs[i].transactionHash;
+            if (nSeen == 1) {
+                console.log("L1_MATCH_BLOCK=%s", logs[i].blockNumber);
+                console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
+            }
+            console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
         }
     }
 }

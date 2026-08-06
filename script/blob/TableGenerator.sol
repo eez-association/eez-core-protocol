@@ -17,6 +17,7 @@ import {
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {ScenarioStore, CallNode, TxSpec} from "./ScenarioStore.sol";
+import {UNIT_KIND_ORIGIN_GROUP, UNIT_KIND_INBOUND, NO_NODE} from "./BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TableGenerator — the Blob → Table direction.
@@ -47,9 +48,11 @@ import {ScenarioStore, CallNode, TxSpec} from "./ScenarioStore.sol";
 
 contract TableGenerator is TestHashes {
     uint64 internal constant L1_CHAIN = 0;
-    uint256 internal constant NO_FRAME = type(uint256).max;
+    uint256 internal constant NO_FRAME = NO_NODE;
 
-    error GeneratorInvariant(string reason);
+    /// @dev `nodeId` locates the store node being processed (NO_NODE when the
+    ///      failure is not tied to one) so a broken scenario points at itself.
+    error GeneratorInvariant(string reason, uint256 nodeId);
 
     ScenarioStore internal _store;
     uint64[] internal _gasByNode;
@@ -69,8 +72,8 @@ contract TableGenerator is TestHashes {
     // ── outputs: L2 units ──
     struct UnitTag {
         uint64 chainId;
-        uint8 kind; // 1 = origin group (load + own tx), 2 = inbound delivery
-        uint256 inboundNodeId; // kind 2: node driven by executeIncomingCrossChainCall
+        uint8 kind; // UNIT_KIND_ORIGIN_GROUP (load + own tx) or UNIT_KIND_INBOUND (delivery)
+        uint256 inboundNodeId; // UNIT_KIND_INBOUND: node driven by executeIncomingCrossChainCall
         uint256 txIndex;
     }
 
@@ -87,15 +90,16 @@ contract TableGenerator is TestHashes {
     // ── walk state ──
     struct Ctx {
         bool hasHost; // an open host entry exists on this chain
-        bool hostIsL1;
-        uint256 hostEntry; // index into _l1Entries / position within the unit's entries
-        uint256 hostUnit; // L2 only
+        bool hostIsL1; // selects which of hostEntry/hostUnit are meaningful (see below)
+        uint256 hostEntry; // hostIsL1: index into _l1Entries; else: entry position within _unitEntries[hostUnit]
+        uint256 hostUnit; // meaningless when hostIsL1
         bytes32 liveHash;
         uint256[] frameStack; // open reentrant-row indices; insertion target = top row's sub-array
     }
 
     mapping(uint64 => Ctx) internal _ctx;
     mapping(uint64 => uint256) internal _openOriginUnit; // chainId → unitIdx + 1 (0 = none), reset per tx
+    uint256 internal _txCursor; // transaction being walked (stamped into each new unit's tag)
 
     // region (Snapshot … Revert) state — v1 supports one region at a time
     bool internal _regionActive;
@@ -123,7 +127,7 @@ contract TableGenerator is TestHashes {
     /// @param gasByNode Observed `callGas` per store node id (0 for L1-sourced and static nodes) —
     ///        folded into the source-side keys of calls leaving an L2.
     function generate(ScenarioStore store, uint64[] calldata gasByNode) external {
-        if (_generated) revert GeneratorInvariant("already generated");
+        if (_generated) revert GeneratorInvariant("already generated", NO_NODE);
         _generated = true;
         _store = store;
         _gasByNode = gasByNode;
@@ -242,7 +246,7 @@ contract TableGenerator is TestHashes {
     /// @notice One mutable root call: consumes an origin-side entry on the origin chain
     ///         and executes on the destination side.
     function _rootCall(uint256 t, uint64 origin, uint256 nodeId, CallNode memory n) internal {
-        if (n.fromChain != origin) revert GeneratorInvariant("root call fromChain != origin");
+        if (n.fromChain != origin) revert GeneratorInvariant("root call fromChain != origin", nodeId);
         bytes32 cch = _nodeCch(n);
 
         if (origin == L1_CHAIN) {
@@ -269,7 +273,7 @@ contract TableGenerator is TestHashes {
             }
         } else {
             // Origin entry on the L2 origin chain, consumed by the driver's proxy call.
-            uint256 unitIdx = _originUnit(origin, t);
+            uint256 unitIdx = _originUnit(origin);
             bytes32 srcCch = _sourceCch(nodeId, n);
             L2ExecutionEntry storage e = _unitEntries[unitIdx].push();
             e.proxyEntryHash = srcCch;
@@ -306,7 +310,7 @@ contract TableGenerator is TestHashes {
         bytes32 cch = _nodeCch(n);
 
         if (dest == L1_CHAIN) {
-            if (!_ctx[L1_CHAIN].hasHost) revert GeneratorInvariant("call into L1 with no host");
+            if (!_ctx[L1_CHAIN].hasHost) revert GeneratorInvariant("call into L1 with no host", nodeId);
             _appendCall(L1_CHAIN, n);
             _foldCallBegin(L1_CHAIN, cch);
             _walkChildren(n);
@@ -321,7 +325,7 @@ contract TableGenerator is TestHashes {
             // Inbound delivery: a fresh unit whose single entry is driven by
             // executeIncomingCrossChainCall (incomingCalls[0] is the inbound call).
             _touchRollupGlobal(dest);
-            uint256 unitIdx = _newUnit(dest, 2, nodeId);
+            uint256 unitIdx = _newUnit(dest, UNIT_KIND_INBOUND, nodeId);
             L2ExecutionEntry storage e = _unitEntries[unitIdx].push();
             e.proxyEntryHash = cch;
             uint16 marker = (_regionActive && dest != _regionHost) ? 1 : 0;
@@ -360,7 +364,7 @@ contract TableGenerator is TestHashes {
                 regionEnd = i + child.revertSpan - 1;
             }
             if (child.isStatic) {
-                _reentrantStatic(execChain, child);
+                _reentrantStatic(execChain, n.children[i], child);
             } else {
                 _reentrantCall(execChain, n.children[i], child);
             }
@@ -374,9 +378,9 @@ contract TableGenerator is TestHashes {
     /// @notice A mutable call leaving `execChain` mid-execution: a row in the host's
     ///         unified reentrant table, keyed by the live rolling hash at fire time.
     function _reentrantCall(uint64 execChain, uint256 nodeId, CallNode memory n) internal {
-        if (n.fromChain != execChain) revert GeneratorInvariant("child fromChain != executing chain");
+        if (n.fromChain != execChain) revert GeneratorInvariant("child fromChain != executing chain", nodeId);
         Ctx storage c = _ctx[execChain];
-        if (!c.hasHost) revert GeneratorInvariant("reentrant call with no host");
+        if (!c.hasHost) revert GeneratorInvariant("reentrant call with no host", nodeId);
 
         bytes32 cch = _sourceCch(nodeId, n);
         bytes32 fireHash = c.liveHash;
@@ -432,7 +436,7 @@ contract TableGenerator is TestHashes {
             se.expectedStateRoots
                 .push(ExpectedStateRootPerRollup({rollupId: n.toChain, stateRoot: _ledgerGet(n.toChain)}));
         } else {
-            uint256 unitIdx = _originUnit(origin, t);
+            uint256 unitIdx = _originUnit(origin);
             L2StaticExecutionEntry storage se = _unitStatics[unitIdx].push();
             se.proxyEntryHash = cch;
             for (uint256 i = 0; i < n.children.length; i++) {
@@ -463,10 +467,10 @@ contract TableGenerator is TestHashes {
     ///         host's unified table (host hash untouched); if the destination chain is
     ///         itself executing, the read also lands in its arrays as an `isStatic`
     ///         call (evaluated at that exact execution point).
-    function _reentrantStatic(uint64 execChain, CallNode memory n) internal {
-        if (n.fromChain != execChain) revert GeneratorInvariant("static child fromChain != executing chain");
+    function _reentrantStatic(uint64 execChain, uint256 nodeId, CallNode memory n) internal {
+        if (n.fromChain != execChain) revert GeneratorInvariant("static child fromChain != executing chain", nodeId);
         Ctx storage c = _ctx[execChain];
-        if (!c.hasHost) revert GeneratorInvariant("reentrant static with no host");
+        if (!c.hasHost) revert GeneratorInvariant("reentrant static with no host", nodeId);
 
         bytes32 cch = _nodeCch(n); // folds isStatic = true
         bytes32 key = keccak256(abi.encodePacked(cch, c.liveHash));
@@ -487,7 +491,7 @@ contract TableGenerator is TestHashes {
     // ──────────────────────────────────────────────
 
     function _openRegion(uint64 hostChain, bool rootLevel) internal {
-        if (_regionActive) revert GeneratorInvariant("nested region");
+        if (_regionActive) revert GeneratorInvariant("nested region", NO_NODE);
         _regionActive = true;
         _regionNonce++;
         _regionHost = hostChain;
@@ -672,20 +676,13 @@ contract TableGenerator is TestHashes {
 
     function _newUnit(uint64 chainId, uint8 kind, uint256 inboundNodeId) internal returns (uint256 idx) {
         idx = _units.length;
-        _units.push(UnitTag({chainId: chainId, kind: kind, inboundNodeId: inboundNodeId, txIndex: _currentTx()}));
-    }
-
-    uint256 internal _txCursor;
-
-    function _currentTx() internal view returns (uint256) {
-        return _txCursor;
+        _units.push(UnitTag({chainId: chainId, kind: kind, inboundNodeId: inboundNodeId, txIndex: _txCursor}));
     }
 
     /// @notice Lazily creates the per-tx origin group unit for `origin`.
-    function _originUnit(uint64 origin, uint256 t) internal returns (uint256 idx) {
-        _txCursor = t;
+    function _originUnit(uint64 origin) internal returns (uint256 idx) {
         if (_openOriginUnit[origin] != 0) return _openOriginUnit[origin] - 1;
-        idx = _newUnit(origin, 1, 0);
+        idx = _newUnit(origin, UNIT_KIND_ORIGIN_GROUP, 0);
         _openOriginUnit[origin] = idx + 1;
     }
 

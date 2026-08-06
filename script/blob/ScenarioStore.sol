@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {BlobMessage, BlobMsgType, Msg, MsgList} from "./BlobMessages.sol";
+import {NO_NODE, MAX_CALL_DEPTH} from "./BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  ScenarioStore — the framework's intermediate representation (IR).
@@ -89,7 +90,9 @@ contract ScenarioStore {
     error UnsupportedShape(string reason);
     error ParseInvariant(string reason);
 
-    uint256 internal constant ROOT_FRAME = type(uint256).max;
+    /// @dev Root-frame parent sentinel — the shared NO_NODE value, because callers
+    ///      (TableStitcher) pass it into `newCall` from across the contract boundary.
+    uint256 internal constant ROOT_FRAME = NO_NODE;
 
     // ──────────────────────────────────────────────
     //  Getters
@@ -253,8 +256,9 @@ contract ScenarioStore {
         if (_nodes.length != 0 || _txs.length != 0) revert ParseInvariant("store already populated");
 
         // Frame stack: ROOT_FRAME sentinel at the bottom of each tx, node ids above.
-        uint256[] memory frames = new uint256[](64);
-        uint64[] memory chains = new uint64[](64); // executing chain per frame level
+        // Capacity matches the codec's context stack — decode enforces the depth.
+        uint256[] memory frames = new uint256[](MAX_CALL_DEPTH);
+        uint64[] memory chains = new uint64[](MAX_CALL_DEPTH); // executing chain per frame level
         uint256 sp = 0;
         bool inTx = false;
         uint256 curTx = 0;

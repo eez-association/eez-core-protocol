@@ -7,7 +7,7 @@ description: Run all e2e tests against the devnet and summarize results
 Runs every e2e scenario in `script/e2e/` and reports pass/fail.
 
 - **Local mode runs in parallel by default** — each scenario gets its own anvil pair on unique ports + chain IDs (so forge `broadcast/<basename>/<chainId>/` dirs and deployer nonces don't collide).
-- **Network mode stays sequential** — the shared on-chain deployer nonce makes parallel runs against a real devnet unsafe.
+- **Network mode is sequential with a shared key** (`run-network-set.sh` — the shared deployer nonce makes parallel runs unsafe) **or parallel with per-worker wallets** (`script/e2e/orchestrator/parallel-e2e.sh` — a faucet account funds one throwaway wallet per job, removing the nonce constraint; logs in `tmp/e2e-parallel-net/<ts>/`).
 
 ## Preconditions
 
@@ -23,7 +23,7 @@ Runs every e2e scenario in `script/e2e/` and reports pass/fail.
 - **Local — single scenario:**
   `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
 - **Network — set of scenarios (sequential, the intended entry point):**
-  `bash script/e2e/shared/run-network-set.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs — shared deployer nonce.
+  `bash script/e2e/shared/run-network-set.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs with a shared key — use the orchestrator for parallel network runs.
 - **Network — single scenario:**
   `bash script/e2e/shared/run-network.sh <sol> --l1-rpc … --l1-front … --l2-rpc … --l2-front … --pk … --rollups … --manager-l2 …` — user-tx-then-composer flow with content-scan settlement discovery.
 
