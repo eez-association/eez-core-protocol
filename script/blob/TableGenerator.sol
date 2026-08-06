@@ -4,20 +4,19 @@ pragma solidity ^0.8.28;
 import {
     ExecutionEntry,
     StateUpdate,
-    L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
     ExpectedStateRootPerRollup
 } from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    CrossChainCall,
     ExpectedOutgoingCrossChainCall,
     StaticExecutionEntry as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {ScenarioStore, CallNode, TxSpec} from "./ScenarioStore.sol";
-import {UNIT_KIND_ORIGIN_GROUP, UNIT_KIND_INBOUND, NO_NODE} from "./BlobConstants.sol";
+import {CallShapes} from "./CallShapes.sol";
+import {UNIT_KIND_ORIGIN_GROUP, UNIT_KIND_INBOUND, NO_NODE, blobGenesisRoot} from "./BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  TableGenerator — the Blob → Table direction.
@@ -48,7 +47,6 @@ import {UNIT_KIND_ORIGIN_GROUP, UNIT_KIND_INBOUND, NO_NODE} from "./BlobConstant
 
 contract TableGenerator is TestHashes {
     uint64 internal constant L1_CHAIN = 0;
-    uint256 internal constant NO_FRAME = NO_NODE;
 
     /// @dev `nodeId` locates the store node being processed (NO_NODE when the
     ///      failure is not tied to one) so a broken scenario points at itself.
@@ -89,12 +87,12 @@ contract TableGenerator is TestHashes {
 
     // ── walk state ──
     struct Ctx {
-        bool hasHost; // an open host entry exists on this chain
+        bool active; // an open host entry exists on this chain
         bool hostIsL1; // selects which of hostEntry/hostUnit are meaningful (see below)
         uint256 hostEntry; // hostIsL1: index into _l1Entries; else: entry position within _unitEntries[hostUnit]
         uint256 hostUnit; // meaningless when hostIsL1
         bytes32 liveHash;
-        uint256[] frameStack; // open reentrant-row indices; insertion target = top row's sub-array
+        uint256[] frameRows; // open reentrant-row indices; insertion target = top row's sub-array
     }
 
     mapping(uint64 => Ctx) internal _ctx;
@@ -119,9 +117,10 @@ contract TableGenerator is TestHashes {
     //  Public API
     // ──────────────────────────────────────────────
 
-    /// @notice Fabricated genesis state root a rollup must be registered with.
+    /// @notice Fabricated genesis state root a rollup must be registered with
+    ///         (the shared `blobGenesisRoot` — one definition for harness + tables).
     function genesisRoot(uint64 rid) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked("blobfw-genesis", rid));
+        return blobGenesisRoot(rid);
     }
 
     /// @param gasByNode Observed `callGas` per store node id (0 for L1-sourced and static nodes) —
@@ -214,15 +213,15 @@ contract TableGenerator is TestHashes {
 
         uint256 regionEnd = type(uint256).max;
         for (uint256 i = 0; i < txSpec.rootCalls.length; i++) {
-            CallNode memory n = _store.getNode(txSpec.rootCalls[i]);
-            if (n.revertSpan > 0) {
+            CallNode memory node = _store.getNode(txSpec.rootCalls[i]);
+            if (node.revertSpan > 0) {
                 _openRegion(origin, true);
-                regionEnd = i + n.revertSpan - 1;
+                regionEnd = i + node.revertSpan - 1;
             }
-            if (n.isStatic) {
-                _rootStatic(origin, n, t);
+            if (node.isStatic) {
+                _rootStatic(origin, node, t);
             } else {
-                _rootCall(t, origin, txSpec.rootCalls[i], n);
+                _rootCall(t, origin, txSpec.rootCalls[i], node);
             }
             if (regionEnd == i) {
                 _closeRegion();
@@ -236,7 +235,7 @@ contract TableGenerator is TestHashes {
             host.rollingHash = _ctx[L1_CHAIN].liveHash;
             host.success = true;
             host.returnData = "";
-            _ctx[L1_CHAIN].hasHost = false;
+            _ctx[L1_CHAIN].active = false;
         }
 
         // Origin units don't span transactions.
@@ -245,28 +244,28 @@ contract TableGenerator is TestHashes {
 
     /// @notice One mutable root call: consumes an origin-side entry on the origin chain
     ///         and executes on the destination side.
-    function _rootCall(uint256 t, uint64 origin, uint256 nodeId, CallNode memory n) internal {
-        if (n.fromChain != origin) revert GeneratorInvariant("root call fromChain != origin", nodeId);
-        bytes32 cch = _nodeCch(n);
+    function _rootCall(uint256 t, uint64 origin, uint256 nodeId, CallNode memory node) internal {
+        if (node.fromChain != origin) revert GeneratorInvariant("root call fromChain != origin", nodeId);
+        bytes32 callHash = _destCallHash(node);
 
         if (origin == L1_CHAIN) {
             // Origin entry on L1, consumed by the driver's proxy call. A root-level
             // region on an L1 origin does NOT suppress ether: each consumption is
             // fully verified (accumulator included) before the driver's own revert
             // rolls it back — only the ledger advance is undone (see _closeRegion).
-            uint256 idx = _openL1Entry(cch, n.toChain, t);
+            uint256 idx = _openL1Entry(callHash, node.toChain, t);
             _prescan(nodeId, idx, true, origin, false);
             _sealL1Header(idx);
 
-            _execCall(nodeId, n);
+            _execCall(nodeId, node);
 
-            ExecutionEntry storage e = _l1Entries[idx];
-            e.rollingHash = _ctx[L1_CHAIN].liveHash;
-            e.success = n.success;
-            e.returnData = n.returnData;
-            _ctx[L1_CHAIN].hasHost = false;
+            ExecutionEntry storage entry = _l1Entries[idx];
+            entry.rollingHash = _ctx[L1_CHAIN].liveHash;
+            entry.success = node.success;
+            entry.returnData = node.returnData;
+            _ctx[L1_CHAIN].active = false;
 
-            if (!n.success) {
+            if (!node.success) {
                 // A failed consumption reverts its own delta application — the live
                 // roots never advance.
                 _rollbackLedgerForEntry(idx);
@@ -274,28 +273,28 @@ contract TableGenerator is TestHashes {
         } else {
             // Origin entry on the L2 origin chain, consumed by the driver's proxy call.
             uint256 unitIdx = _originUnit(origin);
-            bytes32 srcCch = _sourceCch(nodeId, n);
-            L2ExecutionEntry storage e = _unitEntries[unitIdx].push();
-            e.proxyEntryHash = srcCch;
+            bytes32 sourceCallHash = _sourceCallHash(nodeId, node);
+            L2ExecutionEntry storage entry = _unitEntries[unitIdx].push();
+            entry.proxyEntryHash = sourceCallHash;
             uint256 entryPos = _unitEntries[unitIdx].length - 1;
 
-            Ctx storage c = _ctx[origin];
-            c.hasHost = true;
-            c.hostIsL1 = false;
-            c.hostUnit = unitIdx;
-            c.hostEntry = entryPos;
-            c.liveHash = _hEntryBeginL2(srcCch);
-            _clearFrames(c);
+            Ctx storage ctx = _ctx[origin];
+            ctx.active = true;
+            ctx.hostIsL1 = false;
+            ctx.hostUnit = unitIdx;
+            ctx.hostEntry = entryPos;
+            ctx.liveHash = _hEntryBeginL2(sourceCallHash);
+            _clearFrames(ctx);
 
-            _execCall(nodeId, n);
+            _execCall(nodeId, node);
 
             // Re-fetch: pushes to the same unit may have moved nothing (storage), but
             // keep the reference honest.
             L2ExecutionEntry storage sealed_ = _unitEntries[unitIdx][entryPos];
             sealed_.rollingHash = _ctx[origin].liveHash;
-            sealed_.success = n.success;
-            sealed_.returnData = n.returnData;
-            _ctx[origin].hasHost = false;
+            sealed_.success = node.success;
+            sealed_.returnData = node.returnData;
+            _ctx[origin].active = false;
         }
     }
 
@@ -305,68 +304,68 @@ contract TableGenerator is TestHashes {
 
     /// @notice Destination-side handling of a mutable call + recursion into children.
     ///         The caller side (reentrant row / origin entry) is handled by the caller.
-    function _execCall(uint256 nodeId, CallNode memory n) internal {
-        uint64 dest = n.toChain;
-        bytes32 cch = _nodeCch(n);
+    function _execCall(uint256 nodeId, CallNode memory node) internal {
+        uint64 dest = node.toChain;
+        bytes32 callHash = _destCallHash(node);
 
         if (dest == L1_CHAIN) {
-            if (!_ctx[L1_CHAIN].hasHost) revert GeneratorInvariant("call into L1 with no host", nodeId);
-            _appendCall(L1_CHAIN, n);
-            _foldCallBegin(L1_CHAIN, cch);
-            _walkChildren(n);
-            _foldCallEnd(L1_CHAIN, n.success, n.returnData);
-        } else if (_ctx[dest].hasHost) {
+            if (!_ctx[L1_CHAIN].active) revert GeneratorInvariant("call into L1 with no host", nodeId);
+            _appendCall(L1_CHAIN, node);
+            _foldCallBegin(L1_CHAIN, callHash);
+            _walkChildren(node);
+            _foldCallEnd(L1_CHAIN, node.success, node.returnData);
+        } else if (_ctx[dest].active) {
             // Callback into an already-executing chain: lands at its insertion point.
-            _appendCall(dest, n);
-            _foldCallBegin(dest, cch);
-            _walkChildren(n);
-            _foldCallEnd(dest, n.success, n.returnData);
+            _appendCall(dest, node);
+            _foldCallBegin(dest, callHash);
+            _walkChildren(node);
+            _foldCallEnd(dest, node.success, node.returnData);
         } else {
             // Inbound delivery: a fresh unit whose single entry is driven by
             // executeIncomingCrossChainCall (incomingCalls[0] is the inbound call).
             _touchRollupGlobal(dest);
             uint256 unitIdx = _newUnit(dest, UNIT_KIND_INBOUND, nodeId);
-            L2ExecutionEntry storage e = _unitEntries[unitIdx].push();
-            e.proxyEntryHash = cch;
+            L2ExecutionEntry storage entry = _unitEntries[unitIdx].push();
+            entry.proxyEntryHash = callHash;
             uint16 marker = (_regionActive && dest != _regionHost) ? 1 : 0;
-            e.incomingCalls.push(_l2CallStruct(n, marker));
+            entry.incomingCalls.push(CallShapes.toL2Call(node, marker));
 
-            Ctx storage c = _ctx[dest];
-            c.hasHost = true;
-            c.hostIsL1 = false;
-            c.hostUnit = unitIdx;
-            c.hostEntry = 0;
-            c.liveHash = _hEntryBeginL2(cch);
-            _clearFrames(c);
+            Ctx storage ctx = _ctx[dest];
+            ctx.active = true;
+            ctx.hostIsL1 = false;
+            ctx.hostUnit = unitIdx;
+            ctx.hostEntry = 0;
+            ctx.liveHash = _hEntryBeginL2(callHash);
+            _clearFrames(ctx);
 
-            _foldCallBegin(dest, cch);
-            _walkChildren(n);
-            _foldCallEnd(dest, n.success, n.returnData);
+            _foldCallBegin(dest, callHash);
+            _walkChildren(node);
+            _foldCallEnd(dest, node.success, node.returnData);
 
             L2ExecutionEntry storage sealed_ = _unitEntries[unitIdx][0];
             sealed_.rollingHash = _ctx[dest].liveHash;
-            sealed_.success = n.success;
-            sealed_.returnData = n.returnData;
-            _ctx[dest].hasHost = false;
+            sealed_.success = node.success;
+            sealed_.returnData = node.returnData;
+            _ctx[dest].active = false;
         }
     }
 
     /// @notice Walks a node's children: each mutable child opens a reentrant row on the
     ///         executing chain (the caller side) and recurses; static children become
     ///         STATIC rows / destination-array reads. Handles region brackets.
-    function _walkChildren(CallNode memory n) internal {
-        uint64 execChain = n.toChain;
+    function _walkChildren(CallNode memory node) internal {
+        uint64 execChain = node.toChain;
         uint256 regionEnd = type(uint256).max;
-        for (uint256 i = 0; i < n.children.length; i++) {
-            CallNode memory child = _store.getNode(n.children[i]);
+        for (uint256 i = 0; i < node.children.length; i++) {
+            CallNode memory child = _store.getNode(node.children[i]);
             if (child.revertSpan > 0) {
                 _openRegion(execChain, false);
                 regionEnd = i + child.revertSpan - 1;
             }
             if (child.isStatic) {
-                _reentrantStatic(execChain, n.children[i], child);
+                _reentrantStatic(execChain, node.children[i], child);
             } else {
-                _reentrantCall(execChain, n.children[i], child);
+                _reentrantCall(execChain, node.children[i], child);
             }
             if (regionEnd == i) {
                 _closeRegion();
@@ -377,30 +376,30 @@ contract TableGenerator is TestHashes {
 
     /// @notice A mutable call leaving `execChain` mid-execution: a row in the host's
     ///         unified reentrant table, keyed by the live rolling hash at fire time.
-    function _reentrantCall(uint64 execChain, uint256 nodeId, CallNode memory n) internal {
-        if (n.fromChain != execChain) revert GeneratorInvariant("child fromChain != executing chain", nodeId);
-        Ctx storage c = _ctx[execChain];
-        if (!c.hasHost) revert GeneratorInvariant("reentrant call with no host", nodeId);
+    function _reentrantCall(uint64 execChain, uint256 nodeId, CallNode memory node) internal {
+        if (node.fromChain != execChain) revert GeneratorInvariant("child fromChain != executing chain", nodeId);
+        Ctx storage ctx = _ctx[execChain];
+        if (!ctx.active) revert GeneratorInvariant("reentrant call with no host", nodeId);
 
-        bytes32 cch = _sourceCch(nodeId, n);
-        bytes32 fireHash = c.liveHash;
-        bytes32 key = keccak256(abi.encodePacked(cch, fireHash));
+        bytes32 callHash = _sourceCallHash(nodeId, node);
+        bytes32 fireHash = ctx.liveHash;
+        bytes32 key = keccak256(abi.encodePacked(callHash, fireHash));
 
         uint256 rowIdx = _pushRow(execChain, key);
-        c.liveHash = _hNestedBegin(c.liveHash, cch);
-        c.frameStack.push(rowIdx);
+        ctx.liveHash = _hNestedBegin(ctx.liveHash, callHash);
+        ctx.frameRows.push(rowIdx);
 
-        _execCall(nodeId, n);
+        _execCall(nodeId, node);
 
-        c.frameStack.pop();
-        if (n.success) {
-            c.liveHash = _hNestedEnd(c.liveHash);
-            _sealRow(execChain, rowIdx, bytes32(0), true, n.returnData);
+        ctx.frameRows.pop();
+        if (node.success) {
+            ctx.liveHash = _hNestedEnd(ctx.liveHash);
+            _sealRow(execChain, rowIdx, bytes32(0), true, node.returnData);
         } else {
             // REVERTED frame: the mini-entry hash is checked, then the terminal revert
             // rolls the host hash (and cursor) back to the fire point.
-            _sealRow(execChain, rowIdx, c.liveHash, false, n.returnData);
-            c.liveHash = fireHash;
+            _sealRow(execChain, rowIdx, ctx.liveHash, false, node.returnData);
+            ctx.liveHash = fireHash;
         }
     }
 
@@ -416,49 +415,49 @@ contract TableGenerator is TestHashes {
     ///         targets L1), it is additionally evaluated there via STATICCALL — an
     ///         `isStatic` row with real CALL_BEGIN/CALL_END folds, its sub-reads
     ///         matched as STATIC rows at that exact execution point.
-    function _rootStatic(uint64 origin, CallNode memory n, uint256 t) internal {
-        bytes32 cch = _nodeCch(n);
-        _touchRollupGlobal(n.toChain);
+    function _rootStatic(uint64 origin, CallNode memory node, uint256 t) internal {
+        bytes32 callHash = _destCallHash(node);
+        _touchRollupGlobal(node.toChain);
         bytes32 subHash = bytes32(0); // untagged accumulator over the sub-read array
         if (origin == L1_CHAIN) {
-            StaticExecutionEntry storage se = _l1Statics.push();
+            StaticExecutionEntry storage staticEntry = _l1Statics.push();
             _l1StaticTxIdx.push(t);
-            se.proxyEntryHash = cch;
-            se.destinationRollupId = n.toChain;
-            for (uint256 i = 0; i < n.children.length; i++) {
-                CallNode memory sub = _store.getNode(n.children[i]);
-                se.l2ToL1Calls.push(_l1CallStruct(sub, 0));
+            staticEntry.proxyEntryHash = callHash;
+            staticEntry.destinationRollupId = node.toChain;
+            for (uint256 i = 0; i < node.children.length; i++) {
+                CallNode memory sub = _store.getNode(node.children[i]);
+                staticEntry.l2ToL1Calls.push(CallShapes.toL1Call(sub, 0));
                 subHash = _hStatic(subHash, sub.success, sub.returnData);
             }
-            se.rollingHash = subHash;
-            se.success = n.success;
-            se.returnData = n.returnData;
-            se.expectedStateRoots
-                .push(ExpectedStateRootPerRollup({rollupId: n.toChain, stateRoot: _ledgerGet(n.toChain)}));
+            staticEntry.rollingHash = subHash;
+            staticEntry.success = node.success;
+            staticEntry.returnData = node.returnData;
+            staticEntry.expectedStateRoots
+                .push(ExpectedStateRootPerRollup({rollupId: node.toChain, stateRoot: _ledgerGet(node.toChain)}));
         } else {
             uint256 unitIdx = _originUnit(origin);
-            L2StaticExecutionEntry storage se = _unitStatics[unitIdx].push();
-            se.proxyEntryHash = cch;
-            for (uint256 i = 0; i < n.children.length; i++) {
-                CallNode memory sub = _store.getNode(n.children[i]);
-                se.incomingCalls.push(_l2CallStruct(sub, 0));
+            L2StaticExecutionEntry storage staticEntry = _unitStatics[unitIdx].push();
+            staticEntry.proxyEntryHash = callHash;
+            for (uint256 i = 0; i < node.children.length; i++) {
+                CallNode memory sub = _store.getNode(node.children[i]);
+                staticEntry.incomingCalls.push(CallShapes.toL2Call(sub, 0));
                 subHash = _hStatic(subHash, sub.success, sub.returnData);
             }
-            se.rollingHash = subHash;
-            se.success = n.success;
-            se.returnData = n.returnData;
+            staticEntry.rollingHash = subHash;
+            staticEntry.success = node.success;
+            staticEntry.returnData = node.returnData;
 
-            if (n.toChain == L1_CHAIN || _ctx[n.toChain].hasHost) {
+            if (node.toChain == L1_CHAIN || _ctx[node.toChain].active) {
                 // Destination executing: the read really runs there.
-                _appendCall(n.toChain, n);
-                _foldCallBegin(n.toChain, cch);
-                for (uint256 i = 0; i < n.children.length; i++) {
-                    CallNode memory sub = _store.getNode(n.children[i]);
-                    bytes32 key = keccak256(abi.encodePacked(_nodeCch(sub), _ctx[n.toChain].liveHash));
-                    uint256 rowIdx = _pushRow(n.toChain, key);
-                    _sealRow(n.toChain, rowIdx, bytes32(0), sub.success, sub.returnData);
+                _appendCall(node.toChain, node);
+                _foldCallBegin(node.toChain, callHash);
+                for (uint256 i = 0; i < node.children.length; i++) {
+                    CallNode memory sub = _store.getNode(node.children[i]);
+                    bytes32 key = keccak256(abi.encodePacked(_destCallHash(sub), _ctx[node.toChain].liveHash));
+                    uint256 rowIdx = _pushRow(node.toChain, key);
+                    _sealRow(node.toChain, rowIdx, bytes32(0), sub.success, sub.returnData);
                 }
-                _foldCallEnd(n.toChain, n.success, n.returnData);
+                _foldCallEnd(node.toChain, node.success, node.returnData);
             }
         }
     }
@@ -467,21 +466,23 @@ contract TableGenerator is TestHashes {
     ///         host's unified table (host hash untouched); if the destination chain is
     ///         itself executing, the read also lands in its arrays as an `isStatic`
     ///         call (evaluated at that exact execution point).
-    function _reentrantStatic(uint64 execChain, uint256 nodeId, CallNode memory n) internal {
-        if (n.fromChain != execChain) revert GeneratorInvariant("static child fromChain != executing chain", nodeId);
-        Ctx storage c = _ctx[execChain];
-        if (!c.hasHost) revert GeneratorInvariant("reentrant static with no host", nodeId);
+    function _reentrantStatic(uint64 execChain, uint256 nodeId, CallNode memory node) internal {
+        if (node.fromChain != execChain) {
+            revert GeneratorInvariant("static child fromChain != executing chain", nodeId);
+        }
+        Ctx storage ctx = _ctx[execChain];
+        if (!ctx.active) revert GeneratorInvariant("reentrant static with no host", nodeId);
 
-        bytes32 cch = _nodeCch(n); // folds isStatic = true
-        bytes32 key = keccak256(abi.encodePacked(cch, c.liveHash));
+        bytes32 callHash = _destCallHash(node); // folds isStatic = true
+        bytes32 key = keccak256(abi.encodePacked(callHash, ctx.liveHash));
         uint256 rowIdx = _pushRow(execChain, key);
-        _sealRow(execChain, rowIdx, bytes32(0), n.success, n.returnData);
+        _sealRow(execChain, rowIdx, bytes32(0), node.success, node.returnData);
 
-        if (n.toChain == L1_CHAIN || _ctx[n.toChain].hasHost) {
+        if (node.toChain == L1_CHAIN || _ctx[node.toChain].active) {
             // Destination executing: the read is evaluated there via STATICCALL.
-            _appendCall(n.toChain, n);
-            _foldCallBegin(n.toChain, cch);
-            _foldCallEnd(n.toChain, n.success, n.returnData);
+            _appendCall(node.toChain, node);
+            _foldCallBegin(node.toChain, callHash);
+            _foldCallEnd(node.toChain, node.success, node.returnData);
         }
         // Destination idle: the read resolves against its settled state — nothing to record.
     }
@@ -496,7 +497,7 @@ contract TableGenerator is TestHashes {
         _regionNonce++;
         _regionHost = hostChain;
         _regionIsRootLevel = rootLevel;
-        _regionBranched = _ctx[hostChain].hasHost;
+        _regionBranched = _ctx[hostChain].active;
         if (_regionBranched) {
             // The host's own EVM revert undoes its folds natively.
             _regionSavedHash = _ctx[hostChain].liveHash;
@@ -532,27 +533,27 @@ contract TableGenerator is TestHashes {
     ///        protocol layer (span markers / actor-level revert), so the ether never
     ///        counts toward the entry's accumulator invariant.
     function _prescan(uint256 nodeId, uint256 entryIdx, bool isRoot, uint64 origin, bool suppressEther) internal {
-        CallNode memory n = _store.getNode(nodeId);
-        if (n.fromChain != L1_CHAIN) _touch(entryIdx, n.fromChain);
-        if (n.toChain != L1_CHAIN) _touch(entryIdx, n.toChain);
+        CallNode memory node = _store.getNode(nodeId);
+        if (node.fromChain != L1_CHAIN) _touch(entryIdx, node.fromChain);
+        if (node.toChain != L1_CHAIN) _touch(entryIdx, node.toChain);
 
-        if (!suppressEther && !n.isStatic && n.value > 0) {
-            if (n.toChain == L1_CHAIN) {
+        if (!suppressEther && !node.isStatic && node.value > 0) {
+            if (node.toChain == L1_CHAIN) {
                 // A call into L1 pays out of the source rollup's balance (only if it succeeds).
-                if (n.success) _etherAdd(entryIdx, n.fromChain, -int256(n.value));
-            } else if (n.fromChain == L1_CHAIN) {
+                if (node.success) _etherAdd(entryIdx, node.fromChain, -int256(node.value));
+            } else if (node.fromChain == L1_CHAIN) {
                 // Ether leaving L1 toward a rollup. The entry-point value of a root call
                 // counts regardless of success (the accumulator is SET to msg.value);
                 // a failed reentrant row's transfer rolls back with its revert.
-                if (isRoot || n.success) _etherAdd(entryIdx, n.toChain, int256(n.value));
-            } else if (n.success) {
+                if (isRoot || node.success) _etherAdd(entryIdx, node.toChain, int256(node.value));
+            } else if (node.success) {
                 // L2 → L2 move: net zero across the L1 manager, balances shift.
-                _etherAdd(entryIdx, n.fromChain, -int256(n.value));
-                _etherAdd(entryIdx, n.toChain, int256(n.value));
+                _etherAdd(entryIdx, node.fromChain, -int256(node.value));
+                _etherAdd(entryIdx, node.toChain, int256(node.value));
             }
         }
 
-        _prescanChildren(n.children, entryIdx, origin, suppressEther);
+        _prescanChildren(node.children, entryIdx, origin, suppressEther);
     }
 
     function _prescanChildren(uint256[] memory children, uint256 entryIdx, uint64 origin, bool suppressEther) internal {
@@ -580,9 +581,9 @@ contract TableGenerator is TestHashes {
         returns (uint256 idx)
     {
         _touchRollupGlobal(destinationRollupId);
-        ExecutionEntry storage e = _l1Entries.push();
-        e.proxyEntryHash = proxyEntryHash;
-        e.destinationRollupId = destinationRollupId;
+        ExecutionEntry storage entry = _l1Entries.push();
+        entry.proxyEntryHash = proxyEntryHash;
+        entry.destinationRollupId = destinationRollupId;
         idx = _l1Entries.length - 1;
         _l1EntryTxIdx.push(txIdx);
         _touch(idx, destinationRollupId);
@@ -591,46 +592,46 @@ contract TableGenerator is TestHashes {
     /// @notice Builds the sealed header (sorted state deltas from the ledger) and
     ///         initializes the L1 walk context with the entry's seed hash.
     function _sealL1Header(uint256 idx) internal {
-        ExecutionEntry storage e = _l1Entries[idx];
+        ExecutionEntry storage entry = _l1Entries[idx];
 
         // Sort touched rollups ascending (strictly-increasing on-chain requirement).
         uint64[] storage touched = _l1Touched[idx];
         uint64[] memory sorted = new uint64[](touched.length);
         for (uint256 i = 0; i < touched.length; i++) {
-            uint64 v = touched[i];
+            uint64 rid = touched[i];
             uint256 j = i;
-            while (j > 0 && sorted[j - 1] > v) {
+            while (j > 0 && sorted[j - 1] > rid) {
                 sorted[j] = sorted[j - 1];
                 j--;
             }
-            sorted[j] = v;
+            sorted[j] = rid;
         }
 
         for (uint256 i = 0; i < sorted.length; i++) {
             uint64 rid = sorted[i];
             bytes32 cur = _ledgerGet(rid);
             bytes32 newRoot = keccak256(abi.encodePacked("blobfw-step", cur, idx));
-            e.stateUpdates
+            entry.stateUpdates
                 .push(
                     StateUpdate({rollupId: rid, currentState: cur, newState: newRoot, etherDelta: _l1Ether[idx][rid]})
                 );
             _ledgerSet(rid, newRoot);
         }
 
-        Ctx storage c = _ctx[L1_CHAIN];
-        c.hasHost = true;
-        c.hostIsL1 = true;
-        c.hostEntry = idx;
-        c.liveHash = _hEntryBegin(e.stateUpdates, e.proxyEntryHash);
-        _clearFrames(c);
+        Ctx storage ctx = _ctx[L1_CHAIN];
+        ctx.active = true;
+        ctx.hostIsL1 = true;
+        ctx.hostEntry = idx;
+        ctx.liveHash = _hEntryBegin(entry.stateUpdates, entry.proxyEntryHash);
+        _clearFrames(ctx);
     }
 
     /// @notice Undoes the ledger advance of a failed (success = false) L1 entry — its
     ///         consumption reverts, so the live roots stay at the entry's currentState.
     function _rollbackLedgerForEntry(uint256 idx) internal {
-        ExecutionEntry storage e = _l1Entries[idx];
-        for (uint256 i = 0; i < e.stateUpdates.length; i++) {
-            _ledger[e.stateUpdates[i].rollupId] = e.stateUpdates[i].currentState;
+        ExecutionEntry storage entry = _l1Entries[idx];
+        for (uint256 i = 0; i < entry.stateUpdates.length; i++) {
+            _ledger[entry.stateUpdates[i].rollupId] = entry.stateUpdates[i].currentState;
         }
     }
 
@@ -690,162 +691,145 @@ contract TableGenerator is TestHashes {
     //  Insertion / fold plumbing
     // ──────────────────────────────────────────────
 
-    function _clearFrames(Ctx storage c) internal {
-        while (c.frameStack.length > 0) {
-            c.frameStack.pop();
+    function _clearFrames(Ctx storage ctx) internal {
+        while (ctx.frameRows.length > 0) {
+            ctx.frameRows.pop();
         }
     }
 
-    /// @notice Appends the call struct at chain `y`'s current insertion point (host
+    /// @notice Appends the call struct at `chain`'s current insertion point (host
     ///         top-level array, or the open reentrant frame's own sub-array) and
-    ///         applies region span markers when `y` is not the region host.
-    function _appendCall(uint64 y, CallNode memory n) internal {
-        Ctx storage c = _ctx[y];
+    ///         applies region span markers when `chain` is not the region host.
+    function _appendCall(uint64 chain, CallNode memory node) internal {
+        Ctx storage ctx = _ctx[chain];
         bytes32 arrayKey;
         uint256 newIdx;
-        uint256 frame = c.frameStack.length == 0 ? NO_FRAME : c.frameStack[c.frameStack.length - 1];
+        uint256 frame = ctx.frameRows.length == 0 ? NO_NODE : ctx.frameRows[ctx.frameRows.length - 1];
 
-        if (c.hostIsL1) {
-            ExecutionEntry storage e = _l1Entries[c.hostEntry];
-            if (frame == NO_FRAME) {
-                e.l2ToL1Calls.push(_l1CallStruct(n, 0));
-                newIdx = e.l2ToL1Calls.length - 1;
+        if (ctx.hostIsL1) {
+            ExecutionEntry storage entry = _l1Entries[ctx.hostEntry];
+            if (frame == NO_NODE) {
+                entry.l2ToL1Calls.push(CallShapes.toL1Call(node, 0));
+                newIdx = entry.l2ToL1Calls.length - 1;
             } else {
-                e.expectedL1ToL2Calls[frame].l2ToL1Calls.push(_l1CallStruct(n, 0));
-                newIdx = e.expectedL1ToL2Calls[frame].l2ToL1Calls.length - 1;
+                entry.expectedL1ToL2Calls[frame].l2ToL1Calls.push(CallShapes.toL1Call(node, 0));
+                newIdx = entry.expectedL1ToL2Calls[frame].l2ToL1Calls.length - 1;
             }
         } else {
-            L2ExecutionEntry storage e2 = _unitEntries[c.hostUnit][c.hostEntry];
-            if (frame == NO_FRAME) {
-                e2.incomingCalls.push(_l2CallStruct(n, 0));
+            L2ExecutionEntry storage e2 = _unitEntries[ctx.hostUnit][ctx.hostEntry];
+            if (frame == NO_NODE) {
+                e2.incomingCalls.push(CallShapes.toL2Call(node, 0));
                 newIdx = e2.incomingCalls.length - 1;
             } else {
-                e2.expectedOutgoingCalls[frame].incomingCalls.push(_l2CallStruct(n, 0));
+                e2.expectedOutgoingCalls[frame].incomingCalls.push(CallShapes.toL2Call(node, 0));
                 newIdx = e2.expectedOutgoingCalls[frame].incomingCalls.length - 1;
             }
         }
-        arrayKey = keccak256(abi.encodePacked(_regionNonce, y, c.hostIsL1, c.hostUnit, c.hostEntry, frame));
+        arrayKey = keccak256(abi.encodePacked(_regionNonce, chain, ctx.hostIsL1, ctx.hostUnit, ctx.hostEntry, frame));
 
-        if (_regionActive && y != _regionHost) {
+        if (_regionActive && chain != _regionHost) {
             // In-region appends to one array are contiguous (a region is a contiguous
             // message range): the first one starts the span, later ones extend it.
             if (!_regionArraySeen[arrayKey]) {
                 _regionArraySeen[arrayKey] = true;
                 _regionSpanStart[arrayKey] = newIdx;
-                _setMarker(y, frame, newIdx, 1);
+                _setMarker(chain, frame, newIdx, 1);
             } else {
                 uint256 start = _regionSpanStart[arrayKey];
-                _bumpMarker(y, frame, start);
+                _bumpMarker(chain, frame, start);
             }
         }
     }
 
-    function _setMarker(uint64 y, uint256 frame, uint256 idx, uint16 v) internal {
-        Ctx storage c = _ctx[y];
-        if (c.hostIsL1) {
-            ExecutionEntry storage e = _l1Entries[c.hostEntry];
-            if (frame == NO_FRAME) e.l2ToL1Calls[idx].revertNextNCalls = v;
-            else e.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls = v;
+    function _setMarker(uint64 chain, uint256 frame, uint256 idx, uint16 marker) internal {
+        Ctx storage ctx = _ctx[chain];
+        if (ctx.hostIsL1) {
+            ExecutionEntry storage entry = _l1Entries[ctx.hostEntry];
+            if (frame == NO_NODE) entry.l2ToL1Calls[idx].revertNextNCalls = marker;
+            else entry.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls = marker;
         } else {
-            L2ExecutionEntry storage e2 = _unitEntries[c.hostUnit][c.hostEntry];
-            if (frame == NO_FRAME) e2.incomingCalls[idx].revertNextNCalls = v;
-            else e2.expectedOutgoingCalls[frame].incomingCalls[idx].revertNextNCalls = v;
+            L2ExecutionEntry storage e2 = _unitEntries[ctx.hostUnit][ctx.hostEntry];
+            if (frame == NO_NODE) e2.incomingCalls[idx].revertNextNCalls = marker;
+            else e2.expectedOutgoingCalls[frame].incomingCalls[idx].revertNextNCalls = marker;
         }
     }
 
-    function _bumpMarker(uint64 y, uint256 frame, uint256 idx) internal {
-        Ctx storage c = _ctx[y];
-        if (c.hostIsL1) {
-            ExecutionEntry storage e = _l1Entries[c.hostEntry];
-            if (frame == NO_FRAME) e.l2ToL1Calls[idx].revertNextNCalls++;
-            else e.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls++;
+    function _bumpMarker(uint64 chain, uint256 frame, uint256 idx) internal {
+        Ctx storage ctx = _ctx[chain];
+        if (ctx.hostIsL1) {
+            ExecutionEntry storage entry = _l1Entries[ctx.hostEntry];
+            if (frame == NO_NODE) entry.l2ToL1Calls[idx].revertNextNCalls++;
+            else entry.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls++;
         } else {
-            L2ExecutionEntry storage e2 = _unitEntries[c.hostUnit][c.hostEntry];
-            if (frame == NO_FRAME) e2.incomingCalls[idx].revertNextNCalls++;
+            L2ExecutionEntry storage e2 = _unitEntries[ctx.hostUnit][ctx.hostEntry];
+            if (frame == NO_NODE) e2.incomingCalls[idx].revertNextNCalls++;
             else e2.expectedOutgoingCalls[frame].incomingCalls[idx].revertNextNCalls++;
         }
     }
 
-    /// @notice Opens a reentrant-table row on `y`'s host entry with the given position key.
-    function _pushRow(uint64 y, bytes32 key) internal returns (uint256 rowIdx) {
-        Ctx storage c = _ctx[y];
-        if (c.hostIsL1) {
-            ExpectedL1ToL2Call storage row = _l1Entries[c.hostEntry].expectedL1ToL2Calls.push();
+    /// @notice Opens a reentrant-table row on `chain`'s host entry with the given position key.
+    function _pushRow(uint64 chain, bytes32 key) internal returns (uint256 rowIdx) {
+        Ctx storage ctx = _ctx[chain];
+        if (ctx.hostIsL1) {
+            ExpectedL1ToL2Call storage row = _l1Entries[ctx.hostEntry].expectedL1ToL2Calls.push();
             row.expectedL1toL2Hash = key;
-            rowIdx = _l1Entries[c.hostEntry].expectedL1ToL2Calls.length - 1;
+            rowIdx = _l1Entries[ctx.hostEntry].expectedL1ToL2Calls.length - 1;
         } else {
             ExpectedOutgoingCrossChainCall storage row2 =
-                _unitEntries[c.hostUnit][c.hostEntry].expectedOutgoingCalls.push();
+                _unitEntries[ctx.hostUnit][ctx.hostEntry].expectedOutgoingCalls.push();
             row2.expectedOutgoingHash = key;
-            rowIdx = _unitEntries[c.hostUnit][c.hostEntry].expectedOutgoingCalls.length - 1;
+            rowIdx = _unitEntries[ctx.hostUnit][ctx.hostEntry].expectedOutgoingCalls.length - 1;
         }
     }
 
-    function _sealRow(uint64 y, uint256 rowIdx, bytes32 subHash, bool success, bytes memory returnData) internal {
-        Ctx storage c = _ctx[y];
-        if (c.hostIsL1) {
-            ExpectedL1ToL2Call storage row = _l1Entries[c.hostEntry].expectedL1ToL2Calls[rowIdx];
+    function _sealRow(uint64 chain, uint256 rowIdx, bytes32 subHash, bool success, bytes memory returnData) internal {
+        Ctx storage ctx = _ctx[chain];
+        if (ctx.hostIsL1) {
+            ExpectedL1ToL2Call storage row = _l1Entries[ctx.hostEntry].expectedL1ToL2Calls[rowIdx];
             row.revertedOrStaticRollingHash = subHash;
             row.success = success;
             row.returnData = returnData;
         } else {
             ExpectedOutgoingCrossChainCall storage row2 =
-                _unitEntries[c.hostUnit][c.hostEntry].expectedOutgoingCalls[rowIdx];
+                _unitEntries[ctx.hostUnit][ctx.hostEntry].expectedOutgoingCalls[rowIdx];
             row2.revertedOrStaticRollingHash = subHash;
             row2.success = success;
             row2.returnData = returnData;
         }
     }
 
-    function _foldCallBegin(uint64 y, bytes32 cch) internal {
-        _ctx[y].liveHash = _hCallBegin(_ctx[y].liveHash, cch);
+    function _foldCallBegin(uint64 chain, bytes32 callHash) internal {
+        _ctx[chain].liveHash = _hCallBegin(_ctx[chain].liveHash, callHash);
     }
 
-    function _foldCallEnd(uint64 y, bool success, bytes memory retData) internal {
-        _ctx[y].liveHash = _hCallEnd(_ctx[y].liveHash, success, retData);
+    function _foldCallEnd(uint64 chain, bool success, bytes memory retData) internal {
+        _ctx[chain].liveHash = _hCallEnd(_ctx[chain].liveHash, success, retData);
     }
 
     // ──────────────────────────────────────────────
-    //  Struct helpers
+    //  Call hashes (destination-kind vs source-kind — see CLAUDE.md on callGas)
     // ──────────────────────────────────────────────
 
-    function _nodeCch(CallNode memory n) internal pure returns (bytes32) {
-        return _ccHash(n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, n.data);
+    function _destCallHash(CallNode memory node) internal pure returns (bytes32) {
+        return
+            _ccHash(
+                node.isStatic, node.fromAddress, node.fromChain, node.toAddress, node.toChain, node.value, node.data
+            );
     }
 
     /// @notice The hash the SOURCE chain keys this call with: folds the observed callGas when the
     ///         call leaves an L2, 0 when it leaves L1.
-    function _sourceCch(uint256 nodeId, CallNode memory n) internal view returns (bytes32) {
-        if (n.fromChain == L1_CHAIN) return _nodeCch(n);
-        return
-            _ccHashGas(
-                n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, _gasByNode[nodeId], n.data
-            );
-    }
-
-    function _l1CallStruct(CallNode memory n, uint16 span) internal pure returns (L2ToL1Call memory) {
-        return L2ToL1Call({
-            revertNextNCalls: span,
-            isStatic: n.isStatic,
-            gas: n.gas,
-            sourceAddress: n.fromAddress,
-            sourceRollupId: n.fromChain,
-            targetAddress: n.toAddress,
-            value: n.value,
-            data: n.data
-        });
-    }
-
-    function _l2CallStruct(CallNode memory n, uint16 span) internal pure returns (CrossChainCall memory) {
-        return CrossChainCall({
-            revertNextNCalls: span,
-            isStatic: n.isStatic,
-            gas: n.gas,
-            sourceAddress: n.fromAddress,
-            sourceRollupId: n.fromChain,
-            targetAddress: n.toAddress,
-            value: n.value,
-            data: n.data
-        });
+    function _sourceCallHash(uint256 nodeId, CallNode memory node) internal view returns (bytes32) {
+        if (node.fromChain == L1_CHAIN) return _destCallHash(node);
+        return _ccHashGas(
+            node.isStatic,
+            node.fromAddress,
+            node.fromChain,
+            node.toAddress,
+            node.toChain,
+            node.value,
+            _gasByNode[nodeId],
+            node.data
+        );
     }
 }

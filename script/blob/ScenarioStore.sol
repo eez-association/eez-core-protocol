@@ -139,7 +139,7 @@ contract ScenarioStore {
         uint256[] memory buf = new uint256[](_nodes.length);
         uint256 n = 0;
         for (uint256 t = 0; t < _txs.length; t++) {
-            n = _collect(_txs[t].rootCalls, buf, n, true);
+            n = _collectStatics(_txs[t].rootCalls, buf, n);
         }
         ids = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -154,7 +154,7 @@ contract ScenarioStore {
         uint256[] memory buf = new uint256[](_nodes.length);
         uint256 n = 0;
         for (uint256 t = 0; t < _txs.length; t++) {
-            n = _collect(_txs[t].rootCalls, buf, n, false);
+            n = _collectRegionStarts(_txs[t].rootCalls, buf, n);
         }
         sizes = new uint16[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -162,22 +162,37 @@ contract ScenarioStore {
         }
     }
 
-    /// @dev DFS collector: `statics` picks static nodes, otherwise region-start nodes.
-    ///      In statics mode a static node's children (its own sub-reads, always static)
-    ///      are skipped — their fields live in the static entry's sub-call array.
-    function _collect(uint256[] storage siblings, uint256[] memory buf, uint256 n, bool statics)
+    /// @dev DFS over `siblings` collecting static nodes. A static node's children
+    ///      (its own sub-reads, always static) are NOT collected — their fields
+    ///      live in the static entry's sub-call array, not the sidecar.
+    function _collectStatics(uint256[] storage siblings, uint256[] memory buf, uint256 n)
         internal
         view
         returns (uint256)
     {
         for (uint256 i = 0; i < siblings.length; i++) {
             CallNode storage node = _nodes[siblings[i]];
-            if (statics ? node.isStatic : node.revertSpan > 0) {
+            if (node.isStatic) {
+                buf[n++] = siblings[i];
+            } else {
+                n = _collectStatics(node.children, buf, n);
+            }
+        }
+        return n;
+    }
+
+    /// @dev DFS over `siblings` collecting each region's first node (revertSpan > 0).
+    function _collectRegionStarts(uint256[] storage siblings, uint256[] memory buf, uint256 n)
+        internal
+        view
+        returns (uint256)
+    {
+        for (uint256 i = 0; i < siblings.length; i++) {
+            CallNode storage node = _nodes[siblings[i]];
+            if (node.revertSpan > 0) {
                 buf[n++] = siblings[i];
             }
-            if (!(statics && node.isStatic)) {
-                n = _collect(node.children, buf, n, statics);
-            }
+            n = _collectRegionStarts(node.children, buf, n);
         }
         return n;
     }

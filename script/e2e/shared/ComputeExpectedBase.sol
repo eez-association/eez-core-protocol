@@ -15,6 +15,7 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
 
 /// @title ComputeExpectedBase — Shared formatting helpers for ComputeExpected contracts
 /// @dev Each test's ComputeExpected inherits this and overrides _name() and _funcName().
@@ -64,6 +65,20 @@ abstract contract ComputeExpectedBase is Script {
         console.log(label, hexStr);
     }
 
+    /// @dev Prints EXPECTED_L1_STEPS — per-entry rolling-hash fold steps, index-aligned
+    ///      with the expected L1 table, so the network verifier can replay each chain
+    ///      over the REAL posted seed roots (VerifyL1BatchCalldata). Self-checking:
+    ///      replaying each entry's steps over its own (placeholder) seed must reproduce
+    ///      the entry's rollingHash, so the steps cannot drift from the table.
+    function _printL1Steps(ExecutionEntry[] memory entries, HashStep[][] memory steps) internal pure {
+        require(steps.length == entries.length, "steps/entries length mismatch");
+        for (uint256 i = 0; i < entries.length; i++) {
+            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].stateUpdates, entries[i].proxyEntryHash);
+            require(RollingHashBuilder.foldSteps(seed, steps[i]) == entries[i].rollingHash, "steps drift from table");
+        }
+        _printTableLine("EXPECTED_L1_STEPS=%s", abi.encode(steps));
+    }
+
     /// @dev Prints EXPECTED_L1_CALL_HASHES from the entries' non-zero proxyEntryHash keys —
     ///      the hash `ExecutionConsumed` emits per proxy-driven consumption. Zero-hash (L2Tx)
     ///      entries are skipped: they emit no call hash and are matched via EntryExecuted
@@ -74,7 +89,9 @@ abstract contract ComputeExpectedBase is Script {
         bool any;
         for (uint256 i = 0; i < entries.length; i++) {
             if (entries[i].proxyEntryHash == bytes32(0)) continue;
-            acc = any ? string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash)) : vm.toString(entries[i].proxyEntryHash);
+            acc = any
+                ? string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash))
+                : vm.toString(entries[i].proxyEntryHash);
             any = true;
         }
         if (any) console.log("EXPECTED_L1_CALL_HASHES=[%s]", acc);

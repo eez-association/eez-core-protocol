@@ -46,7 +46,9 @@ Framework core (this folder, `script/blob/`):
 | `TableStitcher.sol` | **Table → Blob**: rebuilds the forest from tables + sidecar, matching reentrant rows by their content-addressed keys against a re-simulated live hash, and cross-checking every stored `rollingHash` |
 | `ScriptedActor.sol` | Programmable stand-in for application contracts; performs the real nested proxy calls and asserts returns in-flight |
 | `BlobTranslator.sol` | One-call facade: blob ⇄ byte stream ⇄ tables (each direction a single function — see below) |
-| `BlobConstants.sol` | Shared scalar vocabulary: unit kinds, root kinds, actor step kinds, sentinels, `MAX_CALL_DEPTH` |
+| `BlobConstants.sol` | Shared scalar vocabulary: unit kinds, root kinds, actor step kinds, sentinels, `MAX_CALL_DEPTH`, `blobGenesisRoot` |
+| `BlobSidecar.sol` | The sidecar's data model (per-tx metadata, static call fields, sub-read results, chain ops) — shared by stitcher, translator, and harness |
+| `CallShapes.sol` | Conversion library between the three call representations: IR (`CallNode`/`CallParams`) ⇄ L1 table rows (`L2ToL1Call`) ⇄ L2 table rows (`CrossChainCall`) |
 | `BlobTools.s.sol` + `examples/` | File-based tools: DSL file → tables + wire bytes, blob hex → tables (see below) |
 
 Tests (`test/blob/`):

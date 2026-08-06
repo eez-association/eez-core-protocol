@@ -166,6 +166,51 @@ library RollingHashBuilder {
     function appendStatic(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(prev, success, retData));
     }
+
+    // ── Recorded steps ──────────────────────────────────────────────────
+    // A HashStep is one fold with the seed factored out, so the chain can be
+    // replayed over a DIFFERENT seed. ComputeExpected can only guess placeholder
+    // state roots, but the on-chain seed folds the real ones — exporting the
+    // steps (EXPECTED_L1_STEPS) lets the network verifier rebuild the exact
+    // rolling hash from the POSTED roots and compare it to the posted entry's.
+
+    function stepCallBegin(bytes32 ccHash) internal pure returns (HashStep memory) {
+        return HashStep(CALL_BEGIN, abi.encodePacked(ccHash));
+    }
+
+    function stepCallEnd(bool success, bytes memory retData) internal pure returns (HashStep memory) {
+        return HashStep(CALL_END, abi.encodePacked(success, retData));
+    }
+
+    function stepNestedBegin(bytes32 ccHash) internal pure returns (HashStep memory) {
+        return HashStep(NESTED_BEGIN, abi.encodePacked(ccHash));
+    }
+
+    function stepNestedEnd() internal pure returns (HashStep memory) {
+        return HashStep(NESTED_END, "");
+    }
+
+    function stepCallNotFound(bytes32 ccHash) internal pure returns (HashStep memory) {
+        return HashStep(CALL_NOT_FOUND, abi.encodePacked(ccHash));
+    }
+
+    /// @notice Replays recorded steps over a seed: rh = keccak256(rh ++ tag ++ payload)
+    ///         per step — identical to the append* folds above by construction.
+    function foldSteps(bytes32 seed, HashStep[] memory steps) internal pure returns (bytes32 rh) {
+        rh = seed;
+        for (uint256 i = 0; i < steps.length; i++) {
+            rh = keccak256(abi.encodePacked(rh, steps[i].tag, steps[i].payload));
+        }
+    }
+}
+
+/// @notice One recorded rolling-hash fold (see RollingHashBuilder step helpers):
+///         `tag` is the protocol tag byte; `payload` the packed fold argument
+///         (crossChainCallHash for BEGIN tags, success ++ retData for CALL_END,
+///         empty for NESTED_END).
+struct HashStep {
+    uint8 tag;
+    bytes payload;
 }
 
 /// @notice Position key for a unified reentrant (L1→L2) table entry:

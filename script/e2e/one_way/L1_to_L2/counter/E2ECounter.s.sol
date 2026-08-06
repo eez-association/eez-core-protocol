@@ -19,7 +19,8 @@ import {
     noNestedActions,
     noCalls,
     RollingHashBuilder,
-    immediateSingleRollupBatch
+    immediateSingleRollupBatch,
+    HashStep
 } from "../../../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -282,6 +283,7 @@ contract ComputeExpected is ComputeExpectedBase, CounterActions {
         console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1CallHash));
         console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2CallHash));
         _printL1Table(l1);
+        _printL1Steps(l1, new HashStep[][](1)); // entry 0: seed only, no folds
         _printL2Table(l2);
 
         console.log("");

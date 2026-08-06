@@ -4,7 +4,7 @@
 #
 # Wallet hierarchy:
 #   source key (anvil #2 or SOURCE_PK)       — bootstrap faucet, tops up ↓ (or funds workers directly with --direct)
-#   faucet.txt (repo root, created on demand)  — OUR faucet account, funds ↓
+#   faucet.txt (this dir, created on demand)   — OUR faucet account, funds ↓
 #   one ephemeral wallet per job             — runs the scenario, nonce-isolated
 #
 # Usage:
@@ -108,7 +108,7 @@ echo "== $NJOBS job(s), max $MAX_PARALLEL parallel, ${FUND_ETH} ETH/worker/chain
 
 # Steps 1–3 hold an exclusive lock: concurrent orchestrator instances share the
 # funding key, and racing its nonce yields "replacement transaction underpriced".
-exec 9>"$REPO_ROOT/.faucet.lock"
+exec 9>"$SCRIPT_DIR/.faucet.lock"
 flock 9
 
 if $DIRECT; then
@@ -118,7 +118,7 @@ if $DIRECT; then
     echo "Direct mode: funding workers from $FAUCET_ADDR (no faucet account)"
 else
     # ── Step 1: our faucet account (create once, reuse forever) ──
-    FAUCET_FILE="$REPO_ROOT/faucet.txt"
+    FAUCET_FILE="$SCRIPT_DIR/faucet.txt"
     if [[ ! -f "$FAUCET_FILE" ]]; then
         new=$(cast wallet new)
         faucet_addr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')

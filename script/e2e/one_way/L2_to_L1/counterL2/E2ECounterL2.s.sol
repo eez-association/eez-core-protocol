@@ -22,7 +22,8 @@ import {
     noL2OutgoingCalls,
     noL2StaticEntries,
     immediateSingleRollupBatch,
-    RollingHashBuilder
+    RollingHashBuilder,
+    HashStep
 } from "../../../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -274,6 +275,11 @@ contract ComputeExpected is ComputeExpectedBase, CounterL2Actions {
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
         console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(callHash));
         _printL1Table(l1);
+        HashStep[][] memory steps = new HashStep[][](1); // mirrors _l1Entries' fold chain
+        steps[0] = new HashStep[](2);
+        steps[0][0] = RollingHashBuilder.stepCallBegin(_l1CallHash(counterL1Addr, capAddr));
+        steps[0][1] = RollingHashBuilder.stepCallEnd(true, abi.encode(uint256(1)));
+        _printL1Steps(l1, steps);
         _printL2Table(l2);
 
         console.log("");

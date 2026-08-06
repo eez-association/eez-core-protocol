@@ -103,7 +103,7 @@ bash script/e2e/orchestrator/parallel-e2e.sh all                   # each once
 bash script/e2e/orchestrator/parallel-e2e.sh one_way:2 nested      # categories too
 ```
 
-Self-funding: `faucet.txt` (repo root, gitignored) is the orchestrator's faucet —
+Self-funding: `faucet.txt` (in `script/e2e/orchestrator/`, gitignored) is the orchestrator's faucet —
 created on first run, topped up from anvil #2 when short; workers get `FUND_ETH`
 (default 0.1) per chain via async nonce-sequenced txs; a `flock` serializes
 concurrent instances.
@@ -168,14 +168,20 @@ chains by block number. The link is **content**, in three layers:
    folds every call result (`returnData` included) and every nesting boundary, so
    the source side's cached returns are cryptographically bound to the destination
    side's actual execution — any divergence changes the hash and fails the run.
+   On L1 this identity is only computable where the seed's state roots are known
+   (L2 tables, local mode); a live devnet settles real roots, so zero-hash L1
+   entries are instead pinned by posted-calldata **content** with roots neutralized
+   (the chain itself already verified the posted rolling hash against execution).
 3. **Time windows** — block-number snapshots taken right before publishing the
    trigger bound every scan range (call hashes are not unique across runs — an
    earlier run of the same scenario emits identical ones), and deadlines
    (`L1_SETTLE_TIMEOUT`, `L2_SETTLE_TIMEOUT`, `L1_VERIFY_TIMEOUT`) bound the wait.
 
-Concretely: the settlement block is discovered by scanning `[snapshot..latest]`
-for the expected hashes (`VerifyL1BatchInRange` / `VerifyL1ZeroHashEntriesInRange`
-on L1, `VerifyL2CallsInRange` on L2), and the receipt block of the trigger tx is
+Concretely: the settlement block is discovered by scanning `[snapshot..latest]` —
+by expected call hashes on L1 proxy-consumed entries (`VerifyL1BatchInRange`), by
+listing `EntryExecuted` txs + calldata content-match for L1 zero-hash entries
+(`VerifyL1SettlementTxsInRange`), by call hashes on L2 (`VerifyL2CallsInRange`) —
+and the receipt block of the trigger tx is
 only ever a *candidate* — the composer may bundle the actual consumption in a
 later block on either chain.
 
@@ -190,6 +196,11 @@ later block on either chain.
   entries' per-rollup update chain must be contiguous and move the root), plus the
   structural invariants the contract itself enforces (proxy protection, immediate
   prefix rules).
+- **Rolling-hash replay** (when the scenario prints `EXPECTED_L1_STEPS` via
+  `_printL1Steps`): each posted entry's rolling hash must be reproduced by replaying
+  the scenario's recorded fold steps over the seed rebuilt from the POSTED state
+  roots — exact per-call verification (return data included) without predicting
+  roots. Without steps the comparison is content-only (a NOTE says so).
 - **Live state roots**: the registry root must have settled to (or beyond) each
   touched rollup's posted update.
 - **L2 table**: every expected entry must have a byte-identical loaded twin

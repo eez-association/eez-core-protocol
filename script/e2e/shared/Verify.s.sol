@@ -16,7 +16,7 @@ import {
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "./ComputeExpectedBase.sol";
-import {crossChainCallHash} from "./E2EHelpers.sol";
+import {crossChainCallHash, HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Minimal read interfaces for live on-chain checks
@@ -72,9 +72,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
 
     function _printEntryDetailed(uint256 idx, ExecutionEntry memory e) internal pure {
         bool l2tx = e.proxyEntryHash == bytes32(0);
-        console.log(
-            "  [%s] %s  crossChainCallHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(e.proxyEntryHash)
-        );
+        console.log("  [%s] %s  crossChainCallHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
             "      success=%s  calls=%s  nested=%s", e.success, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
@@ -123,9 +121,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     /// @dev L2 (IEEZL2) entry — no stateUpdates / destinationRollupId.
     function _printEntryDetailed(uint256 idx, L2ExecutionEntry memory e) internal pure {
         bool l2tx = e.proxyEntryHash == bytes32(0);
-        console.log(
-            "  [%s] %s  crossChainCallHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(e.proxyEntryHash)
-        );
+        console.log("  [%s] %s  crossChainCallHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
             "      success=%s  calls=%s  nested=%s", e.success, e.incomingCalls.length, e.expectedOutgoingCalls.length
@@ -285,6 +281,17 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         return false;
     }
 
+    function _hasCountsTriple(ExecutedTriple[] memory triples, uint256 calls, uint256 maxNested)
+        internal
+        pure
+        returns (bool)
+    {
+        for (uint256 i = 0; i < triples.length; i++) {
+            if (triples[i].callsProcessed == calls && triples[i].nestedConsumed <= maxNested) return true;
+        }
+        return false;
+    }
+
     // ── L1: per-entry field checks against ExecutionConsumed / EntryExecuted + live state roots ──
 
     function _verifyL1EntryFields(Vm.EthGetLogs[] memory logs, address rollupsAddr, bytes memory expectedTable)
@@ -342,14 +349,25 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // reverts — the log is discarded with the rollback — so it is only required for
         // committing entries.
         if (e.success && !_hasTriple(executed, e.rollingHash, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length)) {
-            console.log("FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, nestedConsumed)", i);
-            console.log(
-                "      want rollingHash=%s calls=%s nested<=%s",
-                vm.toString(e.rollingHash),
-                e.l2ToL1Calls.length,
-                e.expectedL1ToL2Calls.length
-            );
-            ok = false;
+            // Root-agnostic fallback: the expected rollingHash folds placeholder state
+            // roots, so it cannot match a live devnet's real-root settlement. Accept an
+            // EntryExecuted with the right call/nested counts — the entry's full content
+            // (and, with EXPECTED_L1_STEPS, its exact rebased rolling hash) is pinned by
+            // the posted-calldata comparison.
+            if (_hasCountsTriple(executed, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length)) {
+                console.log("NOTE: entry %s EntryExecuted matched by counts only (rolling hash is root-dependent)", i);
+            } else {
+                console.log(
+                    "FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, nestedConsumed)", i
+                );
+                console.log(
+                    "      want rollingHash=%s calls=%s nested<=%s",
+                    vm.toString(e.rollingHash),
+                    e.l2ToL1Calls.length,
+                    e.expectedL1ToL2Calls.length
+                );
+                ok = false;
+            }
         }
         // Prover obligation: at least one StateUpdate (`EntryHasNoStateUpdates` on-chain).
         // Per-update root movement is deliberately NOT required: entries executed in the same
@@ -424,7 +442,59 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     //    and against the live registry, never against the expected blob:
     //    ComputeExpected cannot predict real state roots off-chain. ──
 
-    function _verifyL1PostedEntries(ExecutionEntry[] memory posted, address rollupsAddr, bytes memory expectedTable)
+    /// @dev Root-agnostic pairing key for posted <-> expected entries. ComputeExpected
+    ///      builds entries over PLACEHOLDER state roots while a live devnet settles real
+    ///      ones, and the roots leak into every hash: the rolling-hash seed folds each
+    ///      (rollupId, currentState) pair, and nested keys fold the live rolling hash.
+    ///      Fold only root-independent content: identity, routing, outcome, every flat
+    ///      call, per-update (rollupId, etherDelta), and nested rows' own content.
+    ///      Per-call return data is NOT bound here (it lives only in the rolling hash);
+    ///      the chain already verified the posted rollingHash against actual execution,
+    ///      so a content match on a settled batch pins everything except the roots.
+    function _contentMatchHash(ExecutionEntry memory e) internal pure returns (bytes32 h) {
+        h = keccak256(abi.encode(e.proxyEntryHash, e.destinationRollupId, e.success, e.returnData));
+        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
+            h = keccak256(abi.encode(h, e.stateUpdates[d].rollupId, e.stateUpdates[d].etherDelta));
+        }
+        for (uint256 c = 0; c < e.l2ToL1Calls.length; c++) {
+            h = keccak256(abi.encode(h, e.l2ToL1Calls[c]));
+        }
+        for (uint256 n = 0; n < e.expectedL1ToL2Calls.length; n++) {
+            h = keccak256(abi.encode(h, _nestedContentHash(e.expectedL1ToL2Calls[n])));
+        }
+    }
+
+    function _nestedContentHash(ExpectedL1ToL2Call memory n) internal pure returns (bytes32 h) {
+        h = keccak256(abi.encode(n.success, n.returnData));
+        for (uint256 c = 0; c < n.l2ToL1Calls.length; c++) {
+            h = keccak256(abi.encode(h, n.l2ToL1Calls[c]));
+        }
+    }
+
+    /// @dev Pair expected[i] against an unused posted entry: exact (proxyEntryHash,
+    ///      rollingHash) identity first — binding in local mode, where the test itself
+    ///      posts the placeholder roots — falling back to the root-agnostic content key
+    ///      for live devnets. Returns the posted index or type(uint256).max.
+    function _findPostedTwin(ExecutionEntry[] memory posted, bool[] memory used, ExecutionEntry memory e)
+        internal
+        pure
+        returns (uint256)
+    {
+        for (uint256 j = 0; j < posted.length; j++) {
+            if (!used[j] && _entryHash(posted[j]) == _entryHash(e)) return j;
+        }
+        for (uint256 j = 0; j < posted.length; j++) {
+            if (!used[j] && _contentMatchHash(posted[j]) == _contentMatchHash(e)) return j;
+        }
+        return type(uint256).max;
+    }
+
+    function _verifyL1PostedEntries(
+        ExecutionEntry[] memory posted,
+        address rollupsAddr,
+        bytes memory expectedTable,
+        bytes memory expectedSteps
+    )
         internal
         view
         returns (bool ok)
@@ -432,24 +502,43 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
         ExecutionEntry[] memory matched = new ExecutionEntry[](expected.length);
         uint256 nMatched;
-        // Entries are queue-consumed in order and (proxyEntryHash, rollingHash) is NOT
-        // unique (e.g. two identical increments) — match each posted entry at most once,
+        // Recorded fold steps (index-aligned with `expected`) let us rebuild each
+        // entry's EXACT rolling hash from the POSTED seed roots — the only part
+        // ComputeExpected cannot predict — closing the per-call-result gap the
+        // content match leaves open. Optional: absent steps degrade to content-only.
+        HashStep[][] memory steps;
+        if (expectedSteps.length > 0) {
+            steps = abi.decode(expectedSteps, (HashStep[][]));
+            if (steps.length != expected.length) {
+                console.log("FAIL: EXPECTED_L1_STEPS has %s entries, table has %s", steps.length, expected.length);
+                return false;
+            }
+        } else {
+            console.log("NOTE: no EXPECTED_L1_STEPS - posted rolling hashes not replay-verified");
+        }
+        // Entries are queue-consumed in order and the match keys are NOT unique
+        // (e.g. two identical increments) — match each posted entry at most once,
         // in posting order.
         bool[] memory used = new bool[](posted.length);
         ok = true;
         for (uint256 i = 0; i < expected.length; i++) {
-            bool found = false;
-            for (uint256 j = 0; j < posted.length; j++) {
-                if (used[j] || _entryHash(posted[j]) != _entryHash(expected[i])) continue;
-                used[j] = true;
-                found = true;
-                matched[nMatched++] = posted[j];
-                if (!_comparePostedEntry(posted[j], expected[i], i)) ok = false;
-                break;
-            }
-            if (!found) {
-                console.log("FAIL: expected entry %s not in posted batch (no (proxyEntryHash, rollingHash) match)", i);
+            uint256 j = _findPostedTwin(posted, used, expected[i]);
+            if (j == type(uint256).max) {
+                console.log("FAIL: expected entry %s not in posted batch (no identity or content match)", i);
                 ok = false;
+                continue;
+            }
+            used[j] = true;
+            matched[nMatched++] = posted[j];
+            if (!_comparePostedEntry(posted[j], expected[i], i)) ok = false;
+            if (steps.length > 0) {
+                bytes32 seed = RollingHashBuilder.entryBegin(posted[j].stateUpdates, posted[j].proxyEntryHash);
+                bytes32 rebased = RollingHashBuilder.foldSteps(seed, steps[i]);
+                if (rebased != posted[j].rollingHash) {
+                    console.log("FAIL: entry %s posted rollingHash not reproduced by replaying expected steps", i);
+                    console.log("      posted %s rebased %s", vm.toString(posted[j].rollingHash), vm.toString(rebased));
+                    ok = false;
+                }
             }
         }
         assembly {
@@ -470,6 +559,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
             console.log(
                 "PASS: posted batch calldata matches expected table (%s entries, field-by-field)", expected.length
             );
+            if (steps.length > 0) {
+                console.log("PASS: posted rolling hashes reproduced from posted roots (%s entries)", expected.length);
+            }
         }
     }
 
@@ -684,10 +776,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         return ha == hb;
     }
 
+    /// @dev Root-agnostic: skips expectedL1toL2Hash and revertedOrStaticRollingHash —
+    ///      both fold the live rolling hash, whose seed folds the real (locally
+    ///      unpredictable) state roots. A wrong key cannot settle anyway: it diverges
+    ///      the on-chain rolling hash (CALL_NOT_FOUND) and the entry reverts.
     function _l1NestedEq(ExpectedL1ToL2Call memory a, ExpectedL1ToL2Call memory b) internal pure returns (bool) {
-        bytes32 ha = keccak256(abi.encode(a));
-        bytes32 hb = keccak256(abi.encode(b));
-        return ha == hb;
+        return _nestedContentHash(a) == _nestedContentHash(b);
     }
 
     function _diffL1Call(uint256 c, L2ToL1Call memory a, L2ToL1Call memory e) internal pure {
@@ -917,7 +1011,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                     || c.sourceRollupId != srcRollup
             ) {
                 console.log("FAIL: entry %s: inbound call event fields differ from expected incomingCalls[0]:", j);
-                _diffCall(0, CrossChainCall(c.revertNextNCalls, c.isStatic, c.gas, src, srcRollup, dest, value, data), c);
+                _diffCall(
+                    0, CrossChainCall(c.revertNextNCalls, c.isStatic, c.gas, src, srcRollup, dest, value, data), c
+                );
                 ok = false;
             }
         }
@@ -1210,6 +1306,42 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
     }
 }
 
+/// @title VerifyL1SettlementTxsInRange — root-agnostic settlement discovery (network,
+/// zero-hash entries). The expected entry hashes fold placeholder state roots, but the
+/// on-chain rolling-hash seed folds the REAL roots the composer settles, so event-level
+/// hash matching cannot work against a live devnet. Instead: list every distinct tx in
+/// range that emitted EntryExecuted on the registry (first as L1_MATCH_BLOCK /
+/// L1_BATCH_TX, all as L1_BATCH_TX_CANDIDATE) and let the runner pin OUR settlement by
+/// decoding each candidate's posted calldata (VerifyL1BatchCalldata, roots neutralized).
+/// Reverts while nothing has settled so the runner's deadline loop keeps waiting.
+contract VerifyL1SettlementTxsInRange is VerifyHelpers {
+    function run(uint256 fromBlock, uint256 toBlock, address rollups) external view {
+        bytes32[] memory topics = new bytes32[](0);
+        Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, rollups, topics);
+        bytes32[] memory seenTxs = new bytes32[](logs.length);
+        uint256 nSeen;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
+            bool dup = false;
+            for (uint256 k = 0; k < nSeen; k++) {
+                if (seenTxs[k] == logs[i].transactionHash) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            seenTxs[nSeen++] = logs[i].transactionHash;
+            if (nSeen == 1) {
+                console.log("L1_MATCH_BLOCK=%s", logs[i].blockNumber);
+                console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
+            }
+            console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
+        }
+        if (nSeen == 0) revert("no settlement txs in range yet");
+        console.log("PASS: %s settlement tx(s) with EntryExecuted in range", nSeen);
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════
 //  VerifyL1BatchCalldata — decode the settlement tx's postAndVerifyBatch
 //  input and compare the POSTED entries field-by-field against the
@@ -1222,7 +1354,10 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
     // tuple signature (forge inspect EEZ methodIdentifiers).
     bytes4 constant SEL_POST_BATCH = 0xcafef125;
 
-    function run(bytes calldata batchInput, address rollups, bytes calldata expectedTable) external view {
+    function run(bytes calldata batchInput, address rollups, bytes calldata expectedTable, bytes calldata expectedSteps)
+        external
+        view
+    {
         require(expectedTable.length > 0, "expected table required");
         require(batchInput.length > 4, "batch input too short");
         bytes4 sel = bytes4(batchInput[:4]);
@@ -1240,14 +1375,11 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
             console.log("FAIL: immediateEntryCount %s exceeds entries %s", b.immediateEntryCount, b.entries.length);
             revert("Posted-batch calldata verification failed");
         }
-        if (
-            b.immediateEntryCount < b.entries.length
-                && b.entries[b.immediateEntryCount].proxyEntryHash == bytes32(0)
-        ) {
+        if (b.immediateEntryCount < b.entries.length && b.entries[b.immediateEntryCount].proxyEntryHash == bytes32(0)) {
             console.log("FAIL: immediateEntryCount %s strands a leading zero-hash L2Tx", b.immediateEntryCount);
             revert("Posted-batch calldata verification failed");
         }
-        if (!_verifyL1PostedEntries(b.entries, rollups, expectedTable)) {
+        if (!_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps)) {
             revert("Posted-batch calldata verification failed");
         }
     }

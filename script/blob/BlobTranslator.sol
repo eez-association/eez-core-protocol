@@ -11,6 +11,7 @@ import {BlobMessage} from "./BlobMessages.sol";
 import {BlobCodec} from "./BlobCodec.sol";
 import {BlobPacking} from "./BlobPacking.sol";
 import {ScenarioStore, CallNode, TxSpec, ChainOpSpec} from "./ScenarioStore.sol";
+import {SidecarTx, SidecarStatic, SidecarStaticResult, SidecarChainOp} from "./BlobSidecar.sol";
 import {ROOT_KIND_CALL, ROOT_KIND_STATIC} from "./BlobConstants.sol";
 import {TableGenerator} from "./TableGenerator.sol";
 import {TableStitcher} from "./TableStitcher.sol";
@@ -55,13 +56,13 @@ contract BlobTranslator is TestHashes {
     ///         one row per L2-sourced mutable call in execution (DFS) order, keyed by
     ///         the destination-kind call hash (callGas = 0).
     struct Sidecar {
-        TableStitcher.SidecarTx[] txs; // per-tx: origin chain, tx_data, root slot kinds
-        TableStitcher.SidecarStatic[] statics; // fields of every hash-matched static call
-        TableStitcher.SidecarStaticResult[] staticSubResults; // sub-read results, parent-DFS order
+        SidecarTx[] txs; // per-tx: origin chain, tx_data, root slot kinds
+        SidecarStatic[] statics; // fields of every hash-matched static call
+        SidecarStaticResult[] staticSubResults; // sub-read results, parent-DFS order
         uint16[] regionSizes; // Snapshot region sizes, message order
         bytes32[] callGasKeys;
         uint64[] callGasValues;
-        TableStitcher.SidecarChainOp[] chainOps;
+        SidecarChainOp[] chainOps;
         bool hasClose; // CloseBlobStream present (position below)
         uint256 closeTxsBefore;
         uint256 closeOpsBefore;
@@ -185,15 +186,14 @@ contract BlobTranslator is TestHashes {
 
     function _buildSidecar(ScenarioStore store, uint64[] memory gasByNode) internal view returns (Sidecar memory s) {
         uint256 txN = store.txCount();
-        s.txs = new TableStitcher.SidecarTx[](txN);
+        s.txs = new SidecarTx[](txN);
         for (uint256 t = 0; t < txN; t++) {
             TxSpec memory txSpec = store.getTx(t);
             uint8[] memory kinds = new uint8[](txSpec.rootCalls.length);
             for (uint256 k = 0; k < txSpec.rootCalls.length; k++) {
                 kinds[k] = store.getNode(txSpec.rootCalls[k]).isStatic ? ROOT_KIND_STATIC : ROOT_KIND_CALL;
             }
-            s.txs[t] =
-                TableStitcher.SidecarTx({originChain: txSpec.originChain, txData: txSpec.txData, rootKinds: kinds});
+            s.txs[t] = SidecarTx({originChain: txSpec.originChain, txData: txSpec.txData, rootKinds: kinds});
         }
 
         // Static call fields + sub-read results (fields of a sub-read live in the
@@ -203,18 +203,17 @@ contract BlobTranslator is TestHashes {
         for (uint256 i = 0; i < staticIds.length; i++) {
             subN += store.getNode(staticIds[i]).children.length;
         }
-        s.statics = new TableStitcher.SidecarStatic[](staticIds.length);
-        s.staticSubResults = new TableStitcher.SidecarStaticResult[](subN);
+        s.statics = new SidecarStatic[](staticIds.length);
+        s.staticSubResults = new SidecarStaticResult[](subN);
         uint256 w = 0;
         for (uint256 i = 0; i < staticIds.length; i++) {
             CallNode memory nd = store.getNode(staticIds[i]);
-            s.statics[i] = TableStitcher.SidecarStatic({
+            s.statics[i] = SidecarStatic({
                 fromAddress: nd.fromAddress, toChain: nd.toChain, toAddress: nd.toAddress, gas: nd.gas, data: nd.data
             });
             for (uint256 c = 0; c < nd.children.length; c++) {
                 CallNode memory sub = store.getNode(nd.children[c]);
-                s.staticSubResults[w++] =
-                    TableStitcher.SidecarStaticResult({success: sub.success, returnData: sub.returnData});
+                s.staticSubResults[w++] = SidecarStaticResult({success: sub.success, returnData: sub.returnData});
             }
         }
 
@@ -234,11 +233,10 @@ contract BlobTranslator is TestHashes {
         }
 
         uint256 opN = store.chainOpCount();
-        s.chainOps = new TableStitcher.SidecarChainOp[](opN);
+        s.chainOps = new SidecarChainOp[](opN);
         for (uint256 i = 0; i < opN; i++) {
             ChainOpSpec memory op = store.getChainOp(i);
-            s.chainOps[i] =
-                TableStitcher.SidecarChainOp({chainId: op.chainId, operations: op.operations, txsBefore: op.txsBefore});
+            s.chainOps[i] = SidecarChainOp({chainId: op.chainId, operations: op.operations, txsBefore: op.txsBefore});
         }
 
         s.hasClose = store.hasClose();

@@ -22,6 +22,7 @@ import {BlobPacking} from "../../script/blob/BlobPacking.sol";
 import {ScenarioStore, CallNode, TxSpec, ChainOpSpec} from "../../script/blob/ScenarioStore.sol";
 import {TableGenerator} from "../../script/blob/TableGenerator.sol";
 import {TableStitcher} from "../../script/blob/TableStitcher.sol";
+import {SidecarStatic} from "../../script/blob/BlobSidecar.sol";
 import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
 import {
     ROOT_KIND_CALL,
@@ -31,7 +32,8 @@ import {
     STEP_CALL_EXPECT_REVERT,
     STEP_STATIC_READ,
     STEP_SUBCONTEXT_REVERT,
-    STEP_STATIC_EXPECT_REVERT
+    STEP_STATIC_EXPECT_REVERT,
+    blobGenesisRoot
 } from "../../script/blob/BlobConstants.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,9 +100,9 @@ abstract contract BlobScenarioBase is Test {
         vm.deal(address(a), 1_000_000 ether);
     }
 
-    /// @dev Must mirror TableGenerator.genesisRoot exactly.
+    /// @dev The shared `blobGenesisRoot` (same definition TableGenerator's ledger uses).
     function _genesisRoot(uint64 rid) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked("blobfw-genesis", rid));
+        return blobGenesisRoot(rid);
     }
 
     // ──────────────────────────────────────────────
@@ -188,7 +190,7 @@ abstract contract BlobScenarioBase is Test {
         for (uint256 i = 0; i < staticIds.length; i++) {
             CallNode memory n = store.getNode(staticIds[i]);
             stitcher.loadSidecarStatic(
-                TableStitcher.SidecarStatic({
+                SidecarStatic({
                     fromAddress: n.fromAddress, toChain: n.toChain, toAddress: n.toAddress, gas: n.gas, data: n.data
                 })
             );
@@ -236,10 +238,10 @@ abstract contract BlobScenarioBase is Test {
         for (uint256 i = 0; i < siblings.length; i++) {
             CallNode memory n = store.getNode(siblings[i]);
             if (!n.isStatic && n.fromChain != L1) {
-                bytes32 destCch = rollups.computeCrossChainCallHash(
+                bytes32 destCallHash = rollups.computeCrossChainCallHash(
                     n.isStatic, n.fromAddress, n.fromChain, n.toAddress, n.toChain, n.value, 0, n.data
                 );
-                stitcher.loadSidecarCallGas(destCch, gasByNode[siblings[i]]);
+                stitcher.loadSidecarCallGas(destCallHash, gasByNode[siblings[i]]);
             }
             _feedCallGasSidecar(stitcher, store, n.children, gasByNode);
         }

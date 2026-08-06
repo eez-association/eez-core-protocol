@@ -8,6 +8,7 @@ broadcast/
 # Dotenv file
 .env
 chain.env
+chain.env2
 
 gh_issue
 node_modules

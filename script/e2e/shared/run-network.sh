@@ -186,6 +186,10 @@ echo "L2 calls expected: $EXPECTED_L2_CALL_HASHES"
 # Optional: scenarios that don't print them fall back to hash-only checks ("0x").
 EXPECTED_L1_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L1_TABLE")
 EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
+# Recorded fold steps (optional): let the calldata verifier replay each entry's
+# rolling hash over the REAL posted seed roots. Empty = content-match only.
+EXPECTED_L1_STEPS=$(extract "$COMPUTE_OUT" "EXPECTED_L1_STEPS")
+EXPECTED_L1_STEPS="${EXPECTED_L1_STEPS:-0x}"
 if [[ "$EXPECTED_L1_TABLE" != "0x" ]]; then
     echo "L1 expected table: $((${#EXPECTED_L1_TABLE} / 2 - 1)) bytes (field-level checks ON)"
 else
@@ -265,28 +269,45 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     #  - proxy-consumed entries (proxyEntryHash != 0): ExecutionConsumed carries the
     #    call hash → VerifyL1BatchInRange with EXPECTED_L1_CALL_HASHES.
     #  - system-driven entries (proxyEntryHash == 0, drained via executeL2Txs): no
-    #    call hash exists → match EntryExecuted rolling hashes against the expected
-    #    entry hashes (keccak(0, rollingHash)) via VerifyL1ZeroHashEntriesInRange.
+    #    call hash exists, and the entry hash is root-dependent → list settlement txs
+    #    via VerifyL1SettlementTxsInRange and pin ours by posted-calldata content.
     if [[ -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
         _L1_CONTRACT="VerifyL1BatchInRange"
         _L1_EXPECTED="$EXPECTED_L1_CALL_HASHES"
     else
-        _L1_CONTRACT="VerifyL1ZeroHashEntriesInRange"
+        # Zero-hash entries: EXPECTED_L1_HASHES fold placeholder state roots, but the
+        # on-chain rolling-hash seed folds the REAL roots the composer settles — the
+        # event-level hash match can never fire on a live devnet. Discover settlement
+        # txs root-agnostically; the posted-calldata comparison (roots neutralized)
+        # is what pins our entries, so the expected table is mandatory here.
+        if [[ "$EXPECTED_L1_TABLE" == "0x" ]]; then
+            echo "ERROR: zero-hash L1 entries need EXPECTED_L1_TABLE for network verification - add _printL1Table to ComputeExpected"
+            FAILED=true
+        fi
+        _L1_CONTRACT="VerifyL1SettlementTxsInRange"
         _L1_EXPECTED="$EXPECTED_L1_HASHES"
     fi
+    # Range scan for the selected verifier; the lister takes no expected args.
+    _l1_scan() {  # $1=fromBlock $2=toBlock
+        if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
+            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
+                "$1" "$2" "$ROLLUPS" 2>&1
+        else
+            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+                --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+                "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
+        fi
+    }
     echo ""
     echo "====== Verify L1 Batch ($_L1_CONTRACT, range $L1_BLOCK_BEFORE.., deadline ${L1_SETTLE_TIMEOUT:-300}s) ======"
     # Settlement (batch post + entry consumption) can take a while — retry the
     # range scan against a growing [before..latest] window until the deadline.
     _L1_DEADLINE=$(( $(date +%s) + ${L1_SETTLE_TIMEOUT:-300} ))
     L1_OK=false
-    while true; do
+    while [[ "${FAILED:-false}" != true ]]; do
         _L1_CUR=$(cast block-number --rpc-url "$RPC")
-        L1_VERIFY=$(forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-            --rpc-url "$RPC" \
-            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-            "$L1_BLOCK_BEFORE" "$_L1_CUR" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1) \
-            && { L1_OK=true; break; }
+        L1_VERIFY=$(_l1_scan "$L1_BLOCK_BEFORE" "$_L1_CUR") && { L1_OK=true; break; }
         [[ $(date +%s) -ge $_L1_DEADLINE ]] && break
         sleep 10
     done
@@ -366,7 +387,9 @@ if [[ "${FAILED:-false}" != true && -z "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
     echo "NOTE: no settlement tx identified (no BatchPosted in the scanned logs) - skipping posted-batch calldata comparison"
 fi
 if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE" != "0x" ]]; then
-    _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
+    # `|| true`: no CANDIDATE lines (e.g. L1-trigger verifiers don't emit them) must
+    # not kill the script under set -e — the fallback below pins the single tx.
+    _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
     [[ -z "$_CANDIDATES" ]] && _CANDIDATES="$L1_BATCH_TX"
     echo ""
     echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx) ======"
@@ -385,8 +408,8 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
             [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
             if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" \
-                --sig "run(bytes,address,bytes)" \
-                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" 2>&1); then
+                --sig "run(bytes,address,bytes,bytes)" \
+                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" 2>&1); then
                 echo "Matched settlement tx $_TX"
                 echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
                 L1_BATCH_TX="$_TX"   # step 5 decodes L2 blocks from this tx
@@ -401,15 +424,18 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
         [[ $(date +%s) -ge $_CD_DEADLINE || "$_TRIGGER_CHAIN" != "L2" ]] && break
         sleep 10
         _L1_CUR=$(cast block-number --rpc-url "$RPC")
-        L1_RESCAN=$(forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-            --rpc-url "$RPC" \
-            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-            "$L1_BLOCK_BEFORE" "$_L1_CUR" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1) || continue
-        _NEW=$(echo "$L1_RESCAN" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
+        L1_RESCAN=$(_l1_scan "$L1_BLOCK_BEFORE" "$_L1_CUR") || continue
+        _NEW=$(echo "$L1_RESCAN" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
         [[ -n "$_NEW" ]] && _CANDIDATES="$_NEW"
     done
     if ! $_CALLDATA_OK; then
-        if [[ -z "$_LAST_FAIL" ]]; then
+        if [[ "${_L1_CONTRACT:-}" == "VerifyL1SettlementTxsInRange" ]]; then
+            # Root-agnostic path: the calldata content match is the ONLY check that
+            # pins our entries to a settlement — not finding one is a failure.
+            FAILED=true
+            [[ -n "$_LAST_FAIL" ]] && echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
+            echo "L1 BATCH CALLDATA VERIFICATION FAILED (no candidate settlement tx contained the expected entries)"
+        elif [[ -z "$_LAST_FAIL" ]]; then
             echo "NOTE: no comparable settlement tx (non-registry target or missing input) - skipping calldata comparison"
         else
             FAILED=true
