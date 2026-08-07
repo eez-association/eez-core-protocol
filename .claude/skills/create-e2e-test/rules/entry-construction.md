@@ -89,6 +89,7 @@ NOTE in a green run as a bug.
 | Simplest L2→L1 (zero-hash L1 entry) | `script/e2e/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol` |
 | Value transfer + etherDelta | `script/e2e/one_way/L1_to_L2/bridge/E2EBridge.s.sol` |
 | Same key consumed twice | `script/e2e/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-twiceL2`) |
+| Same key, one user tx PER consumption (fire-and-forget burst on devnet) | `script/e2e/multi_tx/L1_to_L2/counter-multi-tx/E2ECounterMultiTx.s.sol` |
 | Different keys sequentially | `script/e2e/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-two-diffL2`) |
 | Reentrant frame (success row) | `script/e2e/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol` |
 | Two nesting levels | `script/e2e/nested/L1_to_L2/deepNested/E2EDeepNested.s.sol` |

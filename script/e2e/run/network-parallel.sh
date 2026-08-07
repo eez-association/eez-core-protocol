@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Parallel network e2e orchestrator — per-worker wallets remove the shared-nonce
-# constraint that forces run-network-set.sh to be sequential.
+# constraint that forces network-sequential.sh to be sequential.
 #
 # Wallet hierarchy:
 #   source key (anvil #2 or SOURCE_PK)       — bootstrap faucet, tops up ↓ (or funds workers directly with --direct)
@@ -8,15 +8,15 @@
 #   one ephemeral wallet per job             — runs the scenario, nonce-isolated
 #
 # Usage:
-#   bash script/e2e/orchestrator/parallel-e2e.sh [flags] <target>[:count] ...
+#   bash script/e2e/run/network-parallel.sh [flags] <target>[:count] ...
 #
-#   parallel-e2e.sh counter:10                  # counter 10x in parallel
-#   parallel-e2e.sh counter:5 bridge:3          # mix scenarios and counts
-#   parallel-e2e.sh all                         # every scenario once
-#   parallel-e2e.sh all:3                       # every scenario 3x
-#   parallel-e2e.sh one_way:2 nested            # categories/dirs work too
-#   parallel-e2e.sh --direct counter:10         # fund workers straight from anvil #2
-#   parallel-e2e.sh --fund 0.05 counter:10      # 0.05 ETH per worker per chain
+#   network-parallel.sh counter:10                  # counter 10x in parallel
+#   network-parallel.sh counter:5 bridge:3          # mix scenarios and counts
+#   network-parallel.sh all                         # every scenario once
+#   network-parallel.sh all:3                       # every scenario 3x
+#   network-parallel.sh one_way:2 nested            # categories/dirs work too
+#   network-parallel.sh --direct counter:10         # fund workers straight from anvil #2
+#   network-parallel.sh --fund 0.05 counter:10      # 0.05 ETH per worker per chain
 #
 # Flags:
 #   --direct         skip the faucet.txt account: fund workers directly from the
@@ -28,7 +28,7 @@
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
 #   FUND_ETH         ETH given to each worker per chain (default 0.1)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
-#   RECEIPT_TIMEOUT  passed through to run-network.sh (default 420)
+#   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
 #   DEVNET_ENV       env file with endpoints/addresses (default chain.env)
 #
 # Worker wallets are throwaway; keys are recorded in the run dir's wallets.csv
@@ -72,7 +72,7 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
     esac
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: parallel-e2e.sh [--direct] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
+[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
 
 # ── Expand args into a flat job list ──
 # Each arg is <target>[:count]; target = scenario name, category/direction dir
@@ -184,7 +184,7 @@ forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
 
 # ── Step 5: launch with a concurrency cap ──
 run_job() {  # $1=sol $2=worker_pk $3=logfile
-    RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/shared/run-network.sh "$1" \
+    RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/run/network.sh "$1" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
         --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
         --pk "$2" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \

@@ -7,25 +7,25 @@ description: Run all e2e tests against the devnet and summarize results
 Runs every e2e scenario in `script/e2e/` and reports pass/fail.
 
 - **Local mode runs in parallel by default** — each scenario gets its own anvil pair on unique ports + chain IDs (so forge `broadcast/<basename>/<chainId>/` dirs and deployer nonces don't collide).
-- **Network mode is sequential with a shared key** (`run-network-set.sh` — the shared deployer nonce makes parallel runs unsafe) **or parallel with per-worker wallets** (`script/e2e/orchestrator/parallel-e2e.sh` — a faucet account funds one throwaway wallet per job, removing the nonce constraint; logs in `tmp/e2e-parallel-net/<ts>/`).
+- **Network mode is sequential with a shared key** (`run/network-sequential.sh` — the shared deployer nonce makes parallel runs unsafe) **or parallel with per-worker wallets** (`script/e2e/run/network-parallel.sh` — a faucet account funds one throwaway wallet per job, removing the nonce constraint; logs in `tmp/e2e-parallel-net/<ts>/`).
 
 ## Preconditions
 
 - Network mode: `chain.env` in repo root (gitignored) provides `L1_RPC`, `L1_FRONT`, `L2_RPC`, `L2_FRONT`, `ROLLUPS`, `MANAGER_L2`, `PK` — see the template + liveness pre-flight in `script/e2e/README.md`. If absent, ask the user to supply it.
 - Both chains must be producing blocks (not stuck at block 0). A quick `cast block-number` sanity check catches dead RPCs.
-- CREATE2 factory deployed on both chains (use `script/e2e/shared/prepare-network.sh` if uncertain).
+- CREATE2 factory deployed on both chains (use `script/e2e/run/prepare-network.sh` if uncertain).
 
 ## How to run
 
 - **Local — all scenarios in parallel (default):**
-  `bash script/e2e/shared/run-all-parallel.sh`
-  Forks one `run-local.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Args may be scenario names, categories, or category/direction paths: `bash script/e2e/shared/run-all-parallel.sh one_way multi-call-twice`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
+  `bash script/e2e/run/local-parallel.sh`
+  Forks one `run/local.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Args may be scenario names, categories, or category/direction paths: `bash script/e2e/run/local-parallel.sh one_way multi-call-twice`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
 - **Local — single scenario:**
-  `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
+  `bash script/e2e/run/local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
 - **Network — set of scenarios (sequential, the intended entry point):**
-  `bash script/e2e/shared/run-network-set.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs with a shared key — use the orchestrator for parallel network runs.
+  `bash script/e2e/run/network-sequential.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs with a shared key — use `run/network-parallel.sh` for parallel network runs.
 - **Network — single scenario:**
-  `bash script/e2e/shared/run-network.sh <sol> --l1-rpc … --l1-front … --l2-rpc … --l2-front … --pk … --rollups … --manager-l2 …` — user-tx-then-composer flow with content-scan settlement discovery.
+  `bash script/e2e/run/network.sh <sol> --l1-rpc … --l1-front … --l2-rpc … --l2-front … --pk … --rollups … --manager-l2 …` — user-tx-then-composer flow with content-scan settlement discovery.
 
 ## Ordered test list (simplest → most complex)
 
@@ -39,17 +39,18 @@ Implemented today:
 5. `multi-call-twiceL2` — L2→L1 mirror of `multi-call-twice` (two L2 source entries, one zero-hash L1 entry with 2 calls)
 6. `multi-call-two-diff` — two deferred entries with **different** `proxyEntryHash`es
 7. `multi-call-two-diffL2` — L2→L1 mirror of `multi-call-two-diff`
-8. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
-9. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
-10. `revertCounter` — `L2ToL1Call.revertNextNCalls=1` forced revert on L1 (inner call succeeds, EVM state rolled back; rolling hash still commits to success)
-11. `revertCounterL2` — `revertCounter` mirror on L2
-12. `revertContinue` — outer try/catch over a reentrant call that succeeds then naturally reverts; flow continues, rolling hash captures `(success=false, retData)` via `CALL_END`
-13. `revertContinueL2` — `revertContinue` mirror on L2 (rolling hash matches L1's — protocol parity)
-14. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
-15. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
-16. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
-17. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
-18. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
+8. `counter-multi-tx` — three deferred entries with the same `proxyEntryHash`, each consumed by its OWN top-level user tx (vs `multi-call-twice`'s single-tx trigger); L2 side delivers each inbound call as its own `executeIncomingCrossChainCall` tx. Network mode fires all triggers WITHOUT waiting (pre-signed consecutive nonces — `NUM_TXS` output + `publish_user_txs_nowait`) and prints every tx hash.
+9. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
+10. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
+11. `revertCounter` — `L2ToL1Call.revertNextNCalls=1` forced revert on L1 (inner call succeeds, EVM state rolled back; rolling hash still commits to success)
+12. `revertCounterL2` — `revertCounter` mirror on L2
+13. `revertContinue` — outer try/catch over a reentrant call that succeeds then naturally reverts; flow continues, rolling hash captures `(success=false, retData)` via `CALL_END`
+14. `revertContinueL2` — `revertContinue` mirror on L2 (rolling hash matches L1's — protocol parity)
+15. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
+16. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
+17. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
+18. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
+19. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
 
 Pending:
 - `flash-loan` — refactor of `script/flash-loan-test/ExecuteFlashLoan.s.sol` into the scenario template
@@ -76,4 +77,4 @@ On failure, `bash script/e2e/shared/decode-block.sh --l1-block <N> ...` dumps th
 
 - `tmp/e2e-success/` — successful local runs
 - `tmp/e2e-failures/` — raw forge output + diagnostics for failed local runs
-- `tmp/e2e-network/` — per-scenario network-mode logs (`run-network-set.sh`)
+- `tmp/e2e-network/` — per-scenario network-mode logs (`run/network-sequential.sh`)

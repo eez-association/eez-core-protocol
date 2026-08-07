@@ -186,7 +186,7 @@ contract DeployL2 is Script {
 
 /// @title ExecuteL2 — local mode: loadExecutionTable (system) + incrementProxy (user) in same block
 /// @dev Runs on L2. SYSTEM_ADDRESS is the local deployer (anvil account 0), so the deployer can call
-///      loadExecutionTable directly. The run-local.sh `execute_l2_same_block` wrapper disables
+///      loadExecutionTable directly. The run/local.sh `execute_l2_same_block` wrapper disables
 ///      automine, lets both txs queue, then mines them together — same-block guarantee satisfied.
 /// Env: MANAGER_L2, COUNTER_L1, COUNTER_AND_PROXY_L2
 contract ExecuteL2 is Script, CounterL2Actions {

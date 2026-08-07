@@ -3,9 +3,9 @@
 # Ensures CREATE2 factory on both chains and funds the test account on L2.
 #
 # Usage:
-#   bash script/e2e/shared/prepare-network.sh \
+#   bash script/e2e/run/prepare-network.sh \
 #     --l1-rpc <L1_RPC> --l2-rpc <L2_RPC> --pk <PK> --rollups <ROLLUPS>
-source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/../shared/E2EBase.sh"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

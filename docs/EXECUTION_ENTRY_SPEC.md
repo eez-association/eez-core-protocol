@@ -268,7 +268,7 @@ Each block has at most:
 1. **Setup tx**: `postAndVerifyBatch` (L1) or `loadExecutionTable` (L2) — loads the execution table.
 2. **Execution tx(s)**: One per cross-chain interaction that consumes entries.
 
-On L1, `postAndVerifyBatch` itself runs the leading L2Tx entries inline and can run user-driven cross-chain calls via the **meta hook** (see below) — those don't need a separate execution tx. On L2, `executeIncomingCrossChainCall` combines setup + execution in one system tx.
+On L1, `postAndVerifyBatch` itself runs the leading L2Tx entries inline and can run user-driven cross-chain calls via the **meta hook** (see below) — those don't need a separate execution tx. On L2, `executeIncomingCrossChainCall` combines setup + execution in one system tx (one such tx per top-level inbound call — see the 1-to-1 rule below).
 
 ### Immediate / deferred split (L1 `postAndVerifyBatch`)
 
@@ -290,12 +290,12 @@ A batch with `immediateEntryCount == 0` means no inline execution and no meta-ho
 
 ### 1-to-1 rule
 
-Each user action produces **exactly 1 execution transaction per chain involved**:
+The delivery unit is the **top-level cross-chain call**, not the source-chain transaction. Each top-level call produces exactly 1 execution transaction on the destination chain:
 
-- **L1→L2**: User calls a proxy on L1 → `executeCrossChainCall` (1 tx on L1). The system delivers it on L2 via `executeIncomingCrossChainCall` (system-only; atomically loads the table and consumes `entries[0]`) — 1 tx on L2. Reentrant calls are folded into the same tx via the unified reentrant tables on both sides.
+- **L1→L2**: User calls a proxy on L1 → `executeCrossChainCall` consumes one entry per call (several consumptions can share one L1 tx — e.g. a contract calling a proxy twice). The system delivers EACH top-level call on L2 as its own `executeIncomingCrossChainCall` tx (system-only; atomically replaces the table with that call's entries and consumes `entries[0]`), keyed by the same cross-chain call hash as the L1 side. Once an inbound execution returns, its frame is closed — the next top-level call, even from the same L1 tx, arrives as a NEW L2 tx (typically in the same L2 block). Only reentrant activity inside the open frame folds into the same tx, via the unified reentrant tables on both sides.
 - **L2→L1**: User submits an L2 transaction → on L1 the L2Tx entry is consumed inline by `postAndVerifyBatch` or via `executeL2Txs` (1 tx on L1). The L2 user tx itself is the consumption on L2 (no separate setup tx needed beyond `loadExecutionTable`).
 
-Never split a single cross-chain interaction into multiple execution transactions on the same chain.
+Never split a single top-level call into multiple execution transactions on the same chain — and never merge two top-level calls into one.
 
 ---
 

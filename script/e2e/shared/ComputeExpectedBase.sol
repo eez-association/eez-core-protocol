@@ -44,8 +44,8 @@ abstract contract ComputeExpectedBase is Script {
 
     // ══════════════════════════════════════════════════════════════════
     //  Full expected tables — ABI-encoded blobs consumed by Verify.s.sol
-    //  for field-by-field comparison (picked up by run-network.sh /
-    //  run-local.sh via the EXPECTED_*_TABLE output lines).
+    //  for field-by-field comparison (picked up by run/network.sh /
+    //  run/local.sh via the EXPECTED_*_TABLE output lines).
     // ══════════════════════════════════════════════════════════════════
 
     function _printL1Table(ExecutionEntry[] memory entries) internal pure {

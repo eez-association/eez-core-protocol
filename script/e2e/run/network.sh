@@ -44,13 +44,13 @@
 #       → verify L1 batch (+ posted calldata), L2 table, L2 calls
 #
 # ── Usage ──
-#   bash script/e2e/shared/run-network.sh <E2E.s.sol> \
+#   bash script/e2e/run/network.sh <E2E.s.sol> \
 #     --l1-rpc <L1_RPC> --l2-rpc <L2_RPC> --pk <PK> \
 #     --rollups <ROLLUPS> --manager-l2 <MANAGER_L2> [--l2-rollup-id <ID>]
 #
-source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/../shared/E2EBase.sh"
 
-SOL="$1"; shift || { echo "Usage: run-network.sh <E2E.s.sol> --l1-rpc <RPC> --l2-rpc <RPC> --pk <PK> --rollups <ROLLUPS> --manager-l2 <ADDR>"; exit 1; }
+SOL="$1"; shift || { echo "Usage: network.sh <E2E.s.sol> --l1-rpc <RPC> --l2-rpc <RPC> --pk <PK> --rollups <ROLLUPS> --manager-l2 <ADDR>"; exit 1; }
 [[ -f "$SOL" ]] || { echo "File not found: $SOL"; exit 1; }
 
 # ── Parse CLI args → export as env vars for forge scripts ──
@@ -115,47 +115,7 @@ deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
 echo ""
 echo "====== Create Signed Transaction ======"
 
-if grep -q 'contract ExecuteNetworkL2 ' "$SOL"; then
-    _TRIGGER_CHAIN="L2"
-    _TRIGGER_CONTRACT="ExecuteNetworkL2"
-    _TRIGGER_RPC="$L2_RPC"
-else
-    _TRIGGER_CHAIN="L1"
-    _TRIGGER_CONTRACT="ExecuteNetwork"
-    _TRIGGER_RPC="$RPC"
-fi
-
-_EXEC_OUT=$(forge script "$SOL:$_TRIGGER_CONTRACT" --rpc-url "$_TRIGGER_RPC" 2>&1)
-_TX_TARGET=$(extract "$_EXEC_OUT" "TARGET")
-_TX_VALUE=$(extract "$_EXEC_OUT" "VALUE")
-_TX_CALLDATA=$(extract "$_EXEC_OUT" "CALLDATA")
-
-echo "target: $_TX_TARGET"
-echo "calldata: $_TX_CALLDATA"
-echo "value: $_TX_VALUE"
-
-# Nonce for the trigger tx: a load-balanced public RPC can lag behind blocks we
-# just mined (deploys), and a cross-chain front does its own on-chain+held nonce
-# accounting. Query both and take the max instead of trusting mktx's default.
-_SENDER_ADDR=$(cast wallet address --private-key "$PK")
-_NONCE_RPC=$(cast nonce "$_SENDER_ADDR" --rpc-url "$_TRIGGER_RPC" 2>/dev/null || echo 0)
-if [[ "$_TRIGGER_CHAIN" == "L2" && -n "${L2_FRONT:-}" ]]; then
-    _NONCE_FRONT=$(cast nonce "$_SENDER_ADDR" --rpc-url "$L2_FRONT" 2>/dev/null || echo 0)
-elif [[ "$_TRIGGER_CHAIN" == "L1" && -n "${L1_FRONT:-}" ]]; then
-    _NONCE_FRONT=$(cast nonce "$_SENDER_ADDR" --rpc-url "$L1_FRONT" 2>/dev/null || echo 0)
-else
-    _NONCE_FRONT=0
-fi
-_TX_NONCE=$(( _NONCE_RPC > _NONCE_FRONT ? _NONCE_RPC : _NONCE_FRONT ))
-echo "nonce: $_TX_NONCE (rpc=$_NONCE_RPC front=$_NONCE_FRONT)"
-
-# cast mktx creates a signed raw tx (queries chain for gas price, does NOT broadcast)
-export RLP_ENCODED_TX=$(cast mktx "$_TX_TARGET" "$_TX_CALLDATA" \
-    --value "${_TX_VALUE}wei" \
-    --gas-limit 2000000 \
-    --nonce "$_TX_NONCE" \
-    --private-key "$PK" \
-    --rpc-url "$_TRIGGER_RPC")
+build_trigger_txs "$SOL" network
 
 # ══════════════════════════════════════════════
 #  3. Compute expected entries
@@ -168,52 +128,7 @@ echo "====== Compute Expected Entries ======"
 _SENDER=$(cast wallet address --private-key "$PK")
 COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
 
-EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
-echo "L1 expected calls: $EXPECTED_L1_CALL_HASHES"
-
-EXPECTED_L1_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_HASHES")
-[[ -n "$EXPECTED_L1_HASHES" ]] && echo "L1 expected entries: $EXPECTED_L1_HASHES"
-
-EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
-if [[ -n "$EXPECTED_L2_HASHES" ]]; then
-    echo "L2 table expected: $EXPECTED_L2_HASHES"
-fi
-
-EXPECTED_L2_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_CALL_HASHES")
-echo "L2 calls expected: $EXPECTED_L2_CALL_HASHES"
-
-# Full expected tables (abi-encoded blobs) — enable field-by-field verification.
-# Optional: scenarios that don't print them fall back to hash-only checks ("0x").
-EXPECTED_L1_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L1_TABLE")
-EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
-# Recorded fold steps (optional): let the calldata verifier replay each entry's
-# rolling hash over the REAL posted seed roots. Empty = content-match only.
-EXPECTED_L1_STEPS=$(extract "$COMPUTE_OUT" "EXPECTED_L1_STEPS")
-EXPECTED_L1_STEPS="${EXPECTED_L1_STEPS:-0x}"
-if [[ "$EXPECTED_L1_TABLE" != "0x" ]]; then
-    echo "L1 expected table: $((${#EXPECTED_L1_TABLE} / 2 - 1)) bytes (field-level checks ON)"
-else
-    echo "NOTE: no EXPECTED_L1_TABLE printed - L1 field-level checks OFF (hash-only)"
-fi
-EXPECTED_L2_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L2_TABLE")
-EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
-if [[ "$EXPECTED_L2_TABLE" != "0x" ]]; then
-    echo "L2 expected table: $((${#EXPECTED_L2_TABLE} / 2 - 1)) bytes (field-level checks ON)"
-else
-    echo "NOTE: no EXPECTED_L2_TABLE printed - L2 field-level checks OFF (hash-only)"
-fi
-
-ABSENT_L2_HASHES=$(extract "$COMPUTE_OUT" "ABSENT_L2_HASHES")
-if [[ -n "$ABSENT_L2_HASHES" && "$ABSENT_L2_HASHES" != "[]" ]]; then
-    echo "L2 absent (must NOT appear): $ABSENT_L2_HASHES"
-fi
-
-# Print summary (extract lines between === EXPECTED SUMMARY === and next blank line)
-SUMMARY=$(echo "$COMPUTE_OUT" | sed -n '/=== EXPECTED SUMMARY ===/,/^$/p' | head -20)
-if [[ -n "$SUMMARY" ]]; then
-    echo ""
-    echo "$SUMMARY"
-fi
+extract_expected_outputs "$COMPUTE_OUT"
 
 # ══════════════════════════════════════════════
 #  4. Send the pre-signed user tx
@@ -223,7 +138,7 @@ fi
 # ══════════════════════════════════════════════
 L1_BLOCK=""       # set below: L1 trigger = user tx block, L2 trigger = found via L2 block ref
 L2_BLOCK=""       # set by L2 trigger receipt only
-L1_BATCH_TX=""    # set by VerifyL1BatchInRange (L2 trigger) or VerifyL1Batch (L1 trigger)
+L1_BATCH_TX=""    # set by VerifyL1BatchInRange (L2 trigger: real range; L1 trigger: single-block range)
 
 if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     # ── L2 trigger ──
@@ -231,7 +146,7 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     echo "====== Execute L2 (user tx) ======"
 
     # Snapshot L1 block before the trigger — L1 settlement is verified over
-    # [L1_BLOCK_BEFORE..latest] with a deadline (see step 4).
+    # [L1_BLOCK_BEFORE..latest] with a deadline (see step 5).
     L1_BLOCK_BEFORE=$(cast block-number --rpc-url "$RPC")
 
     publish_user_tx "${L2_FRONT:-$L2_RPC}"
@@ -242,15 +157,26 @@ else
     echo "====== Execute L1 (user tx) ======"
 
     # Snapshot L2 block before the trigger — the L2 sync block is discovered by
-    # scanning [L2_BLOCK_BEFORE..latest] with a deadline (see step 5).
+    # scanning [L2_BLOCK_BEFORE..latest] with a deadline (see step 6).
     L2_BLOCK_BEFORE=$(cast block-number --rpc-url "$L2_RPC")
 
-    publish_user_tx "${L1_FRONT:-$RPC}"  # sets TX_HASH, TX_BLOCK_NUMBER
-    L1_BLOCK="$TX_BLOCK_NUMBER"  # batch is always in the same block as the user tx
+    if [[ "$_TX_COUNT" -gt 1 ]]; then
+        # Multi-tx: fire every pre-signed tx before any of them is mined, so the
+        # composer holds several triggers at once — then poll all receipts.
+        publish_user_txs_nowait "${L1_FRONT:-$RPC}"
+        echo "all $_TX_COUNT txs fired — polling receipts"
+        wait_user_txs "${L1_FRONT:-$RPC}"  # sets TX_HASHES/TX_BLOCK_NUMBERS + min TX_BLOCK_NUMBER
+        _UNIQ_BLOCKS=$(printf "%s\n" "${TX_BLOCK_NUMBERS[@]}" | sort -un | paste -sd, -)
+        echo "trigger blocks: $_UNIQ_BLOCKS"
+        [[ "$_UNIQ_BLOCKS" == *,* ]] && echo "NOTE: composer split the triggers across blocks - single-batch verification below may fail; use the tx hashes above with decode-block.sh"
+    else
+        publish_user_tx "${L1_FRONT:-$RPC}"  # sets TX_HASH, TX_BLOCK_NUMBER
+    fi
+    L1_BLOCK="$TX_BLOCK_NUMBER"  # batch lands with the (first) user tx; later blocks via range scan
 fi
 
 # ══════════════════════════════════════════════
-#  4. Find & verify L1 batch (BatchPosted event)
+#  5. Find & verify L1 batch (BatchPosted event)
 #     L1 trigger: batch is in the same block as the user tx.
 #     L2 trigger: find the batch whose callData references our L2 block.
 #     Then verify that the batch entries match expected hashes.
@@ -303,14 +229,14 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     echo "====== Verify L1 Batch ($_L1_CONTRACT, range $L1_BLOCK_BEFORE.., deadline ${L1_SETTLE_TIMEOUT:-300}s) ======"
     # Settlement (batch post + entry consumption) can take a while — retry the
     # range scan against a growing [before..latest] window until the deadline.
-    _L1_DEADLINE=$(( $(date +%s) + ${L1_SETTLE_TIMEOUT:-300} ))
+    _l1_scan_latest() { _l1_scan "$L1_BLOCK_BEFORE" "$(cast block-number --rpc-url "$RPC")"; }
     L1_OK=false
-    while [[ "${FAILED:-false}" != true ]]; do
-        _L1_CUR=$(cast block-number --rpc-url "$RPC")
-        L1_VERIFY=$(_l1_scan "$L1_BLOCK_BEFORE" "$_L1_CUR") && { L1_OK=true; break; }
-        [[ $(date +%s) -ge $_L1_DEADLINE ]] && break
-        sleep 10
-    done
+    if [[ "${FAILED:-false}" != true ]]; then
+        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_scan_latest; then
+            L1_OK=true
+        fi
+        L1_VERIFY="$RETRY_OUT"
+    fi
 
     if $L1_OK; then
         echo "$L1_VERIFY" | grep -E "PASS|NOTE"
@@ -319,24 +245,24 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
         [[ -n "$L1_BLOCK" ]] && echo "Batch found at L1 block $L1_BLOCK"
     else
         FAILED=true
-        echo "L1 VERIFICATION FAILED (no settlement in $L1_BLOCK_BEFORE..$_L1_CUR within ${L1_SETTLE_TIMEOUT:-300}s)"
+        echo "L1 VERIFICATION FAILED (no settlement in $L1_BLOCK_BEFORE..$(cast block-number --rpc-url "$RPC") within ${L1_SETTLE_TIMEOUT:-300}s)"
     fi
 else
     echo ""
     echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
     # Retry with a deadline: a load-balanced public RPC can briefly serve nodes
     # that don't have the just-mined block yet (eth_getLogs comes back empty).
-    _V_DEADLINE=$(( $(date +%s) + ${L1_VERIFY_TIMEOUT:-90} ))
-    L1_OK=false
-    while true; do
-        L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1Batch \
+    _l1_verify_block() {
+        forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
             --rpc-url "$RPC" \
-            --sig "run(uint256,address,bytes32[],bytes)" \
-            "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE" 2>&1) \
-            && { L1_OK=true; break; }
-        [[ $(date +%s) -ge $_V_DEADLINE ]] && break
-        sleep 10
-    done
+            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+            "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+    }
+    L1_OK=false
+    if retry_until_deadline "${L1_VERIFY_TIMEOUT:-90}" 10 _l1_verify_block; then
+        L1_OK=true
+    fi
+    L1_VERIFY="$RETRY_OUT"
 
     # Fallback: the composer may post the settlement batch in a LATER L1 block than
     # the trigger tx (the front holds the trigger; batching is asynchronous), so a
@@ -344,17 +270,16 @@ else
     # numbers — range-scan [receipt block..latest] for the same expected hashes.
     if ! $L1_OK; then
         echo "batch not in the trigger block — scanning [$L1_BLOCK..latest] (deadline ${L1_SETTLE_TIMEOUT:-300}s)"
-        _L1_DEADLINE=$(( $(date +%s) + ${L1_SETTLE_TIMEOUT:-300} ))
-        while true; do
-            _L1_CUR=$(cast block-number --rpc-url "$RPC")
-            L1_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
+        _l1_range_scan_latest() {
+            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
                 --rpc-url "$RPC" \
                 --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$L1_BLOCK" "$_L1_CUR" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE" 2>&1) \
-                && { L1_OK=true; break; }
-            [[ $(date +%s) -ge $_L1_DEADLINE ]] && break
-            sleep 10
-        done
+                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+        }
+        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_range_scan_latest; then
+            L1_OK=true
+        fi
+        L1_VERIFY="$RETRY_OUT"
         if $L1_OK; then
             _L1_MATCH=$(extract "$L1_VERIFY" "L1_MATCH_BLOCK")
             [[ -n "$_L1_MATCH" ]] && { L1_BLOCK="$_L1_MATCH"; echo "Batch found at L1 block $L1_BLOCK"; }
@@ -371,7 +296,7 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  4b. Compare the POSTED batch against the expected L1 table.
+#  5b. Compare the POSTED batch against the expected L1 table.
 #      L1 events never carry the entries, but the settlement tx's
 #      postAndVerifyBatch calldata does: decode it and field-match every
 #      expected entry (the L1 analogue of the L2 table comparison).
@@ -396,13 +321,16 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
     _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-180} ))
     _CALLDATA_OK=false
     _LAST_FAIL=""
+    _REJECTED=""   # memo of non-registry candidates: skip silently on re-scan iterations
     while true; do
         for _TX in $_CANDIDATES; do
+            [[ ",$_REJECTED," == *",$_TX,"* ]] && continue
             _BATCH_TO=$(cast tx "$_TX" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
             _BATCH_INPUT=$(cast tx "$_TX" input --rpc-url "$RPC" 2>/dev/null)
             if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
                 # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
                 echo "NOTE: candidate $_TX targets ${_BATCH_TO:-<unknown>} (not the registry) - skipped"
+                _REJECTED="$_REJECTED,$_TX"
                 continue
             fi
             [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
@@ -412,7 +340,7 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
                 "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" 2>&1); then
                 echo "Matched settlement tx $_TX"
                 echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
-                L1_BATCH_TX="$_TX"   # step 5 decodes L2 blocks from this tx
+                L1_BATCH_TX="$_TX"   # step 6 decodes L2 blocks from this tx
                 _CALLDATA_OK=true
                 break 2
             fi
@@ -446,7 +374,7 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
 fi
 
 # ══════════════════════════════════════════════
-#  5. Determine L2 blocks to verify
+#  6. Determine L2 blocks to verify
 #
 #     Step A: Decode L2 blocks from the L1 postBatch tx callData
 #             (uses extract_l2_blocks_from_tx in E2EBase.sh).
@@ -481,36 +409,39 @@ if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]
     _SCAN_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
     echo ""
     echo "====== Search L2 Blocks for Calls (from $_SCAN_FROM, deadline ${L2_SETTLE_TIMEOUT:-180}s) ======"
-    _L2_DEADLINE=$(( $(date +%s) + ${L2_SETTLE_TIMEOUT:-180} ))
-    FOUND_L2_BLOCK=""
-    while true; do
-        _L2_CUR=$(cast block-number --rpc-url "$L2_RPC")
-        _L2_OUT=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2CallsInRange \
+    _l2_calls_scan_latest() {
+        forge script script/e2e/shared/Verify.s.sol:VerifyL2CallsInRange \
             --rpc-url "$L2_RPC" \
             --sig "run(uint256,uint256,address,bytes32[])" \
-            "$_SCAN_FROM" "$_L2_CUR" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" 2>&1) \
-            && { FOUND_L2_BLOCK=$(extract "$_L2_OUT" "L2_MATCH_BLOCK"); break; }
-        [[ $(date +%s) -ge $_L2_DEADLINE ]] && break
-        sleep 5
-    done
+            "$_SCAN_FROM" "$(cast block-number --rpc-url "$L2_RPC")" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES"
+    }
+    FOUND_L2_BLOCK=""
+    if retry_until_deadline "${L2_SETTLE_TIMEOUT:-180}" 5 _l2_calls_scan_latest; then
+        FOUND_L2_BLOCK=$(extract "$RETRY_OUT" "L2_MATCH_BLOCK")
+    fi
+    _L2_OUT="$RETRY_OUT"
 
     if [[ -n "$FOUND_L2_BLOCK" ]]; then
-        echo "Found L2 calls in block $FOUND_L2_BLOCK"
-        if [[ "$L2_BLOCKS" == "[]" || "$FOUND_L2_BLOCK" == "${L2_BLOCK:-}" ]]; then
-            L2_BLOCKS="[$FOUND_L2_BLOCK]"
+        # One delivery tx per top-level call — matches may span several blocks.
+        # L2_MATCH_BLOCKS=[b1,b2,...] carries all of them (fallback: the single block).
+        _FOUND_LIST=$(extract "$_L2_OUT" "L2_MATCH_BLOCKS" | tr -d '[]')
+        [[ -z "$_FOUND_LIST" ]] && _FOUND_LIST="$FOUND_L2_BLOCK"
+        echo "Found L2 calls in block(s) $_FOUND_LIST"
+        if [[ -n "${L2_BLOCK:-}" && ",$_FOUND_LIST," != *",$L2_BLOCK,"* ]]; then
+            L2_BLOCKS="[$L2_BLOCK,$_FOUND_LIST]"
         else
-            L2_BLOCKS="[$L2_BLOCK,$FOUND_L2_BLOCK]"
+            L2_BLOCKS="[$_FOUND_LIST]"
         fi
         echo "L2 blocks to verify: $L2_BLOCKS"
     elif [[ "$L2_BLOCKS" == "[]" ]]; then
-        echo "ERROR: no L2 sync block with the expected calls in $_SCAN_FROM..$_L2_CUR within ${L2_SETTLE_TIMEOUT:-180}s"
+        echo "ERROR: no L2 sync block with the expected calls in $_SCAN_FROM..$(cast block-number --rpc-url "$L2_RPC") within ${L2_SETTLE_TIMEOUT:-180}s"
     else
         echo "WARNING: expected calls not found by scan; falling back to receipt block $L2_BLOCKS"
     fi
 fi
 
 # ══════════════════════════════════════════════
-#  6. Verify L2 table (ExecutionTableLoaded event)
+#  7. Verify L2 table (ExecutionTableLoaded event)
 #     The system must have loaded the execution table on L2.
 #     Missing EXPECTED_L2_HASHES or blocks is an error.
 #     Empty [] = no L2 activity expected (e.g. terminal revert — skip verification).
@@ -529,17 +460,9 @@ elif [[ "$EXPECTED_L2_HASHES" == "[]" ]]; then
             echo "PASS: no L2 blocks found (no L2 activity, as expected)"
             L2_OK=true
         else
-            ABSENT_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Absent \
-                --rpc-url "$L2_RPC" \
-                --sig "run(uint256[],address,bytes32[])" "$L2_BLOCKS" "$MANAGER_L2" "$ABSENT_L2_HASHES" 2>&1) \
-                && L2_OK=true || L2_OK=false
-            if $L2_OK; then
-                echo "$ABSENT_VERIFY" | grep -E "PASS|NOTE"
-            else
-                FAILED=true
-                echo "L2 ABSENT VERIFICATION FAILED — entries that should NOT be on L2 were found"
-                echo "$ABSENT_VERIFY"
-            fi
+            # (failure = entries that should NOT be on L2 were found)
+            run_verify_step "L2 ABSENT" full verify_l2_absent "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$ABSENT_L2_HASHES"
+            L2_OK=$VERIFY_STEP_OK
         fi
     else
         echo "SKIP: no absent hashes to verify"
@@ -550,22 +473,12 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_OK=false
 else
-    L2_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Blocks \
-        --rpc-url "$L2_RPC" \
-        --sig "run(uint256[],address,bytes32[],bytes)" \
-        "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" 2>&1) \
-        && L2_OK=true || L2_OK=false
-
-    if $L2_OK; then
-        echo "$L2_VERIFY" | grep -E "PASS|NOTE"
-    else
-        FAILED=true
-        echo "L2 TABLE VERIFICATION FAILED"
-    fi
+    run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
+    L2_OK=$VERIFY_STEP_OK
 fi
 
 # ══════════════════════════════════════════════
-#  7. Verify L2 calls (IncomingCrossChainCallExecuted event)
+#  8. Verify L2 calls (IncomingCrossChainCallExecuted event)
 #     The system must have executed the cross-chain calls on L2.
 #     Missing blocks is an error.
 # ══════════════════════════════════════════════
@@ -579,22 +492,12 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_CALL_OK=false
 else
-    L2_CALL_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL2Calls \
-        --rpc-url "$L2_RPC" \
-        --sig "run(uint256[],address,bytes32[],bytes)" \
-        "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE" 2>&1) \
-        && L2_CALL_OK=true || L2_CALL_OK=false
-
-    if $L2_CALL_OK; then
-        echo "$L2_CALL_VERIFY" | grep -E "PASS|NOTE"
-    else
-        FAILED=true
-        echo "L2 CALL VERIFICATION FAILED"
-    fi
+    run_verify_step "L2 CALL" defer verify_l2_calls "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"
+    L2_CALL_OK=$VERIFY_STEP_OK
 fi
 
 # ══════════════════════════════════════════════
-#  8. On failure: show diagnostics
+#  9. On failure: show diagnostics
 #     Prints actual vs expected tables for each
 #     verification step that failed.
 # ══════════════════════════════════════════════
@@ -607,12 +510,13 @@ if $FAILED; then
     if ! $L2_OK; then
         echo ""
         echo "--- L2 TABLE DIAGNOSTICS ---"
-        echo "${L2_VERIFY:-no L2 table verification output}" | strip_traces
+        # L2_OK is shared by the table check and the absent check — print whichever ran.
+        echo "${VERIFY_STEP_OUT[L2 TABLE]:-${VERIFY_STEP_OUT[L2 ABSENT]:-no L2 table verification output}}" | strip_traces
     fi
     if ! $L2_CALL_OK; then
         echo ""
         echo "--- L2 CALL DIAGNOSTICS ---"
-        echo "${L2_CALL_VERIFY:-no L2 call verification output}" | strip_traces
+        echo "${VERIFY_STEP_OUT[L2 CALL]:-no L2 call verification output}" | strip_traces
     fi
     echo ""
     echo "$COMPUTE_OUT" | sed -n '/=== EXPECTED/,$ p'
@@ -622,25 +526,31 @@ if $FAILED; then
 fi
 
 # ══════════════════════════════════════════════
-#  9. Summary — tx hashes and block numbers
+#  10. Summary — tx hashes and block numbers
 #      Extracted from verification output (no extra RPC calls)
 # ══════════════════════════════════════════════
 echo ""
 echo "====== Summary ======"
 echo ""
-echo "User tx:        $TX_HASH  (block $TX_BLOCK_NUMBER)"
+if [[ "${_TX_COUNT:-1}" -gt 1 ]]; then
+    for _i in "${!TX_HASHES[@]}"; do
+        echo "User tx[$(( _i + 1 ))]:     ${TX_HASHES[$_i]}  (block ${TX_BLOCK_NUMBERS[$_i]})"
+    done
+else
+    echo "User tx:        $TX_HASH  (block $TX_BLOCK_NUMBER)"
+fi
 
 if [[ -n "$L1_BATCH_TX" ]]; then
     echo "L1 postBatch:   $L1_BATCH_TX  (block ${L1_BLOCK:-?})"
 fi
 
-L2_TABLE_TX=$(extract "${L2_VERIFY:-}" "L2_TABLE_TX")
+L2_TABLE_TX=$(extract "${VERIFY_STEP_OUT[L2 TABLE]:-}" "L2_TABLE_TX")
 if [[ -n "$L2_TABLE_TX" ]]; then
     L2_BLOCK_NUM=$(echo "$L2_BLOCKS" | tr -d '[]' | cut -d',' -f1)
     echo "L2 loadTable:   $L2_TABLE_TX  (block $L2_BLOCK_NUM)"
 fi
 
-L2_CALL_TX=$(extract "${L2_CALL_VERIFY:-}" "L2_CALL_TX")
+L2_CALL_TX=$(extract "${VERIFY_STEP_OUT[L2 CALL]:-}" "L2_CALL_TX")
 if [[ -n "$L2_CALL_TX" ]]; then
     L2_BLOCK_NUM=$(echo "$L2_BLOCKS" | tr -d '[]' | cut -d',' -f1)
     echo "L2 call exec:   $L2_CALL_TX  (block $L2_BLOCK_NUM)"

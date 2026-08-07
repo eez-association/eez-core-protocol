@@ -1,7 +1,7 @@
 # E2E Tests — Setup & Running
 
 Cross-chain scenarios under `script/e2e/<category>/<direction>/<scenario>/`.
-Categories: `one_way`, `multi_call`, `nested`, `reentrant`, `revert`; directions:
+Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`; directions:
 `L1_to_L2`, `L2_to_L1`.
 
 Two modes:
@@ -23,9 +23,9 @@ bash, `forge build` clean. Network mode also needs a test-only key (see step 1).
 ## Local mode (no setup)
 
 ```bash
-bash script/e2e/shared/run-all-parallel.sh              # everything
-bash script/e2e/shared/run-all-parallel.sh one_way      # one category
-bash script/e2e/shared/run-all-parallel.sh counter bridge
+bash script/e2e/run/local-parallel.sh              # everything
+bash script/e2e/run/local-parallel.sh one_way      # one category
+bash script/e2e/run/local-parallel.sh counter bridge
 ```
 
 ## Network mode
@@ -65,7 +65,7 @@ cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L2_RPC
 
 ```bash
 source chain.env
-bash script/e2e/shared/prepare-network.sh --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
+bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
 ```
 
 ### 4. Check the deployment is alive
@@ -82,10 +82,10 @@ cast logs --rpc-url "$L1_RPC" --from-block $((LATEST-100)) --to-block $LATEST --
 ### 5. Run — sequential set-runner
 
 ```bash
-bash script/e2e/shared/run-network-set.sh one_way              # category
-bash script/e2e/shared/run-network-set.sh counter bridge       # scenarios
-bash script/e2e/shared/run-network-set.sh all                  # everything
-DEVNET_ENV=other.env bash script/e2e/shared/run-network-set.sh one_way
+bash script/e2e/run/network-sequential.sh one_way              # category
+bash script/e2e/run/network-sequential.sh counter bridge       # scenarios
+bash script/e2e/run/network-sequential.sh all                  # everything
+DEVNET_ENV=other.env bash script/e2e/run/network-sequential.sh one_way
 ```
 
 Sequential because all scenarios share the `chain.env` nonce. Logs:
@@ -97,13 +97,13 @@ Every job gets its own ephemeral wallet, so scenarios run concurrently — inclu
 the same scenario N times (load testing):
 
 ```bash
-bash script/e2e/orchestrator/parallel-e2e.sh counter:10            # counter 10x
-bash script/e2e/orchestrator/parallel-e2e.sh counter:5 bridge:3    # mixed
-bash script/e2e/orchestrator/parallel-e2e.sh all                   # each once
-bash script/e2e/orchestrator/parallel-e2e.sh one_way:2 nested      # categories too
+bash script/e2e/run/network-parallel.sh counter:10            # counter 10x
+bash script/e2e/run/network-parallel.sh counter:5 bridge:3    # mixed
+bash script/e2e/run/network-parallel.sh all                   # each once
+bash script/e2e/run/network-parallel.sh one_way:2 nested      # categories too
 ```
 
-Self-funding: `faucet.txt` (in `script/e2e/orchestrator/`, gitignored) is the orchestrator's faucet —
+Self-funding: `faucet.txt` (in `script/e2e/run/`, gitignored) is the orchestrator's faucet —
 created on first run, topped up from anvil #2 when short; workers get `FUND_ETH`
 (default 0.1) per chain via async nonce-sequenced txs; a `flock` serializes
 concurrent instances.
@@ -112,7 +112,7 @@ Flags: `--direct` funds workers straight from the source key (anvil #2, or
 `SOURCE_PK`) with no faucet account; `--fund <eth>` sets the per-worker amount:
 
 ```bash
-bash script/e2e/orchestrator/parallel-e2e.sh --direct --fund 0.05 counter:10
+bash script/e2e/run/network-parallel.sh --direct --fund 0.05 counter:10
 ```
 
 Env knobs: `MAX_PARALLEL` (default 100), `FUND_ETH`, `SOURCE_PK`,
@@ -132,13 +132,13 @@ Caveats:
 
 ```bash
 source chain.env
-bash script/e2e/shared/run-network.sh script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol \
+bash script/e2e/run/network.sh script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol \
   --l1-rpc $L1_RPC --l1-front $L1_FRONT --l2-rpc $L2_RPC --l2-front $L2_FRONT \
   --pk $PK --rollups $ROLLUPS --manager-l2 $MANAGER_L2
 ```
 
-Timeouts (env, seconds): `RECEIPT_TIMEOUT` 420, `L1_SETTLE_TIMEOUT` 300,
-`L2_SETTLE_TIMEOUT` 180, `L1_VERIFY_TIMEOUT` 90.
+Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420),
+`L1_SETTLE_TIMEOUT` 300, `L2_SETTLE_TIMEOUT` 180, `L1_VERIFY_TIMEOUT` 90.
 
 ## Operational notes
 

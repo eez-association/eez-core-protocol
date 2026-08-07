@@ -2,7 +2,9 @@
 
 Authoritative layout rules for every `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol`.
 
-Categories: `one_way`, `multi_call`, `nested`, `reentrant`, `revert`. Directions:
+Categories: `one_way`, `multi_call`, `multi_tx` (one user tx per consumption; network mode
+fires all triggers without waiting via an `NUM_TXS=N` ExecuteNetwork output — the runner
+pre-signs N copies with consecutive nonces), `nested`, `reentrant`, `revert`. Directions:
 `L1_to_L2` (trigger on L1) / `L2_to_L1` (trigger on L2). **File names are unique per
 scenario on purpose** — identically named scripts share one `out/` artifact bucket and
 forge can silently pick another scenario's contracts. Contract names inside stay
@@ -10,7 +12,7 @@ generic (`Deploy`, `Execute`, …); the file name disambiguates.
 
 ## Single file, multiple contracts
 
-All test logic lives in one `.sol` file. The runners (`run-local.sh` / `run-network.sh`)
+All test logic lives in one `.sol` file. The runners (`run/local.sh` / `run/network.sh`)
 discover contracts by name and route them to the right chain.
 
 Contract order inside the file (top to bottom):
@@ -105,24 +107,30 @@ Machine-parsed lines (the runners route verification on their presence):
 
 ## Verification contracts (`script/e2e/shared/Verify.s.sol`)
 
-All take an optional trailing `bytes expectedTable` blob (empty = hash-only checks):
+`[, table]` marks an optional trailing `bytes expectedTable` blob (empty = hash-only checks):
 
-- `VerifyL1Batch(block, rollups, callHashes[, table])` — `ExecutionConsumed` call
-  hashes in one L1 block + field checks (EntryExecuted triple, routing, stateUpdates,
-  live roots).
-- `VerifyL1BatchInRange(from, to, …)` — range variant (L2-trigger settlement scan and
-  the L1-trigger fallback).
+- `VerifyL1BatchInRange(from, to, rollups, callHashes[, table])` — `ExecutionConsumed`
+  call hashes in [from..to] + field checks (EntryExecuted triple, routing, stateUpdates,
+  live roots). A known settlement block is the `from == to` degenerate range
+  (`verify_l1_batch` in `E2EBase.sh`).
 - `VerifyL1ZeroHashEntriesInRange(from, to, rollups, entryHashes[, table])` — for
   system-driven entries (`proxyEntryHash == 0`): matches `keccak(0, rollingHash)` from
   `EntryExecuted` events.
-- `VerifyL1BatchCalldata(batchInput, rollups, table)` — decodes the settlement tx's
-  `postAndVerifyBatch` calldata and field-matches every expected entry (network mode).
+- `VerifyL1SettlementTxsInRange(from, to, rollups)` — root-agnostic settlement
+  discovery for zero-hash entries on a live devnet: lists every tx in range with an
+  `EntryExecuted` on the registry (`L1_BATCH_TX_CANDIDATE` lines); the runner pins
+  ours by posted-calldata content. Reverts while nothing has settled.
+- `VerifyL1BatchCalldata(batchInput, rollups, table, steps)` — decodes the settlement
+  tx's `postAndVerifyBatch` calldata and field-matches every expected entry (network
+  mode). `table` is REQUIRED here; `steps` (may be empty) replays the recorded
+  rolling-hash folds over the posted roots.
 - `VerifyL2Blocks(blocks, managerL2, entryHashes[, table])` — `ExecutionTableLoaded`
   full-struct comparison + invariants.
 - `VerifyL2Calls(blocks, managerL2, callHashes[, table])` — consumption events +
   incoming-call hash recompute.
-- `VerifyL2CallsInRange(from, to, …)` — L2 sync-block discovery by content scan.
-- `VerifyL2Absent(blocks, managerL2, absentHashes)` — negative check.
+- `VerifyL2CallsInRange(from, to, managerL2, callHashes)` — L2 sync-block discovery by
+  content scan (no table; prints `L2_MATCH_BLOCKS`).
+- `VerifyL2Absent(blocks, managerL2, absentHashes)` — negative check (no table).
 
 Event signatures are declared once as `SIG_*` constants at the top of `Verify.s.sol` —
 that file is the reference for what the runtime emits; don't restate them here.

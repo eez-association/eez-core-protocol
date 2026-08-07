@@ -52,8 +52,8 @@ When adding new contracts, pick a consistent noun + chain suffix (`_L1`, `_L2`) 
 ## Verification loop
 
 1. `forge build` must be clean before running any shell.
-2. `bash script/e2e/shared/run-local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
-3. Only after local passes, try `bash script/e2e/shared/run-network.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` against the devnet. Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
+2. `bash script/e2e/run/local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` must pass. On failure, the runner dumps the full forge script output and traces failed txs.
+3. Only after local passes, try `bash script/e2e/run/network-sequential.sh <scenario>` against the devnet (reads endpoints/key from `chain.env`; `run/network.sh` needs the full `--l1-rpc … --pk …` flag set — see `script/e2e/README.md`). Network mode uncovers ordering/same-block issues that local mode hides with its same-block wrapper.
 4. Compare `forge script <SOL>:ComputeExpected` output against `decode-block.sh` output — any divergence is a bug in the precomputation.
 
 ## Common pitfalls (flatten-specific)

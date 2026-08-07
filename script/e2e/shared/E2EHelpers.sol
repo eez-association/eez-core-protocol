@@ -91,9 +91,7 @@ function crossChainCallHashL2Out(
     pure
     returns (bytes32)
 {
-    return keccak256(
-        abi.encode(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, uint256(0), data)
-    );
+    return crossChainCallHash(false, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, data);
 }
 
 /// @notice Convenience: STATIC cross-chain call hash.
@@ -139,27 +137,27 @@ library RollingHashBuilder {
 
     /// @notice keccak256(prev ++ CALL_BEGIN ++ crossChainCallHash)
     function appendCallBegin(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_BEGIN, ccHash));
+        return _fold(prev, stepCallBegin(ccHash));
     }
 
     /// @notice keccak256(prev ++ CALL_END ++ success ++ retData)
     function appendCallEnd(bytes32 prev, bool success, bytes memory retData) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_END, success, retData));
+        return _fold(prev, stepCallEnd(success, retData));
     }
 
     /// @notice keccak256(prev ++ NESTED_BEGIN ++ crossChainCallHash)
     function appendNestedBegin(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_BEGIN, ccHash));
+        return _fold(prev, stepNestedBegin(ccHash));
     }
 
     /// @notice keccak256(prev ++ NESTED_END)
     function appendNestedEnd(bytes32 prev) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, NESTED_END));
+        return _fold(prev, stepNestedEnd());
     }
 
     /// @notice keccak256(prev ++ CALL_NOT_FOUND ++ crossChainCallHash) — reentrant no-match divergence.
     function appendCallNotFound(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(prev, CALL_NOT_FOUND, ccHash));
+        return _fold(prev, stepCallNotFound(ccHash));
     }
 
     /// @notice Static sub-call accumulator (untagged): keccak256(prev ++ success ++ retData).
@@ -199,8 +197,14 @@ library RollingHashBuilder {
     function foldSteps(bytes32 seed, HashStep[] memory steps) internal pure returns (bytes32 rh) {
         rh = seed;
         for (uint256 i = 0; i < steps.length; i++) {
-            rh = keccak256(abi.encodePacked(rh, steps[i].tag, steps[i].payload));
+            rh = _fold(rh, steps[i]);
         }
+    }
+
+    /// @notice One tagged fold — the single definition the append* helpers and
+    ///         foldSteps share: keccak256(prev ++ tag ++ payload).
+    function _fold(bytes32 prev, HashStep memory step) private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, step.tag, step.payload));
     }
 }
 
@@ -221,9 +225,8 @@ function expectedL1toL2Hash(bytes32 ccHash, bytes32 rollingHashAtFire) pure retu
 
 // ══════════════════════════════════════════════════════════════════════
 //  L2TXBatcher — postAndVerifyBatch + executeL2Txs in one tx (local mode).
-//  Wraps the caller's entries into a single sub-batch with the supplied
-//  proofSystem + rollupId, marks the leading run of proxyEntryHash==0 entries
-//  as immediate, then drains via executeL2Txs(rollupId).
+//  Posts the caller's entries as an `immediateSingleRollupBatch`, then
+//  drains via executeL2Txs(rollupId).
 // ══════════════════════════════════════════════════════════════════════
 
 contract L2TXBatcher {
@@ -236,37 +239,7 @@ contract L2TXBatcher {
     )
         external
     {
-        // immediateEntryCount = count of leading entries whose proxyEntryHash == 0 (L2 txs run inline).
-        uint256 ic = 0;
-        while (ic < entries.length && entries[ic].proxyEntryHash == bytes32(0)) {
-            ic++;
-        }
-
-        address[] memory psList = new address[](1);
-        psList[0] = proofSystem;
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
-            entries: entries,
-            staticEntries: staticEntries,
-            immediateEntryCount: ic,
-            immediateStaticEntryCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs,
-            blockNumber: 0,
-            bindMsgSenderInPublicInput: false
-        });
-        rollups.postAndVerifyBatch(batch);
+        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, rollupId, entries, staticEntries));
         rollups.executeL2Txs(rollupId);
     }
 }

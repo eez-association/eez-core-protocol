@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run every script/e2e/<category>/<direction>/<scenario>/E2E*.s.sol via run-local.sh in parallel.
+# Run every script/e2e/<category>/<direction>/<scenario>/E2E*.s.sol via run/local.sh in parallel.
 # Scenarios are addressed by their directory name (e.g. "counter"); the script
 # resolves each name to its E2E*.s.sol wherever it lives in the category tree.
 # Each scenario gets a unique (L1_PORT, L2_PORT, L1_CHAIN_ID, L2_CHAIN_ID) quadruple
@@ -12,9 +12,9 @@
 #   - Success logs are kept in tmp/e2e-success/, failures in tmp/e2e-failures/.
 #
 # Usage:
-#   bash script/e2e/shared/run-all-parallel.sh                # all scenarios
-#   MAX_PARALLEL=4 bash script/e2e/shared/run-all-parallel.sh # at most 4 concurrent
-#   bash script/e2e/shared/run-all-parallel.sh counter bridge # subset
+#   bash script/e2e/run/local-parallel.sh                # all scenarios
+#   MAX_PARALLEL=4 bash script/e2e/run/local-parallel.sh # at most 4 concurrent
+#   bash script/e2e/run/local-parallel.sh counter bridge # subset
 
 set -uo pipefail
 
@@ -77,7 +77,7 @@ run_one() {
     echo "  [$name] starting (L1=$l1_port chain=$l1_chain, L2=$l2_port chain=$l2_chain)" >&2
     if L1_PORT="$l1_port" L2_PORT="$l2_port" \
        L1_CHAIN_ID="$l1_chain" L2_CHAIN_ID="$l2_chain" \
-       bash script/e2e/shared/run-local.sh "$sol" > "$log" 2>&1; then
+       bash script/e2e/run/local.sh "$sol" > "$log" 2>&1; then
         echo "PASS" > "$status"
         cp "$log" "tmp/e2e-success/$name.log"
         echo "  [$name] PASS" >&2

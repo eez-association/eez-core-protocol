@@ -3,15 +3,15 @@
 # Starts two anvils (L1 + L2), deploys infra + app, executes L2 then L1, decodes events.
 #
 # Usage (from project root):
-#   bash script/e2e/shared/run-local.sh <E2E.s.sol>
+#   bash script/e2e/run/local.sh <E2E.s.sol>
 #
 # Standard contracts in E2E.s.sol (all read args from env vars):
 #   Deploy* contracts  → auto-discovered, run in file order (L2 suffix → L2 RPC)
 #   ExecuteL2          → L2 execution (load table on L2 and trigger any L2 user tx)
 #   Execute            → L1 execution (postAndVerifyBatch + user action, same-block)
-source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/../shared/E2EBase.sh"
 
-SOL="$1"; shift || { echo "Usage: run-local.sh <E2E.s.sol>"; exit 1; }
+SOL="$1"; shift || { echo "Usage: local.sh <E2E.s.sol>"; exit 1; }
 [[ -f "$SOL" ]] || { echo "File not found: $SOL"; exit 1; }
 
 L1_PORT="${L1_PORT:-8545}"
@@ -51,21 +51,7 @@ deploy_contracts "$SOL" "$L1_RPC" "$L2_RPC" "$PK"
 if grep -q 'contract ExecuteNetworkL2 ' "$SOL"; then
     echo ""
     echo "====== Create Signed Transaction ======"
-    _EXEC_OUT=$(forge script "$SOL:ExecuteNetworkL2" --rpc-url "$L2_RPC" 2>&1)
-    _TX_TARGET=$(extract "$_EXEC_OUT" "TARGET")
-    _TX_CALLDATA=$(extract "$_EXEC_OUT" "CALLDATA")
-    _TX_VALUE=$(extract "$_EXEC_OUT" "VALUE")
-
-    _SENDER=$(cast wallet address --private-key "$PK")
-    _NONCE=$(cast nonce "$_SENDER" --rpc-url "$L2_RPC")
-    _USER_NONCE=$((_NONCE + 1))
-
-    export RLP_ENCODED_TX=$(cast mktx "$_TX_TARGET" "$_TX_CALLDATA" \
-        --value "${_TX_VALUE}wei" \
-        --gas-limit 2000000 \
-        --nonce "$_USER_NONCE" \
-        --private-key "$PK" \
-        --rpc-url "$L2_RPC")
+    build_trigger_txs "$SOL" local
 fi
 
 # 6. Execute (L2 first, then L1) — each is optional based on contract presence
@@ -83,6 +69,7 @@ if grep -q 'contract ExecuteL2 ' "$SOL"; then
     if [[ $L2_EXIT -eq 0 ]]; then
         echo "L2 execution succeeded"
         echo "$EXEC_L2" | grep -E "complete|done|counter" || true
+        print_broadcast_txs "$SOL" "$L2_RPC" "L2"
     else
         echo "L2 execution FAILED (exit=$L2_EXIT) — full output below:"
         echo "$EXEC_L2"
@@ -106,6 +93,7 @@ if grep -q 'contract Execute ' "$SOL"; then
     if [[ $L1_EXIT -eq 0 ]]; then
         echo "L1 execution succeeded"
         echo "$EXEC_L1" | grep -E "complete|done|counter" || true
+        print_broadcast_txs "$SOL" "$L1_RPC" "L1"
         # Auto-export any KEY=VALUE lines so ComputeExpected can read them.
         _export_outputs "$EXEC_L1"
     else
@@ -134,59 +122,25 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     _SENDER=$(cast wallet address --private-key "$PK")
     COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$L1_RPC" --sender "$_SENDER" 2>&1)
 
-    EXPECTED_L1_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_HASHES")
-    EXPECTED_L2_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_HASHES")
-    EXPECTED_L1_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L1_CALL_HASHES")
-    EXPECTED_L2_CALL_HASHES=$(extract "$COMPUTE_OUT" "EXPECTED_L2_CALL_HASHES")
-    # Full expected tables (abi-encoded) — optional; "0x" = hash-only fallback.
-    EXPECTED_L1_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L1_TABLE")
-    EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
-    EXPECTED_L2_TABLE=$(extract "$COMPUTE_OUT" "EXPECTED_L2_TABLE")
-    EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
-    if [[ "$EXPECTED_L1_TABLE" != "0x" ]]; then
-        echo "L1 expected table: $((${#EXPECTED_L1_TABLE} / 2 - 1)) bytes (field-level checks ON)"
-    else
-        echo "NOTE: no EXPECTED_L1_TABLE printed - L1 field-level checks OFF (hash-only)"
-    fi
-    if [[ "$EXPECTED_L2_TABLE" != "0x" ]]; then
-        echo "L2 expected table: $((${#EXPECTED_L2_TABLE} / 2 - 1)) bytes (field-level checks ON)"
-    else
-        echo "NOTE: no EXPECTED_L2_TABLE printed - L2 field-level checks OFF (hash-only)"
-    fi
-    [[ -n "$EXPECTED_L1_HASHES"      ]] && echo "EXPECTED_L1_HASHES=$EXPECTED_L1_HASHES"
-    [[ -n "$EXPECTED_L2_HASHES"      ]] && echo "EXPECTED_L2_HASHES=$EXPECTED_L2_HASHES"
-    [[ -n "$EXPECTED_L1_CALL_HASHES" ]] && echo "EXPECTED_L1_CALL_HASHES=$EXPECTED_L1_CALL_HASHES"
-    [[ -n "$EXPECTED_L2_CALL_HASHES" ]] && echo "EXPECTED_L2_CALL_HASHES=$EXPECTED_L2_CALL_HASHES"
+    extract_expected_outputs "$COMPUTE_OUT"
 
     VERIFIERS_RUN=0
 
     # ── Verify L1 batch consumption ──
     # Proxy-consumed entries (EXPECTED_L1_CALL_HASHES): ExecutionConsumed carries the call
-    # hash — VerifyL1Batch on the execution block. System-driven zero-hash entries
+    # hash — verify_l1_batch on the execution block. System-driven zero-hash entries
     # (EXPECTED_L1_HASHES only): no call hash exists — match EntryExecuted rolling hashes
     # via verify_l1_zero_hash, same as network mode.
     if [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        if verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
-        else
-            echo "L1 VERIFICATION FAILED"
-            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
-            FAILED=true
-        fi
+        run_verify_step "L1" inline verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
     elif [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_HASHES" && "$EXPECTED_L1_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Zero-Hash Entries (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        if verify_l1_zero_hash "$L1_RPC" "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_HASHES" "$EXPECTED_L1_TABLE"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
-        else
-            echo "L1 VERIFICATION FAILED"
-            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
-            FAILED=true
-        fi
+        run_verify_step "L1" inline verify_l1_zero_hash "$L1_RPC" "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_HASHES" "$EXPECTED_L1_TABLE"
     else
         echo ""
         echo "====== Verify L1 (SKIP: no L1 block or no EXPECTED_L1_[CALL_]HASHES printed) ======"
@@ -197,13 +151,7 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        if verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
-        else
-            echo "L2 TABLE VERIFICATION FAILED"
-            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
-            FAILED=true
-        fi
+        run_verify_step "L2 TABLE" inline verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
     else
         echo ""
         echo "====== Verify L2 Table (SKIP: no L2 block or no EXPECTED_L2_HASHES printed) ======"
@@ -214,13 +162,7 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo ""
         echo "====== Verify L2 Calls (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        if verify_l2_calls "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"; then
-            echo "$VERIFY_OUT" | grep -E "^\s*(PASS|NOTE)" || echo "  PASS"
-        else
-            echo "L2 CALL VERIFICATION FAILED"
-            echo "$VERIFY_OUT" | strip_traces 2>/dev/null || echo "$VERIFY_OUT"
-            FAILED=true
-        fi
+        run_verify_step "L2 CALL" inline verify_l2_calls "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"
     else
         echo ""
         echo "====== Verify L2 Calls (SKIP: no L2 block or no EXPECTED_L2_CALL_HASHES printed) ======"

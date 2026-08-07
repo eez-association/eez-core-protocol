@@ -515,6 +515,8 @@ address      = address(uint160(uint256(keccak256(abi.encodePacked(
 
 The salt is exactly `(originalRollupId, originalAddress)` — no `domain` or `block.chainid` term is mixed in. `createCrossChainProxy` and `computeCrossChainProxyAddress` are defined on `EEZBase` and inherited by both `EEZ` and `EEZL2`. A proxy stands in for a REMOTE address, never one on the manager's own network: `_createCrossChainProxyInternal` reverts `SameNetworkProxy(rollupId)` when `originalRollupId` equals the manager's own network id (`MAINNET_ROLLUP_ID` on L1, `ROLLUP_ID` on L2) — this also blocks the auto-creation path during execution.
 
+Nothing verifies that `originalAddress` actually holds a contract on rollup `originalRollupId` — proxy creation is permissionless and the manager cannot see other chains. A proxy minted over an address with no code at the destination forwards calls that "succeed" against an empty account (flat entries, empty return data). Always mint proxies over the real remote contract, never over a local twin's address.
+
 #### Per-rollup ownership / configuration
 
 Per-rollup ownership lives on each rollup's `IRollupContract`-conforming manager (reference impl: `src/rollupContract/Rollup.sol`). The central `EEZ` registry exposes a single manager-callable mutator on the rollup config:
@@ -821,7 +823,7 @@ function executeIncomingCrossChainCall(
 ) external payable onlySystemAddress returns (bytes memory)
 ```
 
-System-only top-level delivery path for an inbound cross-chain call from another rollup. Behavior:
+System-only top-level delivery path for an inbound cross-chain call from another rollup. One such tx per top-level inbound call: a source-chain tx that makes N top-level calls to this L2 is delivered as N separate `executeIncomingCrossChainCall` txs, each atomically replacing the table (see `EXECUTION_ENTRY_SPEC.md` §1-to-1 rule). Behavior:
 
 1. Revert `EmptyEntries` if `_entries.length == 0`.
 2. Revert `ValueMismatch` if `msg.value != value` (strict equality — the system mints exactly the call's `value`; that ETH sits in the manager and is drained as `_processNCalls` forwards value through the source proxy).

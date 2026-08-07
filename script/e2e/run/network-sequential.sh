@@ -3,10 +3,10 @@
 # (shared deployer nonce — never parallelize network runs).
 #
 # Args are scenario names, categories, or category/direction paths:
-#   bash script/e2e/shared/run-network-set.sh one_way            # whole category
-#   bash script/e2e/shared/run-network-set.sh multi_call/L1_to_L2
-#   bash script/e2e/shared/run-network-set.sh counter bridge     # specific scenarios
-#   bash script/e2e/shared/run-network-set.sh all                # every scenario
+#   bash script/e2e/run/network-sequential.sh one_way            # whole category
+#   bash script/e2e/run/network-sequential.sh multi_call/L1_to_L2
+#   bash script/e2e/run/network-sequential.sh counter bridge     # specific scenarios
+#   bash script/e2e/run/network-sequential.sh all                # every scenario
 #
 # Devnet endpoints/addresses/key come from an env file (default:
 # chain.env in the repo root; override with DEVNET_ENV=<file>). Required vars:
@@ -38,7 +38,7 @@ for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2 PK; do
     [[ -n "${!var:-}" ]] || { echo "Missing $var (check $DEVNET_ENV)"; exit 1; }
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: run-network-set.sh <scenario|category|all> ..."; exit 1; }
+[[ $# -gt 0 ]] || { echo "Usage: network-sequential.sh <scenario|category|all> ..."; exit 1; }
 
 # ── Resolve args to scenario script paths ──
 SOLS=()
@@ -59,10 +59,16 @@ done
 mkdir -p tmp/e2e-network
 
 PASS=0; FAIL=0; FAILED_LIST=()
+SKIPPED=0
 for sol in "${SOLS[@]}"; do
     name=$(basename "$(dirname "$sol")")
+    # Local-only scenarios (e.g. multi-tx triggers) carry no network driver contract.
+    if ! grep -qE 'contract ExecuteNetwork(L2)? ' "$sol"; then
+        SKIPPED=$((SKIPPED+1)); echo "RESULT $name: SKIP (local-only — no ExecuteNetwork contract)"
+        continue
+    fi
     echo "════════════ RUNNING $name ($sol) ════════════"
-    if RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/shared/run-network.sh "$sol" \
+    if RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/run/network.sh "$sol" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
         --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
         --pk "$PK" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \
@@ -76,6 +82,6 @@ for sol in "${SOLS[@]}"; do
 done
 
 echo ""
-echo "===== NETWORK RESULT: $PASS passed, $FAIL failed ====="
+echo "===== NETWORK RESULT: $PASS passed, $FAIL failed, $SKIPPED skipped (local-only) ====="
 for t in "${FAILED_LIST[@]:-}"; do [[ -n "$t" ]] && echo "  FAILED: $t"; done
 [[ $FAIL -eq 0 ]]

@@ -177,17 +177,73 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         return all;
     }
 
+    /// @dev First indexed param (topics[1]) of every log matching `sig`, in log order.
+    ///      Collection only — duplicates are kept so the multiplicity-aware matchers
+    ///      (`_findMissingHashes`, `_allPresent`) see every event occurrence.
+    function _collectTopic1(Vm.EthGetLogs[] memory logs, bytes32 sig) internal pure returns (bytes32[] memory) {
+        return _collectTopic1(logs, sig, sig);
+    }
+
+    /// @dev Two-signature variant: logs matching EITHER signature (e.g. the proxy-driven
+    ///      and system-driven L2 call-executed events, which both index the call hash).
+    function _collectTopic1(Vm.EthGetLogs[] memory logs, bytes32 sigA, bytes32 sigB)
+        internal
+        pure
+        returns (bytes32[] memory)
+    {
+        uint256 count;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sigA || logs[i].topics[0] == sigB) count++;
+        }
+        bytes32[] memory result = new bytes32[](count);
+        uint256 idx;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == sigA || logs[i].topics[0] == sigB) {
+                result[idx++] = logs[i].topics[1];
+            }
+        }
+        return result;
+    }
+
+    /// @dev Concatenated target-contract logs of every listed block (blocks are queried one
+    ///      by one — the list may be sparse, and unlisted in-between blocks must not leak in).
+    function _getLogsUnion(uint256[] calldata blockNumbers, address target)
+        internal
+        view
+        returns (Vm.EthGetLogs[] memory)
+    {
+        bytes32[] memory topics = new bytes32[](0);
+        Vm.EthGetLogs[][] memory perBlock = new Vm.EthGetLogs[][](blockNumbers.length);
+        uint256 total;
+        for (uint256 i = 0; i < blockNumbers.length; i++) {
+            perBlock[i] = vm.eth_getLogs(blockNumbers[i], blockNumbers[i], target, topics);
+            total += perBlock[i].length;
+        }
+        Vm.EthGetLogs[] memory all = new Vm.EthGetLogs[](total);
+        uint256 idx;
+        for (uint256 i = 0; i < perBlock.length; i++) {
+            for (uint256 j = 0; j < perBlock[i].length; j++) {
+                all[idx++] = perBlock[i][j];
+            }
+        }
+        return all;
+    }
+
+    /// @dev Multiplicity-aware: each actual hash satisfies at most one expected slot, so
+    ///      N-call scenarios emitting the same hash N times need N actual events.
     function _findMissingHashes(bytes32[] memory actual, bytes32[] calldata expected)
         internal
         pure
         returns (bytes32[] memory)
     {
         bytes32[] memory tmp = new bytes32[](expected.length);
+        bool[] memory used = new bool[](actual.length);
         uint256 count;
         for (uint256 i = 0; i < expected.length; i++) {
             bool found = false;
             for (uint256 j = 0; j < actual.length; j++) {
-                if (actual[j] == expected[i]) {
+                if (!used[j] && actual[j] == expected[i]) {
+                    used[j] = true;
                     found = true;
                     break;
                 }
@@ -1021,95 +1077,14 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  VerifyL1Batch — check ExecutionConsumed logs in a given block contain
-//  all expected call hashes (subset match).
-// ══════════════════════════════════════════════════════════════════════
-
-contract VerifyL1Batch is VerifyHelpers {
-    /// @dev Input is the LIST OF EXPECTED CROSS-CHAIN-CALL HASHES (`proxyEntryHash` values)
-    /// that should have been consumed in the L1 block. `BatchPosted` carries no entries;
-    /// consumption is signalled via `ExecutionConsumed` whose first topic is the consumed
-    /// entry's `crossChainCallHash`. This verifier extracts those hashes and checks every
-    /// expected hash is present.
-    function run(uint256 blockNumber, address rollups, bytes32[] calldata expectedCallHashes) external view {
-        run(blockNumber, rollups, expectedCallHashes, "");
-    }
-
-    /// @dev Blob-aware variant: `expectedTable` is abi.encode(ExecutionEntry[]) from
-    ///      ComputeExpected. Adds per-entry field checks (EntryExecuted, rollupId routing,
-    ///      stateUpdates) and the live state-root movement check.
-    function run(
-        uint256 blockNumber,
-        address rollups,
-        bytes32[] calldata expectedCallHashes,
-        bytes memory expectedTable
-    )
-        public
-        view
-    {
-        bytes32[] memory topics = new bytes32[](0);
-        Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blockNumber, blockNumber, rollups, topics);
-
-        // Collect every consumed call hash from ExecutionConsumed events in this block.
-        uint256 count;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) count++;
-        }
-        bytes32[] memory actualHashes = new bytes32[](count);
-        uint256 idx;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) {
-                actualHashes[idx++] = logs[i].topics[1]; // indexed crossChainCallHash
-            }
-        }
-
-        bytes32[] memory missing = _findMissingHashes(actualHashes, expectedCallHashes);
-
-        if (missing.length > 0) {
-            console.log(
-                "FAIL: %s/%s expected call hashes missing in L1 block %s",
-                missing.length,
-                expectedCallHashes.length,
-                blockNumber
-            );
-            console.log("");
-            console.log("=== ACTUAL CONSUMED HASHES (L1 block %s, %s) ===", blockNumber, actualHashes.length);
-            for (uint256 i = 0; i < actualHashes.length; i++) {
-                console.log("  %s", vm.toString(actualHashes[i]));
-            }
-            console.log("");
-            console.log("=== MISSING CALL HASHES ===");
-            for (uint256 i = 0; i < missing.length; i++) {
-                console.log("  %s", vm.toString(missing[i]));
-            }
-            revert("Verification failed");
-        }
-
-        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
-            revert("Field verification failed");
-        }
-
-        console.log(
-            "PASS: %s/%s expected call hashes consumed in L1 block %s",
-            expectedCallHashes.length,
-            expectedCallHashes.length,
-            blockNumber
-        );
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_BATCH_POSTED) {
-                console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
-                break;
-            }
-        }
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════════
-//  VerifyL1BatchInRange — range variant of VerifyL1Batch for L2-starting
-//  scenarios, where the L1 settlement block is not known a priori (batches
-//  don't encode L2 block references). Scans [fromBlock..toBlock] for
-//  ExecutionConsumed events and requires every expected call hash to
-//  appear somewhere in the range.
+//  VerifyL1BatchInRange — check ExecutionConsumed logs in [fromBlock..
+//  toBlock] contain all expected call hashes (subset match). `BatchPosted`
+//  carries no entries; consumption is signalled via `ExecutionConsumed`
+//  whose first topic is the consumed entry's `crossChainCallHash`.
+//  A known settlement block (L1-trigger flows) is the fromBlock == toBlock
+//  degenerate range; L2-starting scenarios scan a real range because the
+//  settlement block is not known a priori (batches don't encode L2 block
+//  references).
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1BatchInRange is VerifyHelpers {
@@ -1133,17 +1108,12 @@ contract VerifyL1BatchInRange is VerifyHelpers {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, rollups, topics);
 
-        uint256 count;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) count++;
-        }
-        bytes32[] memory actualHashes = new bytes32[](count);
-        uint256 idx;
+        bytes32[] memory actualHashes = _collectTopic1(logs, SIG_EXECUTION_CONSUMED_L1);
         uint256 matchBlock;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == SIG_EXECUTION_CONSUMED_L1) {
-                actualHashes[idx++] = logs[i].topics[1];
-                if (matchBlock == 0) matchBlock = logs[i].blockNumber;
+                matchBlock = logs[i].blockNumber;
+                break;
             }
         }
 
@@ -1163,10 +1133,14 @@ contract VerifyL1BatchInRange is VerifyHelpers {
             expectedCallHashes.length
         );
         console.log("L1_MATCH_BLOCK=%s", matchBlock);
+        // Every BatchPosted tx is a candidate — sibling jobs may settle in the same
+        // range, so the calldata stage must be able to try them all.
+        bool first = true;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == SIG_BATCH_POSTED) {
-                console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
-                break;
+                if (first) console.log("L1_BATCH_TX=%s", vm.toString(logs[i].transactionHash));
+                first = false;
+                console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
             }
         }
     }
@@ -1413,29 +1387,26 @@ contract VerifyL2Blocks is VerifyHelpers {
             revert("No L2 blocks");
         }
 
-        for (uint256 i = 0; i < l2Blocks.length; i++) {
-            L2ExecutionEntry[] memory entries = _getEntries(l2Blocks[i], managerL2);
-            if (_allPresent(entries, expectedEntryHashes)) {
-                bytes32[] memory topics = new bytes32[](0);
-                Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
-                if (expectedTable.length > 0 && !_verifyL2TableFields(entries, blkLogs, expectedTable)) {
-                    revert("Field verification failed");
-                }
-                console.log(
-                    "PASS: all %s expected entries found at L2 block %s", expectedEntryHashes.length, l2Blocks[i]
-                );
-                for (uint256 j = 0; j < blkLogs.length; j++) {
-                    if (blkLogs[j].topics[0] == SIG_TABLE_LOADED) {
-                        console.log("L2_TABLE_TX=%s", vm.toString(blkLogs[j].transactionHash));
-                        break;
-                    }
-                }
-                return;
+        // The system delivers one tx per top-level call, so the expected entries may be
+        // spread over several sync blocks — verify against the union of all listed blocks.
+        Vm.EthGetLogs[] memory logs = _getLogsUnion(l2Blocks, managerL2);
+        L2ExecutionEntry[] memory entries = _collectTableEntries(logs);
+        if (!_allPresent(entries, expectedEntryHashes)) {
+            _reportL2Failure(l2Blocks, managerL2, expectedEntryHashes);
+            revert("Verification failed");
+        }
+        if (expectedTable.length > 0 && !_verifyL2TableFields(entries, logs, expectedTable)) {
+            revert("Field verification failed");
+        }
+        console.log(
+            "PASS: all %s expected entries found across %s L2 block(s)", expectedEntryHashes.length, l2Blocks.length
+        );
+        for (uint256 j = 0; j < logs.length; j++) {
+            if (logs[j].topics[0] == SIG_TABLE_LOADED) {
+                console.log("L2_TABLE_TX=%s", vm.toString(logs[j].transactionHash));
+                break;
             }
         }
-
-        _reportL2Failure(l2Blocks, managerL2, expectedEntryHashes);
-        revert("Verification failed");
     }
 
     /// @dev Failure diagnostics for `run`, split into its own frame to keep `run` under the
@@ -1475,10 +1446,13 @@ contract VerifyL2Blocks is VerifyHelpers {
         for (uint256 i = 0; i < entries.length; i++) {
             actualHashes[i] = _entryHash(entries[i]);
         }
+        // Multiplicity-aware: each loaded entry satisfies at most one expected slot.
+        bool[] memory used = new bool[](actualHashes.length);
         for (uint256 i = 0; i < expectedEntryHashes.length; i++) {
             bool found = false;
             for (uint256 j = 0; j < actualHashes.length; j++) {
-                if (actualHashes[j] == expectedEntryHashes[i]) {
+                if (!used[j] && actualHashes[j] == expectedEntryHashes[i]) {
+                    used[j] = true;
                     found = true;
                     break;
                 }
@@ -1565,37 +1539,17 @@ contract VerifyL2Calls is VerifyHelpers {
         // (system-driven executeIncomingCrossChainCall). The crossChainCallHash is the first
         // indexed param of both, so topics[1] extracts it uniformly. L2-manager logs only —
         // L1's 5-field CrossChainCallExecuted has a different topic0 and would never match.
-        uint256 count;
-        for (uint256 i = 0; i < blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            for (uint256 j = 0; j < logs.length; j++) {
-                bytes32 sig = logs[j].topics[0];
-                if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) count++;
-            }
-        }
-        bytes32[] memory result = new bytes32[](count);
-        uint256 idx;
-        for (uint256 i = 0; i < blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            for (uint256 j = 0; j < logs.length; j++) {
-                bytes32 sig = logs[j].topics[0];
-                if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) {
-                    result[idx++] = logs[j].topics[1];
-                }
-            }
-        }
-        return result;
+        return _collectTopic1(_getLogsUnion(blocks, managerL2), SIG_CROSSCHAIN_CALL, SIG_INCOMING_CROSSCHAIN_CALL);
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════
 //  VerifyL2CallsInRange — range variant of VerifyL2Calls for L1-starting
-//  scenarios, where the L2 sync block that executed the inbound calls is
+//  scenarios, where the L2 sync blocks that executed the inbound calls are
 //  not known a priori. One eth_getLogs over [fromBlock..toBlock]; prints
-//  L2_MATCH_BLOCK (block of the first expected-hash hit) on success so
-//  the caller can pin table verification to that block.
+//  every block holding an expected-hash hit (L2_MATCH_BLOCKS) so the
+//  caller can pin table verification to those blocks — one delivery tx
+//  per top-level call means the hits may span several blocks.
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL2CallsInRange is VerifyHelpers {
@@ -1606,20 +1560,7 @@ contract VerifyL2CallsInRange is VerifyHelpers {
         bytes32[] memory topics = new bytes32[](0);
         Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, managerL2, topics);
 
-        uint256 count;
-        for (uint256 i = 0; i < logs.length; i++) {
-            bytes32 sig = logs[i].topics[0];
-            if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) count++;
-        }
-        bytes32[] memory found = new bytes32[](count);
-        uint256 idx;
-        for (uint256 i = 0; i < logs.length; i++) {
-            bytes32 sig = logs[i].topics[0];
-            if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) {
-                found[idx++] = logs[i].topics[1];
-            }
-        }
-
+        bytes32[] memory found = _collectTopic1(logs, SIG_CROSSCHAIN_CALL, SIG_INCOMING_CROSSCHAIN_CALL);
         bytes32[] memory missing = _findMissingHashes(found, expectedCallHashes);
         if (missing.length > 0) {
             console.log("FAIL: %s/%s expected L2 calls missing in range", missing.length, expectedCallHashes.length);
@@ -1632,18 +1573,45 @@ contract VerifyL2CallsInRange is VerifyHelpers {
         console.log(
             "PASS: %s/%s expected L2 calls found in range", expectedCallHashes.length, expectedCallHashes.length
         );
-        // First log whose hash is one of the expected — that block is the sync block.
+        _printMatchBlocks(logs, expectedCallHashes);
+    }
+
+    /// @dev Every distinct block holding an expected-hash log is a sync block — the system
+    ///      delivers one tx per top-level call, so N calls may spread over several blocks.
+    ///      Prints L2_MATCH_BLOCK (first, kept for message text) and the full L2_MATCH_BLOCKS
+    ///      list the runner feeds into table verification.
+    function _printMatchBlocks(Vm.EthGetLogs[] memory logs, bytes32[] calldata expectedCallHashes) internal pure {
+        uint256[] memory blocks = new uint256[](logs.length);
+        uint256 nBlocks;
         for (uint256 i = 0; i < logs.length; i++) {
             bytes32 sig = logs[i].topics[0];
             if (sig != SIG_CROSSCHAIN_CALL && sig != SIG_INCOMING_CROSSCHAIN_CALL) continue;
+            bool isExpected = false;
             for (uint256 j = 0; j < expectedCallHashes.length; j++) {
                 if (logs[i].topics[1] == expectedCallHashes[j]) {
-                    console.log("L2_MATCH_BLOCK=%s", logs[i].blockNumber);
-                    console.log("L2_CALL_TX=%s", vm.toString(logs[i].transactionHash));
-                    return;
+                    isExpected = true;
+                    break;
                 }
             }
+            if (!isExpected) continue;
+            if (nBlocks == 0) {
+                console.log("L2_MATCH_BLOCK=%s", logs[i].blockNumber);
+                console.log("L2_CALL_TX=%s", vm.toString(logs[i].transactionHash));
+            }
+            bool seen = false;
+            for (uint256 k = 0; k < nBlocks; k++) {
+                if (blocks[k] == logs[i].blockNumber) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) blocks[nBlocks++] = logs[i].blockNumber;
         }
+        string memory list = "";
+        for (uint256 k = 0; k < nBlocks; k++) {
+            list = k == 0 ? vm.toString(blocks[k]) : string.concat(list, ",", vm.toString(blocks[k]));
+        }
+        console.log("L2_MATCH_BLOCKS=[%s]", list);
     }
 }
 
