@@ -5,10 +5,11 @@
 # Grammar (case-insensitive, '#' starts a comment):
 #   <chain> call <chain> [value <amount> [wei|gwei|ether]]   open a mutable frame
 #   <chain> staticCall <chain>                               open a read-only frame
-#   <chain> return | returnFail                              close the innermost frame
-#   <chain> snapshot ... <chain> revert                      forced-revert region
+#   [<chain>] return | returnFail                            close the innermost frame
+#   [<chain>] snapshot ... revert                            forced-revert region
 #   --                                                       transaction separator
-# <chain> is L1 or L2_a..L2_z; the leading token is the chain EXECUTING the line.
+# <chain> is L1 or L2_a..L2_z; the leading token is the chain EXECUTING the line
+# (optional on return/returnFail/snapshot/revert; validated when present).
 
 # Tx 1 (L1 origin): read L2_A, then call it with value; A calls back into L1.
 L1 staticCall L2_A

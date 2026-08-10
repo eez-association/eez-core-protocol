@@ -23,17 +23,19 @@ import {MAX_CALL_DEPTH} from "../../script/blob/BlobConstants.sol";
 //                                  unit wei); reads can't carry value
 //      <chain> staticCall <chain>  read-only frame (a top-level one may nest
 //                                  leaf static sub-reads of the origin chain)
-//      <chain> return              closes the innermost frame with ReturnSuccess
-//      <chain> returnFail          closes it with ReturnFail
-//      <chain> snapshot            opens a forced-revert region in the current frame
-//      <chain> revert              closes the open region (same frame, non-empty)
+//      [<chain>] return            closes the innermost frame with ReturnSuccess
+//      [<chain>] returnFail        closes it with ReturnFail
+//      [<chain>] snapshot          opens a forced-revert region in the current frame
+//      [<chain>] revert            closes the open region (same frame, non-empty)
 //      --                          transaction separator
 //
 //      <chain> := L1 | L2_a .. L2_z     (chain id 0, 1..26; rollup id == chain id)
 //
 //  The leading chain token is the chain EXECUTING the instruction and is
-//  validated against the context stack. The first instruction of each
-//  transaction fixes the origin (implicit Initiate); `--`/end-of-script emit
+//  validated against the context stack; on return/returnFail/snapshot/revert it
+//  is deducible and may be omitted (a bare verb). The first instruction of each
+//  transaction must name its chain — it fixes the origin (implicit Initiate);
+//  `--`/end-of-script emit
 //  Finish, and end-of-script adds CloseBlobStream. All tx/call/return payloads
 //  are auto-generated and globally unique ("dsl.tx#i", "dsl.call#k",
 //  "dsl.ret#k", …), so repeated shapes never re-match a rolled-back entry.
@@ -114,6 +116,11 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                 seps++;
                 continue;
             }
+            if (_dslBareVerb(toks[0])) {
+                if (toks.length != 1) _dslFail(lineNo, string.concat("expected: [<chain>] ", toks[0]));
+                instr++;
+                continue;
+            }
             uint64 exec = _dslChain(toks[0], lineNo);
             if (exec > maxChain) maxChain = exec;
             if (toks.length < 2) _dslFail(lineNo, "missing verb");
@@ -133,11 +140,8 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                 }
                 uint64 tgt = _dslChain(toks[2], lineNo);
                 if (tgt > maxChain) maxChain = tgt;
-            } else if (
-                _dslEq(toks[1], "return") || _dslEq(toks[1], "returnfail") || _dslEq(toks[1], "snapshot")
-                    || _dslEq(toks[1], "revert")
-            ) {
-                if (toks.length != 2) _dslFail(lineNo, string.concat("expected: <chain> ", toks[1]));
+            } else if (_dslBareVerb(toks[1])) {
+                if (toks.length != 2) _dslFail(lineNo, string.concat("expected: [<chain>] ", toks[1]));
             } else {
                 _dslFail(lineNo, string.concat("unknown verb '", toks[1], "'"));
             }
@@ -198,8 +202,9 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                 continue;
             }
 
-            uint64 exec = _dslChain(toks[0], lineNo);
-            string memory verb = toks[1];
+            bool bare = _dslBareVerb(toks[0]);
+            uint64 exec = bare ? 0 : _dslChain(toks[0], lineNo);
+            string memory verb = bare ? toks[0] : toks[1];
             bool isCall = _dslEq(verb, "call");
             bool isStatic = _dslEq(verb, "staticcall");
 
@@ -207,6 +212,7 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                 if (!(isCall || isStatic || _dslEq(verb, "snapshot"))) {
                     _dslFail(lineNo, "transaction must start with call, staticCall, or snapshot");
                 }
+                if (bare) _dslFail(lineNo, "first instruction of a transaction must name its executing chain");
                 b.origin = exec;
                 b.txOpen = true;
                 b.txCalls = 0;
@@ -215,7 +221,9 @@ abstract contract DslScenarioBase is BlobScenarioBase {
             }
 
             uint64 cur = b.sp == 0 ? b.origin : b.frameChain[b.sp - 1];
-            if (exec != cur) {
+            if (bare) {
+                exec = cur;
+            } else if (exec != cur) {
                 _dslFail(lineNo, string.concat("executor is ", toks[0], " but ", _dslChainName(cur), " is executing"));
             }
 
@@ -432,6 +440,12 @@ abstract contract DslScenarioBase is BlobScenarioBase {
 
     function _dslEq(string memory a, string memory b) internal pure returns (bool) {
         return keccak256(bytes(a)) == keccak256(bytes(b));
+    }
+
+    /// @dev Verbs whose executor is deducible from the context stack, so the leading
+    ///      chain token may be omitted.
+    function _dslBareVerb(string memory tok) internal pure returns (bool) {
+        return _dslEq(tok, "return") || _dslEq(tok, "returnfail") || _dslEq(tok, "snapshot") || _dslEq(tok, "revert");
     }
 
     function _dslFail(uint256 lineNo, string memory reason) internal pure {

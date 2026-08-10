@@ -45,6 +45,31 @@ contract BlobTools is DslScenarioBase {
         _printTables(_derive(msgs));
     }
 
+    /// @notice Reads a DSL scenario file and runs the FULL pipeline on it — codec and
+    ///         IR round trips, table derivation, stitch-back, and live execution on the
+    ///         real managers with every actor result asserted (`runDsl`).
+    function runLive(string memory path) external {
+        BlobMessage[] memory msgs = dslCompile(vm.readFile(path));
+        _printMessages(msgs);
+        runDsl(vm.readFile(path));
+        console2.log("");
+        console2.log("== Live execution OK ==");
+        for (uint64 c = 0; c <= DSL_MAX_CHAIN; c++) {
+            if (address(dslTarget[c]) != address(0) || address(dslDriver[c]) != address(0)) {
+                console2.log(
+                    string.concat(
+                        "  chain ",
+                        vm.toString(c),
+                        ": driver execs=",
+                        vm.toString(address(dslDriver[c]) != address(0) ? dslDriver[c].execCount() : 0),
+                        " target execs=",
+                        vm.toString(address(dslTarget[c]) != address(0) ? dslTarget[c].execCount() : 0)
+                    )
+                );
+            }
+        }
+    }
+
     /// @notice Reads a hex file holding the blob portion of the logical byte stream
     ///         (with or without trailing 4844 padding) and prints messages + tables.
     function runBlob(string memory path) external {

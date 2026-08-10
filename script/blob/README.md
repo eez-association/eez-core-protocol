@@ -168,14 +168,16 @@ Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 |---|---|
 | `<chain> call <chain> [value <amount> [wei\|gwei\|ether]]` | executor calls target; opens a frame (optionally carrying ether — default unit wei) |
 | `<chain> staticCall <chain>` | read-only frame (a top-level one may nest leaf static sub-reads of the origin chain) |
-| `<chain> return` / `<chain> returnFail` | closes the innermost frame |
-| `<chain> snapshot` … `<chain> revert` | forced-revert region in the current frame |
+| `[<chain>] return` / `[<chain>] returnFail` | closes the innermost frame |
+| `[<chain>] snapshot` … `[<chain>] revert` | forced-revert region in the current frame |
 | `--` | transaction separator |
 
 `<chain>` is `L1` or `L2_a`..`L2_z` (chain id 0, 1..26). The leading chain token
 is the chain **executing** the instruction and is validated against the context
-stack — any structural mistake reverts with `DSL line <n>: <reason>`. The first
-instruction of each transaction fixes the origin (implicit Initiate); `--` and
+stack — any structural mistake reverts with `DSL line <n>: <reason>`. On
+`return`/`returnFail`/`snapshot`/`revert` it is deducible and may be omitted. The
+first instruction of each transaction must name its chain — it fixes the origin
+(implicit Initiate); `--` and
 end-of-script emit Finish, and end-of-script adds CloseBlobStream. All payloads
 are auto-generated and globally unique (`dsl.tx#i`, `dsl.call#k`, `dsl.ret#k`,
 …), so repeated shapes never re-match a rolled-back entry. `dslCompile(script)`

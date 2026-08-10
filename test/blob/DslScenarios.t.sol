@@ -206,6 +206,37 @@ contract DslScenarios is DslScenarioBase {
         assertEq(balB, 10_000 ether + 5 wei, "L2B credited");
     }
 
+    /// @notice Bare verbs: the executor token is optional on return/returnFail/
+    ///         snapshot/revert — the compiler deduces it from the context stack.
+    function test_Dsl_BareVerbs() public {
+        runDsl(
+            string.concat(
+                "L1 call L2_B value 1 ether\n",
+                "snapshot\n",
+                "L2_B call L1 value 1 ether\n",
+                "return\n",
+                "L2_B call L1\n",
+                "return\n",
+                "revert\n",
+                "return\n"
+            )
+        );
+        assertEq(dslTarget[L2B].execCount(), 1, "host frame commits");
+        assertEq(dslTarget[0].execCount(), 0, "both region-covered L1 calls rolled back");
+    }
+
+    /// @notice Bare and explicit forms compile to the identical message stream.
+    function test_Dsl_BareVsExplicitCompile() public {
+        BlobMessage[] memory bare =
+            dslCompile(string.concat("L1 call L2_A\n", "L2_A call L1\n", "return\n", "return\n"));
+        BlobMessage[] memory expl =
+            dslCompile(string.concat("L1 call L2_A\n", "L2_A call L1\n", "L1 return\n", "L2_A return\n"));
+        assertEq(bare.length, expl.length, "message count");
+        for (uint256 i = 0; i < expl.length; i++) {
+            assertTrue(Msg.eq(bare[i], expl[i]), string.concat("message mismatch at index ", vm.toString(i)));
+        }
+    }
+
     /// @notice Locks the compiled message stream: exact order, actor wiring, and
     ///         auto-generated payloads.
     function test_Dsl_CompiledMessages() public {

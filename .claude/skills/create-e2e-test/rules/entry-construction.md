@@ -97,3 +97,4 @@ NOTE in a green run as a bug.
 | Forced revert (`revertNextNCalls`) | `script/e2e/revert/L1_to_L2/revertCounter/E2ERevertCounter.s.sol` |
 | try/catch over natural revert | `script/e2e/revert/L1_to_L2/revertContinue/E2ERevertContinue.s.sol` |
 | Cascading multi-hop reentrancy | `script/e2e/reentrant/L1_to_L2/reentrant/E2EReentrant.s.sol` |
+| Periphery composite (Bridge lock/mint round trip, CREATE2 same-address deploys, L2 outgoing leg) | `script/e2e/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol` |

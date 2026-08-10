@@ -142,6 +142,24 @@ contract DslParser is DslScenarioBase {
         _expectFail(1, "transaction must start with call, staticCall, or snapshot", "L1 return\n");
     }
 
+    function test_reject_bareSnapshotAtTxStart() public {
+        // A bare verb can't open a transaction: the first instruction fixes the origin.
+        _expectFail(
+            1,
+            "first instruction of a transaction must name its executing chain",
+            "snapshot\nL1 call L2_A\nL2_A return\nrevert\n"
+        );
+    }
+
+    function test_reject_bareVerbWithArguments() public {
+        _expectFail(3, "expected: [<chain>] return", "L1 call L2_A\nL2_A call L1\nreturn now\n");
+    }
+
+    function test_reject_bareVerbStillStructuralChecked() public {
+        // Deduced executors relax nothing structural: a bare revert still needs a region.
+        _expectFail(3, "revert without matching snapshot", "L1 call L2_A\nL2_A return\nrevert\n");
+    }
+
     function test_reject_emptyScript() public {
         vm.expectRevert(bytes("DSL: empty script"));
         this.compileExternal("# only a comment\n\n");

@@ -1518,13 +1518,12 @@ contract VerifyL2Calls is VerifyHelpers {
         }
 
         console.log("PASS: %s/%s expected L2 calls verified", expectedCallHashes.length, expectedCallHashes.length);
-        for (uint256 i = 0; i < l2Blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
-            for (uint256 j = 0; j < blkLogs.length; j++) {
-                if (blkLogs[j].topics[0] == SIG_CROSSCHAIN_CALL) {
-                    console.log("L2_CALL_TX=%s", vm.toString(blkLogs[j].transactionHash));
-                }
+        // Both consumption events count as an executed call (see _collectActionHashes).
+        Vm.EthGetLogs[] memory allLogs = _getLogsUnion(l2Blocks, managerL2);
+        for (uint256 i = 0; i < allLogs.length; i++) {
+            bytes32 sig = allLogs[i].topics[0];
+            if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) {
+                console.log("L2_CALL_TX=%s", vm.toString(allLogs[i].transactionHash));
             }
         }
     }

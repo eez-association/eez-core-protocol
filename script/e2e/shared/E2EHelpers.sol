@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {
-    EEZ,
     ProofSystemBatchPerVerificationEntries,
     ExpectedStateRootPerRollup,
     RollupIdWithProofSystems
@@ -221,27 +220,6 @@ struct HashStep {
 ///         keccak256(crossChainCallHash, rollingHashAtFire). Matches `EEZBase._computeExpectedL1toL2Hash`.
 function expectedL1toL2Hash(bytes32 ccHash, bytes32 rollingHashAtFire) pure returns (bytes32) {
     return keccak256(abi.encodePacked(ccHash, rollingHashAtFire));
-}
-
-// ══════════════════════════════════════════════════════════════════════
-//  L2TXBatcher — postAndVerifyBatch + executeL2Txs in one tx (local mode).
-//  Posts the caller's entries as an `immediateSingleRollupBatch`, then
-//  drains via executeL2Txs(rollupId).
-// ══════════════════════════════════════════════════════════════════════
-
-contract L2TXBatcher {
-    function execute(
-        EEZ rollups,
-        address proofSystem,
-        uint64 rollupId,
-        ExecutionEntry[] calldata entries,
-        StaticExecutionEntry[] calldata staticEntries
-    )
-        external
-    {
-        rollups.postAndVerifyBatch(immediateSingleRollupBatch(proofSystem, rollupId, entries, staticEntries));
-        rollups.executeL2Txs(rollupId);
-    }
 }
 
 /// @notice Builds a single-rollup batch whose leading run of `proxyEntryHash == 0` entries is

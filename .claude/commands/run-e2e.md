@@ -51,9 +51,7 @@ Implemented today:
 17. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
 18. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
 19. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
-
-Pending:
-- `flash-loan` — refactor of `script/flash-loan-test/ExecuteFlashLoan.s.sol` into the scenario template
+20. `flash-loan` — DeFi composite: flash loan repaid via a full L1→L2→L1 bridge round trip in one user tx (2 proxy-keyed L1 entries — the second's top-level `l2ToL1Call` releases the escrow on L1; 2 L2 deliveries — the second consumes an outgoing return leg from `expectedOutgoingCalls`)
 
 `siblingScopes` from main is deliberately **not** ported — scope arrays don't exist in the flatten model. Its coverage is subsumed by `multi-call-two-diff`.
 
