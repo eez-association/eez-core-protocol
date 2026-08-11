@@ -1048,11 +1048,10 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         returns (bool ok)
     {
         ok = true;
-        (address dest, uint256 value, bytes memory data, address src, uint64 srcRollup) =
-            abi.decode(eventData, (address, uint256, bytes, address, uint64));
-        // Same preimage the manager folds for an inbound call: non-static, callGas = 0
-        // (incoming calls never fold observed gas — only L2-outgoing keys do).
-        bytes32 computed = crossChainCallHash(false, src, srcRollup, dest, rid, value, data);
+        // Event data is in hash-formula field order; the inbound binding folds the call's OWN gas.
+        (bool isStatic, address src, uint256 srcRollup, address dest, uint256 value, uint256 callGas, bytes memory data)
+        = abi.decode(eventData, (bool, address, uint256, address, uint256, uint256, bytes));
+        bytes32 computed = keccak256(abi.encode(isStatic, src, srcRollup, dest, uint256(rid), value, callGas, data));
         if (computed != emittedHash) {
             console.log("FAIL: IncomingCrossChainCallExecuted fields do not hash to the emitted crossChainCallHash");
             console.log("      emitted    %s", vm.toString(emittedHash));
@@ -1064,11 +1063,15 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
             CrossChainCall memory c = expected[j].incomingCalls[0];
             if (
                 c.targetAddress != dest || c.value != value || !_bytesEq(c.data, data) || c.sourceAddress != src
-                    || c.sourceRollupId != srcRollup
+                    || c.sourceRollupId != srcRollup || c.isStatic != isStatic || c.gas != callGas
             ) {
                 console.log("FAIL: entry %s: inbound call event fields differ from expected incomingCalls[0]:", j);
                 _diffCall(
-                    0, CrossChainCall(c.revertNextNCalls, c.isStatic, c.gas, src, srcRollup, dest, value, data), c
+                    0,
+                    CrossChainCall(
+                        c.revertNextNCalls, isStatic, uint64(callGas), src, uint64(srcRollup), dest, value, data
+                    ),
+                    c
                 );
                 ok = false;
             }

@@ -128,7 +128,7 @@ abstract contract RevertContinueL2Actions {
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
             success: true,
-            returnData: abi.encode(uint256(1))
+            returnData: ""// L2Tx entries must be canonical: success == true, empty returnData
         });
     }
 
