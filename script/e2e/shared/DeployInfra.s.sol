@@ -17,9 +17,8 @@ contract AcceptAllProofSystem is IProofSystem {
 
 /// @title DeployEEZL1
 /// @notice Deploys AcceptAllProofSystem + EEZ + creates L2 rollup (id=1).
-/// @dev The first registered rollup gets id 0 = MAINNET_ROLLUP_ID, which is unpostable
-///      because the strict-increasing rollupIds check in postAndVerifyBatch rejects 0. So we burn
-///      id 0 with a throwaway rollup, then register the L2 rollup at id 1.
+/// @dev Id 0 is MAINNET_ROLLUP_ID and is never assigned — registerRollup pre-increments its
+///      counter, so the first registered rollup (the L2 manager) lands directly at id 1.
 /// Outputs: ROLLUPS, PROOF_SYSTEM, L2_MANAGER, L2_ROLLUP_ID
 contract DeployEEZL1 is Script {
     bytes32 constant DEFAULT_VK = keccak256("verificationKey");
@@ -28,7 +27,7 @@ contract DeployEEZL1 is Script {
         vm.startBroadcast();
 
         AcceptAllProofSystem ps = new AcceptAllProofSystem();
-        EEZ rollups = new EEZ();
+        EEZ rollups = new EEZ(msg.sender);
 
         // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so the first registered rollup
         // lands at id 1.
@@ -54,9 +53,9 @@ contract DeployEEZL1 is Script {
 /// @notice Deploys EEZL2 for the given rollup ID / system address.
 /// Outputs: MANAGER_L2
 contract DeployManagerL2 is Script {
-    function run(uint256 rollupId, address systemAddress) external {
+    function run(uint64 rollupId, address systemAddress) external {
         vm.startBroadcast();
-        EEZL2 manager = new EEZL2(rollupId, systemAddress);
+        EEZL2 manager = new EEZL2(rollupId, systemAddress, false);
         console.log("MANAGER_L2=%s", address(manager));
         vm.stopBroadcast();
     }

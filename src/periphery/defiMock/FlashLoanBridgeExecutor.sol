@@ -17,7 +17,7 @@ contract FlashLoanBridgeExecutor is IFlashLoanReceiver {
     address public immutable wrappedTokenL2;
     address public immutable nftL2;
     address public immutable bridgeL2;
-    uint256 public immutable l2RollupId;
+    uint64 public immutable l2RollupId;
     address public immutable token;
 
     constructor(
@@ -28,7 +28,7 @@ contract FlashLoanBridgeExecutor is IFlashLoanReceiver {
         address _wrappedTokenL2,
         address _nftL2,
         address _bridgeL2,
-        uint256 _l2RollupId,
+        uint64 _l2RollupId,
         address _token
     ) {
         flashLoanPool = FlashLoan(_flashLoanPool);
@@ -67,7 +67,7 @@ contract FlashLoanBridgeExecutor is IFlashLoanReceiver {
         address wrappedToken,
         address nftContract,
         address _bridge,
-        uint256 destRollupId,
+        uint64 destRollupId,
         address returnTo
     )
         external

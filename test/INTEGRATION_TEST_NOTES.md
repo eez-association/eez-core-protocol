@@ -22,7 +22,7 @@ Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
   (Scenarios 3/4), it consumes that manager's own entry — the reentrant tables
   (`expectedL1ToL2Calls` / `expectedOutgoingCalls`) only serve reentry into the SAME manager.
 - **Sequential state deltas (L1).** Entries consuming the same rollup must chain
-  `currentState → newState`; `StateDelta.currentState` is checked against the live
+  `currentState → newState`; `StateUpdate.currentState` is checked against the live
   `rollups[rid].stateRoot` at consumption (`StateRootMismatch` otherwise).
 - **Same-block consumption.** Deferred entries are only consumable in the block their batch was
   posted (`lastVerifiedBlock` gate on L1, `lastLoadBlock` on L2) — tests post and consume in
@@ -31,13 +31,20 @@ Legend: `A` = CounterAndProxy on L1, `B` = Counter on L2, `C` = Counter on L1,
   `fallback()` then the manager's `executeOnBehalf()`): `CrossChainProxy` holds only immutable
   fields, and the two entry points are independent.
 
+## Related suites
+
+- `IntegrationTestBridge.t.sol` — ether/token bridging and a full lock → mint → burn → release
+  roundtrip (value flow + `etherDelta` deltas).
+- `IntegrationTestFlashLoan.t.sol` — atomic cross-chain flash loan (borrow on L1, bridge to L2,
+  claim NFT, bridge back, repay).
+
 ## Open questions / future work
 
 1. **ETH value transfers**: scenarios with non-zero `value`, `etherDelta` accounting in state
    deltas, and negative deltas (rollup sends ETH out). (`IntegrationTestBridge` covers some
    value flow; the delta-accounting matrix is not systematic.)
 2. **Deeper nesting**: 3+ levels of same-manager reentry and multiple sibling reentrant calls
-   (partial coverage exists in `script/e2e/deepNested/`).
+   (partial coverage exists in `script/e2e/nested/L1_to_L2/deepNested/`).
 3. **Multiple rollups**: cross-chain calls spanning 3+ rollups with interleaved per-rollup
    queues (unit-level coverage exists in `test/EEZ.t.sol`; no integration scenario).
 4. **Many-entry batches**: batches mixing immediate (`proxyEntryHash == 0`) and deferred

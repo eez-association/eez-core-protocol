@@ -3,34 +3,35 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    ExpectedLookup,
     ExecutionEntry,
-    LookupCall
+    StaticExecutionEntry
 } from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    LookupCall as L2LookupCall,
-    ExpectedLookup as L2ExpectedLookup,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
 
 /// @title ComputeExpectedBase — Shared formatting helpers for ComputeExpected contracts
 /// @dev Each test's ComputeExpected inherits this and overrides _name() and _funcName().
-///   The flatten model identifies entries by (crossChainCallHash, rollingHash) — both are bound
+///   The flatten model identifies entries by (proxyEntryHash, rollingHash) — both are bound
 ///   into the entry hash below and used for subset verification by Verify.s.sol.
 abstract contract ComputeExpectedBase is Script {
     // ══════════════════════════════════════════════════════════════════
     //  Entry identity hash used by Verify.s.sol for subset matching.
     //  The flatten model binds all execution behaviour into rollingHash,
-    //  so (crossChainCallHash, rollingHash) is a stable identifier for an entry.
+    //  so (proxyEntryHash, rollingHash) is a stable identifier for an entry.
+    //  NOT the protocol's entry hash (keccak256 of the whole struct, folded
+    //  into the proof public input) — this is a test-side identity only.
     // ══════════════════════════════════════════════════════════════════
 
-    function _entryHash(bytes32 crossChainCallHash, bytes32 rollingHash) internal pure returns (bytes32) {
-        return keccak256(abi.encode(crossChainCallHash, rollingHash));
+    function _entryHash(bytes32 proxyEntryHash, bytes32 rollingHash) internal pure returns (bytes32) {
+        return keccak256(abi.encode(proxyEntryHash, rollingHash));
     }
 
     function _entryHash(ExecutionEntry memory e) internal pure returns (bytes32) {
@@ -39,6 +40,76 @@ abstract contract ComputeExpectedBase is Script {
 
     function _entryHash(L2ExecutionEntry memory e) internal pure returns (bytes32) {
         return _entryHash(e.proxyEntryHash, e.rollingHash);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  Full expected tables — ABI-encoded blobs consumed by Verify.s.sol
+    //  for field-by-field comparison (picked up by run/network.sh /
+    //  run/local.sh via the EXPECTED_*_TABLE output lines).
+    // ══════════════════════════════════════════════════════════════════
+
+    function _printL1Table(ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L1_TABLE=%s", blob);
+    }
+
+    function _printL2Table(L2ExecutionEntry[] memory entries) internal pure {
+        bytes memory blob = abi.encode(entries);
+        _printTableLine("EXPECTED_L2_TABLE=%s", blob);
+    }
+
+    /// @dev Separate frame for the hex conversion + log — keeps the via-ir stack of
+    ///      callers that print both tables under the limit.
+    function _printTableLine(string memory label, bytes memory blob) private pure {
+        string memory hexStr = vm.toString(blob);
+        console.log(label, hexStr);
+    }
+
+    /// @dev Prints EXPECTED_L1_STEPS — per-entry rolling-hash fold steps, index-aligned
+    ///      with the expected L1 table, so the network verifier can replay each chain
+    ///      over the REAL posted seed roots (VerifyL1BatchCalldata). Self-checking:
+    ///      replaying each entry's steps over its own (placeholder) seed must reproduce
+    ///      the entry's rollingHash, so the steps cannot drift from the table.
+    function _printL1Steps(ExecutionEntry[] memory entries, HashStep[][] memory steps) internal pure {
+        require(steps.length == entries.length, "steps/entries length mismatch");
+        for (uint256 i = 0; i < entries.length; i++) {
+            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].stateUpdates, entries[i].proxyEntryHash);
+            require(RollingHashBuilder.foldSteps(seed, steps[i]) == entries[i].rollingHash, "steps drift from table");
+        }
+        _printTableLine("EXPECTED_L1_STEPS=%s", abi.encode(steps));
+    }
+
+    /// @dev Prints EXPECTED_L1_CALL_HASHES from the entries' non-zero proxyEntryHash keys —
+    ///      the hash `ExecutionConsumed` emits per proxy-driven consumption. Zero-hash (L2Tx)
+    ///      entries are skipped: they emit no call hash and are matched via EntryExecuted
+    ///      instead (VerifyL1ZeroHashEntriesInRange keyed by EXPECTED_L1_HASHES). The runners
+    ///      route on this line's presence, so print it whenever any L1 entry is proxy-keyed.
+    function _printL1CallHashes(ExecutionEntry[] memory entries) internal pure {
+        string memory acc = "";
+        bool any;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].proxyEntryHash == bytes32(0)) continue;
+            acc = any
+                ? string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash))
+                : vm.toString(entries[i].proxyEntryHash);
+            any = true;
+        }
+        if (any) console.log("EXPECTED_L1_CALL_HASHES=[%s]", acc);
+    }
+
+    /// @dev Prints EXPECTED_L2_CALL_HASHES from the entries' proxyEntryHash keys — the hash
+    ///      every L2 consumption route emits (`CrossChainCallExecuted` for proxy-driven
+    ///      outgoing calls, `IncomingCrossChainCallExecuted` for system-driven inbound ones),
+    ///      so VerifyL2Calls / VerifyL2CallsInRange can match them. Duplicates are fine
+    ///      (subset semantics).
+    function _printL2CallHashes(L2ExecutionEntry[] memory entries) internal pure {
+        string memory acc = "";
+        for (uint256 i = 0; i < entries.length; i++) {
+            acc = i == 0
+                ? vm.toString(entries[i].proxyEntryHash)
+                : string.concat(acc, ",", vm.toString(entries[i].proxyEntryHash));
+        }
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", acc);
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -55,13 +126,13 @@ abstract contract ComputeExpectedBase is Script {
 
     // ══════════════════════════════════════════════════════════════════
     //  Call formatting — L1 `L2ToL1Call` / L2 `CrossChainCall` overloads
-    //  (the legacy `Action` struct was removed)
     // ══════════════════════════════════════════════════════════════════
 
     function _fmtCall(L2ToL1Call memory c) internal view returns (string memory) {
         string memory func = c.data.length == 0 ? "(ETH transfer)" : string.concat(".", _funcName(bytes4(c.data)), "()");
         string memory valStr = c.value > 0 ? string.concat("  value=", _fmtEther(c.value)) : "";
-        string memory revertStr = c.revertSpan > 0 ? string.concat("  revertSpan=", vm.toString(c.revertSpan)) : "";
+        string memory revertStr =
+            c.revertNextNCalls > 0 ? string.concat("  revertNextNCalls=", vm.toString(c.revertNextNCalls)) : "";
         return string.concat(
             "CALL ",
             _name(c.targetAddress),
@@ -78,7 +149,8 @@ abstract contract ComputeExpectedBase is Script {
     function _fmtCall(CrossChainCall memory c) internal view returns (string memory) {
         string memory func = c.data.length == 0 ? "(ETH transfer)" : string.concat(".", _funcName(bytes4(c.data)), "()");
         string memory valStr = c.value > 0 ? string.concat("  value=", _fmtEther(c.value)) : "";
-        string memory revertStr = c.revertSpan > 0 ? string.concat("  revertSpan=", vm.toString(c.revertSpan)) : "";
+        string memory revertStr =
+            c.revertNextNCalls > 0 ? string.concat("  revertNextNCalls=", vm.toString(c.revertNextNCalls)) : "";
         return string.concat(
             "CALL ",
             _name(c.targetAddress),
@@ -94,10 +166,12 @@ abstract contract ComputeExpectedBase is Script {
 
     function _fmtNested(ExpectedL1ToL2Call memory n) internal pure returns (string memory) {
         return string.concat(
-            "NESTED crossChainCallHash=",
-            _shortHash(n.crossChainCallHash),
-            "  callCount=",
-            vm.toString(n.callCount),
+            "NESTED expectedL1toL2Hash=",
+            _shortHash(n.expectedL1toL2Hash),
+            "  success=",
+            n.success ? "true" : "false",
+            "  subCalls=",
+            vm.toString(n.l2ToL1Calls.length),
             "  retData=",
             _shortBytes(n.returnData)
         );
@@ -105,10 +179,12 @@ abstract contract ComputeExpectedBase is Script {
 
     function _fmtNested(ExpectedOutgoingCrossChainCall memory n) internal pure returns (string memory) {
         return string.concat(
-            "NESTED crossChainCallHash=",
-            _shortHash(n.crossChainCallHash),
-            "  callCount=",
-            vm.toString(n.callCount),
+            "NESTED expectedOutgoingHash=",
+            _shortHash(n.expectedOutgoingHash),
+            "  success=",
+            n.success ? "true" : "false",
+            "  subCalls=",
+            vm.toString(n.incomingCalls.length),
             "  retData=",
             _shortBytes(n.returnData)
         );
@@ -121,16 +197,19 @@ abstract contract ComputeExpectedBase is Script {
     /// @notice L1 deferred entry (with state deltas + rolling hash).
     function _logEntry(uint256 idx, ExecutionEntry memory e) internal view {
         bytes32 hash = _entryHash(e);
-        bool immediate = e.proxyEntryHash == bytes32(0);
-        console.log("  [%s] %s  entryHash=%s", idx, immediate ? "IMMEDIATE" : "DEFERRED", vm.toString(hash));
+        bool l2tx = e.proxyEntryHash == bytes32(0);
+        console.log("  [%s] %s  entryHash=%s", idx, l2tx ? "L2TX" : "PROXY", vm.toString(hash));
         console.log("      proxyEntryHash:  %s", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      callCount=%s  calls=%s  nested=%s", e.callCount, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length
+            "      success=%s  calls=%s  nested=%s",
+            e.success ? "true" : "false",
+            e.l2ToL1Calls.length,
+            e.expectedL1ToL2Calls.length
         );
 
-        for (uint256 d = 0; d < e.stateDeltas.length; d++) {
-            StateDelta memory sd = e.stateDeltas[d];
+        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
+            StateUpdate memory sd = e.stateUpdates[d];
             string memory etherStr =
                 sd.etherDelta == 0 ? "" : string.concat("  ether: ", _fmtEtherSigned(sd.etherDelta));
             console.log(
@@ -148,7 +227,6 @@ abstract contract ComputeExpectedBase is Script {
         if (e.returnData.length > 0) {
             console.log("      returnData: %s", _shortBytes(e.returnData));
         }
-        // POST-REFACTOR: ExecutionEntry.failed removed; reverts via LookupCall.
     }
 
     /// @notice L2 entry (no state deltas, no ether tracking).
@@ -158,8 +236,8 @@ abstract contract ComputeExpectedBase is Script {
         console.log("      proxyEntryHash:  %s", vm.toString(e.proxyEntryHash));
         console.log("      rollingHash: %s", vm.toString(e.rollingHash));
         console.log(
-            "      callCount=%s  calls=%s  nested=%s",
-            e.callCount,
+            "      success=%s  calls=%s  nested=%s",
+            e.success ? "true" : "false",
             e.incomingCalls.length,
             e.expectedOutgoingCalls.length
         );
@@ -174,47 +252,26 @@ abstract contract ComputeExpectedBase is Script {
         }
     }
 
-    function _logLookupCall(uint256 idx, LookupCall memory sc) internal pure {
-        console.log("  [%s] TOP-LEVEL crossChainCallHash=%s", idx, vm.toString(sc.crossChainCallHash));
+    function _logStaticLookup(uint256 idx, StaticExecutionEntry memory sc) internal view {
+        console.log("  [%s] TOP-LEVEL STATIC proxyEntryHash=%s", idx, vm.toString(sc.proxyEntryHash));
         console.log(
-            "      failed=%s  rootPins=%s", sc.failed ? "true" : "false", vm.toString(sc.expectedStateRoots.length)
+            "      success=%s  rootPins=%s  subCalls=%s",
+            sc.success ? "true" : "false",
+            vm.toString(sc.expectedStateRoots.length),
+            vm.toString(sc.l2ToL1Calls.length)
         );
         if (sc.returnData.length > 0) {
             console.log("      returnData: %s", _shortBytes(sc.returnData));
         }
     }
 
-    function _logLookupCall(uint256 idx, L2LookupCall memory sc) internal pure {
-        console.log("  [%s] TOP-LEVEL crossChainCallHash=%s", idx, vm.toString(sc.crossChainCallHash));
-        console.log("      failed=%s", sc.failed ? "true" : "false");
+    function _logStaticLookup(uint256 idx, L2StaticExecutionEntry memory sc) internal view {
+        console.log("  [%s] TOP-LEVEL STATIC proxyEntryHash=%s", idx, vm.toString(sc.proxyEntryHash));
+        console.log(
+            "      success=%s  subCalls=%s", sc.success ? "true" : "false", vm.toString(sc.incomingCalls.length)
+        );
         if (sc.returnData.length > 0) {
             console.log("      returnData: %s", _shortBytes(sc.returnData));
-        }
-    }
-
-    function _logNestedLookup(uint256 idx, ExpectedLookup memory el) internal pure {
-        console.log("  [%s] NESTED-LOOKUP crossChainCallHash=%s", idx, vm.toString(el.crossChainCallHash));
-        console.log(
-            "      callNumber=%s  lastL1ToL2=%s  failed=%s",
-            el.l2ToL1CallNumber,
-            el.lastL1ToL2CallConsumed,
-            el.failed ? "true" : "false"
-        );
-        if (el.returnData.length > 0) {
-            console.log("      returnData: %s", _shortBytes(el.returnData));
-        }
-    }
-
-    function _logNestedLookup(uint256 idx, L2ExpectedLookup memory el) internal pure {
-        console.log("  [%s] NESTED-LOOKUP crossChainCallHash=%s", idx, vm.toString(el.crossChainCallHash));
-        console.log(
-            "      callNumber=%s  lastOutgoing=%s  failed=%s",
-            el.callNumber,
-            el.lastOutgoingCallConsumed,
-            el.failed ? "true" : "false"
-        );
-        if (el.returnData.length > 0) {
-            console.log("      returnData: %s", _shortBytes(el.returnData));
         }
     }
 

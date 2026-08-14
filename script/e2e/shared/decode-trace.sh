@@ -392,20 +392,25 @@ run_trace() {
 #  Cross-chain block correlation helpers
 # ══════════════════════════════════════════════
 
+# Batches no longer encode L2 block refs on-chain, so an L1 batch block cannot
+# name its L2 blocks. Mirror the runners' content-scan instead (see
+# VerifyL2CallsInRange in Verify.s.sol): scan recent L2 blocks for EEZL2
+# manager events and return every block that contains any. Window size:
+# L2_SCAN_WINDOW blocks back from latest (default 30).
 find_l2_blocks_from_l1_block() {
-    local l1_block="$1"
-    local batch_tx
-    batch_tx=$(cast logs \
-        --from-block "$l1_block" --to-block "$l1_block" \
-        --address "$ROLLUPS" \
-        --rpc-url "$L1_RPC" --json 2>/dev/null \
-        | jq -r "[.[] | select(.topics[0] == \"$SIG_BATCH_POSTED\")] | .[0].transactionHash // empty")
-
-    if [[ -z "$batch_tx" ]]; then
+    local latest window from blocks
+    latest=$(cast block-number --rpc-url "$L2_RPC" 2>/dev/null) || { echo "[]"; return; }
+    window="${L2_SCAN_WINDOW:-30}"
+    from=$(( latest > window ? latest - window : 0 ))
+    blocks=$(cast logs --from-block "$from" --to-block "$latest" --address "$MANAGER_L2" \
+        --rpc-url "$L2_RPC" --json 2>/dev/null \
+        | jq -r '[.[].blockNumber] | unique | .[]' 2>/dev/null \
+        | xargs -r printf "%d\n" 2>/dev/null | sort -n | uniq | paste -sd, -)
+    if [[ -n "$blocks" ]]; then
+        echo "[$blocks]"
+    else
         echo "[]"
-        return
     fi
-    extract_l2_blocks_from_tx "$batch_tx" "$L1_RPC"
 }
 
 find_l1_block_from_l2() {
@@ -523,8 +528,15 @@ elif [[ "$CHAIN" == "L2" ]]; then
         echo ""
         echo -e "${BOLD}══ L2 block $L2_BLOCK_DEC → L1 batch block ~$L1_BATCH_BLOCK ══${NC}"
 
+        # Batches no longer name their L2 blocks on-chain — take the first
+        # BatchPosted in the candidate window instead of matching by L2 ref.
         L1_SEARCH_END=$((L1_BATCH_BLOCK + 4))
-        if find_batch_block_by_l2_ref "$L2_BLOCK_DEC" "$L1_BATCH_BLOCK" "$L1_SEARCH_END" "$ROLLUPS" "$L1_RPC" 2>/dev/null; then
+        FOUND_BATCH_TX=$(cast logs \
+            --from-block "$L1_BATCH_BLOCK" --to-block "$L1_SEARCH_END" \
+            --address "$ROLLUPS" --rpc-url "$L1_RPC" --json 2>/dev/null \
+            | jq -r "[.[] | select(.topics[0] == \"$SIG_BATCH_POSTED\")] | .[0].transactionHash // empty")
+        if [[ -n "$FOUND_BATCH_TX" ]]; then
+            FOUND_L1_BLOCK=$(printf "%d" "$(cast receipt "$FOUND_BATCH_TX" blockNumber --rpc-url "$L1_RPC" 2>/dev/null)")
             echo -e "Found L1 batch in block ${BOLD}$FOUND_L1_BLOCK${NC} (tx $FOUND_BATCH_TX)"
 
             discover_cross_chain_addresses "$FOUND_BATCH_TX" "$L1_RPC"
@@ -541,7 +553,7 @@ elif [[ "$CHAIN" == "L2" ]]; then
                 run_trace "$l1_tx" "$L1_RPC" "L1 User TX (block $FOUND_L1_BLOCK, status $local_status)"
             done <<< "$ALL_L1_TXS"
         else
-            echo -e "${YELLOW}Could not find L1 batch referencing L2 block $L2_BLOCK_DEC in blocks $L1_BATCH_BLOCK..$L1_SEARCH_END${NC}"
+            echo -e "${YELLOW}No BatchPosted found in L1 blocks $L1_BATCH_BLOCK..$L1_SEARCH_END${NC}"
         fi
     else
         echo -e "${YELLOW}Could not resolve L1 parent block from L2Context${NC}"

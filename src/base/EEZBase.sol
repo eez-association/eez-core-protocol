@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IEEZ, ProxyInfo} from "../interfaces/IEEZ.sol";
+import {IEEZ, ProxyInfo, StateUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -10,9 +10,7 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///      specific execution struct (those structs differ per side — `IEEZ.sol` vs `IEEZL2.sol`):
 ///        - Rolling-hash tag constants, the `_rollingHash` accumulator, and the fold helpers
 ///          (they operate on primitives, so they don't reference any execution struct).
-///        - Neutral transient pointers: `_currentEntryIndex`, `_insideRevertedLookup`,
-///          `_revertedLookupIndex`, `_revertedLookupTopLevel`, and `_topLevelLookupIndex` —
-///          plus `_activeLookupContext()`, the match-key component derived from them.
+///        - The neutral transient pointer `_currentEntryIndex` (which entry the child is executing).
 ///        - The `authorizedProxies` registry, the external `createCrossChainProxy` entry point,
 ///          and the internal CREATE2 deploy helper (`_createCrossChainProxyInternal`).
 ///        - Pure / view helpers (`computeCrossChainCallHash`, `computeCrossChainProxyAddress`).
@@ -22,15 +20,18 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///
 ///      What lives in the children (`EEZ` / `EEZL2`) instead, because it names the per-side
 ///      execution structs or a per-side cursor:
-///        - The call cursors — absolute-directional on L1 (`_currentL2ToL1Call` /
-///          `_lastL1ToL2CallConsumed`), self-relative on L2 (`_currentIncomingCall` /
-///          `_lastOutgoingCallConsumed`) — and `_insideExecution()`.
-///        - `_processNCalls`, `_consumeNestedAction`, `_consumeAndExecute`.
-///        - `_activeCalls` / `_activeNested` / `_getActiveLookups`, `_getCurrentEntryStoragePointer`,
-///          `_currentTopLevelLookup`, `_resolveStaticLookup`, `_processNStaticCalls`,
-///          `_executeRevertedNestedLookup` / `_executeRevertedTopLevelLookup`, `staticCallLookup`.
-///        - The per-side events and errors (L1: `L1ToL2CallConsumed`, `UnconsumedL2ToL1Calls`, …;
-///          L2: `OutgoingCallConsumed`, `UnconsumedIncomingCalls`, …).
+///        - The reentrant-table cursor — `_lastL1ToL2CallConsumed` on L1, `_lastOutgoingCallConsumed`
+///          on L2 — and `_insideExecution()` (L1 derives it from its proxy-protection array, L2 from
+///          a dedicated `_executing` flag). The flat-call position is a plain local index in
+///          `_processNCalls` on both sides (no transient cursor).
+///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
+///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
+///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
+///          (`_resolveNestedReentrant`), `_resolveStaticEntry`, `_processNStaticCalls`,
+///          `staticCrossChainCall`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
+///          `_sliceCrossChainCalls`).
+///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
+///          L2: `EntryExecuted`, `CallResult`, …).
 abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
     //  Rolling-hash tag constants
@@ -39,6 +40,17 @@ abstract contract EEZBase is IEEZ {
     uint8 internal constant CALL_END = 2;
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
+    uint8 internal constant CALL_NOT_FOUND = 5;
+
+    /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on non-static (call) paths.
+    bool internal constant NOT_STATIC_CALL = false;
+
+    /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on static (read-only) paths.
+    bool internal constant IS_STATIC = true;
+
+    /// @notice Readable `callGas` argument for `computeCrossChainCallHash` on paths that don't key
+    ///         on observed gas — every site except calls leaving an L2 with `USE_GAS_LEFT`.
+    uint64 internal constant ZERO_CALL_GAS = 0;
 
     // ──────────────────────────────────────────────
     //  Storage shared with children
@@ -55,34 +67,13 @@ abstract contract EEZBase is IEEZ {
     bytes32 transient _rollingHash;
 
     /// @notice The current execution entry being processed.
-    /// @dev L1 uses this to index `_transientExecutions` while a batch is mid-flight, otherwise
-    ///      `verificationByRollup[_currentEntryRollupId].executionQueue`. L2 always indexes `executions`.
+    /// @dev L1 uses this to index `_transientEntries` while a batch is mid-flight, otherwise
+    ///      `verificationByRollup[_currentEntryRollupId].entryQueue`. L2 always indexes `entries`.
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
-    /// @notice True while executing a reverted NESTED lookup (`_executeRevertedNestedLookup`) — the
-    ///         `ExpectedLookup` at `_revertedLookupIndex` within the active host table.
-    /// @dev Scopes `_activeCalls()` / `_activeNested()` to that lookup instead of the host.
-    ///      Always cleared by the terminal revert of the sub-execution — and, for deeper reverted-lookup executions,
-    ///      restored to the parent's value by that same revert unwind (transient).
-    bool transient _insideRevertedLookup;
-
-    /// @notice Index of the nested `ExpectedLookup` being executed, within the active host
-    ///         table (`_getActiveLookups()`). Storage refs can't be transient, so the child
-    ///         reconstructs the pointer from this index.
-    uint256 transient _revertedLookupIndex;
-
-    /// @notice True while a reverted TOP-LEVEL `LookupCall` is the active host
-    ///         (`_executeRevertedTopLevelLookup`) — the pool lookup at `_topLevelLookupIndex` supplies
-    ///         the flat calls, reentrant table, and nested-lookup table instead of an entry.
-    bool transient _revertedLookupTopLevel;
-
-    /// @notice Pool index of the top-level `LookupCall` being executed. Kept separate from
-    ///         `_revertedLookupIndex` so a nested reverted-lookup execution inside a top-level reverted-lookup execution doesn't
-    ///         clobber the pool coordinate. L1 re-derives the pool (transient table vs
-    ///         per-rollup queue keyed by `_revertedLookupRollupId`) from
-    ///         `_transientExecutions.length`; L2 has a single table.
-    uint256 transient _topLevelLookupIndex;
+    // Sub-frame pointers are NOT shared here: L1 no longer needs them (it passes
+    // the active call array to `_processNCalls` by `memory`), so they live in `EEZL2` only.
 
     // ──────────────────────────────────────────────
     //  Events
@@ -90,7 +81,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice Emitted when a new CrossChainProxy is deployed and registered
     event CrossChainProxyCreated(
-        address indexed proxy, address indexed originalAddress, uint256 indexed originalRollupId
+        address indexed proxy, address indexed originalAddress, uint64 indexed originalRollupId
     );
 
     /// @notice Emitted when a cross-chain call is executed via proxy
@@ -106,7 +97,7 @@ abstract contract EEZBase is IEEZ {
     error UnauthorizedProxy();
 
     /// @notice Error when a self-call-only entry point (`executeInContextAndRevert`,
-    ///         L1's `attemptApplyImmediate`) is called by an external address
+    ///         L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
     error NotSelf();
 
     /// @notice Error when no matching execution entry exists for the action hash
@@ -115,31 +106,40 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when the computed rolling hash doesn't match the entry's `rollingHash`
     error RollingHashMismatch();
 
+    /// @notice Error when an entry begins while `_rollingHash` is still non-zero — a prior
+    ///         entry left the accumulator un-reset (it must be cleared between entries)
+    error RollingHashNotCleared();
+
     /// @notice Carries execution results out of a reverted context
-    /// @dev Direction-neutral transport. `callNotFound` is the deferred-revert flag forwarded
-    ///      from L1's `_consumeNestedAction` no-match path. The EVM rolls back the transient
-    ///      write on revert, so it has to ride out in the payload. L2 has no such flag and
-    ///      always sends `false`.
-    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed, bool callNotFound);
+    /// @dev Direction-neutral transport. A no-match folds CALL_NOT_FOUND into `_rollingHash`, which
+    ///      is carried in the first field, so the isolated frame's not-found survives the revert with
+    ///      no separate flag.
+    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed);
 
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
 
-    /// @notice Error when a lookup-call sub-call targets an un-deployed proxy
+    /// @notice Error when a static sub-call targets an un-deployed proxy
     /// @dev STATICCALL to a codeless address returns `(true, "")`; prover could pre-hash that.
-    error LookupCallProxyNotDeployed(address sourceProxy);
+    error StaticCallProxyNotDeployed(address sourceProxy);
 
     /// @notice Error when a call marked `isStatic` was loaded carrying ETH value.
     /// @dev A STATICCALL cannot transfer value, so a non-zero `value` on a static call is a
     ///      malformed entry. We reject it explicitly rather than silently dropping the value.
     error StaticCallWithValue();
 
+    /// @notice Error when a sub-call of a static resolution is not marked `isStatic`.
+    /// @dev Those calls run via STATICCALL whatever the flag says, and the untagged static rolling
+    ///      hash folds only `(success, retData)` — so an unchecked `false` would let a proven
+    ///      state-changing call execute read-only undetected.
+    error NonStaticSubCall();
+
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own
     ///      `ROLLUP_ID`. Enforced in `_createCrossChainProxyInternal`, so it also blocks the
     ///      auto-creation path during execution, not just the external entry point.
-    error SameNetworkProxy(uint256 rollupId);
+    error SameNetworkProxy(uint64 rollupId);
 
     // ──────────────────────────────────────────────
     //  Proxy creation
@@ -147,43 +147,40 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice This manager's own network rollup id — a proxy may NOT be created for it.
     /// @dev L1 (EEZ) returns `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) returns its own `ROLLUP_ID`.
-    function _getRollupId() internal view virtual returns (uint256);
+    function _getRollupId() internal view virtual returns (uint64);
 
     /// @notice Creates a new CrossChainProxy for an address on another rollup
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
     /// @return proxy The deployed proxy address
-    function createCrossChainProxy(address originalAddress, uint256 originalRollupId) external returns (address proxy) {
+    function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy) {
         return _createCrossChainProxyInternal(originalAddress, originalRollupId);
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint256 originalRollupId)
+    function _createCrossChainProxyInternal(address originalAddress, uint64 originalRollupId)
         internal
         returns (address proxy)
     {
         // A proxy stands in for a REMOTE address — never one on this manager's own network.
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this), originalAddress, originalRollupId));
-        authorizedProxies[proxy] = ProxyInfo(originalAddress, uint64(originalRollupId));
+        proxy = address(new CrossChainProxy{salt: salt}(address(this)));
+        authorizedProxies[proxy] = ProxyInfo(true, originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
 
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
-    function computeCrossChainProxyAddress(address originalAddress, uint256 originalRollupId)
+    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
         public
         view
         returns (address)
     {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash = keccak256(
-            abi.encodePacked(
-                type(CrossChainProxy).creationCode, abi.encode(address(this), originalAddress, originalRollupId)
-            )
-        );
+        bytes32 bytecodeHash =
+            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
         return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
     }
 
@@ -192,35 +189,29 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Computes the cross-chain call hash from individual fields. Public so off-chain
-    ///         tooling can derive the hash for a planned cross-chain call. Identical formula on
-    ///         L1 and L2 so a single off-chain helper can target either chain.
-    /// @dev Formula: `keccak256(abi.encode(targetRollupId, targetAddress, value, data,
-    ///      sourceAddress, sourceRollupId))`. Field order MUST match the call struct field order
-    ///      plus the source pair appended; reordering would break every on-chain hash check
-    ///      and every off-chain tool that pre-computes the hash.
+    ///         tooling can derive the hash for a planned cross-chain call.
+    /// @dev Ordered isStatic → FROM (source pair) → TO (target pair) → value → callGas → data;
+    ///      reordering would break every on-chain hash check and every off-chain tool that
+    ///      pre-computes the hash. `isStatic` makes a read-only call hash distinctly from an
+    ///      otherwise-identical state-changing one. `callGas` is 0 except calls leaving an L2
+    ///      with `USE_GAS_LEFT`, where it is the `gasleft()` observed at manager entry.
     function computeCrossChainCallHash(
-        uint256 targetRollupId,
-        address targetAddress,
-        uint256 value,
-        bytes memory data,
+        bool isStatic,
         address sourceAddress,
-        uint256 sourceRollupId
+        uint64 sourceRollupId,
+        address targetAddress,
+        uint64 targetRollupId,
+        uint256 value,
+        uint64 callGas,
+        bytes memory data
     )
         public
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode(targetRollupId, targetAddress, value, data, sourceAddress, sourceRollupId));
-    }
-
-    // ──────────────────────────────────────────────
-    //  Lookup-context helper
-    // ──────────────────────────────────────────────
-
-    /// @notice Fourth component of the nested-lookup match key (`executingLookupIndex`):
-    ///         0 = host level; k = inside the sub-execution of the host's `expectedLookups[k-1]`.
-    function _activeLookupContext() internal view returns (uint64) {
-        return _insideRevertedLookup ? uint64(_revertedLookupIndex + 1) : 0;
+        return keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
+        );
     }
 
     // ──────────────────────────────────────────────
@@ -228,71 +219,122 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Decodes a `ContextResult` revert payload returned by `executeInContextAndRevert`.
-    /// @dev Validates selector AND length (4 + 4*32 = 132) before the raw mloads — defense
+    /// @dev Validates selector AND length (4 + 3*32 = 100) before the raw mloads — defense
     ///      against a truncated revert that happens to share the selector.
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
-        returns (bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed, bool callNotFound)
+        returns (bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed)
     {
         if (bytes4(revertData) != ContextResult.selector) {
             revert UnexpectedContextRevert(revertData);
         }
-        if (revertData.length < 132) revert UnexpectedContextRevert(revertData);
+        if (revertData.length < 100) revert UnexpectedContextRevert(revertData);
         assembly {
             let ptr := add(revertData, 36)
             rollingHash := mload(ptr)
             reentrantConsumed := mload(add(ptr, 32))
             callsProcessed := mload(add(ptr, 64))
-            callNotFound := mload(add(ptr, 96))
         }
+    }
+
+    /// @notice Content-addressed position key for a row of the unified reentrant table (L1's
+    ///         `expectedL1toL2Hash`, L2's `expectedOutgoingHash` — same formula): the call's
+    ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the
+    ///         live `_rollingHash` at the instant it fires. One comparison replaces the old
+    ///         (hash, rollingHash, isStatic) triple.
+    function _computeExpectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encodePacked(crossChainCallHash, rollingHash));
     }
 
     // ──────────────────────────────────────────────
     //  Rolling hash helpers
     // ──────────────────────────────────────────────
     //
-    // The entry-level `_rollingHash` accumulator is updated at four event points during
-    // entry execution: at the start and end of each top-level call, and at the start and
-    // end of each reentrant frame. Each event is tagged with a domain byte
-    // (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END) so the same set of inputs can't collide
-    // across event types. The final value is checked against `entry.rollingHash` at the end
-    // of execution. See `docs/CORE_PROTOCOL_SPEC.md` §E for the full specification.
+    // The entry-level `_rollingHash` accumulator is updated at five event points during
+    // entry execution: at the start and end of each top-level call, at the start and end of
+    // each reentrant frame, and when a reentrant call finds no matching row. Each event is
+    // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
+    // so the same set of inputs can't collide across event types. The final value is checked
+    // against `entry.rollingHash` at the end of execution. See `docs/CORE_PROTOCOL_SPEC.md`
+    // §E for the full specification.
+    //
+    // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
+    // prior value), so order, count, and nesting are already bound by the chain + the tags. An
+    // explicit index would be a deterministic `1,2,3,…` that adds no information — omitting it is
+    // what lets a `revertNextNCalls` span be processed as a 0-based sub-slice without diverging
+    // the hash from a continuous run.
     //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
-    // because they're verified against `LookupCall.rollingHash`, a separate accumulator
-    // whose surrounding lookup key already pins the entry/call/nesting context. See spec §E.2.
+    // because they're verified against `StaticExecutionEntry.rollingHash`, a separate accumulator
+    // whose surrounding static-entry key already pins the entry/call/nesting context. See spec §E.2.
     //
     // These tags are protocol constants — a call executed on either chain MUST hash the same
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame
     // concept, NOT a direction (the directional naming lives in the per-side children).
 
-    /// @notice Folds a CALL_BEGIN event into `_rollingHash` for the given call number.
-    function _rollingHashCallBegin(uint256 callNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN, callNumber));
+    /// @notice Initializes `_rollingHash` to an entry's BEGIN seed — the ordered
+    ///         `(rollupId, currentState)` state context closed with the entry's identity
+    ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
+    ///         STATE + identity, not just call results (nested frames inherit it transitively).
+    /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateUpdate`); L2 has no
+    ///      state deltas, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
+    ///      an empty delta prefix. Deltas are strictly-increasing-by-rollupId, so the fold is
+    ///      deterministic.
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   _rollingHash = keccak(seed, proxyEntryHash)
+    function _rollingHashEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
+        if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
+
+        bytes32 _rollupStatesHash;
+        for (uint256 i = 0; i < deltas.length; i++) {
+            _rollupStatesHash =
+                keccak256(abi.encodePacked(_rollupStatesHash, deltas[i].rollupId, deltas[i].currentState));
+        }
+        _rollingHash = keccak256(abi.encodePacked(_rollupStatesHash, proxyEntryHash));
+    }
+
+    /// @notice Folds a CALL_BEGIN event into `_rollingHash`, binding the call's IDENTITY
+    ///         (`crossChainCallHash`) so the hash commits to which call ran, not just its result.
+    function _rollingHashCallBegin(bytes32 crossChainCallHash) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN, crossChainCallHash));
     }
 
     /// @notice Folds a CALL_END event into `_rollingHash`, including the call's observed
     ///         outcome (success flag + raw return/revert data).
-    function _rollingHashCallEnd(uint256 callNumber, bool success, bytes memory retData) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, callNumber, success, retData));
+    function _rollingHashCallEnd(bool success, bytes memory retData) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, success, retData));
     }
 
-    /// @notice Folds a NESTED_BEGIN event into `_rollingHash` for the given reentrant-frame
-    ///         index (1-indexed).
-    function _rollingHashNestedBegin(uint256 nestedNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, nestedNumber));
+    /// @notice Folds a NESTED_BEGIN event into `_rollingHash` (start of a reentrant frame), binding
+    ///         the reentrant call's IDENTITY (`crossChainCallHash`).
+    function _rollingHashNestedBegin(bytes32 crossChainCallHash) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, crossChainCallHash));
     }
 
-    /// @notice Folds a NESTED_END event into `_rollingHash` for the given reentrant-frame
-    ///         index (1-indexed).
-    function _rollingHashNestedEnd(uint256 nestedNumber) internal {
-        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END, nestedNumber));
+    /// @notice Folds a NESTED_END event into `_rollingHash` (end of a reentrant frame).
+    function _rollingHashNestedEnd() internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END));
+    }
+
+    /// @notice Folds a CALL_NOT_FOUND event into `_rollingHash` when a reentrant call has no
+    ///         matching expected entry. The dedicated tag is distinct from CALL_END(true, ""), so a
+    ///         no-match can never be forged as a normal empty-bytes return; the divergence reverts the
+    ///         entry at its rolling-hash check (surviving any intermediate try/catch). It rides the
+    ///         `_rollingHash` already carried across the `ContextResult` boundary, so no side flag is
+    ///         needed. A prover that deliberately pre-hashes this tag commits to a not-found at this
+    ///         exact position — a faithful outcome, not an attack.
+    function _rollingHashCallNotFound(bytes32 crossChainCallHash) internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_NOT_FOUND, crossChainCallHash));
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
-    ///         `_rollingHash` because lookup calls are verified against
-    ///         `LookupCall.rollingHash`, a separate per-LookupCall accumulator.
+    ///         `_rollingHash` because static sub-calls are verified against
+    ///         `StaticExecutionEntry.rollingHash`, a separate per-static-entry accumulator.
     ///          Is much less constrained since static calls do not have state race conditions
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal

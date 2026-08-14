@@ -8,7 +8,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)
 ///         to keep `Rollup.sol` decoupled from the cross-chain execution model.
 interface IEEZRegistry {
-    function setStateRoot(uint256 rollupId, bytes32 newStateRoot) external;
+    function setStateRoot(uint64 rollupId, bytes32 newStateRoot) external;
 }
 
 /// @title Rollup
@@ -25,7 +25,7 @@ contract Rollup is IRollupContract, Ownable {
     address public immutable ROLLUPS;
 
     /// @notice The rollupId this contract manages. Written once on registration.
-    uint256 public rollupId;
+    uint64 public rollupId;
 
     /// @notice Minimum number of proof systems that must attest per batch (M of N). Owner is
     ///         free to set this to any value, including above the current PS count (which
@@ -101,7 +101,7 @@ contract Rollup is IRollupContract, Ownable {
     ///      is no zero-padding semantic — the orchestrator must compose batches whose
     ///      proofSystem subset for THIS rollup is a subset of this manager's allowed set,
     ///      and whose size is at least the manager's threshold. Implication: the (rid × ps)
-    ///      vkMatrix the registry sees is uniformly non-zero.
+    ///      verificationKeysPerRollup the registry sees is uniformly non-zero.
     function checkProofSystemsAndGetVkeys(address[] calldata proofSystems)
         external
         view
@@ -111,7 +111,7 @@ contract Rollup is IRollupContract, Ownable {
         vkeys = new bytes32[](proofSystems.length);
         // Strictly-increasing check: rejects address(0) AND duplicates in one pass. The registry
         // already enforces the same invariant on the batch's global PS list and on each
-        // rollup's `proofSystemIndex[]` (so the resolved subset reaches us already sorted),
+        // rollup's `proofSystemIndexes[]` (so the resolved subset reaches us already sorted),
         // but checking here keeps this manager safe for callers that don't pre-sort.
         address prev = address(0);
         for (uint256 i = 0; i < proofSystems.length; i++) {
@@ -155,7 +155,7 @@ contract Rollup is IRollupContract, Ownable {
 
     /// @notice One-shot registration callback fired by the central registry.
     /// @dev `rollupId == 0` is the unset sentinel (registry assigns ids starting at 1).
-    function rollupContractRegistered(uint256 _rollupId) external {
+    function rollupContractRegistered(uint64 _rollupId) external {
         if (msg.sender != ROLLUPS) revert NotEEZRegistry();
         if (rollupId != 0) revert AlreadyRegistered();
         rollupId = _rollupId;
@@ -167,7 +167,7 @@ contract Rollup is IRollupContract, Ownable {
     //
     // No mid-flow lockout modifier here. Two scenarios to consider:
     //   1. During a `postAndVerifyBatch` meta hook — the registry already snapshotted this rollup's
-    //      vkMatrix in step 2 of postAndVerifyBatch (before the hook fires in step 6), so any
+    //      verificationKeysPerRollup in step 2 of postAndVerifyBatch (before the hook fires in step 6), so any
     //      mutation here doesn't affect the in-flight verification.
     //   2. The setStateRoot escape hatch — the only path that mutates central state — is
     //      itself gated by the registry's `RollupBatchActiveThisBlock` check.

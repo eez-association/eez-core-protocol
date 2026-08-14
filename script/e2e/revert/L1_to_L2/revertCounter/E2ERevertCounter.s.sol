@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {Script, console} from "forge-std/Script.sol";
+import {EEZ} from "../../../../../src/EEZ.sol";
+import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
+import {
+    StateUpdate,
+    L2ToL1Call,
+    ExpectedL1ToL2Call,
+    ExecutionEntry,
+    StaticExecutionEntry
+} from "../../../../../src/interfaces/IEEZ.sol";
+import {
+    ExecutionEntry as L2ExecutionEntry,
+    StaticExecutionEntry as L2StaticExecutionEntry,
+    CrossChainCall,
+    ExpectedOutgoingCrossChainCall
+} from "../../../../../src/interfaces/IEEZL2.sol";
+import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
+import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
+import {
+    crossChainCallHash,
+    noStaticEntries,
+    noNestedActions,
+    noCalls,
+    RollingHashBuilder,
+    immediateSingleRollupBatch
+} from "../../../shared/E2EHelpers.sol";
+
+// ═══════════════════════════════════════════════════════════════════════
+//  RevertCounter scenario — exercises L2ToL1Call.revertSpan as a
+//  FORCED revert: the destination call SUCCEEDS, but its EVM state effects
+//  are rolled back at the protocol layer. Two-sided.
+//
+//  Models the canonical use case: an L2→L1 cross-chain call that ran
+//  successfully on the destination, but its prover output marks it as
+//  reverted in the source-chain view of the world (e.g., a higher-level
+//  transaction the call was part of was rolled back). When the destination
+//  runs the entry, revertSpan=1 forces the state effects to disappear
+//  while the rolling hash still commits to (success=true, retData=1).
+//
+//  L1 side (Execute):
+//    1. postAndVerifyBatch loads ONE deferred
+//       entry. Its calls[0] targets the real Counter on L1 with
+//       revertSpan=1.
+//    2. Alice triggers consumption by calling counterProxy (L1 proxy for
+//       Counter on L2). Trigger and inner call are independent — the
+//       trigger just selects this entry by matching actionHash.
+//    3. _processNCalls sees revertSpan=1 → self-calls executeInContext(1).
+//       Inside that frame, Counter.increment() runs successfully, returns
+//       abi.encode(1), and the rolling hash records CALL_END(true, ...).
+//    4. executeInContext reverts with ContextResult, the EVM rolls back
+//       the counter increment, and the outer flow restores the rolling
+//       hash + cursors from the revert payload.
+//    5. Net effect: Counter.counter() == 0 on L1, even though the proof
+//       commits to a successful call.
+//
+//  L2 side (ExecuteL2) — system-driven mirror:
+//    1. SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(
+//         counterL2, 0, increment, alice, MAINNET, l2Entries, lookups
+//       ) which loads ONE entry whose incomingCalls[0] targets the real Counter
+//       on L2 with revertSpan=1.
+//    2. _processNCalls runs the inner span; Counter on L2 increments,
+//       executeInContext reverts, state rolled back.
+//    3. Net effect on L2: Counter.counter() == 0, rolling hash commits
+//       to CALL_END(true, abi.encode(1)).
+//
+//  Contrast with revertSpan=0: a naturally-reverting destination already
+//  produces (success=false, retData=revertReason) under revertSpan=0, so
+//  revertSpan>0 buys nothing for that case. The mechanism only earns its
+//  keep when state would otherwise survive — i.e., a forced revert.
+// ═══════════════════════════════════════════════════════════════════════
+
+uint64 constant L2_ROLLUP_ID = 1;
+uint64 constant MAINNET_ROLLUP_ID = 0;
+
+abstract contract RevertActions {
+    /// @dev `Counter.increment()` returns `abi.encode(uint256(1))` for a fresh
+    ///      counter. The proxy's `executeOnBehalf` returns the destination's
+    ///      raw return bytes via assembly, so the manager sees this exact
+    ///      payload as `retData` and hashes it into CALL_END.
+    function _successReturnData() internal pure returns (bytes memory) {
+        return abi.encode(uint256(1));
+    }
+
+    /// @dev Outer action hash (proxyEntryHash): alice calls counterProxy (proxy for Counter L2) on L1.
+    ///      This is just the trigger — it selects which entry to consume.
+    function _outerActionHash(address counterL2, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(
+            false,
+            alice,
+            MAINNET_ROLLUP_ID,
+            counterL2,
+            L2_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
+        );
+    }
+
+    /// @dev Top-level inner call hash: the manager runs Counter.increment() ON L1 (target rollup =
+    ///      MAINNET) via the source proxy for (alice, L2). Matches `_processNCalls`'s CALL_BEGIN —
+    ///      `revertNextNCalls` does NOT change the fold (the call hashes identically, only its state
+    ///      is rolled back afterward).
+    function _l1InnerCallHash(address counterL1, address alice) internal pure returns (bytes32) {
+        return crossChainCallHash(
+            false,
+            alice,
+            L2_ROLLUP_ID,
+            counterL1,
+            MAINNET_ROLLUP_ID,
+            0,
+            abi.encodeWithSelector(Counter.increment.selector)
+        );
+    }
+
+    function _l1Entries(address counterL1, address counterL2, address alice)
+        internal
+        pure
+        returns (ExecutionEntry[] memory entries)
+    {
+        StateUpdate[] memory deltas = new StateUpdate[](1);
+        deltas[0] = StateUpdate({
+            rollupId: L2_ROLLUP_ID,
+            currentState: keccak256("l2-initial-state"),
+            newState: keccak256("l2-state-after-forced-revert"),
+            etherDelta: 0
+        });
+
+        // Inner call: a Counter.increment() on L1 wrapped in revertNextNCalls=1 to
+        // demonstrate the EVM state effect being rolled back while the rolling
+        // hash still records the successful outcome. sourceRollupId must be a
+        // rollup proved by this entry's stateUpdates (L2_ROLLUP_ID); L1 is never
+        // its own cross-chain counterparty (rule #2).
+        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
+        calls[0] = L2ToL1Call({
+            gas: 0,
+            revertNextNCalls: 1,
+            isStatic: false,
+            sourceAddress: alice,
+            sourceRollupId: L2_ROLLUP_ID,
+            targetAddress: counterL1,
+            value: 0,
+            data: abi.encodeWithSelector(Counter.increment.selector)
+        });
+
+        bytes32 proxyEntryHash = _outerActionHash(counterL2, alice);
+
+        // Rolling hash: a force-revert span folds identically to a normal call —
+        // CALL_BEGIN(ccCall) → CALL_END(true, abi.encode(1)) — only the state is rolled back.
+        bytes32 rh = RollingHashBuilder.entryBegin(deltas, proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, _l1InnerCallHash(counterL1, alice));
+        rh = RollingHashBuilder.appendCallEnd(rh, true, _successReturnData());
+
+        entries = new ExecutionEntry[](1);
+        entries[0] = ExecutionEntry({
+            stateUpdates: deltas,
+            proxyEntryHash: proxyEntryHash,
+            destinationRollupId: L2_ROLLUP_ID,
+            l2ToL1Calls: calls,
+            expectedL1ToL2Calls: noNestedActions(),
+            rollingHash: rh,
+            success: true,
+            returnData: ""
+        });
+    }
+
+    /// @dev L2 mirror entry — same shape, with the inner call targeting the real
+    /// Counter on L2. proxyEntryHash matches the outer trigger that SYSTEM passes
+    /// to executeIncomingCrossChainCall (counterL2 destination, alice on Mainnet
+    /// as the source). The mirror is independent of the L1 side; the cryptographic
+    /// tie is the call hash of the OUTER call (destination + sourceAddress +
+    /// sourceRollupId), which each side computes from its own broadcaster.
+    /// NOTE: L2 rolling hash is PENDING EEZL2 (impl not migrated); re-verify when EEZL2.sol lands.
+    function _l2Entries(address counterL2, address alice) internal pure returns (L2ExecutionEntry[] memory entries) {
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = CrossChainCall({
+            gas: 0,
+            revertNextNCalls: 1,
+            isStatic: false,
+            sourceAddress: alice,
+            sourceRollupId: MAINNET_ROLLUP_ID,
+            targetAddress: counterL2,
+            value: 0,
+            data: abi.encodeWithSelector(Counter.increment.selector)
+        });
+
+        bytes32 proxyEntryHash = _outerActionHash(counterL2, alice);
+
+        // PENDING EEZL2: incoming call CALL_BEGIN hash mirrors L1 — target on this L2 (L2_ROLLUP_ID),
+        // source on MAINNET (== proxyEntryHash here).
+        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
+        rh = RollingHashBuilder.appendCallBegin(rh, _outerActionHash(counterL2, alice));
+        rh = RollingHashBuilder.appendCallEnd(rh, true, _successReturnData());
+
+        entries = new L2ExecutionEntry[](1);
+        entries[0] = L2ExecutionEntry({
+            proxyEntryHash: proxyEntryHash,
+            incomingCalls: calls,
+            expectedOutgoingCalls: new ExpectedOutgoingCrossChainCall[](0),
+            rollingHash: rh,
+            success: true,
+            returnData: ""
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Deploys
+// ═══════════════════════════════════════════════════════════════════════
+
+/// @title DeployL2 — deploy a Counter on L2 (address reference for proxy)
+contract DeployL2 is Script {
+    function run() external {
+        vm.startBroadcast();
+        Counter counter = new Counter();
+        console.log("COUNTER_L2=%s", address(counter));
+        vm.stopBroadcast();
+    }
+}
+
+/// @title Deploy — on L1, deploy Counter (force-revert target) + create trigger proxy
+contract Deploy is Script {
+    function run() external {
+        address rollupsAddr = vm.envAddress("ROLLUPS");
+        address counterL2 = vm.envAddress("COUNTER_L2");
+
+        vm.startBroadcast();
+        EEZ rollups = EEZ(rollupsAddr);
+
+        Counter counterL1 = new Counter();
+
+        // Trigger proxy: proxy for (Counter@L2, L2_ROLLUP_ID) on L1
+        address counterProxy;
+        try rollups.createCrossChainProxy(counterL2, L2_ROLLUP_ID) returns (address p) {
+            counterProxy = p;
+        } catch {
+            counterProxy = rollups.computeCrossChainProxyAddress(counterL2, L2_ROLLUP_ID);
+        }
+
+        console.log("COUNTER_L1=%s", address(counterL1));
+        console.log("COUNTER_PROXY=%s", counterProxy);
+        vm.stopBroadcast();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Execute
+// ═══════════════════════════════════════════════════════════════════════
+
+/// @title Execute — local mode: postAndVerifyBatch tx + trigger tx from the EOA.
+///        The runner mines both in one block (execute_l1_same_block), satisfying the
+///        same-block consumption gate. The broadcaster EOA is the L1 caller (alice).
+contract Execute is Script, RevertActions {
+    function run() external {
+        address rollupsAddr = vm.envAddress("ROLLUPS");
+        address proofSystemAddr = vm.envAddress("PROOF_SYSTEM");
+        address counterL2 = vm.envAddress("COUNTER_L2");
+        address counterL1 = vm.envAddress("COUNTER_L1");
+        address counterProxy = vm.envAddress("COUNTER_PROXY");
+
+        vm.startBroadcast();
+        // alice = msg.sender (the broadcaster EOA — the caller into the proxy)
+        EEZ(rollupsAddr)
+            .postAndVerifyBatch(
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, counterL2, msg.sender), noStaticEntries()
+                )
+            );
+        // Trigger: call counterProxy.increment() — consumes the entry.
+        // The inner call in the entry runs inside executeInContext and is force-reverted.
+        (bool ok,) = counterProxy.call(abi.encodeWithSelector(Counter.increment.selector));
+        require(ok, "trigger should succeed (revertSpan rolls back the inner call's state, not the outer flow)");
+
+        // Invariant: counter on L1 stays at 0 — the increment ran, returned 1,
+        // but executeInContext's revert rolled the state change back. The
+        // rolling hash still committed to (success=true, retData=1).
+        uint256 finalCounter = Counter(counterL1).counter();
+        require(finalCounter == 0, "revertSpan must roll back successful state changes");
+
+        console.log("done");
+        console.log("counterL1.counter=%s (expected 0 -- state rolled back)", finalCounter);
+        vm.stopBroadcast();
+    }
+}
+
+contract ExecuteNetwork is Script {
+    function run() external view {
+        address target = vm.envAddress("COUNTER_PROXY");
+        console.log("TARGET=%s", target);
+        console.log("VALUE=0");
+        console.log("CALLDATA=%s", vm.toString(abi.encodeWithSelector(Counter.increment.selector)));
+    }
+}
+
+/// @title ExecuteL2 — local mode: system-driven L2 mirror via executeIncomingCrossChainCall.
+/// @dev SYSTEM_ADDRESS is the local deployer (anvil account 0), so the broadcaster can call
+///      executeIncomingCrossChainCall directly. The L2 entry's incomingCalls[0] targets the real
+///      Counter on L2 with revertSpan=1; the inner span increments it, then state is rolled
+///      back by executeInContext. Net effect: Counter.counter() == 0 on L2 too.
+///      `_processNCalls` lazily creates the source proxy for (alice, MAINNET_ROLLUP_ID).
+/// Env: MANAGER_L2, COUNTER_L2
+contract ExecuteL2 is Script, RevertActions {
+    function run() external {
+        address managerAddr = vm.envAddress("MANAGER_L2");
+        address counterL2 = vm.envAddress("COUNTER_L2");
+
+        vm.startBroadcast();
+        address alice = msg.sender;
+
+        EEZL2(managerAddr)
+            .executeIncomingCrossChainCall(
+                counterL2,
+                0,
+                abi.encodeWithSelector(Counter.increment.selector),
+                alice,
+                MAINNET_ROLLUP_ID,
+                _l2Entries(counterL2, alice),
+                new L2StaticExecutionEntry[](0)
+            );
+
+        uint256 finalCounter = Counter(counterL2).counter();
+        require(finalCounter == 0, "revertSpan must roll back successful state changes on L2");
+
+        console.log("done");
+        console.log("counterL2.counter=%s (expected 0 -- state rolled back)", finalCounter);
+        vm.stopBroadcast();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ComputeExpected
+// ═══════════════════════════════════════════════════════════════════════
+
+contract ComputeExpected is ComputeExpectedBase, RevertActions {
+    function _name(address a) internal view override returns (string memory) {
+        if (a == vm.envAddress("COUNTER_L2")) return "Counter(L2)";
+        if (a == vm.envAddress("COUNTER_L1")) return "Counter(L1)";
+        return _shortAddr(a);
+    }
+
+    function _funcName(bytes4 sel) internal pure override returns (string memory) {
+        if (sel == Counter.increment.selector) return "increment";
+        return ComputeExpectedBase._funcName(sel);
+    }
+
+    function run() external view {
+        address counterL2 = vm.envAddress("COUNTER_L2");
+        address counterL1 = vm.envAddress("COUNTER_L1");
+        // Both sides use the broadcaster EOA as the caller: msg.sender into the L1
+        // proxy, and the system-delivery source on L2.
+        address alice = msg.sender;
+
+        ExecutionEntry[] memory l1 = _l1Entries(counterL1, counterL2, alice);
+        bytes32 l1Hash = _entryHash(l1[0]);
+
+        L2ExecutionEntry[] memory l2 = _l2Entries(counterL2, alice);
+        bytes32 l2Hash = _entryHash(l2[0]);
+
+        console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1Hash));
+        console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(l2Hash));
+        console.log("EXPECTED_L1_CALL_HASHES=[%s]", vm.toString(l1[0].proxyEntryHash));
+        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
+        _printL1Table(l1);
+        _printL2Table(l2);
+        console.log("");
+        console.log("=== EXPECTED L1 TABLE (1 entry, 1 call w/ revertSpan=1, force-reverted success) ===");
+        _logEntry(0, l1[0]);
+        console.log("");
+        console.log("=== EXPECTED L2 TABLE (1 entry, 1 call w/ revertSpan=1, system-driven mirror) ===");
+        _logL2Entry(0, l2[0]);
+    }
+}

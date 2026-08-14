@@ -1,33 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test, Vm} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
-import {
-    EEZ,
-    RollupConfig,
-    ProofSystemBatchPerVerificationEntries,
-    RollupIdWithProofSystems,
-    RollupVerification
-} from "../src/EEZ.sol";
+import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IRollupContract} from "../src/interfaces/IRollup.sol";
-import {IProofSystem} from "../src/interfaces/IProofSystem.sol";
 import {
     ExecutionEntry,
-    StateDelta,
+    StateUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
-    LookupCall,
-    ExpectedLookup,
-    ProxyInfo,
+    StaticExecutionEntry,
     ExpectedStateRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
-import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
-import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 import {Counter, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
 
 /// @notice Simple target contract for testing
@@ -45,7 +32,7 @@ contract TestTarget {
     receive() external payable {}
 }
 
-/// @notice Target contract that always reverts
+/// @notice Target contract that always reverts. Currently unused — kept as a placeholder target.
 contract RevertingTarget {
     error TargetReverted();
 
@@ -55,7 +42,7 @@ contract RevertingTarget {
 }
 
 /// @notice Receives ETH from an entry call and forwards part of it into a proxy as a
-///         reentrant cross-chain call (exercises the `_entryEtherIn` accounting).
+///         reentrant cross-chain call (exercises the `_entryEtherDelta` accounting).
 contract ValueForwarder {
     address public peer;
 
@@ -70,10 +57,10 @@ contract ValueForwarder {
     }
 }
 
-/// @notice Posts a batch and, during the meta hook, fires one proxy call so the failed-lookup
-///         fallback can be exercised against the *transient* lookup table (which only exists
-///         inside `postAndVerifyBatch`). Swallows the proxy revert so the batch still completes;
-///         the captured `(success, returnData)` is asserted by the test.
+/// @notice Posts a batch and, during the meta hook, fires one proxy call so a reverting
+///         transient entry can be exercised against the *transient* execution table (which only
+///         exists inside `postAndVerifyBatch`). Swallows the proxy revert so the batch still
+///         completes; the captured `(success, returnData)` is asserted by the test.
 contract MetaLookupCaller is IMetaCrossChainReceiver {
     EEZ public immutable eez;
     address public proxyAddr;
@@ -107,7 +94,7 @@ contract EEZTest is Base {
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
 
-    uint256 constant MAINNET_ROLLUP_ID = 0;
+    uint64 internal constant MAINNET_ROLLUP_ID = 0;
 
     function setUp() public {
         setUpBase();
@@ -118,120 +105,83 @@ contract EEZTest is Base {
     //  Helpers
     // ──────────────────────────────────────────────
 
-    /// @notice Deploy a `Rollup` with one PS / one vkey / threshold=1, register it, return ids.
-    /// @dev Test-local overload of `Base._makeRollup` that returns the (id, manager) pair instead
-    ///      of `RollupHandle`. Existing test sites use the tuple form.
-    function _makeRollupLocal(bytes32 initialState, address owner_) internal returns (uint256 rid, Rollup rollup) {
-        address[] memory psList = new address[](1);
-        psList[0] = address(ps);
-        bytes32[] memory vks = new bytes32[](1);
-        vks[0] = DEFAULT_VK;
-        rollup = new Rollup(address(rollups), owner_, 1, psList, vks);
-        rid = rollups.registerRollup(address(rollup), initialState);
-    }
-
-    /// @notice Action-hash computation. Test-local helper kept for callsite compatibility;
-    ///         identical to `Base._hashCall` and `EEZ.computeCrossChainCallHash`.
-    function _computeActionHash(
-        uint256 rollupId,
-        address destination,
-        uint256 value_,
-        bytes memory data,
-        address sourceAddress,
-        uint256 sourceRollup
-    )
+    /// @notice Appends a no-op SUCCESSFUL immediate L2Tx (`root → same root`, no ether) to `entries`.
+    ///         Used by skip tests: the intended-bad immediate entry stays at index 0 (still skipped +
+    ///         rolled back), and this surviving entry keeps the leading run from being 100% failed —
+    ///         otherwise `AllImmediateL2TxsFailed` would unwind the whole post. The no-op leaves state
+    ///         and ether untouched, so the test's post-conditions are unchanged.
+    function _withNoopImmediate(ExecutionEntry[] memory entries, uint256 rid, bytes32 root)
         internal
         pure
-        returns (bytes32)
+        returns (ExecutionEntry[] memory out)
     {
-        return keccak256(abi.encode(rollupId, destination, value_, data, sourceAddress, sourceRollup));
-    }
-
-    /// @notice Wrap entries into a single-PS / single-rollup ProofSystemBatchPerVerificationEntries and call postAndVerifyBatch.
-    function _postBatchSingle(uint256 rid, ExecutionEntry[] memory entries, uint256 transientCount) internal {
-        LookupCall[] memory noStatic = new LookupCall[](0);
-        _postBatchSingle(rid, entries, noStatic, transientCount, 0);
-    }
-
-    function _postBatchSingle(
-        uint256 rid,
-        ExecutionEntry[] memory entries,
-        LookupCall[] memory lookupCalls,
-        uint256 transientCount,
-        uint256 transientLookupCallCount
-    )
-        internal
-    {
-        uint256[] memory rids = new uint256[](1);
-        rids[0] = rid;
-        _postBatchSingleMulti(rids, entries, lookupCalls, transientCount, transientLookupCallCount);
-    }
-
-    function _postBatchSingleMulti(
-        uint256[] memory rids,
-        ExecutionEntry[] memory entries,
-        LookupCall[] memory lookupCalls,
-        uint256 transientCount,
-        uint256 transientLookupCallCount
-    )
-        internal
-    {
-        address[] memory psList = new address[](1);
-        psList[0] = address(ps);
-        bytes[] memory proofs = new bytes[](1);
-        proofs[0] = "proof";
-
-        uint64[] memory psIdx = new uint64[](psList.length);
-        for (uint256 _i = 0; _i < psList.length; _i++) {
-            psIdx[_i] = uint64(_i);
+        out = new ExecutionEntry[](entries.length + 1);
+        for (uint256 k = 0; k < entries.length; k++) {
+            out[k] = entries[k];
         }
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
-        for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndex: psIdx});
-        }
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
-            entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: transientCount,
-            transientLookupCallCount: transientLookupCallCount,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
-        rollups.postAndVerifyBatch(batch);
+        out[entries.length] = _immediateEntry(rid, root, root);
     }
 
-    /// @notice Wrap entries into a single-PS batch with `transientCount = 1` when the leading entry is immediate.
-    function _postBatch(uint256 rid, ExecutionEntry[] memory entries) internal {
-        uint256 tc = (entries.length > 0 && entries[0].proxyEntryHash == bytes32(0)) ? 1 : 0;
-        _postBatchSingle(rid, entries, tc);
+    /// @notice A non-L2Tx queued entry (`proxyEntryHash != 0`). Occupies the boundary slot past the
+    ///         immediate prefix so a queued L2Tx can legally sit behind it (the
+    ///         `ImmediateCountStrandsLeadingL2Tx` guard forbids a leading L2Tx at the boundary). Never
+    ///         consumed by these tests, so its state values are placeholders.
+    function _boundaryEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
+        entry = _immediateEntry(rid, bytes32(0), bytes32(0));
+        entry.proxyEntryHash = keccak256("boundary"); // non-zero ⇒ not an L2Tx
+        entry.rollingHash = _hEntryBegin(entry.stateUpdates, entry.proxyEntryHash);
+    }
+
+    /// @notice Builds a reverting top-level entry (`success == false`): runs, verifies its rolling
+    ///         hash, then reverts with `payload`, rolling back all state. Models a top-level
+    ///         cross-chain call that reverts (the caller may try/catch the revert).
+    function _revertedEntry(uint64 rid, bytes32 currentState, bytes32 proxyEntryHash, bytes memory payload)
+        internal
+        pure
+        returns (ExecutionEntry memory e)
+    {
+        e = _shellEntry(rid, _oneDelta(rid, currentState, keccak256("rev-newstate"), 0));
+        e.proxyEntryHash = proxyEntryHash;
+        e.rollingHash = _hEntryBegin(e.stateUpdates, proxyEntryHash);
+        e.success = false;
+        e.returnData = payload;
+    }
+
+    /// @notice Builds a minimal reverting top-level `StaticExecutionEntry` (no sub-calls), pinned to its own
+    ///         destination at the live root so it is structurally valid.
+    function _revertedStaticLookup(uint64 rid, bytes32 proxyEntryHash, bytes memory payload)
+        internal
+        view
+        returns (StaticExecutionEntry memory lk)
+    {
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
+        lk.expectedStateRoots = pins;
+        lk.proxyEntryHash = proxyEntryHash;
+        lk.destinationRollupId = rid;
+        lk.l2ToL1Calls = _emptyCalls();
+        lk.rollingHash = bytes32(0);
+        lk.success = false;
+        lk.returnData = payload;
     }
 
     // ──────────────────────────────────────────────
     //  Rollup creation
     // ──────────────────────────────────────────────
-    //
-    // NOTE: previous `ProofSystemRegistry` tests (RegisterProofSystem,
-    // DuplicateRegistrationReverts, ZeroAddressReverts) were dropped when the central
-    // PS registry was removed. Each rollup's manager now defines its own allowed PS set.
 
     function test_CreateRollup() public {
         bytes32 initialState = keccak256("initial");
-        (uint256 rid, Rollup r) = _makeRollupLocal(initialState, alice);
+        RollupHandle memory r = _makeRollupWithOwner(initialState, alice);
         // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
         // skipped and the first user-registered rollup lands at id 1.
-        assertEq(rid, 1);
-        assertEq(_getRollupState(rid), initialState);
-        assertEq(_getRollupContract(rid), address(r));
+        assertEq(r.id, 1);
+        assertEq(_getRollupState(r.id), initialState);
+        assertEq(_getRollupContract(r.id), address(r.manager));
         // After registration, the Rollup's `rollupId` is set via the rollupContractRegistered callback
-        assertEq(r.rollupId(), rid);
-        assertEq(r.owner(), alice);
-        assertEq(r.threshold(), 1);
-        assertEq(r.verificationKey(address(ps)), DEFAULT_VK);
+        assertEq(r.manager.rollupId(), r.id);
+        assertEq(r.manager.owner(), alice);
+        assertEq(r.manager.threshold(), 1);
+        assertEq(r.manager.verificationKey(address(ps)), DEFAULT_VK);
     }
 
     function test_CreateRollup_ZeroAddressContractReverts() public {
@@ -244,24 +194,15 @@ contract EEZTest is Base {
         rollups.registerRollup(address(rollups), bytes32(0));
     }
 
-    // NOTE: tests dropped after refactor:
-    // - test_CreateRollup_DuplicateContractReverts: registry no longer enforces unique
-    //   rollupContract addresses; the per-rollup manager is responsible for its own
-    //   one-shot semantic if it wants one (the reference Rollup.sol does NOT — handoff
-    //   re-registration is allowed).
-    // - test_RollupId_NotRegisteredReverts: `rollupIdOf` view was removed when the
-    //   reverse-lookup mapping was dropped. Manager passes rollupId explicitly via
-    //   callbacks now.
-
     // ──────────────────────────────────────────────
     //  CrossChainProxy creation
     // ──────────────────────────────────────────────
 
     function test_CreateCrossChainProxy() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         address targetAddr = address(0x1234);
-        address proxy = rollups.createCrossChainProxy(targetAddr, rid);
-        (address origAddr,) = rollups.authorizedProxies(proxy);
+        address proxy = rollups.createCrossChainProxy(targetAddr, uint64(r.id));
+        (, address origAddr,) = rollups.authorizedProxies(proxy);
         assertEq(origAddr, targetAddr);
         uint256 codeSize;
         assembly {
@@ -271,18 +212,32 @@ contract EEZTest is Base {
     }
 
     function test_ComputeCrossChainProxyAddress() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         address targetAddr = address(0x5678);
-        address computed = rollups.computeCrossChainProxyAddress(targetAddr, rid);
-        address actual = rollups.createCrossChainProxy(targetAddr, rid);
+        address computed = rollups.computeCrossChainProxyAddress(targetAddr, uint64(r.id));
+        address actual = rollups.createCrossChainProxy(targetAddr, uint64(r.id));
         assertEq(computed, actual);
     }
 
+    function test_CreateCrossChainProxy_SweepsPredeployedEther() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address targetAddr = address(0x1234);
+        address predicted = rollups.computeCrossChainProxyAddress(targetAddr, uint64(r.id));
+        vm.deal(predicted, 3 ether);
+
+        uint256 recoveryBalanceBefore = rollups.RECOVERY_ADDRESS().balance;
+        address proxy = rollups.createCrossChainProxy(targetAddr, uint64(r.id));
+
+        assertEq(proxy, predicted);
+        assertEq(proxy.balance, 0);
+        assertEq(rollups.RECOVERY_ADDRESS().balance, recoveryBalanceBefore + 3 ether);
+    }
+
     function test_MultipleProxiesSameTarget() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), alice);
-        address proxy1 = rollups.createCrossChainProxy(address(0x9999), r1);
-        address proxy2 = rollups.createCrossChainProxy(address(0x9999), r2);
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
+        address proxy1 = rollups.createCrossChainProxy(address(0x9999), uint64(r1.id));
+        address proxy2 = rollups.createCrossChainProxy(address(0x9999), uint64(r2.id));
         assertTrue(proxy1 != proxy2);
     }
 
@@ -291,62 +246,80 @@ contract EEZTest is Base {
     // ──────────────────────────────────────────────
 
     function test_PostBatch_ImmediateStateUpdate() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         bytes32 newState = keccak256("new state");
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(rid, bytes32(0), newState);
-        _postBatch(rid, entries);
-        assertEq(_getRollupState(rid), newState);
+        entries[0] = _immediateEntry(r.id, bytes32(0), newState);
+        _postBatchAutoTransient(r, entries);
+        assertEq(_getRollupState(r.id), newState);
+    }
+
+    function test_PostBatch_ExpectedStateRootPin_Match() public {
+        RollupHandle memory r = _makeRollup(keccak256("root"));
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(r.id), stateRoot: keccak256("root")});
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _immediateEntry(r.id, keccak256("root"), keccak256("next"));
+        _postBatchWithPins(r, entries, pins);
+        assertEq(_getRollupState(r.id), keccak256("next"));
+    }
+
+    function test_PostBatch_ExpectedStateRootPin_Mismatch_Reverts() public {
+        RollupHandle memory r = _makeRollup(keccak256("root"));
+        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
+        pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(r.id), stateRoot: keccak256("WRONG")});
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _immediateEntry(r.id, keccak256("root"), keccak256("next"));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.ExpectedStateRootMismatch.selector, uint64(r.id)));
+        _postBatchWithPins(r, entries, pins);
     }
 
     function test_PostBatch_StateRootMismatch_ImmediateSkipped() public {
-        (uint256 rid,) = _makeRollupLocal(keccak256("real"), alice);
+        RollupHandle memory r = _makeRollup(keccak256("real"));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         // wrong currentState — chain has keccak256("real"), entry claims bytes32(0).
-        // Immediate entries are run inside an attemptApplyImmediate try/catch: the StateRootMismatch
-        // revert is swallowed and the entry is reported as `ImmediateEntrySkipped`.
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("new"));
+        // Immediate L2Tx entries run inside a try/catch self-call: the StateRootMismatch revert is
+        // swallowed and the entry is reported as `L2TxSkipped`.
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("new"));
+        // Pair the bad entry with a surviving no-op so the run isn't 100% failed (else the whole post
+        // unwinds with AllImmediateL2TxsFailed); the bad one at index 0 is still skipped.
+        entries = _withNoopImmediate(entries, r.id, keccak256("real"));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
         // State unchanged because the immediate entry was skipped.
-        assertEq(_getRollupState(rid), keccak256("real"));
+        assertEq(_getRollupState(r.id), keccak256("real"));
     }
 
     function test_PostBatch_MultipleEEZ_OneEntryEach() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), bob);
+        // registerRollup assigns strictly increasing ids, so r1.id < r2.id.
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
 
-        StateDelta[] memory deltas = new StateDelta[](2);
-        deltas[0] = StateDelta({rollupId: r1, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
-        deltas[1] = StateDelta({rollupId: r2, currentState: bytes32(0), newState: keccak256("s2"), etherDelta: 0});
+        StateUpdate[] memory deltas = new StateUpdate[](2);
+        deltas[0] =
+            StateUpdate({rollupId: uint64(r1.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        deltas[1] =
+            StateUpdate({rollupId: uint64(r2.id), currentState: bytes32(0), newState: keccak256("s2"), etherDelta: 0});
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = r1; // any rollup in batch is fine for inline
-        entries[0].l2ToL1Calls = new L2ToL1Call[](0);
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].rollingHash = bytes32(0);
+        entries[0] = _shellEntry(r1.id, deltas); // any rollup in batch is fine for inline
+        entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
 
-        uint256[] memory rids = new uint256[](2);
-        // strictly increasing required
-        rids[0] = r1 < r2 ? r1 : r2;
-        rids[1] = r1 < r2 ? r2 : r1;
-        _postBatchSingleMulti(rids, entries, new LookupCall[](0), 1, 0);
+        rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, entries, _emptyStaticEntries(), 1, 0));
 
-        assertEq(_getRollupState(r1), keccak256("s1"));
-        assertEq(_getRollupState(r2), keccak256("s2"));
+        assertEq(_getRollupState(r1.id), keccak256("s1"));
+        assertEq(_getRollupState(r2.id), keccak256("s2"));
     }
 
     function test_PostBatch_InvalidProofReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s"));
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
         // Verification on with no pinned hash — rejects every proof.
         ps.setShouldVerify(true);
         vm.expectRevert(EEZ.InvalidProof.selector);
-        _postBatch(rid, entries);
+        _postBatchAutoTransient(r, entries);
     }
 
     /// @notice Multiple verifications for the same rollup in the same block are allowed:
@@ -354,81 +327,73 @@ contract EEZTest is Base {
     ///         the second batch transitions s1 → s2). Each verify wipes the rollup's queue,
     ///         so the second batch fully replaces the first's entries.
     function test_PostBatch_SameBlockSameRollupOk() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries1 = new ExecutionEntry[](1);
-        entries1[0] = _immediateEntry(rid, bytes32(0), keccak256("s1"));
-        _postBatch(rid, entries1);
-        assertEq(_getRollupState(rid), keccak256("s1"));
+        entries1[0] = _immediateEntry(r.id, bytes32(0), keccak256("s1"));
+        _postBatchAutoTransient(r, entries1);
+        assertEq(_getRollupState(r.id), keccak256("s1"));
 
         ExecutionEntry[] memory entries2 = new ExecutionEntry[](1);
-        entries2[0] = _immediateEntry(rid, keccak256("s1"), keccak256("s2"));
-        _postBatch(rid, entries2);
-        assertEq(_getRollupState(rid), keccak256("s2"));
+        entries2[0] = _immediateEntry(r.id, keccak256("s1"), keccak256("s2"));
+        _postBatchAutoTransient(r, entries2);
+        assertEq(_getRollupState(r.id), keccak256("s2"));
     }
 
     function test_PostBatch_SameBlockDifferentEEZOk() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), bob);
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
         ExecutionEntry[] memory e1 = new ExecutionEntry[](1);
-        e1[0] = _immediateEntry(r1, bytes32(0), keccak256("s1"));
-        _postBatch(r1, e1);
+        e1[0] = _immediateEntry(r1.id, bytes32(0), keccak256("s1"));
+        _postBatchAutoTransient(r1, e1);
 
         ExecutionEntry[] memory e2 = new ExecutionEntry[](1);
-        e2[0] = _immediateEntry(r2, bytes32(0), keccak256("s2"));
-        _postBatch(r2, e2);
+        e2[0] = _immediateEntry(r2.id, bytes32(0), keccak256("s2"));
+        _postBatchAutoTransient(r2, e2);
 
-        assertEq(_getRollupState(r1), keccak256("s1"));
-        assertEq(_getRollupState(r2), keccak256("s2"));
+        assertEq(_getRollupState(r1.id), keccak256("s1"));
+        assertEq(_getRollupState(r2.id), keccak256("s2"));
     }
 
     function test_PostBatch_DifferentBlocks_LazyReset() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
 
         // Block 1 — post a deferred entry that's never consumed
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (1));
-        bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
         ExecutionEntry[] memory e1 = new ExecutionEntry[](1);
-        StateDelta[] memory d1 = new StateDelta[](1);
-        d1[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: bytes32(0), etherDelta: 0});
-        e1[0].stateDeltas = d1;
+        e1[0] = _shellEntry(rid, _oneDelta(rid, bytes32(0), bytes32(0), 0));
         e1[0].proxyEntryHash = ah;
-        e1[0].destinationRollupId = rid;
-        e1[0].l2ToL1Calls = new L2ToL1Call[](0);
-        e1[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        e1[0].rollingHash = bytes32(0);
-        _postBatchSingle(rid, e1, 0);
+        e1[0].rollingHash = _hEntryBegin(e1[0].stateUpdates, ah);
+        _postBatchOne(r, e1, _emptyStaticEntries(), 0, 0);
         assertEq(rollups.queueLength(rid), 1);
 
         // New block — lazy reset clears the stale queue
         vm.roll(block.number + 1);
         ExecutionEntry[] memory e2 = new ExecutionEntry[](1);
         e2[0] = _immediateEntry(rid, bytes32(0), keccak256("s2"));
-        _postBatch(rid, e2);
+        _postBatchAutoTransient(r, e2);
         assertEq(_getRollupState(rid), keccak256("s2"));
         assertEq(rollups.queueLength(rid), 0);
-        assertEq(rollups.executionQueueIndex(rid), 0);
+        assertEq(rollups.entryQueueIndex(rid), 0);
     }
 
     function test_PostBatch_LastVerifiedBlock() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s"));
-        _postBatch(rid, entries);
-        assertEq(rollups.lastVerifiedBlock(rid), block.number);
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
+        _postBatchAutoTransient(r, entries);
+        assertEq(rollups.lastVerifiedBlock(uint64(r.id)), block.number);
     }
-
-    // NOTE: dropped after refactor — `postAndVerifyBatch` now
-    // takes a single `ProofSystemBatchPerVerificationEntries`, not an array, so there's no
-    // "empty array" edge case. The empty-batch validation lives inline in
-    // `_validateStructure` (e.g., empty `proofSystems[]` reverts `InvalidProofSystemConfig`)
-    // and is exercised by other tests in this file.
 
     // ──────────────────────────────────────────────
     //  Sub-batch validation
     // ──────────────────────────────────────────────
+    //
+    // A rollup may appear in several batches within one block — see test_PostBatch_SameBlockSameRollupOk.
 
     function test_SubBatch_DuplicateProofSystemReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         address[] memory psList = new address[](2);
         psList[0] = address(ps);
         psList[1] = address(ps); // duplicate (also unsorted)
@@ -436,118 +401,68 @@ contract EEZTest is Base {
         proofs[0] = "p1";
         proofs[1] = "p2";
 
-        uint64[] memory psIdx = new uint64[](2);
-        psIdx[0] = 0;
-        psIdx[1] = 1;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rid, proofSystemIndex: psIdx});
-
-        ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
-            entries: new ExecutionEntry[](0),
-            l1ToL2lookupCalls: new LookupCall[](0),
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, _rpsOne(r.id, 2), 0, 0);
 
         vm.expectRevert(abi.encodeWithSelector(EEZ.DuplicateProofSystem.selector, address(ps)));
         rollups.postAndVerifyBatch(batch);
     }
 
-    // NOTE: dropped after refactor:
-    //   test_SubBatch_UnregisteredProofSystemReverts — there is no central PS registry
-    //   anymore. Any address can be supplied as a proof system; the per-rollup manager's
-    //   `getVkeysFromProofSystems` decides which addresses are allowed (returns non-zero
-    //   vkey only for allowed PSes). An "unrelated" PS just reverts with
-    //   `ProofSystemNotAllowed` from the manager, not from the registry.
-
     function test_SubBatch_NonIncreasingRollupIdsReverts() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), bob);
-        // pass them in reverse order
-        uint256[] memory rids = new uint256[](2);
-        rids[0] = r1 < r2 ? r2 : r1;
-        rids[1] = r1 < r2 ? r1 : r2;
-
-        ExecutionEntry[] memory entries = new ExecutionEntry[](0);
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
+        // r1.id < r2.id (registration order) — pass them in reverse order.
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _twoRollupBatch(r2.id, r1.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
-        _postBatchSingleMulti(rids, entries, new LookupCall[](0), 0, 0);
+        rollups.postAndVerifyBatch(batch);
     }
-
-    // NOTE: `test_SubBatch_RollupInMultipleSubBatchesReverts` was dropped after the multi-
-    // sub-batch model was collapsed into a single batch and the once-per-block-per-rollup
-    // guard in `_markVerifiedThisBlock` was lifted. See `test_PostBatch_SameBlockSameRollup*`
-    // for the replacement: a rollup can now be verified multiple times within the same block
-    // and entries simply accumulate on its queue.
 
     function test_SubBatch_RollupNotInBatchReverts() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), bob); // not in this batch's rollupIds
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0)); // not in this batch's rollupIds
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: r2, currentState: bytes32(0), newState: keccak256("x"), etherDelta: 0});
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = r1;
-        entries[0].l2ToL1Calls = new L2ToL1Call[](0);
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].rollingHash = bytes32(0);
+        entries[0] = _shellEntry(r1.id, _oneDelta(r2.id, bytes32(0), keccak256("x"), 0));
 
-        vm.expectRevert(abi.encodeWithSelector(EEZ.RollupNotInBatch.selector, r2));
-        _postBatchSingle(r1, entries, 1);
+        vm.expectRevert(abi.encodeWithSelector(EEZ.RollupNotInBatch.selector, uint64(r2.id)));
+        _postBatchOne(r1, entries, _emptyStaticEntries(), 1, 0);
     }
 
-    /// @notice Transient lookups without transient entries are unreachable (no immediate drain,
-    ///         no meta hook) — `_validateStructure` rejects the shape.
+    /// @notice Immediate static lookups without immediate entries are unreachable (no immediate
+    ///         drain, no meta hook) — `_validateBatchStructure` rejects the shape.
     function test_SubBatch_TransientLookupsWithoutTransientEntriesReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = _revertedLookup(rid, keccak256("h"), hex"deadbeef");
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        lookups[0] = _revertedStaticLookup(uint64(r.id), keccak256("h"), hex"deadbeef");
 
-        vm.expectRevert(EEZ.TransientLookupCallsWithoutTransientEntries.selector);
-        _postBatchSingle(rid, new ExecutionEntry[](0), lookups, 0, 1);
+        vm.expectRevert(EEZ.ImmediateStaticEntriesWithoutImmediateEntries.selector);
+        _postBatchOne(r, _emptyEntries(), lookups, 0, 1);
     }
 
     // ──────────────────────────────────────────────
-    //  Per-rollup queue routing (executeCrossChainCall / executeL2TX)
+    //  Per-rollup queue routing (executeCrossChainCall / executeL2Txs)
     // ──────────────────────────────────────────────
 
     function test_ExecuteCrossChainCall_Simple() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (42));
-        bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(target),
-            value: 0,
-            data: cd,
-            sourceAddress: address(this),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
-        bytes32 rh = _rollingHashSingleCall("");
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("after"), 0);
+
+        // CALL_BEGIN folds the call's identity (target executed ON L1 = MAINNET, source on `rid`).
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, address(target), MAINNET_ROLLUP_ID, 0, cd);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("after"), etherDelta: 0});
-        entries[0].stateDeltas = deltas;
+        entries[0] = _shellEntry(rid, deltas);
         entries[0].proxyEntryHash = ah;
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = calls;
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].callCount = 1;
-        entries[0].rollingHash = rh;
-        _postBatchSingle(rid, entries, 0); // deferred — must consume via proxy
+        entries[0].l2ToL1Calls = _oneCall(_call(address(this), rid, address(target), 0, cd));
+        entries[0].rollingHash = _oneCallHash(deltas, ah, cch, true, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0); // deferred — must consume via proxy
 
         (bool ok,) = proxyAddr.call(cd);
         assertTrue(ok);
@@ -556,48 +471,47 @@ contract EEZTest is Base {
     }
 
     function test_ExecuteCrossChainCall_UnauthorizedProxyReverts() public {
-        _makeRollupLocal(bytes32(0), alice);
+        _makeRollup(bytes32(0));
         vm.expectRevert(EEZBase.UnauthorizedProxy.selector);
         rollups.executeCrossChainCall(alice, "");
     }
 
     function test_ExecuteCrossChainCall_NotInCurrentBlockReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
-        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
         // No postAndVerifyBatch in this block → proxy call should revert
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (1));
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        bytes4 sel;
-        assembly {
-            sel := mload(add(ret, 32))
-        }
-        assertEq(sel, EEZ.ExecutionNotInCurrentBlock.selector);
+        _assertRevertSelector(ret, EEZ.ExecutionNotInCurrentBlock.selector);
     }
 
     function test_ExecuteL2TX() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
 
-        // Two entries: first is immediate (transient), second is a pure L2TX in the persistent queue
-        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s1"));
-        entries[1] = _immediateEntry(rid, keccak256("s1"), keccak256("s2"));
-        _postBatchSingle(rid, entries, 1);
+        // Three entries: [0] immediate (transient), [1] a non-L2Tx boundary entry (so the queued L2Tx
+        // isn't a *leading* one — ImmediateCountStrandsLeadingL2Tx forbids that), [2] a pure L2Tx in the
+        // persistent queue. executeL2Txs scans past the boundary entry to consume the queued L2Tx.
+        ExecutionEntry[] memory entries = new ExecutionEntry[](3);
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s1"));
+        entries[1] = _boundaryEntry(r.id);
+        entries[2] = _immediateEntry(r.id, keccak256("s1"), keccak256("s2"));
+        _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
 
-        assertEq(_getRollupState(rid), keccak256("s1"));
-        rollups.executeL2TX(rid);
-        assertEq(_getRollupState(rid), keccak256("s2"));
+        assertEq(_getRollupState(r.id), keccak256("s1"));
+        rollups.executeL2Txs(uint64(r.id));
+        assertEq(_getRollupState(r.id), keccak256("s2"));
     }
 
     function test_ExecuteL2TX_NotInCurrentBlockReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
-        vm.expectRevert(abi.encodeWithSelector(EEZ.ExecutionNotInCurrentBlock.selector, rid));
-        rollups.executeL2TX(rid);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.ExecutionNotInCurrentBlock.selector, uint64(r.id)));
+        rollups.executeL2Txs(uint64(r.id));
     }
 
     function test_ExecuteInContext_NotSelfReverts() public {
         vm.expectRevert(EEZBase.NotSelf.selector);
-        rollups.executeInContextAndRevert(1);
+        rollups.executeInContextAndRevert(_emptyCalls());
     }
 
     // ──────────────────────────────────────────────
@@ -605,140 +519,116 @@ contract EEZTest is Base {
     // ──────────────────────────────────────────────
 
     function test_PostBatch_EtherDeltasMustSumToZero() public {
-        (uint256 r1,) = _makeRollupLocal(bytes32(0), alice);
-        (uint256 r2,) = _makeRollupLocal(bytes32(0), bob);
-        _fundRollup(r1, 5 ether);
+        // registerRollup assigns strictly increasing ids, so the deltas below are sorted.
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
+        _fundRollup(r1.id, 5 ether);
 
-        StateDelta[] memory deltas = new StateDelta[](2);
-        // sort by rollupId so the deltas are ordered consistently with the strictly-increasing rollupIds
-        if (r1 < r2) {
-            deltas[0] =
-                StateDelta({rollupId: r1, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: -2 ether});
-            deltas[1] =
-                StateDelta({rollupId: r2, currentState: bytes32(0), newState: keccak256("s2"), etherDelta: 2 ether});
-        } else {
-            deltas[0] =
-                StateDelta({rollupId: r2, currentState: bytes32(0), newState: keccak256("s2"), etherDelta: 2 ether});
-            deltas[1] =
-                StateDelta({rollupId: r1, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: -2 ether});
-        }
+        StateUpdate[] memory deltas = new StateUpdate[](2);
+        deltas[0] = StateUpdate({
+            rollupId: uint64(r1.id), currentState: bytes32(0), newState: keccak256("s1"), etherDelta: -2 ether
+        });
+        deltas[1] = StateUpdate({
+            rollupId: uint64(r2.id), currentState: bytes32(0), newState: keccak256("s2"), etherDelta: 2 ether
+        });
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = r1;
-        entries[0].l2ToL1Calls = new L2ToL1Call[](0);
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].rollingHash = bytes32(0);
+        entries[0] = _shellEntry(r1.id, deltas);
+        entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
 
-        uint256[] memory rids = new uint256[](2);
-        rids[0] = r1 < r2 ? r1 : r2;
-        rids[1] = r1 < r2 ? r2 : r1;
-        _postBatchSingleMulti(rids, entries, new LookupCall[](0), 1, 0);
+        rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, entries, _emptyStaticEntries(), 1, 0));
 
-        assertEq(_getRollupEtherBalance(r1), 3 ether);
-        assertEq(_getRollupEtherBalance(r2), 2 ether);
+        assertEq(_getRollupEtherBalance(r1.id), 3 ether);
+        assertEq(_getRollupEtherBalance(r2.id), 2 ether);
     }
 
     function test_PostBatch_EtherDeltasNonZeroSum_ImmediateSkipped() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
-        _fundRollup(rid, 5 ether);
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] =
-            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 1 ether});
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        _fundRollup(r.id, 5 ether);
+        StateUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 1 ether);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = new L2ToL1Call[](0);
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].rollingHash = bytes32(0);
-        // EtherDeltaMismatch raised inside attemptApplyImmediate → caught → ImmediateEntrySkipped.
+        entries[0] = _shellEntry(r.id, deltas);
+        entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
+        // EtherDeltaMismatch raised inside the immediate L2Tx run → caught → L2TxSkipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, r.id, bytes32(0));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
-        assertEq(_getRollupState(rid), bytes32(0));
-        assertEq(_getRollupEtherBalance(rid), 5 ether);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
+        assertEq(_getRollupState(r.id), bytes32(0));
+        assertEq(_getRollupEtherBalance(r.id), 5 ether);
     }
 
     function test_PostBatch_InsufficientRollupBalance_ImmediateSkipped() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] =
-            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: -1 ether});
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        StateUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), -1 ether);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = new L2ToL1Call[](0);
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].rollingHash = bytes32(0);
-        // InsufficientRollupBalance raised inside attemptApplyImmediate → caught → ImmediateEntrySkipped.
+        entries[0] = _shellEntry(r.id, deltas);
+        entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
+        // InsufficientRollupBalance raised inside the immediate L2Tx run → caught → L2TxSkipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, r.id, bytes32(0));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
-        assertEq(_getRollupState(rid), bytes32(0));
-        assertEq(_getRollupEtherBalance(rid), 0);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
+        assertEq(_getRollupState(r.id), bytes32(0));
+        assertEq(_getRollupEtherBalance(r.id), 0);
     }
 
     /// @notice Builds the reentrant-value fixture: an entry call sends 2 ether to a
     ///         ValueForwarder, which forwards 1.5 ether back into a proxy as a reentrant
     ///         cross-chain call. Net for the rollup: -0.5 ether.
-    function _reentrantValueEntry(uint256 rid, int256 etherDelta)
+    function _reentrantValueEntry(uint64 rid, int256 etherDelta)
         internal
         returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)
     {
         forwarder = new ValueForwarder();
-        address remote = address(0xBEEF);
-        forwarder.setPeer(rollups.createCrossChainProxy(remote, rid));
+        forwarder.setPeer(rollups.createCrossChainProxy(L2_REMOTE, rid));
 
         bytes memory depositData = abi.encodeWithSignature("deposit()");
-        bytes32 nestedHash = _hashCall(rid, remote, 1.5 ether, depositData, address(forwarder), 0);
+        // reentrant call hash: source = forwarder on L1 (mainnet), target = L2_REMOTE on `rid`.
+        bytes32 nestedHash =
+            _ccHash(NOT_STATIC_CALL, address(forwarder), MAINNET_ROLLUP_ID, L2_REMOTE, rid, 1.5 ether, depositData);
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(forwarder),
-            value: 2 ether,
-            data: abi.encodeCall(ValueForwarder.forward, (1.5 ether)),
-            sourceAddress: address(0xD00D),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
+        bytes memory forwardData = abi.encodeCall(ValueForwarder.forward, (1.5 ether));
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
+
+        // Rolling hash: the reentrant call fires right after the top call's CALL_BEGIN, so its
+        // position key is keyed on `_rollingHash` at that instant. A SUCCESS frame folds
+        // NESTED_BEGIN/END (no sub-calls), then the top call's CALL_END closes.
+        bytes32 cchTop =
+            _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(forwarder), MAINNET_ROLLUP_ID, 2 ether, forwardData);
+        bytes32 h = _hEntryBegin(deltas, bytes32(0));
+        h = _hCallBegin(h, cchTop);
+        bytes32 fireHash = h;
+        h = _hNestedBegin(h, nestedHash);
+        h = _hNestedEnd(h);
+        h = _hCallEnd(h, true, abi.encode(uint256(2 ether)));
 
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
         nested[0] = ExpectedL1ToL2Call({
-            crossChainCallHash: nestedHash, destinationRollupId: rid, callCount: 0, returnData: ""
+            expectedL1toL2Hash: _expectedL1toL2Hash(nestedHash, fireHash),
+            l2ToL1Calls: _emptyCalls(),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: ""
         });
 
-        bytes32 h = bytes32(0);
-        h = _hCallBegin(h, 1);
-        h = _hNestedBegin(h, 1);
-        h = _hNestedEnd(h, 1);
-        h = _hCallEnd(h, 1, true, abi.encode(uint256(2 ether)));
-
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] =
-            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: etherDelta});
-
         entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = calls;
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(forwarder), 2 ether, forwardData));
         entries[0].expectedL1ToL2Calls = nested;
-        entries[0].callCount = 1;
-        entries[0].returnData = "";
         entries[0].rollingHash = h;
     }
 
     function test_ReentrantValue_CountedInEtherAccounting() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         _fundRollup(rid, 2 ether);
 
         // 2 ether out at the top level, 1.5 ether back in reentrantly → net -0.5 ether.
         (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _reentrantValueEntry(rid, -0.5 ether);
-        _postBatch(rid, entries);
+        _postBatchAutoTransient(r, entries);
 
         assertEq(_getRollupState(rid), keccak256("s1"));
         assertEq(_getRollupEtherBalance(rid), 1.5 ether);
@@ -747,15 +637,18 @@ contract EEZTest is Base {
     }
 
     function test_ReentrantValue_NotCredited_ImmediateSkipped() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         _fundRollup(rid, 2 ether);
 
         // Delta pretends the reentrant 1.5 ether never came back → EtherDeltaMismatch
-        // inside attemptApplyImmediate → caught → ImmediateEntrySkipped, all rolled back.
+        // inside the immediate L2Tx run → caught → L2TxSkipped, all rolled back.
         (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _reentrantValueEntry(rid, -2 ether);
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
 
         assertEq(_getRollupState(rid), bytes32(0));
         assertEq(_getRollupEtherBalance(rid), 2 ether);
@@ -769,78 +662,96 @@ contract EEZTest is Base {
     ///         `sink`. True net = 1.5 in − 2 − 1 = −1.5 ether. A local accumulator (discarded when
     ///         the reentrant frame returns) would have seen only the 2-ether top-level outflow and
     ///         computed −0.5.
-    function _nestedOutflowEntry(uint256 rid, address sink, int256 etherDelta)
+    /// @notice Rolling hash for `_nestedOutflowEntry` (top-level forward + nested outflow + return).
+    ///         Pulled out so the builder stays under the stack-depth limit under coverage instrumentation.
+    function _nestedOutflowRollingHash(StateUpdate[] memory deltas, bytes32 cchTop, bytes32 nestedHash, bytes32 cchSink)
+        internal
+        pure
+        returns (bytes32 h, bytes32 fireHash)
+    {
+        h = _hEntryBegin(deltas, bytes32(0));
+        h = _hCallBegin(h, cchTop); // top-level begin
+        fireHash = h; // reentrant fires here
+        h = _hNestedBegin(h, nestedHash); // reentry begin
+        h = _hCallBegin(h, cchSink); // nested outflow begin
+        h = _hCallEnd(h, true, ""); // nested outflow end — plain ETH transfer returns ""
+        h = _hNestedEnd(h); // reentry end
+        h = _hCallEnd(h, true, abi.encode(uint256(2 ether))); // forward() returns msg.value
+    }
+
+    function _nestedOutflowEntry(uint64 rid, address sink, int256 etherDelta)
         internal
         returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)
     {
         forwarder = new ValueForwarder();
-        address remote = address(0xBEEF);
-        forwarder.setPeer(rollups.createCrossChainProxy(remote, rid));
+        forwarder.setPeer(rollups.createCrossChainProxy(L2_REMOTE, rid));
 
         bytes memory depositData = abi.encodeWithSignature("deposit()");
-        bytes32 nestedHash = _hashCall(rid, remote, 1.5 ether, depositData, address(forwarder), 0);
+        bytes32 nestedHash =
+            _ccHash(NOT_STATIC_CALL, address(forwarder), MAINNET_ROLLUP_ID, L2_REMOTE, rid, 1.5 ether, depositData);
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
-        // Flat[0]: top-level call that drives the reentry.
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(forwarder),
-            value: 2 ether,
-            data: abi.encodeCall(ValueForwarder.forward, (1.5 ether)),
-            sourceAddress: address(0xD00D),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
-        // Flat[1]: consumed INSIDE the nested frame — sends 1 ether out of EEZ to `sink`.
-        calls[1] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: sink,
-            value: 1 ether,
-            data: "",
-            sourceAddress: address(0xD00D),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
+        bytes memory forwardData = abi.encodeCall(ValueForwarder.forward, (1.5 ether));
+        // Top-level call that drives the reentry.
+        L2ToL1Call[] memory calls = _oneCall(_call(L2_SENDER, rid, address(forwarder), 2 ether, forwardData));
+        // Consumed INSIDE the nested frame — sends 1 ether out of EEZ to `sink`.
+        L2ToL1Call[] memory subCalls = _oneCall(_call(L2_SENDER, rid, sink, 1 ether, ""));
 
-        // The reentrant frame consumes ONE flat call (Flat[1]) → callCount: 1.
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
+
+        bytes32 cchTop =
+            _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(forwarder), MAINNET_ROLLUP_ID, 2 ether, forwardData);
+
+        // Extracted into a sub-frame to keep this builder under the stack-depth limit.
+        (bytes32 h, bytes32 fireHash) = _nestedOutflowRollingHash(
+            deltas, cchTop, nestedHash, _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, sink, MAINNET_ROLLUP_ID, 1 ether, "")
+        );
+
+        // Assembled in a sub-frame to keep this builder under the stack-depth limit.
+        entries =
+            _assembleNestedOutflowEntry(rid, deltas, calls, subCalls, _expectedL1toL2Hash(nestedHash, fireHash), h);
+    }
+
+    /// @notice Final entry assembly for `_nestedOutflowEntry`, in a sub-frame for stack-depth headroom.
+    function _assembleNestedOutflowEntry(
+        uint64 rid,
+        StateUpdate[] memory deltas,
+        L2ToL1Call[] memory calls,
+        L2ToL1Call[] memory subCalls,
+        bytes32 nestedKey,
+        bytes32 rollingHash
+    )
+        internal
+        pure
+        returns (ExecutionEntry[] memory entries)
+    {
         ExpectedL1ToL2Call[] memory nested = new ExpectedL1ToL2Call[](1);
-        nested[0] =
-            ExpectedL1ToL2Call({crossChainCallHash: nestedHash, destinationRollupId: rid, callCount: 1, returnData: ""});
-
-        bytes32 h = bytes32(0);
-        h = _hCallBegin(h, 1); // Flat[0] begin
-        h = _hNestedBegin(h, 1); // reentry begin
-        h = _hCallBegin(h, 2); // Flat[1] begin (nested outflow)
-        h = _hCallEnd(h, 2, true, ""); // Flat[1] end — plain ETH transfer returns ""
-        h = _hNestedEnd(h, 1); // reentry end
-        // Flat[0]'s CALL_END reads the LIVE cursor, which the nested frame advanced 1 -> 2.
-        h = _hCallEnd(h, 2, true, abi.encode(uint256(2 ether))); // forward() returns msg.value
-
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] =
-            StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: etherDelta});
+        nested[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: nestedKey,
+            l2ToL1Calls: subCalls,
+            revertedOrStaticRollingHash: bytes32(0),
+            success: true,
+            returnData: ""
+        });
 
         entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = rid;
+        entries[0] = _shellEntry(rid, deltas);
         entries[0].l2ToL1Calls = calls;
         entries[0].expectedL1ToL2Calls = nested;
-        entries[0].callCount = 1;
-        entries[0].returnData = "";
-        entries[0].rollingHash = h;
+        entries[0].rollingHash = rollingHash;
     }
 
     /// @notice The fixed accounting credits the FULL net outflow, including ether sent inside a
     ///         reentrant frame. Fails on the pre-fix code (local `etherOut` drops the nested 1 ether,
-    ///         so the −1.5 delta mismatches the computed −0.5 → ImmediateEntrySkipped).
+    ///         so the −1.5 delta mismatches the computed −0.5 → L2TxSkipped).
     function test_NestedOutflow_CountedInEtherAccounting() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         _fundRollup(rid, 2 ether);
         TestTarget sink = new TestTarget();
 
-        (ExecutionEntry[] memory entries, ValueForwarder forwarder) = _nestedOutflowEntry(rid, address(sink), -1.5 ether);
-        _postBatch(rid, entries);
+        (ExecutionEntry[] memory entries, ValueForwarder forwarder) =
+            _nestedOutflowEntry(rid, address(sink), -1.5 ether);
+        _postBatchAutoTransient(r, entries);
 
         assertEq(_getRollupState(rid), keccak256("s1"), "entry must apply");
         assertEq(_getRollupEtherBalance(rid), 0.5 ether, "rollup debited the full net outflow");
@@ -852,14 +763,17 @@ contract EEZTest is Base {
     /// @notice Soundness: the delta a per-frame local would have accepted (−0.5, nested outflow
     ///         dropped) must now be REJECTED, otherwise EEZ would book 1 ether it no longer holds.
     function test_NestedOutflow_DroppedDeltaRejected() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         _fundRollup(rid, 2 ether);
         TestTarget sink = new TestTarget();
 
         (ExecutionEntry[] memory entries,) = _nestedOutflowEntry(rid, address(sink), -0.5 ether);
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
 
         assertEq(_getRollupState(rid), bytes32(0), "unsound entry must not apply");
         assertEq(_getRollupEtherBalance(rid), 2 ether);
@@ -872,116 +786,95 @@ contract EEZTest is Base {
     // ──────────────────────────────────────────────
 
     function test_RollupSetStateRoot_ByOwner() public {
-        (uint256 rid, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         vm.prank(alice);
-        r.setStateRoot(keccak256("escape"));
-        assertEq(_getRollupState(rid), keccak256("escape"));
+        r.manager.setStateRoot(keccak256("escape"));
+        assertEq(_getRollupState(r.id), keccak256("escape"));
     }
 
     function test_RollupSetStateRoot_NotOwnerReverts() public {
-        (, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, bob));
-        r.setStateRoot(keccak256("escape"));
+        r.manager.setStateRoot(keccak256("escape"));
     }
 
     function test_RollupSetStateRoot_MidFlowReverts() public {
-        (uint256 rid, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s"));
-        _postBatch(rid, entries);
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
+        _postBatchAutoTransient(r, entries);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EEZ.RollupBatchActiveThisBlock.selector, rid));
-        r.setStateRoot(keccak256("escape"));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.RollupBatchActiveThisBlock.selector, uint64(r.id)));
+        r.manager.setStateRoot(keccak256("escape"));
     }
 
     function test_RollupTransferOwnership() public {
-        (, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         vm.prank(alice);
-        r.transferOwnership(bob);
-        assertEq(r.owner(), bob);
+        r.manager.transferOwnership(bob);
+        assertEq(r.manager.owner(), bob);
         vm.prank(bob);
-        r.setStateRoot(keccak256("bob's state"));
+        r.manager.setStateRoot(keccak256("bob's state"));
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
-        r.setStateRoot(keccak256("alice's state"));
+        r.manager.setStateRoot(keccak256("alice's state"));
     }
 
     function test_RollupSetVerificationKey() public {
-        (, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         bytes32 newVk = keccak256("new vk");
         vm.prank(alice);
-        r.updateVerificationKey(address(ps), newVk);
-        assertEq(r.verificationKey(address(ps)), newVk);
+        r.manager.updateVerificationKey(address(ps), newVk);
+        assertEq(r.manager.verificationKey(address(ps)), newVk);
     }
-
-    // NOTE: `test_SetRollupContract_Handoff` was dropped — the registry no longer exposes
-    // a `setRollupContract` handoff path. Once a manager is registered via `registerRollup`
-    // it owns that rollupId for the lifetime of the registry. A future replacement (force
-    // inbox / governance handoff) is tracked separately.
 
     // ──────────────────────────────────────────────
     //  Rolling-hash failure modes
     // ──────────────────────────────────────────────
 
     function test_RollingHashMismatch_Reverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (42));
-        bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(target),
-            value: 0,
-            data: cd,
-            sourceAddress: address(this),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s"), etherDelta: 0});
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
+
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
+        entries[0] = _shellEntry(rid, _oneDelta(rid, bytes32(0), keccak256("s"), 0));
         entries[0].proxyEntryHash = ah;
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = calls;
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].callCount = 1;
+        entries[0].l2ToL1Calls = _oneCall(_call(address(this), rid, address(target), 0, cd));
         entries[0].rollingHash = bytes32(uint256(0xdead)); // wrong!
-        _postBatchSingle(rid, entries, 0);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(EEZBase.RollingHashMismatch.selector);
         proxyAddr.call(cd);
     }
 
+    /// @notice Providing more top-level calls than the entry's `rollingHash` accounts for diverges
+    ///         the hash (every call folds CALL_BEGIN/END), surfacing as `RollingHashMismatch`. The
+    ///         old dedicated `UnconsumedL2ToL1Calls` error is gone — `_processNCalls` runs the WHOLE
+    ///         array and completeness is enforced structurally by the rolling hash.
     function test_UnconsumedCalls_Reverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (42));
-        bytes32 ah = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(target),
-            value: 0,
-            data: cd,
-            sourceAddress: address(this),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
+        calls[0] = _call(address(this), rid, address(target), 0, cd);
         calls[1] = calls[0];
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s"), etherDelta: 0});
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s"), 0);
+
+        // rollingHash accounts for ONE call; two are provided → divergence.
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, address(target), MAINNET_ROLLUP_ID, 0, cd);
+
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
+        entries[0] = _shellEntry(rid, deltas);
         entries[0].proxyEntryHash = ah;
-        entries[0].destinationRollupId = rid;
         entries[0].l2ToL1Calls = calls;
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].callCount = 1; // promise only one call but provide two
-        entries[0].rollingHash = _rollingHashSingleCall("");
-        _postBatchSingle(rid, entries, 0);
-        vm.expectRevert(EEZ.UnconsumedL2ToL1Calls.selector);
+        entries[0].rollingHash = _oneCallHash(deltas, ah, cch, true, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
+        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
         proxyAddr.call(cd);
     }
 
@@ -1002,95 +895,68 @@ contract EEZTest is Base {
     }
 
     function test_Event_BatchPosted() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(rid, bytes32(0), keccak256("s"));
+        entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
         vm.recordLogs();
-        _postBatch(rid, entries);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        bytes32 sel = EEZ.BatchPosted.selector;
-        bool found = false;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == sel) {
-                found = true;
-                break;
-            }
-        }
-        assertTrue(found);
+        _postBatchAutoTransient(r, entries);
+        assertTrue(_findLog(vm.getRecordedLogs(), EEZ.BatchPosted.selector));
     }
 
     function test_Event_StateUpdated_OnEscape() public {
-        (uint256 rid, Rollup r) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollupWithOwner(bytes32(0), alice);
         vm.prank(alice);
         vm.expectEmit(true, true, true, true);
-        emit EEZ.StateUpdated(rid, keccak256("escape"));
-        r.setStateRoot(keccak256("escape"));
+        emit EEZ.StateUpdated(uint64(r.id), keccak256("escape"));
+        r.manager.setStateRoot(keccak256("escape"));
     }
 
     // ──────────────────────────────────────────────
-    //  Top-level reverted-LookupCall fallback
+    //  Top-level reverting entries (success == false)
     // ──────────────────────────────────────────────
     //
-    // A reverting top-level cross-chain call isn't an `ExecutionEntry` — it's a
-    // `LookupCall { failed: true }`. When `_consumeAndExecute` finds no matching entry it
-    // delegates to `_tryRevertedTopLevelLookup`, which scans the transient table then the
-    // routed rollup's `lookupQueue` for a `failed` lookup matching `crossChainCallHash` with
-    // every state-root pin live, and reverts with the cached `returnData`. The entry cursor
-    // is never advanced — the lookup consumes no queue slot. See docs §D.3 / §F.4.
+    // A top-level cross-chain call that reverts is a normal `ExecutionEntry` with `success == false`:
+    // it runs, verifies its rolling hash, then reverts with the cached `returnData`, rolling back all
+    // state effects (including the cursor advance) so the caller's try/catch sees the revert and the
+    // queue is not consumed. (There is no separate reverted-lookup pool for state-changing calls; the
+    // read-only `StaticExecutionEntry` pool serves static reads via `staticCrossChainCall`.)
 
-    /// @notice Builds a top-level reverted `LookupCall` (no sub-calls, no pins).
-    function _revertedLookup(uint256 rid, bytes32 hash, bytes memory payload)
-        internal
-        view
-        returns (LookupCall memory lc)
-    {
-        lc.crossChainCallHash = hash;
-        lc.destinationRollupId = rid;
-        lc.returnData = payload;
-        lc.failed = true;
-        lc.l2ToL1Calls = new L2ToL1Call[](0);
-        lc.rollingHash = bytes32(0);
-        // A top-level lookup must pin its own destination (postBatch: destination ∈ pins). Pin the
-        // live root so `_stateRootsMatch` also passes at resolution.
-        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
-        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
-        lc.expectedStateRoots = pins;
-    }
-
-    /// @notice Deferred path: the reverted lookup sits in `verificationByRollup[rid].lookupQueue`
-    ///         and a top-level proxy call reverts with its cached returnData without advancing the cursor.
+    /// @notice Deferred path: the reverting entry sits in `verificationByRollup[rid].entryQueue`
+    ///         and a top-level proxy call reverts with its cached returnData; the cursor advance rolls
+    ///         back with the revert, so a second identical call reverts identically.
     function test_RevertedLookup_TopLevel_Deferred() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
         bytes memory payload = hex"deadbeef";
         // Hash exactly as `executeCrossChainCall` computes it: source = this test (it calls the proxy).
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = _revertedLookup(rid, h, payload);
-        // transientLookupCallCount = 0 → published to the per-rollup lookupQueue.
-        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _revertedEntry(rid, bytes32(0), h, payload);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0); // deferred — queued, consumed via the proxy
 
-        uint256 cursorBefore = rollups.executionQueueIndex(rid);
+        uint256 cursorBefore = rollups.entryQueueIndex(rid);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.executionQueueIndex(rid), cursorBefore, "reverted lookup must not advance the cursor");
+        assertEq(rollups.entryQueueIndex(rid), cursorBefore, "reverting entry rolls back the cursor advance");
 
-        // Content-addressed + repeatable: a second identical call reverts identically, still no advance.
+        // Repeatable: a second identical call reverts identically, still no advance.
         (ok, ret) = proxyAddr.call(cd);
         assertFalse(ok);
         assertEq(ret, payload);
-        assertEq(rollups.executionQueueIndex(rid), cursorBefore);
+        assertEq(rollups.entryQueueIndex(rid), cursorBefore);
     }
 
-    /// @notice Transient path: the reverted lookup lives in `_transientLookupCalls` and is hit by a
+    /// @notice Transient path: the reverting entry lives in `_transientEntries` and is hit by a
     ///         proxy call fired from inside the meta hook (the only window the transient table exists).
     function test_RevertedLookup_TopLevel_Transient() public {
-        (uint256 rid, Rollup rollup) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         MetaLookupCaller caller = new MetaLookupCaller(rollups);
@@ -1098,20 +964,16 @@ contract EEZTest is Base {
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
         bytes memory payload = hex"c0ffee";
         // The meta-hook caller is what calls through the proxy, so it's the hash's sourceAddress.
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(caller), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(caller), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
         caller.setProxyCall(proxyAddr, cd);
 
-        // One undrained transient entry (proxyEntryHash != 0 and != h) so the meta hook fires.
+        // One reverting transient entry whose `proxyEntryHash != 0` so the leading L2Tx run stops and
+        // the meta hook fires; the caller drives it via the proxy.
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _emptyImmediateEntry(rid);
-        entries[0].proxyEntryHash = keccak256("dummy-undrained");
+        entries[0] = _revertedEntry(rid, bytes32(0), h, payload);
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = _revertedLookup(rid, h, payload);
-
-        // transientExecutionEntryCount = 1, transientLookupCallCount = 1 → both stay in transient tables.
-        RollupHandle memory handle = RollupHandle({id: rid, manager: rollup});
-        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(handle, entries, lookups, 1, 1);
+        // immediateEntryCount = 1 → the entry stays in the transient table for the meta hook.
+        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(r, entries, _emptyStaticEntries(), 1, 0);
         caller.post(batch);
 
         assertTrue(caller.hookRan(), "meta hook did not run");
@@ -1119,171 +981,144 @@ contract EEZTest is Base {
         assertEq(caller.callReturnData(), payload);
     }
 
-    /// @notice Negative path: rollup verified this block but no entry and no lookup match → ExecutionNotFound.
+    /// @notice Negative path: rollup verified this block but no entry matches → ExecutionNotFound.
     function test_RevertedLookup_TopLevel_NoMatchReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
-        address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
-        // Verify the rollup this block, but post nothing to consume or look up.
-        _postBatchSingle(rid, _emptyEntries(), _emptyLookupCalls(), 0, 0);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+        // Verify the rollup this block, but post nothing to consume.
+        _postBatchOne(r, _emptyEntries(), _emptyStaticEntries(), 0, 0);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        bytes4 sel;
-        assembly {
-            sel := mload(add(ret, 32))
-        }
-        assertEq(sel, EEZBase.ExecutionNotFound.selector);
+        _assertRevertSelector(ret, EEZBase.ExecutionNotFound.selector);
     }
 
     // ──────────────────────────────────────────────
-    //  Reverted-LookupCall sub-execution (_executeRevertedTopLevelLookup)
+    //  Reverting-entry sub-execution
     // ──────────────────────────────────────────────
     //
-    // A `failed` LookupCall can carry a real sub-execution: `calls[]` that run for real (with
-    // `callCount` top-level iterations) and then get discarded by the terminal revert. Exercised
-    // here via the TOP-LEVEL fallback (`_tryRevertedTopLevelLookup`), which routes through
-    // `_executeRevertedTopLevelLookup` (nested lookups use `_executeRevertedNestedLookup` on the entry's table).
+    // A `success == false` entry can carry a real sub-execution: `l2ToL1Calls[]` that run for real
+    // and then get discarded by the terminal revert. The rolling hash is still verified BEFORE the
+    // revert, so the sub-calls genuinely run.
 
-    /// @notice Top-level reverted LookupCall whose sub-execution runs one real sub-call
-    ///         `subTarget.setValue(subValue)` (callCount = 1) then reverts `payload`.
-    function _revertedLookupWithSubcall(
-        uint256 rid,
-        bytes32 hash,
+    /// @notice Reverting entry whose execution runs one real sub-call `subTarget.setValue(subValue)`
+    ///         then reverts `payload`.
+    function _revertedEntryWithSubcall(
+        uint64 rid,
+        bytes32 proxyEntryHash,
         bytes memory payload,
         address subTarget,
         uint256 subValue
     )
         internal
         view
-        returns (LookupCall memory lc)
+        returns (ExecutionEntry memory e)
     {
-        L2ToL1Call[] memory subCalls = new L2ToL1Call[](1);
-        subCalls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: subTarget,
-            value: 0,
-            data: abi.encodeCall(TestTarget.setValue, (subValue)),
-            sourceAddress: address(this),
-            sourceRollupId: rid,
-            revertSpan: 0
-        });
-        lc.crossChainCallHash = hash;
-        lc.destinationRollupId = rid;
-        lc.returnData = payload;
-        lc.failed = true;
-        lc.l2ToL1Calls = subCalls;
-        lc.expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        lc.expectedLookups = new ExpectedLookup[](0);
-        lc.callCount = 1;
-        lc.rollingHash = _rollingHashSingleCall(""); // CALL_BEGIN(1) → CALL_END(1, true, "")
-        // Pin the destination (postBatch: destination ∈ pins) at its live root so it also matches.
-        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
-        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: _getRollupState(rid)});
-        lc.expectedStateRoots = pins;
+        bytes memory subCd = abi.encodeCall(TestTarget.setValue, (subValue));
+        StateUpdate[] memory deltas = _oneDelta(rid, _getRollupState(rid), keccak256("rev"), 0);
+
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, subTarget, MAINNET_ROLLUP_ID, 0, subCd);
+
+        e = _shellEntry(rid, deltas);
+        e.proxyEntryHash = proxyEntryHash;
+        e.l2ToL1Calls = _oneCall(_call(address(this), rid, subTarget, 0, subCd));
+        e.rollingHash = _oneCallHash(deltas, proxyEntryHash, cch, true, "");
+        e.success = false;
+        e.returnData = payload;
     }
 
-    /// @notice Happy path: the reverted lookup runs its sub-execution, then reverts with the
-    ///         cached `returnData`; the sub-call's state change is discarded by the revert and the
-    ///         queue is not advanced.
+    /// @notice Happy path: the reverting entry runs its sub-execution, then reverts with the cached
+    ///         `returnData`; the sub-call's state change is discarded by the revert and the queue is
+    ///         not advanced.
     function test_RevertedLookup_SubExecution_RunsAndReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
         bytes memory payload = hex"deadbeef";
 
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = _revertedLookupWithSubcall(rid, h, payload, address(target), 99);
-        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _revertedEntryWithSubcall(rid, h, payload, address(target), 99);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        assertEq(ret, payload, "must revert with the lookup's returnData");
+        assertEq(ret, payload, "must revert with the entry's returnData");
         assertEq(target.value(), 0, "sub-execution state must be discarded by the terminal revert");
-        assertEq(rollups.executionQueueIndex(rid), 0, "reverted lookup must not advance the queue");
+        assertEq(rollups.entryQueueIndex(rid), 0, "reverting entry rolls back the cursor advance");
     }
 
     /// @notice Proves the sub-execution actually RUNS the sub-calls: a wrong `rollingHash` makes the
     ///         post-execution check fire `RollingHashMismatch` (impossible if the calls were skipped).
     function test_RevertedLookup_SubExecution_WrongHashReverts() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        LookupCall memory lc = _revertedLookupWithSubcall(rid, h, hex"deadbeef", address(target), 99);
-        lc.rollingHash = keccak256("wrong"); // != the hash the real sub-execution produces
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = lc;
-        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+        ExecutionEntry memory e = _revertedEntryWithSubcall(rid, h, hex"deadbeef", address(target), 99);
+        e.rollingHash = keccak256("wrong"); // != the hash the real sub-execution produces
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = e;
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        bytes4 sel;
-        assembly {
-            sel := mload(add(ret, 32))
-        }
-        assertEq(
-            sel, EEZBase.RollingHashMismatch.selector, "the sub-execution must run the sub-calls and check the hash"
-        );
+        // The sub-execution must run the sub-calls and check the hash.
+        _assertRevertSelector(ret, EEZBase.RollingHashMismatch.selector);
     }
 
-    /// @notice State-root pins are part of the MATCH (full-scan): a lookup pinned to a wrong
-    ///         root is skipped, and with no other candidate the call ends `ExecutionNotFound`.
+    /// @notice State precondition is part of the MATCH: a reverting entry whose `currentState` no
+    ///         longer holds is skipped, and with no other candidate the call ends `ExecutionNotFound`.
     function test_RevertedLookup_StateRootPin_MismatchSkips() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0)); // live root is 0
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        LookupCall memory lc = _revertedLookup(rid, h, hex"deadbeef"); // plain reverted lookup
-        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
-        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: keccak256("wrong-root")}); // live root is 0
-        lc.expectedStateRoots = pins;
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = lc;
-        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _revertedEntry(rid, keccak256("wrong-root"), h, hex"deadbeef"); // stale currentState
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        bytes4 sel;
-        assembly {
-            sel := mload(add(ret, 32))
-        }
-        assertEq(sel, EEZBase.ExecutionNotFound.selector, "wrong root pin must skip the candidate");
+        // Stale currentState must skip the candidate.
+        _assertRevertSelector(ret, EEZBase.ExecutionNotFound.selector);
     }
 
-    /// @notice A lookup pinned to the LIVE state root matches and reverts with its cached returnData.
+    /// @notice An entry whose `currentState` equals the LIVE state root matches and reverts with its
+    ///         cached returnData.
     function test_RevertedLookup_StateRootPin_MatchResolves() public {
-        (uint256 rid,) = _makeRollupLocal(keccak256("live-root"), alice);
+        RollupHandle memory r = _makeRollup(keccak256("live-root"));
+        uint64 rid = uint64(r.id);
         address proxyAddr = rollups.createCrossChainProxy(address(target), rid);
 
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (7));
         bytes memory payload = hex"deadbeef";
-        bytes32 h = _computeActionHash(rid, address(target), 0, cd, address(this), MAINNET_ROLLUP_ID);
+        bytes32 h = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        LookupCall memory lc = _revertedLookup(rid, h, payload);
-        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
-        pins[0] = ExpectedStateRootPerRollup({rollupId: rid, stateRoot: keccak256("live-root")});
-        lc.expectedStateRoots = pins;
-        LookupCall[] memory lookups = new LookupCall[](1);
-        lookups[0] = lc;
-        _postBatchSingle(rid, _emptyEntries(), lookups, 0, 0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _revertedEntry(rid, keccak256("live-root"), h, payload);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
 
         (bool ok, bytes memory ret) = proxyAddr.call(cd);
         assertFalse(ok);
-        assertEq(ret, payload, "live root pin must match and revert with the cached returnData");
+        assertEq(ret, payload, "live currentState must match and revert with the cached returnData");
     }
 
-    /// @notice NESTED reverted lookup, entry-scoped: a reentrant call with no ExpectedL1ToL2Call
-    ///         match falls back to the entry's own `expectedLookups`, reverts with the cached
-    ///         revert, and the caller's try/catch absorbs it.
+    /// @notice REVERTED reentrant call: a reentrant (L1→L2) call resolved as a `success == false`
+    ///         `ExpectedL1ToL2Call` reverts; the caller's try/catch absorbs it. The reverting frame's
+    ///         folds roll back, so the host entry still completes.
     function test_NestedRevertedLookup_EntryScoped_RevertsAndCatches() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
 
         // Inner target: proxy on L1 for a Counter living on rollup `rid`.
         address counterL2 = address(0xC0117E6);
@@ -1292,118 +1127,84 @@ contract EEZTest is Base {
 
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
-        bytes32 innerHash = _computeActionHash(rid, counterL2, 0, innerCd, address(scap), MAINNET_ROLLUP_ID);
+        bytes32 innerHash = _ccHash(NOT_STATIC_CALL, address(scap), MAINNET_ROLLUP_ID, counterL2, rid, 0, innerCd);
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(scap),
-            value: 0,
-            data: outerCd,
-            sourceAddress: address(0xD00D),
-            sourceRollupId: rid,
-            revertSpan: 0
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+
+        bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(scap), MAINNET_ROLLUP_ID, 0, outerCd);
+        // The reentrant call fires after the top call's CALL_BEGIN.
+        bytes32 fireHash = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cchTop);
+
+        ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
+        reentrant[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: _expectedL1toL2Hash(innerHash, fireHash),
+            l2ToL1Calls: _emptyCalls(),
+            // REVERTED frame checks its mid-call hash == _rollingHash after NESTED_BEGIN (no sub-calls).
+            revertedOrStaticRollingHash: _hNestedBegin(fireHash, innerHash),
+            success: false,
+            returnData: bytes("inner reverts")
         });
 
-        ExpectedLookup[] memory lookups = new ExpectedLookup[](1);
-        lookups[0] = ExpectedLookup({
-            crossChainCallHash: innerHash,
-            destinationRollupId: rid,
-            returnData: bytes("inner reverts"),
-            failed: true,
-            l2ToL1CallNumber: 1,
-            lastL1ToL2CallConsumed: 0,
-            executingLookupIndex: 0,
-            l2ToL1Calls: new L2ToL1Call[](0),
-            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
-            callCount: 0,
-            rollingHash: bytes32(0)
-        });
-
-        // incrementProxy() returns nothing → CALL_END(1, true, "").
-        bytes32 h = _rollingHashSingleCall("");
-
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        // The reverted reentrant frame's folds roll back, so the host's hash is just the top call.
+        bytes32 h = _hCallEnd(fireHash, true, "");
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0); // immediate
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = calls;
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].expectedLookups = lookups;
-        entries[0].callCount = 1;
-        entries[0].returnData = "";
+        entries[0] = _shellEntry(rid, deltas); // immediate (`proxyEntryHash == 0`)
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(scap), 0, outerCd));
+        entries[0].expectedL1ToL2Calls = reentrant;
         entries[0].rollingHash = h;
 
-        _postBatch(rid, entries);
+        _postBatchAutoTransient(r, entries);
 
         assertEq(_getRollupState(rid), keccak256("s1"), "entry must complete");
         assertEq(scap.counter(), 1, "outer call must run");
-        assertTrue(scap.lastCallFailed(), "inner reentrant call must revert via the entry-scoped lookup");
+        assertTrue(scap.lastCallFailed(), "inner reentrant call must revert via the reverted reentrant entry");
         assertEq(scap.targetCounter(), 0, "inner call must not have executed");
     }
 
-    /// @notice The `executingLookupIndex` coordinate gates the nested match: a lookup stamped
-    ///         as fired inside a sub-execution (k != 0) must NOT resolve at entry level.
+    /// @notice The reentrant position key (`keccak(crossChainCallHash, _rollingHash)`) gates the match:
+    ///         a reentrant entry stamped at the wrong rolling-hash position never matches, so the call
+    ///         folds CALL_NOT_FOUND, the entry's rolling hash diverges, and the immediate entry is skipped.
     function test_NestedRevertedLookup_WrongExecutingLookupIndex_NoMatch() public {
-        (uint256 rid,) = _makeRollupLocal(bytes32(0), alice);
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
 
         address counterL2 = address(0xC0117E6);
         address counterProxy = rollups.createCrossChainProxy(counterL2, rid);
         SafeCounterAndProxy scap = new SafeCounterAndProxy(Counter(counterProxy));
 
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
-        bytes memory innerCd = abi.encodeCall(Counter.increment, ());
-        bytes32 innerHash = _computeActionHash(rid, counterL2, 0, innerCd, address(scap), MAINNET_ROLLUP_ID);
 
-        L2ToL1Call[] memory calls = new L2ToL1Call[](1);
-        calls[0] = L2ToL1Call({
-            isStatic: false,
-            targetAddress: address(scap),
-            value: 0,
-            data: outerCd,
-            sourceAddress: address(0xD00D),
-            sourceRollupId: rid,
-            revertSpan: 0
+        StateUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+
+        bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(scap), MAINNET_ROLLUP_ID, 0, outerCd);
+        bytes32 fireHash = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cchTop);
+
+        ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
+        reentrant[0] = ExpectedL1ToL2Call({
+            expectedL1toL2Hash: keccak256("wrong-position"), // never matches the fire-time key
+            l2ToL1Calls: _emptyCalls(),
+            revertedOrStaticRollingHash: bytes32(0),
+            success: false,
+            returnData: bytes("inner reverts")
         });
 
-        ExpectedLookup[] memory lookups = new ExpectedLookup[](1);
-        lookups[0] = ExpectedLookup({
-            crossChainCallHash: innerHash,
-            destinationRollupId: rid,
-            returnData: bytes("inner reverts"),
-            failed: true,
-            l2ToL1CallNumber: 1,
-            lastL1ToL2CallConsumed: 0,
-            executingLookupIndex: 1, // wrong context: claims it fires inside expectedLookups[0]'s sub-execution
-            l2ToL1Calls: new L2ToL1Call[](0),
-            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
-            callCount: 0,
-            rollingHash: bytes32(0)
-        });
-
-        bytes32 h = _rollingHashSingleCall("");
-
-        StateDelta[] memory deltas = new StateDelta[](1);
-        deltas[0] = StateDelta({rollupId: rid, currentState: bytes32(0), newState: keccak256("s1"), etherDelta: 0});
+        // The entry's hash is the would-be-success value (no CALL_NOT_FOUND fold); the actual run
+        // folds CALL_NOT_FOUND → divergence → skip.
+        bytes32 h = _hCallEnd(fireHash, true, "");
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0].stateDeltas = deltas;
-        entries[0].proxyEntryHash = bytes32(0);
-        entries[0].destinationRollupId = rid;
-        entries[0].l2ToL1Calls = calls;
-        entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-        entries[0].expectedLookups = lookups;
-        entries[0].callCount = 1;
-        entries[0].returnData = "";
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(scap), 0, outerCd));
+        entries[0].expectedL1ToL2Calls = reentrant;
         entries[0].rollingHash = h;
 
-        // No match at entry level → deferred no-match → the immediate entry is skipped.
+        // No reentrant match → CALL_NOT_FOUND → RollingHashMismatch → the immediate entry is skipped.
+        // A surviving no-op keeps the run from being 100% failed (AllImmediateL2TxsFailed).
+        entries = _withNoopImmediate(entries, rid, bytes32(0));
         vm.expectEmit(true, false, false, false);
-        emit EEZ.ImmediateEntrySkipped(0, "");
-        _postBatch(rid, entries);
+        emit EEZ.L2TxSkipped(0, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 2, 0);
         assertEq(_getRollupState(rid), bytes32(0), "entry must not commit");
     }
 }

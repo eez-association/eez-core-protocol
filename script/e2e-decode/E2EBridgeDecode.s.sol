@@ -2,19 +2,26 @@
 pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../../src/EEZ.sol";
+import {
+    EEZ,
+    ProofSystemBatchPerVerificationEntries,
+    ExpectedStateRootPerRollup,
+    RollupIdWithProofSystems
+} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {
-    ExecutionEntry,
-    StateDelta,
-    L2ToL1Call,
-    ExpectedL1ToL2Call,
-    LookupCall,
-    ExpectedLookup
-} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
+import {
+    crossChainCallHash,
+    noStaticEntries,
+    noNestedActions,
+    noCalls,
+    RollingHashBuilder
+} from "../e2e/shared/E2EHelpers.sol";
+
+uint64 constant MAINNET_ROLLUP_ID = 0;
 
 contract MockProofSystem is IProofSystem {
     function verify(bytes calldata, bytes32) external pure override returns (bool) {
@@ -27,9 +34,9 @@ contract BridgeBatcher {
     function execute(
         EEZ rollups,
         address proofSystem,
-        uint256 rollupId,
+        uint64 rollupId,
         ExecutionEntry[] calldata entries,
-        LookupCall[] calldata lookupCalls,
+        StaticExecutionEntry[] calldata staticEntries,
         Bridge bridge,
         address destination
     )
@@ -44,19 +51,21 @@ contract BridgeBatcher {
         uint64[] memory psIdx = new uint64[](1);
         psIdx[0] = 0;
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndex: psIdx});
+        rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
+            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
             entries: entries,
-            l1ToL2lookupCalls: lookupCalls,
-            transientExecutionEntryCount: 0,
-            transientLookupCallCount: 0,
+            staticEntries: staticEntries,
+            immediateEntryCount: 0,
+            immediateStaticEntryCount: 0,
             proofSystems: psList,
             rollupIdsWithProofSystems: rps,
             blobIndices: new uint256[](0),
             callData: "",
-            proofs: proofs
+            proofs: proofs,
+            blockNumber: 0,
+            bindMsgSenderInPublicInput: false
         });
         rollups.postAndVerifyBatch(batch);
         bridge.bridgeEther{value: msg.value}(rollupId, destination);
@@ -72,7 +81,7 @@ contract E2EBridgeDeploy is Script {
         vm.startBroadcast();
 
         MockProofSystem ps = new MockProofSystem();
-        EEZ rollups = new EEZ();
+        EEZ rollups = new EEZ(msg.sender);
 
         address[] memory psList = new address[](1);
         psList[0] = address(ps);
@@ -107,45 +116,37 @@ contract E2EBridgeExecute is Script {
         BridgeBatcher batcher = new BridgeBatcher();
 
         address destination = msg.sender;
-        uint256 L2_ROLLUP_ID = 1;
+        uint64 L2_ROLLUP_ID = 1;
 
-        bytes32 callHash = keccak256(
-            abi.encode(
-                L2_ROLLUP_ID, // targetRollupId
-                destination, // targetAddress (proxy.originalAddress)
-                uint256(1 ether), // value
-                bytes(""), // data
-                bridgeAddr, // sourceAddress
-                uint256(0) // sourceRollupId (MAINNET)
-            )
-        );
+        bytes32 callHash =
+            crossChainCallHash(false, bridgeAddr, MAINNET_ROLLUP_ID, destination, L2_ROLLUP_ID, 1 ether, bytes(""));
 
-        StateDelta[] memory stateDeltas = new StateDelta[](1);
-        stateDeltas[0] = StateDelta({
+        StateUpdate[] memory stateUpdates = new StateUpdate[](1);
+        stateUpdates[0] = StateUpdate({
             rollupId: L2_ROLLUP_ID,
             currentState: keccak256("l2-initial-state"),
             newState: keccak256("l2-state-after-bridge"),
             etherDelta: int256(1 ether)
         });
 
+        // No L1 top-level calls; rolling hash is just the entry-begin seed.
+        bytes32 rh = RollingHashBuilder.entryBegin(stateUpdates, callHash);
+
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateDeltas: stateDeltas,
+            stateUpdates: stateUpdates,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
-            l2ToL1Calls: new L2ToL1Call[](0),
-            expectedL1ToL2Calls: new ExpectedL1ToL2Call[](0),
-            expectedLookups: new ExpectedLookup[](0),
-            callCount: 0,
-            returnData: "",
-            rollingHash: bytes32(0)
+            l2ToL1Calls: noCalls(),
+            expectedL1ToL2Calls: noNestedActions(),
+            rollingHash: rh,
+            success: true,
+            returnData: ""
         });
-
-        LookupCall[] memory noLookups = new LookupCall[](0);
 
         batcher.execute{
             value: 1 ether
-        }(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noLookups, Bridge(bridgeAddr), destination);
+        }(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noStaticEntries(), Bridge(bridgeAddr), destination);
 
         console.log("done");
 

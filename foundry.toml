@@ -4,8 +4,12 @@ out = "out"
 libs = ["lib"]
 solc = "0.8.34"
 optimizer = true
-optimizer_runs = 200
+# runs=1 optimizes for code size: EEZ sits near the EIP-170 limit (24,576) and does not fit at runs=200.
+optimizer_runs = 1
 via_ir = true
+# Read access for file-based tools (BlobTools.s.sol), scoped to the DSL examples
+# folder only — input files (scenario .dsl / blob hex) must live there.
+fs_permissions = [{access = "read", path = "./script/blob/examples/"}]
 
 [profile.default.fmt]
 line_length = 120

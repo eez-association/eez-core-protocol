@@ -17,10 +17,9 @@ import {Vm} from "forge-std/Vm.sol";
 ///       decoder reports execution flow purely from emitted events. The events
 ///       it relies on are rich enough for almost all debugging use cases:
 ///       BatchPosted, RollupCreated, StateUpdated,
-///       L2ExecutionPerformed, ImmediateEntrySkipped, ExecutionConsumed,
-///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted, CallResult,
-///       L1ToL2CallConsumed (L1) / OutgoingCallConsumed (L2), RevertSpanExecuted,
-///       CrossChainProxyCreated,
+///       L2ExecutionPerformed, L2TxSkipped, ExecutionConsumed,
+///       L2TXExecuted, EntryExecuted, CrossChainCallExecuted (L1 + L2 kinds), CallResult,
+///       CallsReverted, CrossChainProxyCreated,
 ///       and the L2-only ExecutionTableLoaded / IncomingCrossChainCallExecuted.
 ///       For a full pre-execution dump of entries, decode the postAndVerifyBatch tx
 ///       input off-chain (e.g. with `cast calldata-decode`).
@@ -30,28 +29,34 @@ import {Vm} from "forge-std/Vm.sol";
 ///     --rpc-url <RPC> --sig "runBlock(uint256,address)" <BLOCK> <CONTRACT>
 contract DecodeExecutions is Script {
     // ── Event signatures (L1 + L2 share most of these) ──
+    // New flatten model: rollupIds are uint64; ImmediateEntrySkipped→L2TxSkipped;
+    // RevertSpanExecuted→CallsReverted; L2TXExecuted carries only the rollupId.
     bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
-    bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint256,address,bytes32)");
-    bytes32 constant SIG_STATE_UPDATED = keccak256("StateUpdated(uint256,bytes32)");
-    bytes32 constant SIG_L2_EXEC_PERFORMED = keccak256("L2ExecutionPerformed(uint256,bytes32)");
-    bytes32 constant SIG_IMMEDIATE_SKIPPED = keccak256("ImmediateEntrySkipped(uint256,bytes)");
-    bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint256,uint256)");
+    bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint64,address,bytes32)");
+    bytes32 constant SIG_STATE_UPDATED = keccak256("StateUpdated(uint64,bytes32)");
+    bytes32 constant SIG_L2_EXEC_PERFORMED = keccak256("L2ExecutionPerformed(uint64,bytes32)");
+    bytes32 constant SIG_IMMEDIATE_SKIPPED = keccak256("L2TxSkipped(uint256,bytes)");
+    bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint64,uint256)");
     bytes32 constant SIG_EXECUTION_CONSUMED_L2 = keccak256("ExecutionConsumed(bytes32,uint256)");
-    bytes32 constant SIG_L2TX_EXECUTED = keccak256("L2TXExecuted(uint256,uint256)");
+    bytes32 constant SIG_L2TX_EXECUTED = keccak256("L2TXExecuted(uint64)");
     bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
     bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED =
         keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256)");
+    // L2 kind: carries the observed callGas folded into the L2 outgoing hash.
+    bytes32 constant SIG_CROSSCHAIN_CALL_EXECUTED_L2 =
+        keccak256("CrossChainCallExecuted(bytes32,address,address,bytes,uint256,uint64)");
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");
-    bytes32 constant SIG_L1_TO_L2_CALL_CONSUMED = keccak256("L1ToL2CallConsumed(uint256,uint256,bytes32,uint256)");
-    bytes32 constant SIG_OUTGOING_CALL_CONSUMED = keccak256("OutgoingCallConsumed(uint256,uint256,bytes32,uint256)");
-    bytes32 constant SIG_REVERT_SPAN = keccak256("RevertSpanExecuted(uint256,uint256,uint256)");
-    bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint256)");
-    // L2-only:
+    bytes32 constant SIG_REVERT_SPAN = keccak256("CallsReverted(uint256,uint256,uint256)");
+    bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint64)");
+    // L2-only: new ExecutionEntry tuple (flatten model; copied verbatim from Verify.s.sol):
+    //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
+    //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)
+    //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(address,uint256,bytes,address,uint256,uint256)[],(bytes32,uint256,bytes)[],uint256,bytes,bytes32)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
-        keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint256)");
+        keccak256("IncomingCrossChainCallExecuted(bytes32,address,uint256,bytes,address,uint64)");
 
     // ──────────────────── Public entry points ────────────────────
 
@@ -133,12 +138,10 @@ contract DecodeExecutions is Script {
             _printEntryExecuted(topics, data, p);
         } else if (sig == SIG_CROSSCHAIN_CALL_EXECUTED) {
             _printCrossChainCallExecuted(topics, data, p);
+        } else if (sig == SIG_CROSSCHAIN_CALL_EXECUTED_L2) {
+            _printCrossChainCallExecutedL2(topics, data, p);
         } else if (sig == SIG_CALL_RESULT) {
             _printCallResult(topics, data, p);
-        } else if (sig == SIG_L1_TO_L2_CALL_CONSUMED) {
-            _printNestedCallConsumed(topics, data, p, "L1ToL2CallConsumed");
-        } else if (sig == SIG_OUTGOING_CALL_CONSUMED) {
-            _printNestedCallConsumed(topics, data, p, "OutgoingCallConsumed");
         } else if (sig == SIG_REVERT_SPAN) {
             _printRevertSpan(topics, data, p);
         } else if (sig == SIG_PROXY_CREATED) {
@@ -200,18 +203,16 @@ contract DecodeExecutions is Script {
     }
 
     function _printImmediateSkipped(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // ImmediateEntrySkipped(uint256 indexed transientIdx, bytes revertData)
+        // L2TxSkipped(uint256 indexed transientIdx, bytes revertData)
         uint256 idx = uint256(topics[1]);
         bytes memory revertData = abi.decode(data, (bytes));
         console.log(
-            string.concat(
-                p, "ImmediateEntrySkipped(idx=", vm.toString(idx), ", revertData=", _shortBytes(revertData), ")"
-            )
+            string.concat(p, "L2TxSkipped(idx=", vm.toString(idx), ", revertData=", _shortBytes(revertData), ")")
         );
     }
 
     function _printExecutionConsumedL1(bytes32[] memory topics, string memory p) internal pure {
-        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed executionQueueIndex)
+        // ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed rollupId, uint256 indexed entryQueueIndex)
         bytes32 cchash = topics[1];
         uint256 rollupId = uint256(topics[2]);
         uint256 cursor = uint256(topics[3]);
@@ -230,7 +231,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printExecutionConsumedL2(bytes32[] memory topics, string memory p) internal pure {
-        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed executionQueueIndex)
+        // L2 variant: ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryQueueIndex)
         bytes32 cchash = topics[1];
         uint256 entryIndex = uint256(topics[2]);
         console.log(
@@ -241,12 +242,9 @@ contract DecodeExecutions is Script {
     }
 
     function _printL2TXExecuted(bytes32[] memory topics, string memory p) internal pure {
-        // L2TXExecuted(uint256 indexed rollupId, uint256 indexed executionQueueIndex)
+        // L2TXExecuted(uint64 indexed rollupId) — cursor no longer emitted in the flatten model.
         uint256 rollupId = uint256(topics[1]);
-        uint256 cursor = uint256(topics[2]);
-        console.log(
-            string.concat(p, "L2TXExecuted(rollup=", vm.toString(rollupId), ", cursor=", vm.toString(cursor), ")")
-        );
+        console.log(string.concat(p, "L2TXExecuted(rollup=", vm.toString(rollupId), ")"));
     }
 
     function _printEntryExecuted(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
@@ -294,6 +292,33 @@ contract DecodeExecutions is Script {
         );
     }
 
+    function _printCrossChainCallExecutedL2(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
+        // CrossChainCallExecuted(bytes32 indexed cchash, address indexed proxy, address sourceAddress,
+        //                        bytes callData, uint256 value, uint64 callGas)
+        bytes32 cchash = topics[1];
+        address proxy = address(uint160(uint256(topics[2])));
+        (address sourceAddress, bytes memory callData, uint256 value, uint64 callGas) =
+            abi.decode(data, (address, bytes, uint256, uint64));
+        console.log(
+            string.concat(
+                p,
+                "CrossChainCallExecuted(hash=",
+                _shortHash(cchash),
+                ", proxy=",
+                _shortAddr(proxy),
+                ", src=",
+                _shortAddr(sourceAddress),
+                ", value=",
+                vm.toString(value),
+                ", callGas=",
+                vm.toString(callGas),
+                ", call=",
+                _selectorName(callData),
+                ")"
+            )
+        );
+    }
+
     function _printCallResult(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
         // CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData)
         uint256 entryIndex = uint256(topics[1]);
@@ -315,40 +340,14 @@ contract DecodeExecutions is Script {
         );
     }
 
-    function _printNestedCallConsumed(bytes32[] memory topics, bytes memory data, string memory p, string memory name)
-        internal
-        pure
-    {
-        // L1: L1ToL2CallConsumed(uint256 indexed entryIndex, uint256 indexed l1ToL2CallNumber, bytes32 cchash, uint256 callCount)
-        // L2: OutgoingCallConsumed(uint256 indexed entryIndex, uint256 indexed nestedNumber, bytes32 cchash, uint256 callCount)
-        uint256 entryIndex = uint256(topics[1]);
-        uint256 nestedNumber = uint256(topics[2]);
-        (bytes32 cchash, uint256 callCount) = abi.decode(data, (bytes32, uint256));
-        console.log(
-            string.concat(
-                p,
-                name,
-                "(entry=",
-                vm.toString(entryIndex),
-                ", nested#=",
-                vm.toString(nestedNumber),
-                ", hash=",
-                _shortHash(cchash),
-                ", callCount=",
-                vm.toString(callCount),
-                ")"
-            )
-        );
-    }
-
     function _printRevertSpan(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // RevertSpanExecuted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 span)
+        // CallsReverted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 nCalls)
         uint256 entryIndex = uint256(topics[1]);
         (uint256 startCallNumber, uint256 span) = abi.decode(data, (uint256, uint256));
         console.log(
             string.concat(
                 p,
-                "RevertSpanExecuted(entry=",
+                "CallsReverted(entry=",
                 vm.toString(entryIndex),
                 ", start=",
                 vm.toString(startCallNumber),
@@ -429,8 +428,6 @@ contract DecodeExecutions is Script {
                 callsExec++;
                 (bool success,) = abi.decode(logs[i].data, (bool, bytes));
                 if (!success) callsFailed++;
-            } else if (sig == SIG_L1_TO_L2_CALL_CONSUMED || sig == SIG_OUTGOING_CALL_CONSUMED) {
-                nested++;
             } else if (sig == SIG_REVERT_SPAN) {
                 reverts++;
             } else if (sig == SIG_L2TX_EXECUTED) {
@@ -506,7 +503,9 @@ contract DecodeExecutions is Script {
         if (sel == bytes4(keccak256("executeCrossChainCall(address,bytes)"))) {
             return "executeCrossChainCall(address,bytes)";
         }
-        if (sel == bytes4(keccak256("staticCallLookup(address,bytes)"))) return "staticCallLookup(address,bytes)";
+        if (sel == bytes4(keccak256("staticCrossChainCall(address,bytes)"))) {
+            return "staticCrossChainCall(address,bytes)";
+        }
         // Fall back to raw 4-byte selector
         return vm.toString(abi.encodePacked(sel));
     }

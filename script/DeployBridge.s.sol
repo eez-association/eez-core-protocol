@@ -69,9 +69,9 @@ contract BridgeDeployL1 is Script {
 
 /// @title BridgeDeployL2  - same deterministic address, no setCanonicalBridgeAddress needed
 /// @dev forge script script/DeployBridge.s.sol:BridgeDeployL2 \
-///   --rpc-url $L2_RPC --broadcast --private-key $PK --sig "run(address,uint256,bytes32)" $MANAGER $ROLLUP_ID $SALT
+///   --rpc-url $L2_RPC --broadcast --private-key $PK --sig "run(address,uint64,bytes32)" $MANAGER $ROLLUP_ID $SALT
 contract BridgeDeployL2 is Script {
-    function run(address managerL2, uint256 rollupId, bytes32 salt) external {
+    function run(address managerL2, uint64 rollupId, bytes32 salt) external {
         vm.startBroadcast();
         address bridge = _deployBridge(salt);
         Bridge(bridge).initialize(managerL2, rollupId, msg.sender);

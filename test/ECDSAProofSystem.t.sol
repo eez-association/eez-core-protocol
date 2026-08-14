@@ -5,8 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {Base} from "./Base.t.sol";
 import {ECDSAProofSystem} from "../src/proofSystems/ECDSAProofSystem.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
-import {ExecutionEntry, LookupCall} from "../src/interfaces/IEEZ.sol";
+import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
+import {ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
 contract ECDSAProofSystemTest is Test {
     ECDSAProofSystem verifier;
@@ -25,27 +25,27 @@ contract ECDSAProofSystemTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function test_verify_validSignature() public view {
+    function test_Verify_ValidSignature() public view {
         bytes32 message = keccak256("test message");
         bytes memory proof = _sign(SIGNER_PK, message);
         assertTrue(verifier.verify(proof, message));
     }
 
-    function test_verify_wrongSigner() public view {
+    function test_Verify_WrongSigner() public view {
         bytes32 message = keccak256("test message");
         uint256 wrongPk = 0xBAD;
         bytes memory proof = _sign(wrongPk, message);
         assertFalse(verifier.verify(proof, message));
     }
 
-    function test_setSigner_byOwner() public {
+    function test_SetSigner_ByOwner() public {
         address newSigner = address(0x1234);
         vm.prank(owner);
         verifier.setSigner(newSigner);
         assertEq(verifier.signer(), newSigner);
     }
 
-    function test_setSigner_byNonOwner_reverts() public {
+    function test_SetSigner_ByNonOwnerReverts() public {
         address nonOwner = address(0xDEAD);
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
@@ -77,7 +77,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
     ///      manager returns an empty `customData` blob, folded into the shared public input.
     function _computePublicInputsHash(
         ExecutionEntry[] memory entries,
-        LookupCall[] memory lookupCalls,
+        StaticExecutionEntry[] memory staticEntries,
         uint256 rid,
         bytes32 vk
     )
@@ -89,20 +89,23 @@ contract ECDSAProofSystemIntegrationTest is Base {
         for (uint256 i = 0; i < entries.length; i++) {
             entryHashes[i] = keccak256(abi.encode(entries[i]));
         }
-        bytes32[] memory lookupCallHashes = new bytes32[](lookupCalls.length);
-        for (uint256 i = 0; i < lookupCalls.length; i++) {
-            lookupCallHashes[i] = keccak256(abi.encode(lookupCalls[i]));
+        bytes32[] memory staticEntryHashes = new bytes32[](staticEntries.length);
+        for (uint256 i = 0; i < staticEntries.length; i++) {
+            staticEntryHashes[i] = keccak256(abi.encode(staticEntries[i]));
         }
         bytes32[] memory blobHashes = new bytes32[](0);
 
-        bytes32 customDataAcc = keccak256(abi.encode(bytes32(0), rid, bytes("")));
+        // Mirror `_verifyProofSystemBatch`: per-rollup customData hashed as an array.
+        bytes32[] memory customDataHashes = new bytes32[](1);
+        customDataHashes[0] = keccak256(abi.encode(uint64(rid), bytes("")));
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
                 abi.encode(entryHashes),
-                abi.encode(lookupCallHashes),
+                abi.encode(staticEntryHashes),
                 abi.encode(blobHashes),
                 keccak256(""),
-                customDataAcc
+                abi.encode(customDataHashes),
+                address(0) // batches here are not submitter-bound (`bindMsgSenderInPublicInput = false`)
             )
         );
 
@@ -120,6 +123,8 @@ contract ECDSAProofSystemIntegrationTest is Base {
         return _makeRollupCustom(initialState, psList, vks, 1, defaultOwner);
     }
 
+    /// @notice Single-batch wrapper over `Base._raw` swapping the default `ps` for the ECDSA
+    ///         `verifier` and its signed `proof`; the one entry is immediate.
     function _buildECDSABatch(RollupHandle memory r, ExecutionEntry[] memory entries, bytes memory proof)
         internal
         view
@@ -129,27 +134,10 @@ contract ECDSAProofSystemIntegrationTest is Base {
         psList[0] = address(verifier);
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = proof;
-
-        uint64[] memory psIdx = new uint64[](1);
-        psIdx[0] = 0;
-        RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: r.id, proofSystemIndex: psIdx});
-
-        batch = ProofSystemBatchPerVerificationEntries({
-            blockNumber: 0,
-            entries: entries,
-            l1ToL2lookupCalls: _emptyLookupCalls(),
-            transientExecutionEntryCount: 1,
-            transientLookupCallCount: 0,
-            proofSystems: psList,
-            rollupIdsWithProofSystems: rps,
-            blobIndices: new uint256[](0),
-            callData: "",
-            proofs: proofs
-        });
+        batch = _raw(entries, _emptyStaticEntries(), psList, proofs, _rpsOne(r.id, 1), 1, 0);
     }
 
-    function test_postAndVerifyBatch_withECDSAVerifier() public {
+    function test_PostAndVerifyBatch_WithECDSAVerifier() public {
         bytes32 initialState = keccak256("initial");
         bytes32 newState = keccak256("new");
         bytes32 vk = keccak256("vk");
@@ -159,7 +147,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, initialState, newState);
 
-        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyLookupCalls(), r.id, vk);
+        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(SIGNER_PK, publicInputsHash);
 
         rollups.postAndVerifyBatch(_buildECDSABatch(r, entries, proof));
@@ -167,7 +155,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         assertEq(_getRollupState(r.id), newState);
     }
 
-    function test_postAndVerifyBatch_withWrongSigner_reverts() public {
+    function test_PostAndVerifyBatch_WrongSignerReverts() public {
         bytes32 initialState = keccak256("initial");
         bytes32 newState = keccak256("new");
         bytes32 vk = keccak256("vk");
@@ -177,7 +165,7 @@ contract ECDSAProofSystemIntegrationTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, initialState, newState);
 
-        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyLookupCalls(), r.id, vk);
+        bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(0xBAD, publicInputsHash);
 
         ProofSystemBatchPerVerificationEntries memory batch = _buildECDSABatch(r, entries, proof);

@@ -5,7 +5,7 @@ import {IEEZ} from "../interfaces/IEEZ.sol";
 
 /// @title CrossChainProxy
 /// @notice Proxy contract for cross-chain addresses, deployed via CREATE2
-/// @dev Stores the EEZ manager address, original address, and original rollup ID as immutables.
+/// @dev Stores the EEZ manager address as an immutable.
 ///      Uses the OZ TransparentProxy pattern: the EEZ manager (admin) calling executeOnBehalf
 ///      gets the direct forwarding behavior; any other caller hitting executeOnBehalf
 ///      is routed through the cross-chain execution path via _fallback().
@@ -13,23 +13,25 @@ contract CrossChainProxy {
     /// @notice The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     address internal immutable EEZ;
 
-    /// @notice The original address this proxy represents
-    address internal immutable ORIGINAL_ADDRESS;
-
-    /// @notice The original rollup ID
-    uint256 internal immutable ORIGINAL_ROLLUP_ID;
-
     /// @dev Dummy transient variable used to detect STATICCALL context.
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
     uint256 transient _staticDetector;
 
+    /// @dev Gas for the `staticCheck` probe self-call. In a static context the tstore is an
+    ///      exceptional halt that consumes everything forwarded, so the probe must be capped;
+    ///      the mutable path uses ~300 gas.
+    uint256 private constant STATIC_CHECK_GAS = 1_000;
+
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
-    /// @param _originalAddress The original address this proxy represents
-    /// @param _originalRollupId The original rollup ID
-    constructor(address _eez, address _originalAddress, uint256 _originalRollupId) {
+    constructor(address _eez) {
         EEZ = _eez;
-        ORIGINAL_ADDRESS = _originalAddress;
-        ORIGINAL_ROLLUP_ID = _originalRollupId;
+
+        // Best-effort sweep of ether sent here before deployment (otherwise stuck —
+        // the proxy only forwards msg.value); a failed transfer never blocks creation.
+        uint256 predeployedEther = address(this).balance;
+        if (predeployedEther != 0) {
+            IEEZ(_eez).RECOVERY_ADDRESS().call{value: predeployedEther}("");
+        }
     }
 
     /// @notice Fallback function that forwards all calls to the manager contract
@@ -43,10 +45,13 @@ contract CrossChainProxy {
     ///      When called by anyone else, routes through _fallback() (cross-chain path),
     ///      similar to OZ's TransparentProxy admin pattern.
     /// @param destination The address to call
+    /// @param callGas Gas limit for the destination call; 0 forwards all remaining gas
     /// @param data The calldata
-    function executeOnBehalf(address destination, bytes calldata data) external payable {
+    function executeOnBehalf(address destination, uint64 callGas, bytes calldata data) external payable {
         if (msg.sender == EEZ) {
-            (bool success, bytes memory result) = destination.call{value: msg.value}(data);
+            (bool success, bytes memory result) = callGas == 0
+                ? destination.call{value: msg.value}(data)  // Forward all remaining gas
+                : destination.call{value: msg.value, gas: callGas}(data); // Forward callGas
 
             assembly {
                 switch success
@@ -73,7 +78,7 @@ contract CrossChainProxy {
     ///      Uses assembly return/revert which terminates the entire call context.
     ///
     ///      Static context detection: a self-call to staticCheck() attempts a transient store.
-    ///      If it reverts we're in a STATICCALL — route to staticCallLookup (view) instead.
+    ///      If it reverts we're in a STATICCALL — route to staticCrossChainCall (view) instead.
     ///
     ///      Result decoding:
     ///      The low-level `.call()` returns ABI-encoded return data. Since `executeCrossChainCall`
@@ -84,12 +89,12 @@ contract CrossChainProxy {
     function _fallback() internal {
         // Detect STATICCALL context: tstore reverts in static context, tload does not.
         // A self-call to staticCheck() isolates the tstore so we can catch the revert.
-        (bool success,) = address(this).call(abi.encodeCall(this.staticCheck, ()));
+        (bool success,) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeCall(this.staticCheck, ()));
         bytes memory result;
 
         if (!success) {
             // Static context — look up pre-computed result via view function
-            (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCallLookup, (msg.sender, msg.data)));
+            (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCrossChainCall, (msg.sender, msg.data)));
         } else {
             // Normal context — execute cross-chain call
             (success, result) =

@@ -24,7 +24,7 @@ contract RollupTest is Test {
     address internal alice = makeAddr("alice");
 
     /// @dev Stand-in for `EEZ.setStateRoot` so the escape-hatch path resolves.
-    function setStateRoot(uint256, bytes32 newStateRoot) external {
+    function setStateRoot(uint64, bytes32 newStateRoot) external {
         lastStateRoot = newStateRoot;
     }
 
