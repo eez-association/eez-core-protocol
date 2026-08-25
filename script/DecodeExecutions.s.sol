@@ -48,12 +48,13 @@ contract DecodeExecutions is Script {
     bytes32 constant SIG_CALL_RESULT = keccak256("CallResult(uint256,uint256,bool,bytes)");
     bytes32 constant SIG_REVERT_SPAN = keccak256("CallsReverted(uint256,uint256,uint256)");
     bytes32 constant SIG_PROXY_CREATED = keccak256("CrossChainProxyCreated(address,address,uint64)");
-    // L2-only: new ExecutionEntry tuple (flatten model; copied verbatim from Verify.s.sol):
+    // L2-only: ExecutionEntry + StaticExecutionEntry tuples (flatten model; copied verbatim from Verify.s.sol):
     //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
     //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)
     //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
+    //   StaticExecutionEntry           = (bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
         keccak256("IncomingCrossChainCallExecuted(bytes32,bool,address,uint64,address,uint256,uint64,bytes)");

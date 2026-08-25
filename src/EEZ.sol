@@ -31,7 +31,8 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///      and do not treat its current behavior as the canonical specification.
 /// @dev An execution entry combines a proven state transition for its rollups (`stateUpdates`)
 ///      with a pre-computed L1 execution: the cross-chain calls to run and the expected results
-///      (rolling hash, return data) the live execution must match the precomputatino, otherwise the whole execution and therefore state update will revert.
+///      (rolling hash, return data). The live execution must match the precomputation, otherwise
+///      the whole execution — and with it the state update — reverts.
 ///      Execution entries are posted via `postAndVerifyBatch(batch)`,
 ///      attested by ≥ threshold proof systems per rollup. Atomic verification: if any single
 ///      proof fails, the whole batch reverts.
@@ -88,7 +89,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // entries don't need it: theirs are read from `_transientEntries` / the per-rollup queue.
 
     /// @notice The executing entry's `stateUpdates` rollup ids — the only rollups whose proxies the
-    ///         entry might use ( it can execute or recieve cross-chain calls). 
+    ///         entry may use (to execute or receive cross-chain calls).
     ///         Filled when execution starts, `delete`d when it ends, so it also
     ///         answers `_insideExecution()` (non-empty ⇔ an entry is executing). Plain storage
     ///         because Solidity has no `transient` arrays; on a revert the pushes roll back with
@@ -517,7 +518,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
 
         // Per entry: `stateUpdates` (≥1, strictly increasing, all ∈ batch), `destinationRollupId` ∈ deltas,
         // and every call SOURCE ∈ deltas. Sources are fail-fast here; reentrant TARGETS carry no rollup
-        // field, so they stay a RUNTIME check (`_isRollupAllowed`) — together they replace the old static walk.
+        // field, so they stay a RUNTIME check (`_isRollupAllowed`).
         for (uint256 i = 0; i < batch.entries.length; i++) {
             ExecutionEntry calldata entry = batch.entries[i];
             StateUpdate[] calldata deltas = entry.stateUpdates;

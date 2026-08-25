@@ -72,9 +72,6 @@ abstract contract EEZBase is IEEZ {
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
 
-    // Sub-frame pointers are NOT shared here: L1 no longer needs them (it passes
-    // the active call array to `_processNCalls` by `memory`), so they live in `EEZL2` only.
-
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────
@@ -344,7 +341,8 @@ abstract contract EEZBase is IEEZ {
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
     ///         `_rollingHash` because static sub-calls are verified against
     ///         `StaticExecutionEntry.rollingHash`, a separate per-static-entry accumulator.
-    ///          Is much less constrained since static calls do not have state race conditions
+    /// @dev The schema is untagged — the surrounding static-entry key already pins the
+    ///      entry/call context that the tagged events disambiguate at entry level.
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal
         pure

@@ -268,6 +268,15 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
 `immediateEntryCount`); the remainder past it is published to the per-rollup
 `staticEntryQueue`s regardless of whether the meta hook fired.
 
+The static prefix is a companion of the batch's META-HOOK entries, not of the immediate
+prefix as a whole: it is loaded only when the meta hook fires, i.e. when the immediate prefix
+contains at least one non-L2Tx entry. If the whole immediate prefix is L2Txs, the hook never
+runs and a non-zero `immediateStaticEntryCount` silently drops the leading static entries —
+they are neither loaded transiently nor published to the queues (`_saveRemainderEntries`
+starts past them). Composers whose immediate prefix is pure L2Txs must set
+`immediateStaticEntryCount = 0` so the static entries flow to the persistent
+`staticEntryQueue`s (which are not block-gated).
+
 ---
 
 ## 7. L1 / L2 differences
@@ -321,4 +330,5 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
   every sub-call source ∈ pins; whole static entries folded into `publicInputsHash`;
   `immediateStaticEntryCount ≤ staticEntries.length`, and a non-zero count requires a
   non-zero `immediateEntryCount` (the transient static pool is only reachable while
-  transient entries are mid-flight).
+  transient entries are mid-flight). Note the effective requirement is stronger: the pool
+  loads only if the meta hook fires (≥1 non-L2Tx immediate entry) — see §6.

@@ -25,8 +25,8 @@ struct ExpectedStateRootPerRollup {
 ///         (blobs + `callData`) against the proof systems approved by each participating rollup,
 ///         plus the execution/static entries to run or queue once verified.
 /// @dev `rollupIdsWithProofSystems` and `proofSystems` are both strictly increasing (sorted, deduped,
-///      rejects address(0)); together with the once-per-block-per-rollup invariant this stops a batch
-///      from verifying a rollup twice. Each rollup's `proofSystemIndexes[]` is strictly increasing in
+///      rejects address(0)), so one batch can never verify the same rollup or proof system twice.
+///      Each rollup's `proofSystemIndexes[]` is strictly increasing in
 ///      `[0, proofSystems.length)` and must meet that rollup's threshold (checked by its rollup contract).
 /// @dev `immediateEntryCount` / `immediateStaticEntryCount` are UNPROVEN dispatch params — not folded
 ///      into the public input, so the immediate/persistent split can be re-tuned without re-proving.
@@ -36,7 +36,7 @@ struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries; // execution entries: immediate entries are executed in this call, remainder are saved in storage
     StaticExecutionEntry[] staticEntries; // top-level static entries
     uint256 immediateEntryCount; // number of leading `entries` executed this tx (immediate L2Txs + meta-hook entries, not queued)
-    uint256 immediateStaticEntryCount; // number of leading `staticEntries` resolvable this tx via the meta hook; remainder saved to storage
+    uint256 immediateStaticEntryCount; // number of leading `staticEntries` resolvable this tx via the meta hook; remainder saved to storage. Only loaded when the meta hook fires (≥1 non-L2Tx entry in the immediate prefix) — with a pure-L2Tx immediate prefix the leading static entries are dropped, so set 0 there
     address[] proofSystems; // proof systems attesting this batch; strictly increasing, no address(0)
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // participating rollups + their accepted proof-system subsets; strictly increasing by rollupId
     uint256[] blobIndices; // indices of the tx's EIP-4844 blobs this batch consumes
@@ -137,7 +137,7 @@ struct ExecutionEntry {
 
 /// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via
 ///         `staticCrossChainCall` OUTSIDE any execution, from the pool (`_transientStaticEntries` /
-///         per-rollup `staticEntryQueue`). Every top-level STATICCALL resolves here 
+///         per-rollup `staticEntryQueue`). Every top-level STATICCALL resolves here.
 /// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
 ///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` + `destinationRollupId` + all
 ///      `expectedStateRoots` pins live (full scan). Used proxies must already be deployed.

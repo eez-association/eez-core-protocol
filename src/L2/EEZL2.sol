@@ -94,8 +94,9 @@ contract EEZL2 is EEZBase {
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
 
-    /// @notice Emitted when execution entries are loaded into the execution table
-    event ExecutionTableLoaded(ExecutionEntry[] entries);
+    /// @notice Emitted when an execution table is loaded — carries both the execution entries and
+    ///         the top-level static entries of the load
+    event ExecutionTableLoaded(ExecutionEntry[] entries, StaticExecutionEntry[] staticEntries);
 
     /// @notice Emitted when an execution entry is consumed
     event ExecutionConsumed(bytes32 indexed crossChainCallHash, uint256 indexed entryIndex);
@@ -192,7 +193,7 @@ contract EEZL2 is EEZBase {
             staticEntries.push(_staticEntries[i]);
         }
         lastLoadBlock = block.number;
-        emit ExecutionTableLoaded(_entries);
+        emit ExecutionTableLoaded(_entries, _staticEntries);
     }
 
     // ──────────────────────────────────────────────
