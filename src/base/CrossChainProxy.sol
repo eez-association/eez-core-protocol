@@ -25,12 +25,19 @@ contract CrossChainProxy {
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     constructor(address _eez) {
         EEZ = _eez;
+    }
 
-        // Best-effort sweep of ether sent here before deployment (otherwise stuck —
-        // the proxy only forwards msg.value); a failed transfer never blocks creation.
-        uint256 predeployedEther = address(this).balance;
-        if (predeployedEther != 0) {
-            IEEZ(_eez).RECOVERY_ADDRESS().call{value: predeployedEther}("");
+    /// @notice Best-effort recovery of ETH sent to a deterministic proxy address
+    ///         before the clone was deployed.
+    /// @dev Clone construction does not execute this implementation's constructor,
+    ///      so the manager invokes this immediately after clone deployment when the
+    ///      predicted address already has a balance.
+    function sweepPredeployedEther() external {
+        if (msg.sender != EEZ) {
+            _fallback();
+        } else {
+            (bool recovered,) = IEEZ(EEZ).RECOVERY_ADDRESS().call{value: address(this).balance}("");
+            recovered; // Best effort: recovery failure must not block clone creation.
         }
     }
 

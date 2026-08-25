@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IEEZ, ProxyInfo, StateUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 
 /// @title EEZBase
 /// @notice Direction-neutral shared base for the L1 (`EEZ`) and L2 (`EEZL2`) cross-chain managers.
@@ -33,6 +34,15 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
 ///          L2: `EntryExecuted`, `CallResult`, …).
 abstract contract EEZBase is IEEZ {
+    /// @notice Shared implementation used by every deterministic CrossChainProxy clone.
+    /// @dev The implementation embeds this manager as an immutable, while delegatecall
+    ///      preserves each clone's address, balance, transient storage and caller identity.
+    address public immutable CROSS_CHAIN_PROXY_IMPLEMENTATION;
+
+    constructor() {
+        CROSS_CHAIN_PROXY_IMPLEMENTATION = address(new CrossChainProxy(address(this)));
+    }
+
     // ──────────────────────────────────────────────
     //  Rolling-hash tag constants
     // ──────────────────────────────────────────────
@@ -157,31 +167,39 @@ abstract contract EEZBase is IEEZ {
         return _createCrossChainProxyInternal(originalAddress, originalRollupId);
     }
 
-    /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint64 originalRollupId)
+    /// @notice Deploys a minimal CrossChainProxy clone via CREATE2 and registers it as authorized
+    function _createCrossChainProxyInternal(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         internal
         returns (address proxy)
     {
         // A proxy stands in for a REMOTE address — never one on this manager's own network.
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this)));
+        proxy = Clones.cloneDeterministic(CROSS_CHAIN_PROXY_IMPLEMENTATION, salt);
         authorizedProxies[proxy] = ProxyInfo(true, originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
+
+        // Preserve the old full-contract constructor's recovery behavior. A failed
+        // recovery transfer remains best-effort and never blocks proxy creation.
+        if (proxy.balance != 0) CrossChainProxy(payable(proxy)).sweepPredeployedEther();
     }
 
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
-    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
+    function computeCrossChainProxyAddress(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         public
         view
         returns (address)
     {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash =
-            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
+        return Clones.predictDeterministicAddress(CROSS_CHAIN_PROXY_IMPLEMENTATION, salt, address(this));
     }
 
     // ──────────────────────────────────────────────
