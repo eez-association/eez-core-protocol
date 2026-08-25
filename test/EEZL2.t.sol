@@ -148,6 +148,16 @@ contract EEZL2Test is BaseL2 {
         assertTrue(codeSize > 0);
     }
 
+    function test_CreateCrossChainProxy_UsesMinimalCloneAndCostsUnder100kGas() public {
+        uint256 gasBefore = gasleft();
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        assertEq(proxy.code.length, 45, "EIP-1167 runtime must remain minimal");
+        assertGt(manager.CROSS_CHAIN_PROXY_IMPLEMENTATION().code.length, proxy.code.length);
+        assertLt(gasUsed, 100_000, "proxy creation gas regression");
+    }
+
     function test_CreateCrossChainProxy_EmitsEvent() public {
         vm.expectEmit(true, true, true, true);
         emit EEZBase.CrossChainProxyCreated(
