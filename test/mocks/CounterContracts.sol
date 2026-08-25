@@ -73,6 +73,29 @@ contract NestedCaller {
     }
 }
 
+/// @notice Makes one call inside a self-call frame that then reverts (caught) — the
+///         call's local consumption unwinds with the frame; no retry follows.
+contract SelfCallerRevertOnly {
+    Counter public target;
+    bool public reverted;
+
+    constructor(Counter _target) {
+        target = _target;
+    }
+
+    function execute() external {
+        try this.innerCall() {}
+        catch {
+            reverted = true;
+        }
+    }
+
+    function innerCall() external {
+        target.increment();
+        revert("inner scope revert");
+    }
+}
+
 /// @notice Calls target via self-call that reverts, then calls target directly.
 contract SelfCallerWithRevert {
     Counter public target;

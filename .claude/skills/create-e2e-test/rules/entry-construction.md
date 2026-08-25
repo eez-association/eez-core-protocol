@@ -95,6 +95,6 @@ NOTE in a green run as a bug.
 | Two nesting levels | `script/e2e/nested/L1_to_L2/deepNested/E2EDeepNested.s.sol` |
 | Reverting reentrant row (`success: false`) | `script/e2e/revert/L1_to_L2/nestedCallRevert/E2ENestedCallRevert.s.sol` |
 | Forced revert (`revertNextNCalls`) | `script/e2e/revert/L1_to_L2/revertCounter/E2ERevertCounter.s.sol` |
-| try/catch over natural revert | `script/e2e/revert/L1_to_L2/revertContinue/E2ERevertContinue.s.sol` |
+| try/catch over natural revert | `script/e2e/revert/L2_to_L1/revertFromOtherChainL2/E2ERevertFromOtherChainL2.s.sol` |
 | Cascading multi-hop reentrancy | `script/e2e/reentrant/L1_to_L2/reentrant/E2EReentrant.s.sol` |
 | Periphery composite (Bridge lock/mint round trip, CREATE2 same-address deploys, L2 outgoing leg) | `script/e2e/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol` |
