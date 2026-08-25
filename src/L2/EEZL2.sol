@@ -40,12 +40,6 @@ contract EEZL2 is EEZBase {
     ///      intended production mode once the node supplies observed gas.
     bool public immutable USE_GAS_LEFT;
 
-    /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
-    /// @dev On L2 this is `SYSTEM_ADDRESS` — same as the burn path in `executeCrossChainCall`.
-    function RECOVERY_ADDRESS() external view returns (address) {
-        return SYSTEM_ADDRESS;
-    }
-
     /// @notice Array of pre-computed entries
     ExecutionEntry[] public entries;
 
@@ -199,20 +193,6 @@ contract EEZL2 is EEZBase {
         }
         lastLoadBlock = block.number;
         emit ExecutionTableLoaded(_entries);
-    }
-
-    // ──────────────────────────────────────────────
-    //  Predicates
-    // ──────────────────────────────────────────────
-
-    /// @notice Returns true if currently inside a cross-chain call execution
-    function _insideExecution() internal view returns (bool) {
-        return _executing;
-    }
-
-    /// @notice This L2's own network — `createCrossChainProxy` may not proxy a local address.
-    function _getRollupId() internal view override returns (uint64) {
-        return ROLLUP_ID;
     }
 
     // ──────────────────────────────────────────────
@@ -707,8 +687,28 @@ contract EEZL2 is EEZBase {
     }
 
     // ──────────────────────────────────────────────
+    //  Views
+    // ──────────────────────────────────────────────
+
+    /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
+    /// @dev On L2 this is `SYSTEM_ADDRESS` — same as the burn path in `executeCrossChainCall`.
+    function RECOVERY_ADDRESS() external view returns (address) {
+        return SYSTEM_ADDRESS;
+    }
+
+    // ──────────────────────────────────────────────
     //  Internal helpers
     // ──────────────────────────────────────────────
+
+    /// @notice Returns true if currently inside a cross-chain call execution
+    function _insideExecution() internal view returns (bool) {
+        return _executing;
+    }
+
+    /// @notice This L2's own network — `createCrossChainProxy` may not proxy a local address.
+    function _getRollupId() internal view override returns (uint64) {
+        return ROLLUP_ID;
+    }
 
     /// @notice Copies the `n`-call span at `start` into a fresh memory array. Explicit field copy
     ///         (not element assignment) so the fresh structs don't alias the caller's array. The
