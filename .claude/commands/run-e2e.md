@@ -42,16 +42,17 @@ Implemented today:
 8. `counter-multi-tx` — three deferred entries with the same `proxyEntryHash`, each consumed by its OWN top-level user tx (vs `multi-call-twice`'s single-tx trigger); L2 side delivers each inbound call as its own `executeIncomingCrossChainCall` tx. Network mode fires all triggers WITHOUT waiting (pre-signed consecutive nonces — `NUM_TXS` output + `publish_user_txs_nowait`) and prints every tx hash.
 9. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
 10. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
-11. `revertCounter` — `L2ToL1Call.revertNextNCalls=1` forced revert on L1 (inner call succeeds, EVM state rolled back; rolling hash still commits to success)
-12. `revertCounterL2` — `revertCounter` mirror on L2
-13. `revertContinue` — outer try/catch over a reentrant call that succeeds then naturally reverts; flow continues, rolling hash captures `(success=false, retData)` via `CALL_END`
-14. `revertContinueL2` — `revertContinue` mirror on L2 (rolling hash matches L1's — protocol parity)
-15. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
-16. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
-17. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
-18. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
-19. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
-20. `flash-loan` — DeFi composite: flash loan repaid via a full L1→L2→L1 bridge round trip in one user tx (2 proxy-keyed L1 entries — the second's top-level `l2ToL1Call` releases the escrow on L1; 2 L2 deliveries — the second consumes an outgoing return leg from `expectedOutgoingCalls`)
+11. `revertCounter` — natural destination revert: the delivered call (`RevertCounter.increment()` on L2) reverts; `CALL_END(false, ...)` captures it and the source entry (`success=false`) replays the revert to the L1 caller (a `SafeCounterAndProxy` try/catch absorbs it)
+12. `revertCounterL2` — `revertCounter` mirror, L2→L1 (destination `RevertCounter` on L1)
+13. `revertFromOtherChain` — the real `revertNextNCalls` producer: `SelfCallerWithRevert` on L2 consumes the same reentrant row twice (first unwound by its inner revert); the L1 entry mirrors BOTH consumptions — `[increment span=1, increment plain]` — so the other chain's revert force-reverts the first increment on L1 (counter ends 1, not 2)
+14. `revertFromOtherChainL2` — the SIMPLEST span producer: alice calls `SelfCallerRevertOnly` on L2 directly; its one consumption unwinds with the inner revert, and L1 mirrors it as a single `increment` with `revertNextNCalls=1` — counter ends 0 (ran, returned 1, state erased)
+15. `revertFromOtherChainAndCallAgainL2` — same plus a surviving retry: two consumptions of one source entry (first unwound), mirrored on L1 as `[increment span=1, increment plain]` — counter ends 1
+16. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
+17. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
+18. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
+19. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
+20. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
+21. `flash-loan` — DeFi composite: flash loan repaid via a full L1→L2→L1 bridge round trip in one user tx (2 proxy-keyed L1 entries — the second's top-level `l2ToL1Call` releases the escrow on L1; 2 L2 deliveries — the second consumes an outgoing return leg from `expectedOutgoingCalls`)
 
 `siblingScopes` from main is deliberately **not** ported — scope arrays don't exist in the flatten model. Its coverage is subsumed by `multi-call-two-diff`.
 

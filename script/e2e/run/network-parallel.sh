@@ -3,8 +3,8 @@
 # constraint that forces network-sequential.sh to be sequential.
 #
 # Wallet hierarchy:
-#   source key (anvil #2 or SOURCE_PK)       — bootstrap faucet, tops up ↓ (or funds workers directly with --direct)
-#   faucet.txt (this dir, created on demand)   — OUR faucet account, funds ↓
+#   source key (anvil #2 or SOURCE_PK)       — funds the run faucet ↓ (or workers directly with --direct)
+#   run faucet (fresh wallet, in the run dir)  — funds ↓
 #   one ephemeral wallet per job             — runs the scenario, nonce-isolated
 #
 # Usage:
@@ -19,9 +19,8 @@
 #   network-parallel.sh --fund 0.05 counter:10      # 0.05 ETH per worker per chain
 #
 # Flags:
-#   --direct         skip the faucet.txt account: fund workers directly from the
-#                    source key (anvil #2, or SOURCE_PK if set). No faucet file,
-#                    no top-up step.
+#   --direct         skip the run faucet: fund workers directly from the
+#                    source key (anvil #2, or SOURCE_PK if set).
 #   --fund <eth>     ETH given to each worker per chain (same as FUND_ETH env)
 #
 # Env knobs:
@@ -31,8 +30,9 @@
 #   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
 #   DEVNET_ENV       env file with endpoints/addresses (default chain.env)
 #
-# Worker wallets are throwaway; keys are recorded in the run dir's wallets.csv
-# so leftover funds are recoverable. Logs: tmp/e2e-parallel-net/<ts>/<job>.log
+# Worker and faucet wallets are throwaway; keys are recorded in the run dir
+# (wallets.csv, faucet.txt) so leftover funds are recoverable.
+# Logs: tmp/e2e-parallel-net/<ts>/<job>.log
 #
 # Known benign race: N parallel runs of the SAME scenario share
 # broadcast/<Sol>/<chainId>/run-latest.json. Nothing reads it (no --resume;
@@ -107,7 +107,8 @@ mkdir -p "$RUN_DIR"
 echo "== $NJOBS job(s), max $MAX_PARALLEL parallel, ${FUND_ETH} ETH/worker/chain — logs in $RUN_DIR"
 
 # Steps 1–3 hold an exclusive lock: concurrent orchestrator instances share the
-# funding key, and racing its nonce yields "replacement transaction underpriced".
+# source funding key, and racing its nonce yields "replacement transaction
+# underpriced".
 exec 9>"$SCRIPT_DIR/.faucet.lock"
 flock 9
 
@@ -117,32 +118,25 @@ if $DIRECT; then
     FAUCET_ADDR=$(cast wallet address --private-key "$FAUCET_PK")
     echo "Direct mode: funding workers from $FAUCET_ADDR (no faucet account)"
 else
-    # ── Step 1: our faucet account (create once, reuse forever) ──
-    FAUCET_FILE="$SCRIPT_DIR/faucet.txt"
-    if [[ ! -f "$FAUCET_FILE" ]]; then
-        new=$(cast wallet new)
-        faucet_addr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-        faucet_pk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-        printf 'address: %s\npvtKey:  %s\n' "$faucet_addr" "$faucet_pk" > "$FAUCET_FILE"
-        chmod 600 "$FAUCET_FILE"
-        echo "Created new faucet account $faucet_addr → $FAUCET_FILE"
-    fi
-    FAUCET_ADDR=$(grep -oE '0x[0-9a-fA-F]{40}' "$FAUCET_FILE" | head -1)
-    FAUCET_PK=$(grep -oE '0x[0-9a-fA-F]{64}' "$FAUCET_FILE" | head -1)
+    # ── Step 1: fresh faucet account for this run ──
+    FAUCET_FILE="$RUN_DIR/faucet.txt"
+    new=$(cast wallet new)
+    FAUCET_ADDR=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
+    FAUCET_PK=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+    printf 'address: %s\npvtKey:  %s\n' "$FAUCET_ADDR" "$FAUCET_PK" > "$FAUCET_FILE"
+    chmod 600 "$FAUCET_FILE"
+    echo "Created run faucet $FAUCET_ADDR → $FAUCET_FILE"
 
-    # ── Step 2: top up the faucet from the source key if it can't cover this run ──
-    # bc, not $(( )) — FUND_ETH may be fractional (e.g. 0.2)
-    NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + 0.5" | bc)")
+    # ── Step 2: fund the run faucet from the source key ──
+    # bc, not $(( )) — FUND_ETH may be fractional (e.g. 0.2). Send the amount in
+    # wei: bc prints 0.6 as ".6", which cast's <eth>ether parser rejects.
+    NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + 0.1" | bc)")
     for chain in L1 L2; do
         rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
-        bal=$(cast balance "$FAUCET_ADDR" --rpc-url "$rpc")
-        if (( $(echo "$bal < $NEED_WEI" | bc) )); then
-            top=$(cast from-wei "$(echo "$NEED_WEI - $bal" | bc)")
-            echo "Faucet top-up on $chain: ${top} ETH from source key"
-            cast send "$FAUCET_ADDR" --value "${top}ether" \
-                --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
-                echo "Faucet top-up FAILED on $chain"; exit 1; }
-        fi
+        echo "Faucet funding on $chain: $(cast from-wei "$NEED_WEI") ETH from source key"
+        cast send "$FAUCET_ADDR" --value "$NEED_WEI" \
+            --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
+            echo "Faucet funding FAILED on $chain"; exit 1; }
     done
 fi
 
