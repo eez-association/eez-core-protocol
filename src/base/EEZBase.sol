@@ -53,6 +53,16 @@ abstract contract EEZBase is IEEZ {
     uint64 internal constant ZERO_CALL_GAS = 0;
 
     // ──────────────────────────────────────────────
+    //  Immutables
+    // ──────────────────────────────────────────────
+
+    /// @notice Hash of the CrossChainProxy creation code (constructor arg included) used in the
+    ///         CREATE2 address derivation. Both operands are fixed at deployment, so it is
+    ///         computed once in the constructor instead of re-hashing the ~1.4 KB creation code
+    ///         per derivation.
+    bytes32 internal immutable PROXY_INIT_CODE_HASH;
+
+    // ──────────────────────────────────────────────
     //  Storage shared with children
     // ──────────────────────────────────────────────
 
@@ -148,6 +158,16 @@ abstract contract EEZBase is IEEZ {
     error SameNetworkProxy(uint64 rollupId);
 
     // ──────────────────────────────────────────────
+    //  Constructor
+    // ──────────────────────────────────────────────
+
+    constructor() {
+        // Every proxy is deployed with the same creation code
+        PROXY_INIT_CODE_HASH =
+            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
+    }
+
+    // ──────────────────────────────────────────────
     //  Proxy creation
     // ──────────────────────────────────────────────
 
@@ -191,9 +211,10 @@ abstract contract EEZBase is IEEZ {
         returns (address)
     {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash =
-            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
+        return
+            address(
+                uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, PROXY_INIT_CODE_HASH))))
+            );
     }
 
     // ──────────────────────────────────────────────

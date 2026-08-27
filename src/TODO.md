@@ -35,22 +35,6 @@ The last row is the repo's own A/B proof that the `ExpectedL1ToL2CallTransient` 
 
 ## Findings (ranked by win ÷ effort)
 
-### G-1. Proxy init-code hash recomputed on every call — make it an `immutable`
-
-`computeCrossChainProxyAddress` (EEZBase) does
-`keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))))`
-on **every invocation**. Creation code is 1,365 bytes, so each call pays a CODECOPY of ~43 words, a ~1.4 KB memory build, and a 44-word keccak — **~600–800 gas** — before the actual CREATE2 address hash.
-
-It runs once per executed `L2ToL1Call` (`_processNCalls`), once per static sub-call (`_processNStaticCalls`), and on every external `computeCrossChainProxyAddress` view. The operands are fixed at deployment (`address(this)` is final inside the constructor), so:
-
-```solidity
-bytes32 internal immutable PROXY_INIT_CODE_HASH; // set once in the EEZBase constructor
-```
-
-- **Win:** ~700 gas × every sub-call in every entry, L1 and L2 (e.g. a 3-call entry saves ~2.1k; also shrinks runtime code).
-- **Change:** ~10 lines in `EEZBase.sol` (add constructor + immutable, use it in `computeCrossChainProxyAddress`). No ABI, storage, or protocol change.
-- **Risk:** none worth noting.
-
 ### G-2. Meta-hook tables (`_transientEntries`) do a full storage round-trip — extend the transient serializer
 
 `postAndVerifyBatch` step 7 `push`es every meta-hook entry into the storage array `_transientEntries`, then `delete`s it in step 9 — all within one tx. Measured: the same entry costs **121,872 inline vs 534,628 via the meta hook (+412,756)**, and the refund model already loses to the EIP-3529 cap (measured raw refund 39,800 vs cap 36,797 — clipped). Net cost is ~16–20k per storage word vs ~200 per transient word.
@@ -120,13 +104,13 @@ Considered replacing `_markVerifiedBlockAndDeletePreviousEntries`'s `delete` wit
 
 ## What the top of the list buys, together
 
-| Flow | Today | After G-1 + G-3 + G-4 | After + G-2 |
+| Flow | Today | After G-3 + G-4 | After + G-2 |
 |---|---|---|---|
 | Immediate inline L2Tx | 121,872 | ~90k (−26%) | — |
 | Deferred proxy execution (tx 2) | 153,338 | ~110k (−28%) | — |
 | Meta-hook batch (1 entry) | 534,628 | ~500k | ~130–180k (−65–75%) |
 
-Recommended order: **G-1** (trivial, ships alone) → **G-3** → **G-4** → **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2) → **G-6** only alongside the next protocol-encoding break. G-7/G-8/G-9 need no action.
+Recommended order: **G-3** → **G-4** → **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2) → **G-6** only alongside the next protocol-encoding break. G-7/G-8/G-9 need no action. (G-1 — immutable proxy init-code hash — is applied.)
 
 All estimates should be re-measured with the existing `GasCost` / `GasExecPaths` suites after each step — they already isolate exactly these paths.
 
