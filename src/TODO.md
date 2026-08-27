@@ -47,16 +47,6 @@ The same applies on L2 to `executeIncomingCrossChainCall` (atomic, same-tx — t
 - **Change:** medium-large — ~250–350 lines of new serializer (mirroring the existing one) + rewiring the read sites; extend the `test_Stale_TwoBatchesOneTx`-style stale-table tests to the new region.
 - **Risk:** medium — serialization bugs are subtle; mitigated by the proven in-repo pattern and existing test shapes. Note: Solidity's `transient` keyword still doesn't cover arrays/structs (the code's own TODO), so this is the manual namespaced-region version, same as the already-accepted `ExpectedL1ToL2CallTransient`.
 
-### G-3. `_verifiedRollupInCurrentExecutingEntry` is a storage array pushed/deleted per executed entry
-
-Every `_executeEntry` pushes each `RootUpdate.rollupId` into a **storage** array and `delete`s it at the end — the array also backs `_insideExecution()`. Per top-level entry with 1 delta that's a length-slot + element-slot round trip: ~50,000 gross, ~9,600 refund → **~30–40k net per executed entry** (~25–33% of a bare execution's 122k), plus ~17k per extra delta (visible in the measured +15.8k per exec-side `RootUpdate`, which this dominates).
-
-Fix: a small transient region — one count word + one id word per delta (`tstore` at `base+i`), `_insideExecution()` = count ≠ 0, `_isRollupAllowed` scans `tload`s. Clearing = store count 0 (length-authoritative, same convention as the existing serializer). Reverts roll transient writes back exactly like storage, so all revert paths keep their semantics.
-
-- **Win:** ~30k per executed entry (every immediate L2Tx, every consumed queue entry, every meta-hook entry — it stacks with G-2).
-- **Change:** ~50–70 lines (tiny region + swap 4 touch points: push loop, `delete`, `_insideExecution`, `_isRollupAllowed`).
-- **Risk:** low-medium. Same `transient`-keyword caveat as G-2 (arrays unsupported → assembly region).
-
 ### G-4. Queue path copies the whole entry to memory — including the reentrant table it never reads
 
 `_consumeAndExecuteEntry` resolves `entry = rec.entryQueue[idx]` (storage) and calls `_executeEntry(entry)` whose parameter is `memory` → Solidity copies the **entire** entry, `expectedL1ToL2Calls` included. `_executeEntry` never reads that field (nested resolution goes through `_getExpectedL1toL2Calls()`, which reads storage again). Each unused reentrant row copied = ~5 fixed slots + 4 per sub-call + `returnData` words, at 2,100/cold SLOAD → **≥10.5k wasted per row**, linear in table size, on every deferred consumption.
@@ -104,13 +94,13 @@ Considered replacing `_markVerifiedBlockAndDeletePreviousEntries`'s `delete` wit
 
 ## What the top of the list buys, together
 
-| Flow | Today | After G-3 + G-4 | After + G-2 |
+| Flow | Today | After G-4 | After + G-2 |
 |---|---|---|---|
 | Immediate inline L2Tx | 121,872 | ~90k (−26%) | — |
 | Deferred proxy execution (tx 2) | 153,338 | ~110k (−28%) | — |
 | Meta-hook batch (1 entry) | 534,628 | ~500k | ~130–180k (−65–75%) |
 
-Recommended order: **G-3** → **G-4** → **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2) → **G-6** only alongside the next protocol-encoding break. G-7/G-8/G-9 need no action. (G-1 — immutable proxy init-code hash — is applied.)
+Recommended order: **G-4** → **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2) → **G-6** only alongside the next protocol-encoding break. G-7/G-8/G-9 need no action.
 
 All estimates should be re-measured with the existing `GasCost` / `GasExecPaths` suites after each step — they already isolate exactly these paths.
 

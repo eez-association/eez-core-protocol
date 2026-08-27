@@ -5,6 +5,7 @@ import {IProofSystem} from "./interfaces/IProofSystem.sol";
 import {IRollupContract} from "./interfaces/IRollup.sol";
 import {CrossChainProxy} from "./base/CrossChainProxy.sol";
 import {ExpectedL1ToL2CallTransient} from "./base/ExpectedL1ToL2CallTransient.sol";
+import {VerifiedRollupsTransient} from "./base/VerifiedRollupsTransient.sol";
 import {
     RootUpdate,
     L2ToL1Call,
@@ -46,7 +47,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///      The batch remainder (entries past `immediateEntryCount`) is published into
 ///      per-rollup queues in storage, keyed by `destinationRollupId` UNCONDITIONALLY — even if the meta
 ///      hook left transient entries unconsumed. Every entry's `RootUpdate.currentRoot` is checked at consumption time.
-contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
+contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     // ──────────────────────────────────────────────
     //  Constants
     // ──────────────────────────────────────────────
@@ -88,13 +89,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // empty otherwise; set and cleared in `_attemptExecuteImmediateL2Txs`. Meta-hook and queued
     // entries don't need it: theirs are read from `_transientEntries` / the per-rollup queue.
 
-    /// @notice The executing entry's `rootUpdates` rollup ids — the only rollups whose proxies the
-    ///         entry may use (to execute or receive cross-chain calls).
-    ///         Filled when execution starts, `delete`d when it ends, so it also
-    ///         answers `_insideExecution()` (non-empty ⇔ an entry is executing). Plain storage
-    ///         because Solidity has no `transient` arrays; on a revert the pushes roll back with
-    ///         everything else.
-    uint64[] internal _verifiedRollupInCurrentExecutingEntry;
+    // The executing entry's `rootUpdates` rollup ids — the only rollups whose proxies the entry may
+    // use (to execute or receive cross-chain calls) — live in the `VerifiedRollupsTransient` region:
+    // filled when execution starts, cleared when it ends, so the count also answers
+    // `_insideExecution()` (non-zero ⇔ an entry is executing). On a revert the pushes roll back
+    // with everything else.
 
     // ──────────────────────────────────────────────
     //  Transient state
@@ -1073,7 +1072,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///      this preamble — only at the end, after the invariant check.
     /// @dev The entry's `l2ToL1Calls[]` is its TOP-LEVEL calls only (each reentrant frame carries
     ///      its own sub-calls); `_processNCalls` runs the whole array, so completeness is structural
-    ///      (no cursor-vs-length check). `_verifiedRollupInCurrentExecutingEntry` is non-empty for the whole span (backs
+    ///      (no cursor-vs-length check). The verified-rollups set is non-empty for the whole span (backs
     ///      `_insideExecution()`), so a reentrant call is routed correctly.
     /// @dev The entry is taken by `memory` so a leading L2Tx can be executed straight from calldata
     ///      without SSTOREing the whole struct (see `_attemptExecuteImmediateL2Txs`). `entry.expectedL1ToL2Calls`
@@ -1084,20 +1083,20 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     function _executeEntry(ExecutionEntry memory entry) internal {
         RootUpdate[] memory deltas = entry.rootUpdates;
 
-        // Redundant ≥1-delta guard (also enforced at validation): a non-empty `_verifiedRollupInCurrentExecutingEntry` is
+        // Redundant ≥1-delta guard (also enforced at validation): a non-empty verified-rollups set is
         // what backs `_insideExecution()`.
         if (deltas.length == 0) revert EntryHasNoRootUpdates();
 
         // Validity gate + allowed-rollups set, one pass. CHECK each `currentRoot` vs the live root
         // (fail fast — `newRoot` applies after the calls so mid-execution reads see the pre-state),
-        // and ADD each delta's rollup to `_verifiedRollupInCurrentExecutingEntry` (proxy-protection: the proxies the entry
-        // can execute are limited to the rollups it proved). Populating the array also flips
-        // `_insideExecution()` true (it's non-empty now); `delete` at the end flips it back.
+        // and ADD each delta's rollup to the verified-rollups set (proxy-protection: the proxies the
+        // entry can execute are limited to the rollups it proved). Populating the set also flips
+        // `_insideExecution()` true (its count is non-zero now); the clear at the end flips it back.
         for (uint256 i = 0; i < deltas.length; i++) {
             if (rollups[deltas[i].rollupId].root != deltas[i].currentRoot) {
                 revert RootMismatch(deltas[i].rollupId);
             }
-            _verifiedRollupInCurrentExecutingEntry.push(deltas[i].rollupId);
+            _pushVerifiedRollup(deltas[i].rollupId);
         }
 
         _rollingHashEntryBegin(deltas, entry.proxyEntryHash); // initial hash: binds starting state + identity
@@ -1129,7 +1128,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             }
         }
 
-        delete _verifiedRollupInCurrentExecutingEntry; // clears the allowed set AND resets _insideExecution() to false
+        _clearVerifiedRollups(); // clears the allowed set AND resets _insideExecution() to false
         _entryEtherDelta = 0; // reset for the next top-level entry in this tx
         _rollingHash = bytes32(0); // reset so the next entry's `_rollingHashEntryBegin` zero-guard passes
     }
@@ -1406,27 +1405,23 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         }
     }
 
-    /// @notice True while inside a cross-chain call execution — backed by the allowed-rollups array
-    ///         (non-empty ⇔ executing, since every entry has ≥1 delta and the array is `delete`d at the
-    ///         end of `_executeEntry`).
+    /// @notice True while inside a cross-chain call execution — backed by the transient
+    ///         verified-rollups set (non-zero count ⇔ executing, since every entry has ≥1 delta
+    ///         and the set is cleared at the end of `_executeEntry`).
     function _insideExecution() internal view returns (bool) {
-        return _verifiedRollupInCurrentExecutingEntry.length != 0;
+        return _verifiedRollupCount() != 0;
     }
 
     // ── "Allowed rollups" set ────────────────────────────────────────────────────────────────────
     // Runtime proxy-protection for reentrant / static-read TARGETS only. A target's rollup is whichever
     // proxy re-enters (no clear-text field to validate at post time), so it's checked here against the
-    // executing entry's `rootUpdates` — populated into `_verifiedRollupInCurrentExecutingEntry` by `_executeEntry`. Call
-    // SOURCES need no runtime check: `_validateBatchStructure` already pins them ∈ `rootUpdates`.
+    // executing entry's `rootUpdates` — pushed into the `VerifiedRollupsTransient` region by
+    // `_executeEntry`. Call SOURCES need no runtime check: `_validateBatchStructure` already pins
+    // them ∈ `rootUpdates`.
 
     /// @notice True iff `rollupId` is in the current entry's allowed set. Linear scan (deltas are few).
     function _isRollupAllowed(uint64 rollupId) internal view returns (bool) {
-        uint64[] storage allowed = _verifiedRollupInCurrentExecutingEntry;
-        uint256 n = allowed.length;
-        for (uint256 i = 0; i < n; i++) {
-            if (allowed[i] == rollupId) return true;
-        }
-        return false;
+        return _containsVerifiedRollup(rollupId);
     }
 
     // ──────────────────────────────────────────────
