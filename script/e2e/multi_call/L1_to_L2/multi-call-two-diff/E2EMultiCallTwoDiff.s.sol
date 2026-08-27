@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -54,7 +54,11 @@ abstract contract TwoDiffActions {
         return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, target, L2_ROLLUP_ID, 0, _incrementCallData());
     }
 
-    function _l1Entries(address counterA, address counterB, address caller)
+    function _l1Entries(
+        address counterA,
+        address counterB,
+        address caller
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -62,19 +66,19 @@ abstract contract TwoDiffActions {
         bytes32 hA = _callHash(counterA, caller);
         bytes32 hB = _callHash(counterB, caller);
 
-        StateUpdate[] memory deltas1 = new StateUpdate[](1);
-        deltas1[0] = StateUpdate({
+        RootUpdate[] memory deltas1 = new RootUpdate[](1);
+        deltas1[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-two-diff-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-two-diff-1"),
             etherDelta: 0
         });
 
-        StateUpdate[] memory deltas2 = new StateUpdate[](1);
-        deltas2[0] = StateUpdate({
+        RootUpdate[] memory deltas2 = new RootUpdate[](1);
+        deltas2[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-state-after-two-diff-1"),
-            newState: keccak256("l2-state-after-two-diff-2"),
+            currentRoot: keccak256("l2-state-after-two-diff-1"),
+            newRoot: keccak256("l2-state-after-two-diff-2"),
             etherDelta: 0
         });
 
@@ -82,7 +86,7 @@ abstract contract TwoDiffActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas1,
+            rootUpdates: deltas1,
             proxyEntryHash: hA,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -92,7 +96,7 @@ abstract contract TwoDiffActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateUpdates: deltas2,
+            rootUpdates: deltas2,
             proxyEntryHash: hB,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -109,7 +113,11 @@ abstract contract TwoDiffActions {
     /// L1). Each entry's proxyEntryHash IS the L1 twin's — the inbound key is
     /// the same cross-chain call hash on both sides. Both entries return
     /// abi.encode(1) (each L2 counter starts at 0 and is incremented once).
-    function _l2Entries(address counterA, address counterB, address caller)
+    function _l2Entries(
+        address counterA,
+        address counterB,
+        address caller
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)

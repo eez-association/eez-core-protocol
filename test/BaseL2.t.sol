@@ -88,7 +88,12 @@ abstract contract BaseL2 is Test, TestHashes {
 
     /// @notice Rolling hash for an entry with a single top-level call:
     ///         seed → CALL_BEGIN(cch) → CALL_END(success, retData).
-    function _rhSingle(bytes32 proxyEntryHash, bytes32 cch, bool success, bytes memory retData)
+    function _rhSingle(
+        bytes32 proxyEntryHash,
+        bytes32 cch,
+        bool success,
+        bytes memory retData
+    )
         internal
         pure
         returns (bytes32)
@@ -97,7 +102,12 @@ abstract contract BaseL2 is Test, TestHashes {
     }
 
     /// @notice `_rhSingle` overload deriving the call hash from `cc` (executed on this L2).
-    function _rhSingle(bytes32 proxyEntryHash, CrossChainCall memory cc, bool success, bytes memory retData)
+    function _rhSingle(
+        bytes32 proxyEntryHash,
+        CrossChainCall memory cc,
+        bool success,
+        bytes memory retData
+    )
         internal
         pure
         returns (bytes32)
@@ -110,7 +120,13 @@ abstract contract BaseL2 is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     /// @notice Compact `CrossChainCall` builder: non-static, no forced-revert span.
-    function _cc(address tgt, uint256 value_, bytes memory data, address src, uint64 srcRollup)
+    function _cc(
+        address tgt,
+        uint256 value_,
+        bytes memory data,
+        address src,
+        uint64 srcRollup
+    )
         internal
         pure
         returns (CrossChainCall memory)
@@ -149,7 +165,10 @@ abstract contract BaseL2 is Test, TestHashes {
     }
 
     /// @notice No-call entry (just a `proxyEntryHash` match + return data).
-    function _buildNoCalls(bytes32 proxyEntryHash, bytes memory returnData)
+    function _buildNoCalls(
+        bytes32 proxyEntryHash,
+        bytes memory returnData
+    )
         internal
         pure
         returns (ExecutionEntry memory entry)
@@ -186,7 +205,12 @@ abstract contract BaseL2 is Test, TestHashes {
     ///         into its outgoing hash. Loads an EMPTY table (block gate, guaranteed no-match) and
     ///         probes twice: the first call warms the access path, the second measures it warm.
     ///         Wipes any loaded table — probe BEFORE loading the real entries.
-    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data)
+    function _probeOutgoing(
+        address caller,
+        address proxyAddr,
+        uint256 value,
+        bytes memory data
+    )
         internal
         returns (uint64 g)
     {
@@ -195,7 +219,13 @@ abstract contract BaseL2 is Test, TestHashes {
 
     /// @notice `_probeOutgoing` with an explicit attached gas — for the top-level call of a nested
     ///         scenario, which attaches `OUTER_CALL_GAS` (see above) instead of `CALL_GAS`.
-    function _probeOutgoing(address caller, address proxyAddr, uint256 value, bytes memory data, uint256 attachedGas)
+    function _probeOutgoing(
+        address caller,
+        address proxyAddr,
+        uint256 value,
+        bytes memory data,
+        uint256 attachedGas
+    )
         internal
         returns (uint64 g)
     {

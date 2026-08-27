@@ -5,12 +5,12 @@ import {Script, console} from "forge-std/Script.sol";
 import {
     EEZ,
     ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     RollupIdWithProofSystems
 } from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RootUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
 import {
@@ -54,7 +54,7 @@ contract BridgeBatcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+            expectedRootPerRollup: new ExpectedRootPerRollup[](0),
             entries: entries,
             staticEntries: staticEntries,
             immediateEntryCount: 0,
@@ -121,20 +121,20 @@ contract E2EBridgeExecute is Script {
         bytes32 callHash =
             crossChainCallHash(false, bridgeAddr, MAINNET_ROLLUP_ID, destination, L2_ROLLUP_ID, 1 ether, bytes(""));
 
-        StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-        stateUpdates[0] = StateUpdate({
+        RootUpdate[] memory rootUpdates = new RootUpdate[](1);
+        rootUpdates[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-bridge"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-bridge"),
             etherDelta: int256(1 ether)
         });
 
         // No L1 top-level calls; rolling hash is just the entry-begin seed.
-        bytes32 rh = RollingHashBuilder.entryBegin(stateUpdates, callHash);
+        bytes32 rh = RollingHashBuilder.entryBegin(rootUpdates, callHash);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: stateUpdates,
+            rootUpdates: rootUpdates,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -144,9 +144,9 @@ contract E2EBridgeExecute is Script {
             returnData: ""
         });
 
-        batcher.execute{
-            value: 1 ether
-        }(EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noStaticEntries(), Bridge(bridgeAddr), destination);
+        batcher.execute{value: 1 ether}(
+            EEZ(rollupsAddr), proofSystemAddr, L2_ROLLUP_ID, entries, noStaticEntries(), Bridge(bridgeAddr), destination
+        );
 
         console.log("done");
 

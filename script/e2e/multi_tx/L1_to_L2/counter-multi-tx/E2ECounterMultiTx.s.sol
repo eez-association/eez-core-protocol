@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -32,7 +32,7 @@ import {
 //  L1 side (Execute):
 //    1. postAndVerifyBatch loads NUM_TXS deferred entries with the SAME
 //       proxyEntryHash (CAP -> Counter@L2 increment), returnData 1..NUM_TXS,
-//       state roots chained initial -> after-1 -> ... -> after-NUM_TXS
+//       roots chained initial -> after-1 -> ... -> after-NUM_TXS
 //    2. The EOA sends CounterAndProxy.incrementProxy() NUM_TXS times, each
 //       its own tx; the runner mines batch + all triggers in one block
 //    3. Each tx consumes the next queue entry via the cursor forward-scan;
@@ -73,17 +73,20 @@ abstract contract CounterMultiTxActions {
             );
     }
 
-    /// @dev Placeholder state root after the n-th increment; n = 0 is the registered initial root.
+    /// @dev Placeholder root after the n-th increment; n = 0 is the registered initial root.
     function _rootAfter(uint256 n) internal pure returns (bytes32) {
         if (n == 0) return keccak256("l2-initial-state");
         return keccak256(abi.encodePacked("l2-state-after-multi-tx-", n));
     }
 
     /// @dev NUM_TXS L1 entries sharing one proxyEntryHash — consumed sequentially, one per user
-    ///      tx, by the queue cursor. State roots chain across the entries; returnData is the
+    ///      tx, by the queue cursor. Roots chain across the entries; returnData is the
     ///      counter value each increment yields on L2. No L1 top-level calls, so each rolling
     ///      hash is just the entry-begin seed.
-    function _l1Entries(address counterL2, address counterAndProxy)
+    function _l1Entries(
+        address counterL2,
+        address counterAndProxy
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -92,13 +95,13 @@ abstract contract CounterMultiTxActions {
 
         entries = new ExecutionEntry[](NUM_TXS);
         for (uint256 n = 1; n <= NUM_TXS; n++) {
-            StateUpdate[] memory deltas = new StateUpdate[](1);
-            deltas[0] = StateUpdate({
-                rollupId: L2_ROLLUP_ID, currentState: _rootAfter(n - 1), newState: _rootAfter(n), etherDelta: 0
+            RootUpdate[] memory deltas = new RootUpdate[](1);
+            deltas[0] = RootUpdate({
+                rollupId: L2_ROLLUP_ID, currentRoot: _rootAfter(n - 1), newRoot: _rootAfter(n), etherDelta: 0
             });
 
             entries[n - 1] = ExecutionEntry({
-                stateUpdates: deltas,
+                rootUpdates: deltas,
                 proxyEntryHash: ah,
                 destinationRollupId: L2_ROLLUP_ID,
                 l2ToL1Calls: noCalls(),
@@ -113,7 +116,11 @@ abstract contract CounterMultiTxActions {
     /// @dev The L2-side mirror entry for the n-th inbound delivery (n = 1..NUM_TXS). Each is
     ///      loaded and consumed by its own executeIncomingCrossChainCall tx, so each table holds
     ///      exactly one entry and every rolling hash starts fresh from the entry-begin seed.
-    function _l2Entry(address counterL2, address counterAndProxy, uint256 n)
+    function _l2Entry(
+        address counterL2,
+        address counterAndProxy,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry memory)
@@ -146,7 +153,11 @@ abstract contract CounterMultiTxActions {
     }
 
     /// @dev 1-entry table for the n-th executeIncomingCrossChainCall tx.
-    function _l2TableForTx(address counterL2, address counterAndProxy, uint256 n)
+    function _l2TableForTx(
+        address counterL2,
+        address counterAndProxy,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -156,7 +167,10 @@ abstract contract CounterMultiTxActions {
     }
 
     /// @dev All entries in delivery order — what the block's ExecutionTableLoaded events sum to.
-    function _l2Entries(address counterL2, address counterAndProxy)
+    function _l2Entries(
+        address counterL2,
+        address counterAndProxy
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -228,7 +242,9 @@ contract ExecuteL2 is Script, CounterMultiTxActions {
         vm.startBroadcast();
         for (uint256 n = 1; n <= NUM_TXS; n++) {
             EEZL2(managerAddr)
-                .executeIncomingCrossChainCall(_l2TableForTx(counterL2Addr, capAddr, n), new L2StaticExecutionEntry[](0));
+                .executeIncomingCrossChainCall(
+                    _l2TableForTx(counterL2Addr, capAddr, n), new L2StaticExecutionEntry[](0)
+                );
         }
 
         console.log("done");

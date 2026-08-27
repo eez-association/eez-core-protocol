@@ -5,12 +5,12 @@ import {Script, console} from "forge-std/Script.sol";
 import {
     EEZ,
     ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     RollupIdWithProofSystems
 } from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RootUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "../../test/mocks/CounterContracts.sol";
 import {
     crossChainCallHash,
@@ -53,7 +53,7 @@ contract Batcher {
         rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+            expectedRootPerRollup: new ExpectedRootPerRollup[](0),
             entries: entries,
             staticEntries: staticEntries,
             immediateEntryCount: 0,
@@ -110,7 +110,12 @@ contract E2EDeploy is Script {
 
 /// @title E2EExecute -- postAndVerifyBatch + incrementProxy via Batcher (single tx)
 contract E2EExecute is Script {
-    function run(address rollupsAddr, address proofSystemAddr, address counterL2Addr, address counterAndProxyAddr)
+    function run(
+        address rollupsAddr,
+        address proofSystemAddr,
+        address counterL2Addr,
+        address counterAndProxyAddr
+    )
         external
     {
         vm.startBroadcast();
@@ -125,20 +130,20 @@ contract E2EExecute is Script {
             false, counterAndProxyAddr, MAINNET_ROLLUP_ID, counterL2Addr, L2_ROLLUP_ID, 0, incrementCallData
         );
 
-        StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-        stateUpdates[0] = StateUpdate({
+        RootUpdate[] memory rootUpdates = new RootUpdate[](1);
+        rootUpdates[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-scenario1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-scenario1"),
             etherDelta: 0
         });
 
         // No L1 top-level calls; rolling hash is just the entry-begin seed.
-        bytes32 rh = RollingHashBuilder.entryBegin(stateUpdates, callHash);
+        bytes32 rh = RollingHashBuilder.entryBegin(rootUpdates, callHash);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: stateUpdates,
+            rootUpdates: rootUpdates,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

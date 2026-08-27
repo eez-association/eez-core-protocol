@@ -764,5 +764,4 @@ contract EEZL2CoverageTest is BaseL2 {
 
 contract RejectEther {
     // No payable receive/fallback → any value transfer reverts.
-
-    }
+}

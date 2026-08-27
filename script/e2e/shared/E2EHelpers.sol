@@ -3,12 +3,12 @@ pragma solidity ^0.8.28;
 
 import {
     ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
 import {
     IEEZ,
-    StateUpdate,
+    RootUpdate,
     ExecutionEntry,
     StaticExecutionEntry,
     L2ToL1Call,
@@ -115,14 +115,14 @@ function crossChainCallHashStatic(
 // ══════════════════════════════════════════════════════════════════════
 
 library RollingHashBuilder {
-    /// @notice Entry-begin seed (L1): folds the ordered `(rollupId, currentState)` state context,
+    /// @notice Entry-begin seed (L1): folds the ordered `(rollupId, currentRoot)` state context,
     ///         then closes with the entry identity (`proxyEntryHash`).
-    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function entryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function entryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
-            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
+            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentRoot));
         }
         return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
     }
@@ -167,7 +167,7 @@ library RollingHashBuilder {
     // ── Recorded steps ──────────────────────────────────────────────────
     // A HashStep is one fold with the seed factored out, so the chain can be
     // replayed over a DIFFERENT seed. ComputeExpected can only guess placeholder
-    // state roots, but the on-chain seed folds the real ones — exporting the
+    // roots, but the on-chain seed folds the real ones — exporting the
     // steps (EXPECTED_L1_STEPS) lets the network verifier rebuild the exact
     // rolling hash from the POSTED roots and compare it to the posted entry's.
 
@@ -253,7 +253,7 @@ function immediateSingleRollupBatch(
     RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
     rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
     batch = ProofSystemBatchPerVerificationEntries({
-        expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+        expectedRootPerRollup: new ExpectedRootPerRollup[](0),
         entries: entries,
         staticEntries: staticEntries,
         immediateEntryCount: ic,

@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {StateUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -103,7 +103,11 @@ abstract contract MultiCallNestedL2Actions {
 
     /// CAP's n-th reentrant CounterL2.increment(), delivered back on L2 as its own incoming
     /// execution (1-entry table); returns abi.encode(n).
-    function _l2IncomingEntry(address counterL2, address capL1, uint256 n)
+    function _l2IncomingEntry(
+        address counterL2,
+        address capL1,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry memory)
@@ -136,7 +140,11 @@ abstract contract MultiCallNestedL2Actions {
 
     /// All four L2-side executions in consumption order: the two outgoing entries the user
     /// tx consumes, then the two inbound reentry deliveries.
-    function _l2Entries(address counterL2, address capL1, address app)
+    function _l2Entries(
+        address counterL2,
+        address capL1,
+        address app
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -150,7 +158,13 @@ abstract contract MultiCallNestedL2Actions {
 
     /// The n-th L2Tx entry: CAP.incrementProxy() runs on L1 with one nested reentry
     /// (cached abi.encode(n)).
-    function _l1Entry(address counterL2, address capL1, address app, StateUpdate[] memory deltas, uint256 n)
+    function _l1Entry(
+        address counterL2,
+        address capL1,
+        address app,
+        RootUpdate[] memory deltas,
+        uint256 n
+    )
         internal
         pure
         returns (ExecutionEntry memory)
@@ -186,7 +200,7 @@ abstract contract MultiCallNestedL2Actions {
         });
 
         return ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — consumed by postAndVerifyBatch/executeL2Txs
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -197,23 +211,27 @@ abstract contract MultiCallNestedL2Actions {
         });
     }
 
-    function _l1Entries(address counterL2, address capL1, address app)
+    function _l1Entries(
+        address counterL2,
+        address capL1,
+        address app
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory d0 = new StateUpdate[](1);
-        d0[0] = StateUpdate({
+        RootUpdate[] memory d0 = new RootUpdate[](1);
+        d0[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-mcnl2-step-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-mcnl2-step-1"),
             etherDelta: 0
         });
-        StateUpdate[] memory d1 = new StateUpdate[](1);
-        d1[0] = StateUpdate({
+        RootUpdate[] memory d1 = new RootUpdate[](1);
+        d1[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-mcnl2-step-1"),
-            newState: keccak256("l2-mcnl2-step-2"),
+            currentRoot: keccak256("l2-mcnl2-step-1"),
+            newRoot: keccak256("l2-mcnl2-step-2"),
             etherDelta: 0
         });
 

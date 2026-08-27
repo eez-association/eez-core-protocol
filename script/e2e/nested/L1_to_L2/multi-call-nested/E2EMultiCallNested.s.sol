@@ -6,7 +6,7 @@ import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -107,7 +107,12 @@ abstract contract MCNActions {
 
     // ── L1 entries (3) ──
 
-    function _l1Entries(address counterL1, address cap2L2, address counterL2, address app)
+    function _l1Entries(
+        address counterL1,
+        address cap2L2,
+        address counterL2,
+        address app
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -129,25 +134,25 @@ abstract contract MCNActions {
         L2ToL1Call[] memory calls1 = new L2ToL1Call[](1);
         calls1[0] = cap2CallsCounterL1;
 
-        StateUpdate[] memory d0 = new StateUpdate[](1);
-        d0[0] = StateUpdate({
+        RootUpdate[] memory d0 = new RootUpdate[](1);
+        d0[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-mcn-step-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-mcn-step-1"),
             etherDelta: 0
         });
-        StateUpdate[] memory d1 = new StateUpdate[](1);
-        d1[0] = StateUpdate({
+        RootUpdate[] memory d1 = new RootUpdate[](1);
+        d1[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-mcn-step-1"),
-            newState: keccak256("l2-mcn-step-2"),
+            currentRoot: keccak256("l2-mcn-step-1"),
+            newRoot: keccak256("l2-mcn-step-2"),
             etherDelta: 0
         });
-        StateUpdate[] memory d2 = new StateUpdate[](1);
-        d2[0] = StateUpdate({
+        RootUpdate[] memory d2 = new RootUpdate[](1);
+        d2[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-mcn-step-2"),
-            newState: keccak256("l2-mcn-step-3"),
+            currentRoot: keccak256("l2-mcn-step-2"),
+            newRoot: keccak256("l2-mcn-step-3"),
             etherDelta: 0
         });
 
@@ -162,7 +167,7 @@ abstract contract MCNActions {
         rh0 = RollingHashBuilder.appendCallBegin(rh0, topCallCch);
         rh0 = RollingHashBuilder.appendCallEnd(rh0, true, abi.encode(uint256(1)));
         entries[0] = ExecutionEntry({
-            stateUpdates: d0,
+            rootUpdates: d0,
             proxyEntryHash: outerCAP2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls0,
@@ -176,7 +181,7 @@ abstract contract MCNActions {
         rh1 = RollingHashBuilder.appendCallBegin(rh1, topCallCch);
         rh1 = RollingHashBuilder.appendCallEnd(rh1, true, abi.encode(uint256(2)));
         entries[1] = ExecutionEntry({
-            stateUpdates: d1,
+            rootUpdates: d1,
             proxyEntryHash: outerCAP2, // same hash, sequential consumption
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls1,
@@ -188,7 +193,7 @@ abstract contract MCNActions {
 
         // [2]: no L1-side execution (CounterL2 is L2-local); rolling hash is just the entry seed.
         entries[2] = ExecutionEntry({
-            stateUpdates: d2,
+            rootUpdates: d2,
             proxyEntryHash: outerCounterL2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -201,7 +206,12 @@ abstract contract MCNActions {
 
     // ── L2 entries (3) ──
 
-    function _l2Entries(address counterL1, address cap2L2, address counterL2, address app)
+    function _l2Entries(
+        address counterL1,
+        address cap2L2,
+        address counterL2,
+        address app
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -213,7 +223,12 @@ abstract contract MCNActions {
     }
 
     /// @dev 1-entry table for the n-th CAP2 delivery (executeIncomingCrossChainCall tx).
-    function _l2TableForCap2(address counterL1, address cap2L2, address app, uint256 n)
+    function _l2TableForCap2(
+        address counterL1,
+        address cap2L2,
+        address app,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory table)
@@ -235,7 +250,12 @@ abstract contract MCNActions {
     /// @dev CAP2 delivery entry: top-level app→CAP2 call (inbound key = the L1-side hash,
     ///      folded again by CALL_BEGIN) wrapping one nested (outgoing) reentry to CounterL1
     ///      on MAINNET whose cached result is abi.encode(n).
-    function _l2Cap2Entry(address counterL1, address cap2L2, address app, uint256 n)
+    function _l2Cap2Entry(
+        address counterL1,
+        address cap2L2,
+        address app,
+        uint256 n
+    )
         private
         pure
         returns (L2ExecutionEntry memory)

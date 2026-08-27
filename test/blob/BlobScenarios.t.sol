@@ -81,9 +81,9 @@ contract BlobScenarios is BlobScenarioBase {
         assertEq(entries[0].expectedL1ToL2Calls.length, 0, "no reentrant frames on L1");
         assertEq(entries[0].returnData, abi.encode(uint256(7)), "pre-computed L2A return");
         // L2A + L2B both change state, so both must be in the entry's delta set.
-        assertEq(entries[0].stateUpdates.length, 2, "deltas for L2A and L2B");
-        assertEq(entries[0].stateUpdates[0].rollupId, L2A);
-        assertEq(entries[0].stateUpdates[1].rollupId, L2B);
+        assertEq(entries[0].rootUpdates.length, 2, "deltas for L2A and L2B");
+        assertEq(entries[0].rootUpdates[0].rollupId, L2A);
+        assertEq(entries[0].rootUpdates[1].rollupId, L2B);
 
         runScenario(msgs);
     }
@@ -271,7 +271,7 @@ contract BlobScenarios is BlobScenarioBase {
     }
 
     /// @notice Top-level static read fired from an idle L1: a pool
-    ///         StaticExecutionEntry pinned to L2A's live state root.
+    ///         StaticExecutionEntry pinned to L2A's live root.
     function test_TopLevelStaticReadFromL1() public {
         MsgList memory l = Msg.list(8);
         Msg.push(l, Msg.initiate(0, "tx-data"));

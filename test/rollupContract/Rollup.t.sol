@@ -11,7 +11,7 @@ import {Rollup} from "../../src/rollupContract/Rollup.sol";
 contract RollupTest is Test {
     Rollup internal rollup;
 
-    bytes32 internal lastStateRoot;
+    bytes32 internal lastRoot;
 
     // Ascending proof-system addresses (strictly-increasing requirement).
     address internal ps1 = address(0x1001);
@@ -23,9 +23,9 @@ contract RollupTest is Test {
 
     address internal alice = makeAddr("alice");
 
-    /// @dev Stand-in for `EEZ.setStateRoot` so the escape-hatch path resolves.
-    function setStateRoot(uint64, bytes32 newStateRoot) external {
-        lastStateRoot = newStateRoot;
+    /// @dev Stand-in for `EEZ.setRoot` so the escape-hatch path resolves.
+    function setRoot(uint64, bytes32 newRoot) external {
+        lastRoot = newRoot;
     }
 
     function setUp() public {
@@ -172,10 +172,10 @@ contract RollupTest is Test {
         assertEq(rollup.threshold(), 3);
     }
 
-    function test_setStateRootEscapeHatch() public {
+    function test_setRootEscapeHatch() public {
         rollup.rollupContractRegistered(1);
-        rollup.setStateRoot(bytes32(uint256(0xDEAD)));
-        assertEq(lastStateRoot, bytes32(uint256(0xDEAD)));
+        rollup.setRoot(bytes32(uint256(0xDEAD)));
+        assertEq(lastRoot, bytes32(uint256(0xDEAD)));
     }
 
     function test_ownerOpsOnlyOwner() public {

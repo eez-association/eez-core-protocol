@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {
     ExecutionEntry,
-    StateUpdate,
+    RootUpdate,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
-    ExpectedStateRootPerRollup
+    ExpectedRootPerRollup
 } from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
@@ -79,7 +79,7 @@ contract TableGenerator is TestHashes {
     mapping(uint256 => L2ExecutionEntry[]) internal _unitEntries;
     mapping(uint256 => L2StaticExecutionEntry[]) internal _unitStatics;
 
-    // ── fabricated per-rollup state-root ledger ──
+    // ── fabricated per-rollup root ledger ──
     uint64[] internal _rollupIds;
     mapping(uint64 => bool) internal _rollupSeen;
     mapping(uint64 => bool) internal _ledgerInit;
@@ -117,7 +117,7 @@ contract TableGenerator is TestHashes {
     //  Public API
     // ──────────────────────────────────────────────
 
-    /// @notice Fabricated genesis state root a rollup must be registered with
+    /// @notice Fabricated genesis root a rollup must be registered with
     ///         (the shared `blobGenesisRoot` — one definition for harness + tables).
     function genesisRoot(uint64 rid) public pure returns (bytes32) {
         return blobGenesisRoot(rid);
@@ -175,7 +175,7 @@ contract TableGenerator is TestHashes {
         return _rollupIds;
     }
 
-    /// @notice The expected live state root of `rid` after every entry has been consumed.
+    /// @notice The expected live root of `rid` after every entry has been consumed.
     function finalRoot(uint64 rid) external view returns (bytes32) {
         return _ledgerInit[rid] ? _ledger[rid] : genesisRoot(rid);
     }
@@ -432,8 +432,8 @@ contract TableGenerator is TestHashes {
             staticEntry.rollingHash = subHash;
             staticEntry.success = node.success;
             staticEntry.returnData = node.returnData;
-            staticEntry.expectedStateRoots
-                .push(ExpectedStateRootPerRollup({rollupId: node.toChain, stateRoot: _ledgerGet(node.toChain)}));
+            staticEntry.expectedRoots
+                .push(ExpectedRootPerRollup({rollupId: node.toChain, root: _ledgerGet(node.toChain)}));
         } else {
             uint256 unitIdx = _originUnit(origin);
             L2StaticExecutionEntry storage staticEntry = _unitStatics[unitIdx].push();
@@ -576,7 +576,11 @@ contract TableGenerator is TestHashes {
     //  L1 entry lifecycle
     // ──────────────────────────────────────────────
 
-    function _openL1Entry(bytes32 proxyEntryHash, uint64 destinationRollupId, uint256 txIdx)
+    function _openL1Entry(
+        bytes32 proxyEntryHash,
+        uint64 destinationRollupId,
+        uint256 txIdx
+    )
         internal
         returns (uint256 idx)
     {
@@ -611,10 +615,8 @@ contract TableGenerator is TestHashes {
             uint64 rid = sorted[i];
             bytes32 cur = _ledgerGet(rid);
             bytes32 newRoot = keccak256(abi.encodePacked("blobfw-step", cur, idx));
-            entry.stateUpdates
-                .push(
-                    StateUpdate({rollupId: rid, currentState: cur, newState: newRoot, etherDelta: _l1Ether[idx][rid]})
-                );
+            entry.rootUpdates
+                .push(RootUpdate({rollupId: rid, currentRoot: cur, newRoot: newRoot, etherDelta: _l1Ether[idx][rid]}));
             _ledgerSet(rid, newRoot);
         }
 
@@ -622,16 +624,16 @@ contract TableGenerator is TestHashes {
         ctx.active = true;
         ctx.hostIsL1 = true;
         ctx.hostEntry = idx;
-        ctx.liveHash = _hEntryBegin(entry.stateUpdates, entry.proxyEntryHash);
+        ctx.liveHash = _hEntryBegin(entry.rootUpdates, entry.proxyEntryHash);
         _clearFrames(ctx);
     }
 
     /// @notice Undoes the ledger advance of a failed (success = false) L1 entry — its
-    ///         consumption reverts, so the live roots stay at the entry's currentState.
+    ///         consumption reverts, so the live roots stay at the entry's currentRoot.
     function _rollbackLedgerForEntry(uint256 idx) internal {
         ExecutionEntry storage entry = _l1Entries[idx];
-        for (uint256 i = 0; i < entry.stateUpdates.length; i++) {
-            _ledger[entry.stateUpdates[i].rollupId] = entry.stateUpdates[i].currentState;
+        for (uint256 i = 0; i < entry.rootUpdates.length; i++) {
+            _ledger[entry.rootUpdates[i].rollupId] = entry.rootUpdates[i].currentRoot;
         }
     }
 

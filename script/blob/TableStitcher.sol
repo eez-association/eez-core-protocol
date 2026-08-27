@@ -296,7 +296,13 @@ contract TableStitcher is TestHashes {
 
     /// @notice Root mutable call: fields resolved from the destination side by the
     ///         origin entry's proxyEntryHash; result from the origin entry.
-    function _stitchRootCall(uint256 txId, uint64 origin, bytes32 callHash, bool success, bytes memory returnData)
+    function _stitchRootCall(
+        uint256 txId,
+        uint64 origin,
+        bytes32 callHash,
+        bool success,
+        bytes memory returnData
+    )
         internal
         returns (uint256 nodeId)
     {
@@ -695,7 +701,7 @@ contract TableStitcher is TestHashes {
         ctx.active = true;
         ctx.hostIsL1 = true;
         ctx.hostEntry = entryIdx;
-        ctx.liveHash = _hEntryBegin(_l1Entries[entryIdx].stateUpdates, _l1Entries[entryIdx].proxyEntryHash);
+        ctx.liveHash = _hEntryBegin(_l1Entries[entryIdx].rootUpdates, _l1Entries[entryIdx].proxyEntryHash);
         ctx.rowCursor = 0;
         ctx.topCursor = 0;
         _clearFrames(ctx);

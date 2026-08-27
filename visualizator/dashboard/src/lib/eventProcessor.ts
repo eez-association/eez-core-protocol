@@ -37,8 +37,8 @@ export function processEventForTables(
       const entries = event.args.entries as Array<{
         stateDeltas: Array<{
           rollupId: bigint;
-          currentState: string;
-          newState: string;
+          currentRoot: string;
+          newRoot: string;
           etherDelta: bigint;
         }>;
         crossChainCallHash: string;
@@ -81,8 +81,8 @@ function entryToTableEntry(
   entry: {
     stateDeltas: Array<{
       rollupId: bigint;
-      currentState: string;
-      newState: string;
+      currentRoot: string;
+      newRoot: string;
       etherDelta: bigint;
     }>;
     crossChainCallHash: string;
@@ -96,7 +96,7 @@ function entryToTableEntry(
   eventId: string,
 ): TableEntry {
   const deltas = entry.stateDeltas.map(
-    (sd) => `r${sd.rollupId}: -> ${truncateHex(sd.newState)}`,
+    (sd) => `r${sd.rollupId}: -> ${truncateHex(sd.newRoot)}`,
   );
   const rollupIds = entry.stateDeltas.map((sd) => sd.rollupId);
 
@@ -137,7 +137,7 @@ export function extractRollupState(
     case "RollupCreated": {
       const rid = String(event.args.rollupId);
       updates.push(
-        { rollupId: rid, key: `Rollup ${rid} state`, value: truncateHex(event.args.initialState as string) },
+        { rollupId: rid, key: `Rollup ${rid} state`, value: truncateHex(event.args.initialRoot as string) },
         { rollupId: rid, key: `Rollup ${rid} contract`, value: (event.args.rollupContract as string) },
       );
       break;

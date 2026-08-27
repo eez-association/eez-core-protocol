@@ -6,11 +6,11 @@ import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} f
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {
     ExecutionEntry,
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
-    ExpectedStateRootPerRollup
+    ExpectedRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 import {TestHashes} from "./TestHashes.sol";
@@ -24,7 +24,7 @@ import {TestHashes} from "./TestHashes.sol";
 ///      Tests should:
 ///        1. `is Base` (extend this contract).
 ///        2. Call `setUpBase()` from their own `setUp()`.
-///        3. Use `_makeRollup(initialState)` to register a fresh rollup with the default
+///        3. Use `_makeRollup(initialRoot)` to register a fresh rollup with the default
 ///           shape (1 proof system, threshold 1, owner = `defaultOwner`).
 ///        4. Use `_postBatchOne(handle, entries, staticEntries, immediateEntryCount,
 ///           immediateStaticEntryCount)` to wrap a single sub-batch and post it.
@@ -65,25 +65,25 @@ abstract contract Base is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     /// @notice Default-shape rollup: one PS (the shared `ps`), threshold 1, owner = defaultOwner.
-    function _makeRollup(bytes32 initialState) internal returns (RollupHandle memory handle) {
-        return _makeRollupWithOwner(initialState, defaultOwner);
+    function _makeRollup(bytes32 initialRoot) internal returns (RollupHandle memory handle) {
+        return _makeRollupWithOwner(initialRoot, defaultOwner);
     }
 
     /// @notice Default-shape rollup with a caller-specified owner (useful when the test
     ///         needs to call owner ops on the manager).
-    function _makeRollupWithOwner(bytes32 initialState, address owner_) internal returns (RollupHandle memory handle) {
+    function _makeRollupWithOwner(bytes32 initialRoot, address owner_) internal returns (RollupHandle memory handle) {
         address[] memory psList = new address[](1);
         psList[0] = address(ps);
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
         handle.manager = new Rollup(address(rollups), owner_, 1, psList, vks);
-        handle.id = rollups.registerRollup(address(handle.manager), initialState);
+        handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }
 
     /// @notice Custom-shape rollup. Deploys a `Rollup` manager with the given PS/vkey/threshold/owner
     ///         and registers it in the central registry.
     function _makeRollupCustom(
-        bytes32 initialState,
+        bytes32 initialRoot,
         address[] memory psList,
         bytes32[] memory vks,
         uint256 threshold,
@@ -93,13 +93,13 @@ abstract contract Base is Test, TestHashes {
         returns (RollupHandle memory handle)
     {
         handle.manager = new Rollup(address(rollups), owner_, threshold, psList, vks);
-        handle.id = rollups.registerRollup(address(handle.manager), initialState);
+        handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }
 
-    /// @notice Reads `rollups[rid].stateRoot`.
+    /// @notice Reads `rollups[rid].root`.
     function _getRollupState(uint256 rid) internal view returns (bytes32) {
-        (, bytes32 stateRoot,) = rollups.rollups(uint64(rid));
-        return stateRoot;
+        (, bytes32 root,) = rollups.rollups(uint64(rid));
+        return root;
     }
 
     /// @notice Reads `rollups[rid].rollupContract`.
@@ -118,7 +118,7 @@ abstract contract Base is Test, TestHashes {
     /// @dev Storage layout: EEZBase owns slot 0 (`authorizedProxies`). EEZ then has
     ///      `rollupCounter` at slot 1 and `mapping(rid => RollupConfig) rollups` at slot 2.
     ///      Mapping value slot = `keccak256(abi.encode(rid, 2))`. `RollupConfig` is
-    ///      `{rollupContract, stateRoot, etherBalance}` at slot offsets 0, 1, 2, so
+    ///      `{rollupContract, root, etherBalance}` at slot offsets 0, 1, 2, so
     ///      `etherBalance` lives at `keccak256(abi.encode(rid, 2)) + 2`. Also funds the
     ///      contract's actual ETH balance to keep accounting consistent.
     function _fundRollup(uint256 rid, uint256 amount) internal {
@@ -243,9 +243,8 @@ abstract contract Base is Test, TestHashes {
     )
         internal
     {
-        ProofSystemBatchPerVerificationEntries memory batch = _singleSubBatch(
-            r, entries, staticEntries, immediateEntryCount, immediateStaticEntryCount
-        );
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _singleSubBatch(r, entries, staticEntries, immediateEntryCount, immediateStaticEntryCount);
         rollups.postAndVerifyBatch(batch);
     }
 
@@ -258,17 +257,17 @@ abstract contract Base is Test, TestHashes {
     }
 
     /// @notice Posts a single-rollup batch whose whole `entries` prefix is immediate, carrying
-    ///         `expectedStateRootPerRollup` pins (mismatch reverts `ExpectedStateRootMismatch`).
+    ///         `expectedRootPerRollup` pins (mismatch reverts `ExpectedRootMismatch`).
     function _postBatchWithPins(
         RollupHandle memory r,
         ExecutionEntry[] memory entries,
-        ExpectedStateRootPerRollup[] memory pins
+        ExpectedRootPerRollup[] memory pins
     )
         internal
     {
         ProofSystemBatchPerVerificationEntries memory batch =
             _singleSubBatch(r, entries, _emptyStaticEntries(), entries.length, 0);
-        batch.expectedStateRootPerRollup = pins;
+        batch.expectedRootPerRollup = pins;
         rollups.postAndVerifyBatch(batch);
     }
 
@@ -292,41 +291,49 @@ abstract contract Base is Test, TestHashes {
         arr = new ExpectedL1ToL2Call[](0);
     }
 
-    function _emptyPins() internal pure returns (ExpectedStateRootPerRollup[] memory arr) {
-        arr = new ExpectedStateRootPerRollup[](0);
+    function _emptyPins() internal pure returns (ExpectedRootPerRollup[] memory arr) {
+        arr = new ExpectedRootPerRollup[](0);
     }
 
-    /// @notice A single-delta array transitioning `rid` from `currentState` to `newState`.
-    function _oneDelta(uint256 rid, bytes32 currentState, bytes32 newState, int256 etherDelta)
+    /// @notice A single-delta array transitioning `rid` from `currentRoot` to `newRoot`.
+    function _oneDelta(
+        uint256 rid,
+        bytes32 currentRoot,
+        bytes32 newRoot,
+        int256 etherDelta
+    )
         internal
         pure
-        returns (StateUpdate[] memory deltas)
+        returns (RootUpdate[] memory deltas)
     {
-        deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
-            rollupId: uint64(rid), currentState: currentState, newState: newState, etherDelta: etherDelta
-        });
+        deltas = new RootUpdate[](1);
+        deltas[0] =
+            RootUpdate({rollupId: uint64(rid), currentRoot: currentRoot, newRoot: newRoot, etherDelta: etherDelta});
     }
 
     /// @notice An immediate entry (`proxyEntryHash == 0`) transitioning `rid` from
-    ///         `currentState` to `newState`, with no calls. `success = true`.
-    function _immediateEntry(uint256 rid, bytes32 currentState, bytes32 newState)
+    ///         `currentRoot` to `newRoot`, with no calls. `success = true`.
+    function _immediateEntry(
+        uint256 rid,
+        bytes32 currentRoot,
+        bytes32 newRoot
+    )
         internal
         pure
         returns (ExecutionEntry memory entry)
     {
-        entry.stateUpdates = _oneDelta(rid, currentState, newState, 0);
+        entry.rootUpdates = _oneDelta(rid, currentRoot, newRoot, 0);
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = uint64(rid);
         entry.l2ToL1Calls = _emptyCalls();
         entry.expectedL1ToL2Calls = _emptyReentrant();
-        entry.rollingHash = _hEntryBegin(entry.stateUpdates, bytes32(0));
+        entry.rollingHash = _hEntryBegin(entry.rootUpdates, bytes32(0));
         entry.success = true;
         entry.returnData = "";
     }
 
     /// @notice An immediate entry with a single no-op state delta (`proxyEntryHash == 0`, empty
-    ///         calls). The delta exists only so `destinationRollupId ∈ stateUpdates` (postBatch
+    ///         calls). The delta exists only so `destinationRollupId ∈ rootUpdates` (postBatch
     ///         requires it); entries built with this helper are not consumed, so the state values
     ///         are placeholders. Useful for tests that want to verify postAndVerifyBatch flow.
     function _emptyImmediateEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
@@ -335,8 +342,8 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice A "shell" entry: given deltas, default everything else (`proxyEntryHash = 0`,
     ///         no calls, `rollingHash = 0`, `success = true`); destination = `destRid`.
-    function _shellEntry(uint256 destRid, StateUpdate[] memory deltas) internal pure returns (ExecutionEntry memory e) {
-        e.stateUpdates = deltas;
+    function _shellEntry(uint256 destRid, RootUpdate[] memory deltas) internal pure returns (ExecutionEntry memory e) {
+        e.rootUpdates = deltas;
         e.proxyEntryHash = bytes32(0);
         e.destinationRollupId = uint64(destRid);
         e.l2ToL1Calls = _emptyCalls();
@@ -348,7 +355,7 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice Rolling hash for an entry with exactly one top-level call.
     function _oneCallHash(
-        StateUpdate[] memory deltas,
+        RootUpdate[] memory deltas,
         bytes32 proxyEntryHash,
         bytes32 crossChainCallHash,
         bool success,
@@ -364,7 +371,13 @@ abstract contract Base is Test, TestHashes {
     }
 
     /// @notice Compact default-shape call: state-changing (`isStatic = false`), no forced revert.
-    function _call(address src, uint64 srcRid, address tgt, uint256 value_, bytes memory data)
+    function _call(
+        address src,
+        uint64 srcRid,
+        address tgt,
+        uint256 value_,
+        bytes memory data
+    )
         internal
         pure
         returns (L2ToL1Call memory c)
@@ -382,7 +395,12 @@ abstract contract Base is Test, TestHashes {
     }
 
     /// @notice Compact read-only call: dispatched via STATICCALL (`isStatic = true`, no value).
-    function _staticCall(address src, uint64 srcRid, address tgt, bytes memory data)
+    function _staticCall(
+        address src,
+        uint64 srcRid,
+        address tgt,
+        bytes memory data
+    )
         internal
         pure
         returns (L2ToL1Call memory c)

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -28,12 +28,12 @@ import {
 //
 //  L1 side (Execute):
 //    1. postAndVerifyBatch loads ONE deferred L1 entry
-//       with precomputed return=uint256(1) and a StateUpdate advancing L2's stateRoot
+//       with precomputed return=uint256(1) and a RootUpdate advancing L2's root
 //    2. User calls CounterAndProxy.incrementProxy() on L1
 //    3. CAP calls CounterProxy (L1 proxy for Counter@L2)
 //    4. Proxy forwards to EEZ.executeCrossChainCall
 //    5. Entry consumed, returns abi.encode(1); CAP: counter=1, targetCounter=1
-//    6. L2 rollup stateRoot in the registry updated via StateUpdate
+//    6. L2 rollup root in the registry updated via RootUpdate
 //
 //  L2 side (ExecuteL2):
 //    1. SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall(...) loading
@@ -68,16 +68,19 @@ abstract contract CounterActions {
     /// @dev Single L1 entry — the cross-chain call returns precomputed `uint256(1)`; the real
     ///      increment runs on L2. No L1 top-level calls, so the rolling hash is just the entry-begin
     ///      seed (state deltas + proxyEntryHash).
-    function _l1Entries(address counterL2, address counterAndProxy)
+    function _l1Entries(
+        address counterL2,
+        address counterAndProxy
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-counter"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-counter"),
             etherDelta: 0
         });
 
@@ -86,7 +89,7 @@ abstract contract CounterActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -100,7 +103,10 @@ abstract contract CounterActions {
     /// @dev Single L2 entry — L2-side mirror that drives the actual Counter.increment() on L2.
     /// `incomingCalls[0]` is the inbound call delivered through the source proxy. Same `proxyEntryHash`
     /// as the L1 entry.
-    function _l2Entries(address counterL2, address counterAndProxy)
+    function _l2Entries(
+        address counterL2,
+        address counterAndProxy
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)

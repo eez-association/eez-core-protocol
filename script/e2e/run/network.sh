@@ -201,7 +201,7 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
         _L1_CONTRACT="VerifyL1BatchInRange"
         _L1_EXPECTED="$EXPECTED_L1_CALL_HASHES"
     else
-        # Zero-hash entries: EXPECTED_L1_HASHES fold placeholder state roots, but the
+        # Zero-hash entries: EXPECTED_L1_HASHES fold placeholder roots, but the
         # on-chain rolling-hash seed folds the REAL roots the composer settles — the
         # event-level hash match can never fire on a live devnet. Discover settlement
         # txs root-agnostically; the posted-calldata comparison (roots neutralized)

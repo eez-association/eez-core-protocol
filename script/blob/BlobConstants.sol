@@ -40,7 +40,7 @@ uint8 constant STEP_STATIC_EXPECT_REVERT = 5; // staticcall target; expect rever
 ///      their capacities must agree.
 uint256 constant MAX_CALL_DEPTH = 64;
 
-/// @notice Fabricated genesis state root the framework registers rollup `rid`
+/// @notice Fabricated genesis root the framework registers rollup `rid`
 ///         with — the single definition used by both the table derivation
 ///         (TableGenerator's ledger) and the live harness (rollup registration).
 function blobGenesisRoot(uint64 rid) pure returns (bytes32) {

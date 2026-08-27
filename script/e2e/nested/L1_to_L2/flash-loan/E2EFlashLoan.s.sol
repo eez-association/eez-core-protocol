@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -102,7 +102,16 @@ abstract contract FlashLoanActions {
     function _fwdReceiveData(FlashLoanAddrs memory a) internal pure returns (bytes memory) {
         return abi.encodeCall(
             Bridge.receiveTokens,
-            (a.token, MAINNET_ROLLUP_ID, a.executorL2, AMOUNT, TOKEN_NAME, TOKEN_SYMBOL, TOKEN_DECIMALS, MAINNET_ROLLUP_ID)
+            (
+                a.token,
+                MAINNET_ROLLUP_ID,
+                a.executorL2,
+                AMOUNT,
+                TOKEN_NAME,
+                TOKEN_SYMBOL,
+                TOKEN_DECIMALS,
+                MAINNET_ROLLUP_ID
+            )
         );
     }
 
@@ -126,31 +135,23 @@ abstract contract FlashLoanActions {
 
     /// Entry-0 key on both sides: bridgeL1 → bridgeL2 (same address) forward receiveTokens.
     function _fwdHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.bridge, MAINNET_ROLLUP_ID, a.bridge, L2_ROLLUP_ID, 0, _fwdReceiveData(a)
-        );
+        return crossChainCallHash(false, a.bridge, MAINNET_ROLLUP_ID, a.bridge, L2_ROLLUP_ID, 0, _fwdReceiveData(a));
     }
 
     /// Entry-1 key on both sides: executorL1 → executorL2 claimAndBridgeBack.
     function _claimHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, L2_ROLLUP_ID, 0, _claimData(a)
-        );
+        return crossChainCallHash(false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, L2_ROLLUP_ID, 0, _claimData(a));
     }
 
     /// Return leg as folded on L1 (entry 1's top-level l2ToL1Call): bridgeL2 → bridgeL1.
     function _retHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a)
-        );
+        return crossChainCallHash(false, a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     /// Return leg as folded on L2 (the call LEAVES the L2, so it keys with the
     /// L2-outgoing hash; same digest under useGasLeft = false).
     function _retHashL2Out(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(
-            a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a)
-        );
+        return crossChainCallHashL2Out(a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     // ── Tables ──
@@ -159,20 +160,17 @@ abstract contract FlashLoanActions {
         bytes32 rootAfterFwd = keccak256("l2-state-after-flash-loan-fwd");
 
         // Entry 0: forward bridge leg — no L1-side calls, seed-only rolling hash.
-        StateUpdate[] memory fwdDeltas = new StateUpdate[](1);
-        fwdDeltas[0] = StateUpdate({
-            rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: rootAfterFwd,
-            etherDelta: 0
+        RootUpdate[] memory fwdDeltas = new RootUpdate[](1);
+        fwdDeltas[0] = RootUpdate({
+            rollupId: L2_ROLLUP_ID, currentRoot: keccak256("l2-initial-state"), newRoot: rootAfterFwd, etherDelta: 0
         });
 
         // Entry 1: claim leg — one top-level l2ToL1Call: the return bridge leg runs on L1.
-        StateUpdate[] memory claimDeltas = new StateUpdate[](1);
-        claimDeltas[0] = StateUpdate({
+        RootUpdate[] memory claimDeltas = new RootUpdate[](1);
+        claimDeltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: rootAfterFwd,
-            newState: keccak256("l2-state-after-flash-loan-claim"),
+            currentRoot: rootAfterFwd,
+            newRoot: keccak256("l2-state-after-flash-loan-claim"),
             etherDelta: 0
         });
 
@@ -194,7 +192,7 @@ abstract contract FlashLoanActions {
 
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateUpdates: fwdDeltas,
+            rootUpdates: fwdDeltas,
             proxyEntryHash: _fwdHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -204,7 +202,7 @@ abstract contract FlashLoanActions {
             returnData: ""
         });
         entries[1] = ExecutionEntry({
-            stateUpdates: claimDeltas,
+            rootUpdates: claimDeltas,
             proxyEntryHash: _claimHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: claimCalls,

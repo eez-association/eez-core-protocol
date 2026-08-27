@@ -164,7 +164,7 @@ const E = {
         sourceAddress:'A (CounterAndProxy on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-after-increment")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-after-increment")', etherDelta:'0' }
   },
   // Single L2 entry: actionHash matches the proxy call from A', calls[] has the call to B.
   s1e2: {
@@ -200,7 +200,7 @@ const E = {
         sourceAddress:'D (CounterAndProxy on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-after-scenario2")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-after-scenario2")', etherDelta:'0' }
   },
   // L2 entry: actionHash matches D's call to C'. calls[] has the call to C.
   s2e2: {
@@ -238,7 +238,7 @@ const E = {
     nestedActions: [
       { actionHash:'keccak256(L2,B,0,inc.selector,A,MAINNET)', callCount:'1', returnData:'abi.encode(uint256(1))' }
     ],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s3-step1")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-s3-step1")', etherDelta:'0' }
   },
   // L2 entry 1: actionHash matches Alice's call to A' (proxy). calls[] = [call B], nestedActions = none.
   // _consumeNestedAction on L1 validates via rolling hash.
@@ -275,7 +275,7 @@ const E = {
         sourceAddress:'A (CounterAndProxy on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s3-step2")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-s3-step2")', etherDelta:'0' }
   },
 
   // ── Scenario 4: L1 -> L2 -> L1 (nested cross-manager) ──
@@ -297,7 +297,7 @@ const E = {
     nestedActions: [
       { actionHash:'keccak256(MAIN,C,0,inc.selector,D,L2)', callCount:'1', returnData:'abi.encode(uint256(1))' }
     ],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s4-step1")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-s4-step1")', etherDelta:'0' }
   },
   // L2 entry 1: actionHash matches Alice's call to D (via proxy). calls[] = [call D.incProxy],
   //   nestedActions = [C.inc].
@@ -334,7 +334,7 @@ const E = {
         sourceAddress:'D (CounterAndProxy on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-state-s4-step2")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-state-s4-step2")', etherDelta:'0' }
   },
 
   // ── Scenario 5: Cross-Chain Flash Loan ──
@@ -353,7 +353,7 @@ const E = {
         sourceAddress:'Bridge_L1 (Bridge on L1)', sourceRollup:'MAINNET_ROLLUP_ID (0)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-tokens-bridged-to-executor")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-tokens-bridged-to-executor")', etherDelta:'0' }
   },
   // L1 entry 2: claimBack. calls[] = [ExecL2.claimAndBridgeBack], nestedActions = [bridge return].
   s5e2: {
@@ -372,7 +372,7 @@ const E = {
     nestedActions: [
       { actionHash:'keccak256(MAIN,Bridge_L1,0,recvTokens.sel,Bridge_L2,L2)', callCount:'1', returnData:'"" (void)' }
     ],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-nft-claimed-tokens-bridged-back")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-nft-claimed-tokens-bridged-back")', etherDelta:'0' }
   },
   // L1 entry 3: nested bridge return. Consumed by _consumeNestedAction.
   s5e3: {
@@ -389,7 +389,7 @@ const E = {
         sourceAddress:'Bridge_L2 (Bridge on L2)', sourceRollup:'L2_ROLLUP_ID (1)', revertSpan:'0' }
     ],
     nestedActions: [],
-    sd: { rollupId:'L2_ROLLUP_ID (1)', newState:'keccak256("l2-bridge-return-executed")', etherDelta:'0' }
+    sd: { rollupId:'L2_ROLLUP_ID (1)', newRoot:'keccak256("l2-bridge-return-executed")', etherDelta:'0' }
   },
   // L2 entry 1: bridge forward receives. calls[] = [Bridge_L2.receiveTokens].
   s5e4: {
@@ -1173,7 +1173,7 @@ function renderTbl(title, chain, entries) {
         }
         if (e.sd) {
           h += '<div class="te-section"><div class="te-sec-hdr">StateDelta</div><div class="te-kv">';
-          h += kv('rollupId', e.sd.rollupId) + kv('newState', e.sd.newState, true) + kv('etherDelta', e.sd.etherDelta);
+          h += kv('rollupId', e.sd.rollupId) + kv('newRoot', e.sd.newRoot, true) + kv('etherDelta', e.sd.etherDelta);
           h += '</div></div>';
         }
         h += '</div>';

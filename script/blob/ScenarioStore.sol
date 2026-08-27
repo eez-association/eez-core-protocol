@@ -165,7 +165,11 @@ contract ScenarioStore {
     /// @dev DFS over `siblings` collecting static nodes. A static node's children
     ///      (its own sub-reads, always static) are NOT collected — their fields
     ///      live in the static entry's sub-call array, not the sidecar.
-    function _collectStatics(uint256[] storage siblings, uint256[] memory buf, uint256 n)
+    function _collectStatics(
+        uint256[] storage siblings,
+        uint256[] memory buf,
+        uint256 n
+    )
         internal
         view
         returns (uint256)
@@ -182,7 +186,11 @@ contract ScenarioStore {
     }
 
     /// @dev DFS over `siblings` collecting each region's first node (revertSpan > 0).
-    function _collectRegionStarts(uint256[] storage siblings, uint256[] memory buf, uint256 n)
+    function _collectRegionStarts(
+        uint256[] storage siblings,
+        uint256[] memory buf,
+        uint256 n
+    )
         internal
         view
         returns (uint256)

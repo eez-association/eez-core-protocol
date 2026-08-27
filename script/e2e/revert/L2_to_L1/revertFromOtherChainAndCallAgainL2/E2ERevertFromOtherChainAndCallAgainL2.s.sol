@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
@@ -57,14 +57,15 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
     ///      call, matched with the L2-outgoing key (`callGas` = 0). Consumed twice by S: the
     ///      first consumption unwinds with innerCall()'s revert, the second survives.
     function _proxyEntryHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(
-            selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData()
-        );
+        return crossChainCallHashL2Out(selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev L2 source entry: nothing executes on L2 — it just hands S the pre-computed L1
     ///      result (abi.encode(1), valid for BOTH consumptions: the first one's L1 state is erased).
-    function _l2Entries(address counterL1, address selfCallerL2)
+    function _l2Entries(
+        address counterL1,
+        address selfCallerL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -84,7 +85,10 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
 
     /// @dev L1 entry — mirrors BOTH increment consumptions S made on L2: calls[0] force-reverted
     ///      (its L2 frame reverted), calls[1] committed. Both run on a counter at 0 → both return 1.
-    function _l1Entries(address counterL1, address selfCallerL2)
+    function _l1Entries(
+        address counterL1,
+        address selfCallerL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -111,17 +115,16 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
             data: _incrementData()
         });
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-revertFromOtherChainAndCallAgainL2"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-revertFromOtherChainAndCallAgainL2"),
             etherDelta: 0
         });
 
-        bytes32 ccInc = crossChainCallHash(
-            false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData()
-        );
+        bytes32 ccInc =
+            crossChainCallHash(false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccInc);
         rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1)));
@@ -130,7 +133,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -84,16 +84,20 @@ abstract contract NestedCallRevertActions {
         return crossChainCallHash(false, scap, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
     }
 
-    function _l1Entries(address scap, address alice, address counterL2)
+    function _l1Entries(
+        address scap,
+        address alice,
+        address counterL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-nested-call-revert"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-nested-call-revert"),
             etherDelta: 0
         });
 
@@ -103,7 +107,7 @@ abstract contract NestedCallRevertActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
-            // L1 calls must be sourced from a rollup in the entry's stateUpdates (L2), not MAINNET.
+            // L1 calls must be sourced from a rollup in the entry's rootUpdates (L2), not MAINNET.
             sourceRollupId: L2_ROLLUP_ID,
             targetAddress: scap,
             value: 0,
@@ -135,7 +139,7 @@ abstract contract NestedCallRevertActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -165,7 +169,11 @@ abstract contract NestedCallRevertActions {
         return crossChainCallHashL2Out(scapL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
-    function _l2Entries(address scapL2, address aliceL1, address counterL1)
+    function _l2Entries(
+        address scapL2,
+        address aliceL1,
+        address counterL1
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
@@ -62,24 +62,28 @@ abstract contract RevertActions {
     /// @dev Proxy-entry identity: safeCaller (on L1) calls the L1 proxy for (RevertCounter@L2).
     ///      Same hash on both sides (L2's executeIncomingCrossChainCall folds targetRollupId = L2).
     function _proxyEntryHash(address revCounterL2, address safeCaller) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, safeCaller, MAINNET_ROLLUP_ID, revCounterL2, L2_ROLLUP_ID, 0, _incrementCallData()
-        );
+        return
+            crossChainCallHash(
+                false, safeCaller, MAINNET_ROLLUP_ID, revCounterL2, L2_ROLLUP_ID, 0, _incrementCallData()
+            );
     }
 
     /// @dev L1 source entry: nothing executes on L1 — the entry only carries the destination's
     ///      outcome. success=false replays the destination's revert to the caller (consumption
     ///      runs, verifies, then reverts with returnData; the cursor advance unwinds with it).
-    function _l1Entries(address revCounterL2, address safeCaller)
+    function _l1Entries(
+        address revCounterL2,
+        address safeCaller
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-reverted-call"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-reverted-call"),
             etherDelta: 0
         });
 
@@ -87,7 +91,7 @@ abstract contract RevertActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -100,7 +104,10 @@ abstract contract RevertActions {
 
     /// @dev L2 mirror entry: the delivered call runs the real RevertCounter, which reverts —
     ///      folded as CALL_END(false, Error("always reverts")). The entry itself succeeds.
-    function _l2Entries(address revCounterL2, address safeCaller)
+    function _l2Entries(
+        address revCounterL2,
+        address safeCaller
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -229,8 +236,7 @@ contract ExecuteL2 is Script, RevertActions {
         address safeCallerAddr = vm.envAddress("SAFE_CALLER");
 
         vm.startBroadcast();
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(_l2Entries(revCounterL2, safeCallerAddr), noL2StaticEntries());
+        EEZL2(managerAddr).executeIncomingCrossChainCall(_l2Entries(revCounterL2, safeCallerAddr), noL2StaticEntries());
 
         console.log("done");
         console.log("delivered call reverted naturally; entry verified");

@@ -8,7 +8,7 @@ import {BlobCodec} from "./BlobCodec.sol";
 import {ScenarioStore} from "./ScenarioStore.sol";
 import {TableGenerator} from "./TableGenerator.sol";
 import {UNIT_KIND_ORIGIN_GROUP} from "./BlobConstants.sol";
-import {ExecutionEntry, StaticExecutionEntry, L2ToL1Call, StateUpdate} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StaticExecutionEntry, L2ToL1Call, RootUpdate} from "../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../src/interfaces/IEEZL2.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,16 +158,16 @@ contract BlobTools is DslScenarioBase {
             );
             console2.log(string.concat("      proxyEntryHash=", vm.toString(e.proxyEntryHash)));
             console2.log(string.concat("      rollingHash=   ", vm.toString(e.rollingHash)));
-            for (uint256 d = 0; d < e.stateUpdates.length; d++) {
-                StateUpdate memory u = e.stateUpdates[d];
+            for (uint256 d = 0; d < e.rootUpdates.length; d++) {
+                RootUpdate memory u = e.rootUpdates[d];
                 console2.log(
                     string.concat(
                         "      delta rollup ",
                         vm.toString(u.rollupId),
                         ": ",
-                        vm.toString(u.currentState),
+                        vm.toString(u.currentRoot),
                         " -> ",
-                        vm.toString(u.newState),
+                        vm.toString(u.newRoot),
                         " ether=",
                         vm.toString(u.etherDelta)
                     )
@@ -205,7 +205,7 @@ contract BlobTools is DslScenarioBase {
                     "] dest=",
                     vm.toString(se.destinationRollupId),
                     " pins=",
-                    vm.toString(se.expectedStateRoots.length),
+                    vm.toString(se.expectedRoots.length),
                     " subReads=",
                     vm.toString(se.l2ToL1Calls.length),
                     " success=",

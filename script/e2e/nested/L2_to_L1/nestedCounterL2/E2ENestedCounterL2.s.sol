@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {StateUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -128,7 +128,11 @@ abstract contract NestedL2Actions {
 
     /// Both L2-side executions in consumption order: the user's outgoing entry, then the
     /// inbound reentry delivery.
-    function _l2Entries(address counterL2, address capL1, address alice)
+    function _l2Entries(
+        address counterL2,
+        address capL1,
+        address alice
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -138,16 +142,20 @@ abstract contract NestedL2Actions {
         entries[1] = _l2IncomingEntry(counterL2, capL1);
     }
 
-    function _l1Entries(address counterL2, address capL1, address alice)
+    function _l1Entries(
+        address counterL2,
+        address capL1,
+        address alice
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-nested-l2"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-nested-l2"),
             etherDelta: 0
         });
 
@@ -184,7 +192,7 @@ abstract contract NestedL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — consumed by postAndVerifyBatch/executeL2Txs
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

@@ -168,7 +168,7 @@ chains by block number. The link is **content**, in three layers:
    folds every call result (`returnData` included) and every nesting boundary, so
    the source side's cached returns are cryptographically bound to the destination
    side's actual execution — any divergence changes the hash and fails the run.
-   On L1 this identity is only computable where the seed's state roots are known
+   On L1 this identity is only computable where the seed's roots are known
    (L2 tables, local mode); a live devnet settles real roots, so zero-hash L1
    entries are instead pinned by posted-calldata **content** with roots neutralized
    (the chain itself already verified the posted rolling hash against execution).
@@ -201,7 +201,7 @@ later block on either chain.
   the scenario's recorded fold steps over the seed rebuilt from the POSTED state
   roots — exact per-call verification (return data included) without predicting
   roots. Without steps the comparison is content-only (a NOTE says so).
-- **Live state roots**: the registry root must have settled to (or beyond) each
+- **Live roots**: the registry root must have settled to (or beyond) each
   touched rollup's posted update.
 - **L2 table**: every expected entry must have a byte-identical loaded twin
   (subset match — extra entries from other actors are ignored), plus structural
@@ -215,7 +215,7 @@ How a two-sided scenario exercises **both** anvil chains, and which pattern to p
 
 ### Why two-sided
 
-The protocol commits on the source side to "the destination chain will execute X and produce returnData=Y" via a cached `returnData` (plus a per-rollup `StateUpdate` on L1). A single-sided test only checks the source-side bookkeeping — the destination chain stays passive. A two-sided test additionally invokes the destination call for real, so any drift between the cached `returnData` and what the destination actually produces surfaces as an assertion failure.
+The protocol commits on the source side to "the destination chain will execute X and produce returnData=Y" via a cached `returnData` (plus a per-rollup `RootUpdate` on L1). A single-sided test only checks the source-side bookkeeping — the destination chain stays passive. A two-sided test additionally invokes the destination call for real, so any drift between the cached `returnData` and what the destination actually produces surfaces as an assertion failure.
 
 The cross-chain call hash (`computeCrossChainCallHash(...)`, identical formula on both managers) is the cryptographic tie: a green two-sided run shows the **same hash** in events on both chains.
 

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -71,7 +71,10 @@ abstract contract CounterL2Actions {
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`
     /// (CAP L2 -> Counter L1 proxy); it carries no incoming calls and returns precomputed `uint256(1)`,
     /// so the rolling hash is just the entry-begin seed.
-    function _l2Entries(address counterL1, address counterAndProxyL2)
+    function _l2Entries(
+        address counterL1,
+        address counterAndProxyL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -95,7 +98,10 @@ abstract contract CounterL2Actions {
     /// immediate L2Tx during `postAndVerifyBatch`. `l2ToL1Calls[0]` is the inbound call delivered through the source proxy for
     /// CAP-on-L2 (lazily created during processing); it executes ON L1, so CALL_BEGIN folds the call
     /// hash with targetRollupId = MAINNET.
-    function _l1Entries(address counterL1, address counterAndProxyL2)
+    function _l1Entries(
+        address counterL1,
+        address counterAndProxyL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -112,11 +118,11 @@ abstract contract CounterL2Actions {
             data: _incrementCallData()
         });
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-counter"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-counter"),
             etherDelta: 0
         });
 
@@ -127,14 +133,14 @@ abstract contract CounterL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
             success: true,
-            returnData: ""// L2Tx entries must be canonical: success == true, empty returnData
+            returnData: "" // L2Tx entries must be canonical: success == true, empty returnData
         });
     }
 }

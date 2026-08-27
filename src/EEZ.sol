@@ -6,12 +6,12 @@ import {IRollupContract} from "./interfaces/IRollup.sol";
 import {CrossChainProxy} from "./base/CrossChainProxy.sol";
 import {ExpectedL1ToL2CallTransient} from "./base/ExpectedL1ToL2CallTransient.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
     ExecutionEntry,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     ProxyInfo,
     RollupConfig,
     RollupIdWithProofSystems,
@@ -22,14 +22,14 @@ import {EEZBase} from "./base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol";
 
 /// @title EEZ
-/// @notice L1 contract managing rollup state roots, multi-prover batch posting, and cross-chain call execution
+/// @notice L1 contract managing rollup roots, multi-prover batch posting, and cross-chain call execution
 /// @dev EARLY-STAGE IMPLEMENTATION — NOT PRODUCTION READY.
 ///      This is a first implementation of the EEZ protocol. It has NOT undergone an
 ///      external security audit. Interfaces, storage layout, error semantics, and execution
 ///      flow are expected to change in the near term as design issues are fixed and the
 ///      protocol is iterated on. Do not rely on this code for value-bearing deployments,
 ///      and do not treat its current behavior as the canonical specification.
-/// @dev An execution entry combines a proven state transition for its rollups (`stateUpdates`)
+/// @dev An execution entry combines a proven state transition for its rollups (`rootUpdates`)
 ///      with a pre-computed L1 execution: the cross-chain calls to run and the expected results
 ///      (rolling hash, return data). The live execution must match the precomputation, otherwise
 ///      the whole execution — and with it the state update — reverts.
@@ -45,7 +45,7 @@ import {IMetaCrossChainReceiver} from "./interfaces/IMetaCrossChainReceiver.sol"
 ///
 ///      The batch remainder (entries past `immediateEntryCount`) is published into
 ///      per-rollup queues in storage, keyed by `destinationRollupId` UNCONDITIONALLY — even if the meta
-///      hook left transient entries unconsumed. Every entry's `StateUpdate.currentState` is checked at consumption time.
+///      hook left transient entries unconsumed. Every entry's `RootUpdate.currentRoot` is checked at consumption time.
 contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // ──────────────────────────────────────────────
     //  Constants
@@ -64,7 +64,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Counter for generating rollup IDs
     uint64 public rollupCounter;
 
-    /// @notice Mapping from rollup ID to rollup configuration (state root + ether + rollup-contract pointer)
+    /// @notice Mapping from rollup ID to rollup configuration (root + ether + rollup-contract pointer)
     /// @dev The rollupContract is the source of truth for "is this id registered" — a zero
     ///      rollupContract means the slot is unused. Callbacks from the rollup contract pass the
     ///      rollupId explicitly and the registry validates `msg.sender == rollups[rid].rollupContract`
@@ -88,7 +88,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // empty otherwise; set and cleared in `_attemptExecuteImmediateL2Txs`. Meta-hook and queued
     // entries don't need it: theirs are read from `_transientEntries` / the per-rollup queue.
 
-    /// @notice The executing entry's `stateUpdates` rollup ids — the only rollups whose proxies the
+    /// @notice The executing entry's `rootUpdates` rollup ids — the only rollups whose proxies the
     ///         entry may use (to execute or receive cross-chain calls).
     ///         Filled when execution starts, `delete`d when it ends, so it also
     ///         answers `_insideExecution()` (non-empty ⇔ an entry is executing). Plain storage
@@ -123,13 +123,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     int256 transient _entryEtherDelta;
 
     /// @notice Emitted when a new rollup is created
-    event RollupCreated(uint64 indexed rollupId, address indexed rollupContract, bytes32 initialState);
+    event RollupCreated(uint64 indexed rollupId, address indexed rollupContract, bytes32 initialRoot);
 
     /// @notice Emitted when a rollup state is updated (only via the registered rollupContract)
-    event StateUpdated(uint64 indexed rollupId, bytes32 newStateRoot);
+    event RootUpdated(uint64 indexed rollupId, bytes32 newRoot);
 
     /// @notice Emitted when an L2 execution is performed
-    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newState);
+    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot);
 
     /// @notice Emitted when an execution entry is consumed
     event ExecutionConsumed(
@@ -172,11 +172,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when caller is not the rollup's registered `rollupContract`
     error NotRollupContract();
 
-    /// @notice Error when the rollup contract's `setStateRoot` escape hatch is invoked in the same
+    /// @notice Error when the rollup contract's `setRoot` escape hatch is invoked in the same
     ///         block a `postAndVerifyBatch` already touched the rollup
     /// @dev Conservative gate: once a verified state transition lands in block N, the rollup contract
     ///      must wait until block N+1 to escape-mutate. Avoids invalidating queued entries'
-    ///      `currentState` checks and prevents PS-set / threshold mutation from racing the meta hook.
+    ///      `currentRoot` checks and prevents PS-set / threshold mutation from racing the meta hook.
     error RollupBatchActiveThisBlock(uint64 rollupId);
 
     /// @notice Error when the proposed rollup contract is address(0) or the registry itself
@@ -192,8 +192,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         impossible; signals a corrupted execution context, not recoverable input.
     error ResidualEntryEtherIn();
 
-    /// @notice Error when a state delta's currentState doesn't match the rollup's on-chain stateRoot
-    error StateRootMismatch(uint64 rollupId);
+    /// @notice Error when a state delta's currentRoot doesn't match the rollup's on-chain root
+    error RootMismatch(uint64 rollupId);
 
     /// @notice Error when execution is attempted in a different block than the last state update for that rollup
     error ExecutionNotInCurrentBlock(uint64 rollupId);
@@ -201,10 +201,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when executeL2Txs is called while already inside a cross-chain execution
     error L2TxNotAllowedDuringExecution();
 
-    /// @notice Error when the rollup contract's `setStateRoot` escape hatch is invoked while a cross-chain
+    /// @notice Error when the rollup contract's `setRoot` escape hatch is invoked while a cross-chain
     ///         execution is in progress (e.g., the rollup contract is reached via a cross-chain call that
     ///         tries to re-escape mid-flow).
-    error SetStateRootNotAllowedDuringExecution();
+    error SetRootNotAllowedDuringExecution();
 
     /// @notice Error when `immediateEntryCount` exceeds the entry count
     error ImmediateCountExceedsEntries();
@@ -229,9 +229,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         the whole post is unwound rather than proceeding on a fully-failed immediate prefix.
     error AllImmediateL2TxsFailed();
 
-    /// @notice Error when a composer-supplied `expectedStateRootPerRollup` pin doesn't equal the
-    ///         rollup's live state root.
-    error ExpectedStateRootMismatch(uint64 rollupId);
+    /// @notice Error when a composer-supplied `expectedRootPerRollup` pin doesn't equal the
+    ///         rollup's live root.
+    error ExpectedRootMismatch(uint64 rollupId);
 
     /// @notice Error when batch validation fails for malformed inputs
     error InvalidProofSystemConfig();
@@ -239,7 +239,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when duplicate / unsorted proof systems are submitted in the batch
     error DuplicateProofSystem(address proofSystem);
 
-    /// @notice Error when a state delta's `rollupId` or a static entry's `expectedStateRoots` pin
+    /// @notice Error when a state delta's `rollupId` or a static entry's `expectedRoots` pin
     ///         references a rollup not in the batch
     error RollupNotInBatch(uint64 rollupId);
 
@@ -251,13 +251,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     error NoExpectedL1ToL2CallFound();
 
     /// @notice Proxy protection (postAndVerifyBatch): a top-level static entry's `destinationRollupId` is
-    ///         not among its own `expectedStateRoots` pins — the routing target must be pinned to
-    ///         proven state (mirrors the entry `destination ∈ stateUpdates` rule).
+    ///         not among its own `expectedRoots` pins — the routing target must be pinned to
+    ///         proven state (mirrors the entry `destination ∈ rootUpdates` rule).
     error StaticEntryDestinationNotPinned(uint64 rollupId);
 
     /// @notice Proxy protection (VALIDATION): a call's source rollup isn't in its entry's proven set
-    ///         (its `stateUpdates`), or a static entry's sub-call source isn't among its
-    ///         `expectedStateRoots` pins. Thrown only in `_validateBatchStructure` — executed
+    ///         (its `rootUpdates`), or a static entry's sub-call source isn't among its
+    ///         `expectedRoots` pins. Thrown only in `_validateBatchStructure` — executed
     ///         calls need no runtime source check.
     error CallSourceNotVerified(uint64 rollupId);
 
@@ -265,14 +265,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         executing entry's allowed set.
     error ReentrantDestinationNotVerified(uint64 rollupId);
 
-    /// @notice An entry's `stateUpdates` are not strictly increasing by `rollupId`. The strict order
+    /// @notice An entry's `rootUpdates` are not strictly increasing by `rollupId`. The strict order
     ///         rejects duplicate rollups (which would let one entry apply two transitions to the same
     ///         rollup) and, starting above MAINNET_ROLLUP_ID, also rejects a mainnet (L1) delta.
-    error StateUpdatesNotStrictlyIncreasing(uint64 rollupId);
+    error RootUpdatesNotStrictlyIncreasing(uint64 rollupId);
 
-    /// @notice An entry carries no `stateUpdates` — it would be unpinned from the `StateRootMismatch`
+    /// @notice An entry carries no `rootUpdates` — it would be unpinned from the `RootMismatch`
     ///         backstop, so it's rejected at validation.
-    error EntryHasNoStateUpdates();
+    error EntryHasNoRootUpdates();
 
     /// @notice Error when an L2Tx entry (`proxyEntryHash == 0`) is not canonical: `success` must be
     ///         true and `returnData` empty — no proxy consumer observes them. Defensive check of
@@ -280,14 +280,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     error L2TxEntryNotCanonical(uint256 entryIndex);
 
     /// @notice An entry's `destinationRollupId` (the queue it routes to) is not among its own
-    ///         `stateUpdates` — so it could be left in a non-participating rollup's queue. Rejected
+    ///         `rootUpdates` — so it could be left in a non-participating rollup's queue. Rejected
     ///         at validation: the routing target must be a rollup this entry actually proved.
-    error EntryDestinationNotInStateUpdates(uint64 rollupId);
+    error EntryDestinationNotInRootUpdates(uint64 rollupId);
 
-    /// @notice A top-level static entry's `expectedStateRoots` pins are not strictly increasing by
-    ///         `rollupId`. Same rationale as `StateUpdatesNotStrictlyIncreasing`: rejects duplicate
+    /// @notice A top-level static entry's `expectedRoots` pins are not strictly increasing by
+    ///         `rollupId`. Same rationale as `RootUpdatesNotStrictlyIncreasing`: rejects duplicate
     ///         pins and (bounding above MAINNET_ROLLUP_ID) a mainnet (L1) pin.
-    error ExpectedStateRootsNotStrictlyIncreasing(uint64 rollupId);
+    error ExpectedRootsNotStrictlyIncreasing(uint64 rollupId);
 
     /// @notice The constructor was given `address(0)` as the recovery address.
     error InvalidRecoveryAddress();
@@ -310,25 +310,25 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @dev The caller deploys the rollup contract (e.g. our reference `Rollup.sol`, or a custom
     ///      multisig / governance contract) with the desired proof systems / threshold /
     ///      whatever ownership model it chooses baked in, then registers it here. Registry
-    ///      assigns a fresh rollupId and stores the initial state root; the rollup contract learns
+    ///      assigns a fresh rollupId and stores the initial root; the rollup contract learns
     ///      its id via the `rollupContractRegistered` callback (there is no reverse-lookup mapping).
     ///      The registry makes no assumption about how the rollup contract handles ownership —
     ///      that's entirely its concern.
     /// @param rollupContract Address of the pre-deployed `IRollupContract` contract
-    /// @param initialState Initial state root for this rollup
+    /// @param initialRoot Initial root for this rollup
     /// @return rollupId Newly assigned rollup ID
-    function registerRollup(address rollupContract, bytes32 initialState) external returns (uint64 rollupId) {
+    function registerRollup(address rollupContract, bytes32 initialRoot) external returns (uint64 rollupId) {
         if (rollupContract == address(0) || rollupContract == address(this)) revert InvalidRollupContract();
 
         rollupId = ++rollupCounter;
-        rollups[rollupId] = RollupConfig({rollupContract: rollupContract, stateRoot: initialState, etherBalance: 0});
+        rollups[rollupId] = RollupConfig({rollupContract: rollupContract, root: initialRoot, etherBalance: 0});
 
         // One-shot callback informing the rollup contract of its rollupId. It must accept this
         // call only from the registry and only when not already initialized (otherwise reuse
         // of an already-registered rollup contract would silently take over a different rollupId).
         IRollupContract(rollupContract).rollupContractRegistered(rollupId);
 
-        emit RollupCreated(rollupId, rollupContract, initialState);
+        emit RollupCreated(rollupId, rollupContract, initialRoot);
     }
 
     // ──────────────────────────────────────────────
@@ -357,11 +357,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         // calls are ever allowed there (e.g. a non-view `getCustomData`), an explicit mutex is needed.
         if (_insideExecution() || _transientEntries.length != 0) revert PostBatchReentry();
 
-        // 1a. OPTIONAL composer assertion: every `expectedStateRootPerRollup` pin must equal the live root.
-        ExpectedStateRootPerRollup[] calldata stateRootPins = batch.expectedStateRootPerRollup;
-        for (uint256 p = 0; p < stateRootPins.length; p++) {
-            if (rollups[stateRootPins[p].rollupId].stateRoot != stateRootPins[p].stateRoot) {
-                revert ExpectedStateRootMismatch(stateRootPins[p].rollupId);
+        // 1a. OPTIONAL composer assertion: every `expectedRootPerRollup` pin must equal the live root.
+        ExpectedRootPerRollup[] calldata rootPins = batch.expectedRootPerRollup;
+        for (uint256 p = 0; p < rootPins.length; p++) {
+            if (rollups[rootPins[p].rollupId].root != rootPins[p].root) {
+                revert ExpectedRootMismatch(rootPins[p].rollupId);
             }
         }
 
@@ -387,7 +387,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         //    calldata — no full-entry SSTORE; only each entry's `expectedL1ToL2Calls` is held transiently
         //    (see `_attemptExecuteImmediateL2Txs`). Each runs in a `try/catch` self-call so a revert rolls
         //    back only that entry and the loop continues, emitting `L2TxSkipped`. If a later entry
-        //    depended on a skipped one, it will fail its own `StateRootMismatch` check at consumption
+        //    depended on a skipped one, it will fail its own `RootMismatch` check at consumption
         //    (its expected pre-state no longer holds). Stop at the first non-L2Tx entry.
         uint256 immediateEntryCount = batch.immediateEntryCount;
         uint256 i = 0;
@@ -430,10 +430,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         }
 
         // 8. Save the remaining executions to their per-rollup queues, unconditionally. Each entry
-        //    records its expected pre-state in `StateUpdate.currentState`, which is re-checked when the
+        //    records its expected pre-state in `RootUpdate.currentRoot`, which is re-checked when the
         //    entry is consumed. So even if an entry is queued whose preconditions no longer hold (e.g.
         //    its dependency was a transient leftover that got dropped), it simply reverts with
-        //    `StateRootMismatch` at consumption instead of executing incorrectly.
+        //    `RootMismatch` at consumption instead of executing incorrectly.
         _saveRemainderEntries(batch);
 
         // 9. Clear the transient tables. Emptying `_transientEntries` also closes the re-entry window
@@ -480,7 +480,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @dev Checks PS/rollup sorting + registration, per-rollup PS-index ranges, and transient prefix
     ///      bounds. Crucially, it also enforces PROXY PROTECTION: every rollup an entry/static entry touches
     ///      — its `destinationRollupId` plus every cross-chain call's source/target rollup — must be in
-    ///      that entry's proven set (its `stateUpdates`, or the static entry's `expectedStateRoots` pins), so
+    ///      that entry's proven set (its `rootUpdates`, or the static entry's `expectedRoots` pins), so
     ///      every proxy driven at execution is backed by a verified rollup.
     function _validateBatchStructure(ProofSystemBatchPerVerificationEntries calldata batch) internal view {
         uint256 psLen = batch.proofSystems.length;
@@ -520,13 +520,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             }
         }
 
-        // Per entry: `stateUpdates` (≥1, strictly increasing, all ∈ batch), `destinationRollupId` ∈ deltas,
+        // Per entry: `rootUpdates` (≥1, strictly increasing, all ∈ batch), `destinationRollupId` ∈ deltas,
         // and every call SOURCE ∈ deltas. Sources are fail-fast here; reentrant TARGETS carry no rollup
         // field, so they stay a RUNTIME check (`_isRollupAllowed`).
         for (uint256 i = 0; i < batch.entries.length; i++) {
             ExecutionEntry calldata entry = batch.entries[i];
-            StateUpdate[] calldata deltas = entry.stateUpdates;
-            if (deltas.length == 0) revert EntryHasNoStateUpdates(); // must be state-pinned to the backstop
+            RootUpdate[] calldata deltas = entry.rootUpdates;
+            if (deltas.length == 0) revert EntryHasNoRootUpdates(); // must be state-pinned to the backstop
 
             // Defensive check for L2Tx entries
             if (entry.proxyEntryHash == bytes32(0) && (!entry.success || entry.returnData.length != 0)) {
@@ -537,7 +537,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             uint64 prevDeltaRid = MAINNET_ROLLUP_ID;
             for (uint256 j = 0; j < deltas.length; j++) {
                 uint64 drid = deltas[j].rollupId;
-                if (drid <= prevDeltaRid) revert StateUpdatesNotStrictlyIncreasing(drid);
+                if (drid <= prevDeltaRid) revert RootUpdatesNotStrictlyIncreasing(drid);
                 if (!_containsRollupInBatch(batch, drid)) revert RollupNotInBatch(drid);
                 verifiedRollups[j] = drid;
                 prevDeltaRid = drid;
@@ -545,7 +545,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             // Route only into a proven rollup's queue — else `_saveRemainderEntries` could put the
             // entry in a non-participating queue. (Mirrors the static-entry `destinationRollupId ∈ pins` check.)
             uint64 destRid = entry.destinationRollupId;
-            if (!_containsRollupInList(verifiedRollups, destRid)) revert EntryDestinationNotInStateUpdates(destRid);
+            if (!_containsRollupInList(verifiedRollups, destRid)) revert EntryDestinationNotInRootUpdates(destRid);
 
             // Every call SOURCE proven — top-level calls + each reentrant frame's sub-calls. Flat
             // double-loop: reverted frames reuse the host table, so there's no deeper nesting to recurse.
@@ -567,16 +567,16 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         }
 
         // Same shape for static entries: the verified set is the rollups they pin
-        // (`expectedStateRoots`, validated strictly-increasing); `destinationRollupId` must be pinned,
+        // (`expectedRoots`, validated strictly-increasing); `destinationRollupId` must be pinned,
         // and the read-only sub-call sources must be in the set (a static entry has no reentrant table).
         for (uint256 i = 0; i < batch.staticEntries.length; i++) {
             StaticExecutionEntry calldata staticEntry = batch.staticEntries[i];
-            ExpectedStateRootPerRollup[] calldata expectedStateRoots = staticEntry.expectedStateRoots;
-            uint64[] memory verifiedRollups = new uint64[](expectedStateRoots.length);
+            ExpectedRootPerRollup[] calldata expectedRoots = staticEntry.expectedRoots;
+            uint64[] memory verifiedRollups = new uint64[](expectedRoots.length);
             uint64 prevPinRid = MAINNET_ROLLUP_ID;
-            for (uint256 j = 0; j < expectedStateRoots.length; j++) {
-                uint64 prid = expectedStateRoots[j].rollupId;
-                if (prid <= prevPinRid) revert ExpectedStateRootsNotStrictlyIncreasing(prid);
+            for (uint256 j = 0; j < expectedRoots.length; j++) {
+                uint64 prid = expectedRoots[j].rollupId;
+                if (prid <= prevPinRid) revert ExpectedRootsNotStrictlyIncreasing(prid);
                 if (!_containsRollupInBatch(batch, prid)) revert RollupNotInBatch(prid);
                 verifiedRollups[j] = prid;
                 prevPinRid = prid;
@@ -676,7 +676,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             blobHashes[i] = blobhash(batch.blobIndices[i]);
         }
 
-        // Per-entry hash binds the FULL entry content (stateUpdates, proxyEntryHash, destinationRollupId,
+        // Per-entry hash binds the FULL entry content (rootUpdates, proxyEntryHash, destinationRollupId,
         // l2ToL1Calls[], the unified expectedL1ToL2Calls[], returnData, rollingHash) — so a poster
         // can't swap calls / results at execution time without invalidating the proof.
         bytes32[] memory entryHashes = new bytes32[](batch.entries.length);
@@ -744,8 +744,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @dev Wipes the entry / static-entry queues and cursor on EVERY verify — including a
     ///      same-block re-verify, where a second proven batch fully SUPERSEDES the first for
     ///      this rollup (no append). Safe because state only mutates at consumption and every
-    ///      entry is gated by `StateUpdate.currentState`: any dropped entry a later batch
-    ///      wrongly assumed had applied fails `StateRootMismatch` loudly rather than corrupting
+    ///      entry is gated by `RootUpdate.currentRoot`: any dropped entry a later batch
+    ///      wrongly assumed had applied fails `RootMismatch` loudly rather than corrupting
     ///      state — so discarding unconsumed-but-proven entries is a liveness choice, not a
     ///      safety one.
     function _markVerifiedBlockAndDeletePreviousEntries(uint64 rid) internal {
@@ -783,7 +783,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return result The return data from the execution
-    function executeCrossChainCall(address sourceAddress, bytes calldata callData)
+    function executeCrossChainCall(
+        address sourceAddress,
+        bytes calldata callData
+    )
         external
         payable
         returns (bytes memory result)
@@ -917,7 +920,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///      continuous `_rollingHash` (NESTED_END) and returns `returnData`. REVERTED checks the sub-hash
     ///      against `expectedL1toL2Call.revertedOrStaticRollingHash` and reverts with `returnData`; the
     ///      terminal revert rolls back the frame's state, hash, and cursor (no save needed).
-    function _resolveNestedReentrant(ExpectedL1ToL2Call memory expectedL1toL2Call, bytes32 crossChainCallHash)
+    function _resolveNestedReentrant(
+        ExpectedL1ToL2Call memory expectedL1toL2Call,
+        bytes32 crossChainCallHash
+    )
         internal
         returns (bytes memory)
     {
@@ -958,7 +964,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///      there `destinationRollupId` is consistent by construction (entries are published under it).
     ///
     ///      Miss path: when the cursor is out of bounds or the entry doesn't fully match
-    ///      (`_entryMatches`: identity, routing, or a stale `currentState`), we revert
+    ///      (`_entryMatches`: identity, routing, or a stale `currentRoot`), we revert
     ///      `ExecutionNotFound`. There is no reverted-top-level fallback — top-level reverting calls
     ///      are normal entries, and the static pool (`StaticExecutionEntry`) is read-only (`staticCrossChainCall`).
     /// @param destRid The destination rollup whose queue / transient slot to consume from
@@ -1005,7 +1011,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         `ExecutionNotFound` if the scan reaches the end of the queue with no match.
     /// @dev Skipping intervening non-matches is what lets a top-level call reach past already-attempted
     ///      failed entries (whose reverts left the cursor where it was). A skipped entry simply never
-    ///      executes — anything depending on it later fails its own `currentState` check.
+    ///      executes — anything depending on it later fails its own `currentRoot` check.
     function _findMatchingEntry(
         ExecutionEntry[] storage entryQueue,
         uint256 startIndex,
@@ -1027,27 +1033,31 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
 
     /// @notice Whether the entry at the cursor is the right one to consume: its identity
     ///         (`proxyEntryHash`), routing (`destinationRollupId`), AND state preconditions (every
-    ///         delta's `currentState` == the live root) all hold.
+    ///         delta's `currentRoot` == the live root) all hold.
     /// @dev `destinationRollupId == destRid` is load-bearing in the transient branch (one global
     ///      cursor across rollups); it holds by construction in the persistent branch (queue-routed),
-    ///      so the check is harmless there. The `currentState` check makes a stale-state entry a
+    ///      so the check is harmless there. The `currentRoot` check makes a stale-state entry a
     ///      non-match (→ `ExecutionNotFound`); `_executeEntry` re-asserts it as the gate for the
     ///      immediate L2Tx path that doesn't pass through here.
-    function _entryMatches(ExecutionEntry storage entry, bytes32 crossChainCallHash, uint64 destRid)
+    function _entryMatches(
+        ExecutionEntry storage entry,
+        bytes32 crossChainCallHash,
+        uint64 destRid
+    )
         internal
         view
         returns (bool)
     {
         if (entry.proxyEntryHash != crossChainCallHash) return false;
         if (entry.destinationRollupId != destRid) return false;
-        StateUpdate[] storage deltas = entry.stateUpdates;
+        RootUpdate[] storage deltas = entry.rootUpdates;
         for (uint256 i = 0; i < deltas.length; i++) {
-            if (rollups[deltas[i].rollupId].stateRoot != deltas[i].currentState) return false;
+            if (rollups[deltas[i].rollupId].root != deltas[i].currentRoot) return false;
         }
         return true;
     }
 
-    /// @notice Applies state deltas (with currentState validation), processes the entry's
+    /// @notice Applies state deltas (with currentRoot validation), processes the entry's
     ///         top-level calls, verifies rolling hash, checks ether accounting.
     /// @dev `_entryEtherDelta` already holds the entry-point call's `msg.value` when we get here
     ///      (SET by the top-level entry point before consumption), so it is NOT reset in
@@ -1063,20 +1073,20 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @param entry The execution entry to run; the caller is responsible for routing
     ///        `_getExpectedL1toL2Calls()` to the matching live storage table.
     function _executeEntry(ExecutionEntry memory entry) internal {
-        StateUpdate[] memory deltas = entry.stateUpdates;
+        RootUpdate[] memory deltas = entry.rootUpdates;
 
         // Redundant ≥1-delta guard (also enforced at validation): a non-empty `_verifiedRollupInCurrentExecutingEntry` is
         // what backs `_insideExecution()`.
-        if (deltas.length == 0) revert EntryHasNoStateUpdates();
+        if (deltas.length == 0) revert EntryHasNoRootUpdates();
 
-        // Validity gate + allowed-rollups set, one pass. CHECK each `currentState` vs the live root
-        // (fail fast — `newState` applies after the calls so mid-execution reads see the pre-state),
+        // Validity gate + allowed-rollups set, one pass. CHECK each `currentRoot` vs the live root
+        // (fail fast — `newRoot` applies after the calls so mid-execution reads see the pre-state),
         // and ADD each delta's rollup to `_verifiedRollupInCurrentExecutingEntry` (proxy-protection: the proxies the entry
         // can execute are limited to the rollups it proved). Populating the array also flips
         // `_insideExecution()` true (it's non-empty now); `delete` at the end flips it back.
         for (uint256 i = 0; i < deltas.length; i++) {
-            if (rollups[deltas[i].rollupId].stateRoot != deltas[i].currentState) {
-                revert StateRootMismatch(deltas[i].rollupId);
+            if (rollups[deltas[i].rollupId].root != deltas[i].currentRoot) {
+                revert RootMismatch(deltas[i].rollupId);
             }
             _verifiedRollupInCurrentExecutingEntry.push(deltas[i].rollupId);
         }
@@ -1086,7 +1096,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
 
         L2ToL1Call[] memory calls = entry.l2ToL1Calls;
         _processNCalls(calls);
-        int256 totalEtherDelta = _applyStateUpdates(deltas);
+        int256 totalEtherDelta = _applyRootUpdates(deltas);
 
         // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
         // `RollingHashMismatch` — no separate no-match check needed.
@@ -1145,7 +1155,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
                 );
 
                 // No source check here: every executed call's `sourceRollupId` was already validated
-                // ∈ `stateUpdates` in `_validateBatchStructure` (entry + reentrant sub-call walk).
+                // ∈ `rootUpdates` in `_validateBatchStructure` (entry + reentrant sub-call walk).
                 address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
                 if (!authorizedProxies[sourceProxy].isProxy) {
                     _createCrossChainProxyInternal(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
@@ -1164,9 +1174,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
                         )
                     );
                 } else {
-                    (success, retData) = sourceProxy.call{
-                        value: l2ToL1Call.value
-                    }(
+                    (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(
                         abi.encodeCall(
                             CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
                         )
@@ -1215,13 +1223,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     }
 
     /// @notice Applies state deltas (root + ether balance) and sums their ether deltas. The
-    ///         `currentState` precondition is the validity gate checked upfront in `_executeEntry`
-    ///         (roots are immutable mid-execution), so this just applies `newState`.
-    function _applyStateUpdates(StateUpdate[] memory deltas) internal returns (int256 totalEtherDelta) {
+    ///         `currentRoot` precondition is the validity gate checked upfront in `_executeEntry`
+    ///         (roots are immutable mid-execution), so this just applies `newRoot`.
+    function _applyRootUpdates(RootUpdate[] memory deltas) internal returns (int256 totalEtherDelta) {
         for (uint256 i = 0; i < deltas.length; i++) {
-            StateUpdate memory delta = deltas[i];
+            RootUpdate memory delta = deltas[i];
             RollupConfig storage config = rollups[delta.rollupId];
-            config.stateRoot = delta.newState;
+            config.root = delta.newRoot;
             totalEtherDelta += delta.etherDelta;
 
             if (delta.etherDelta < 0) {
@@ -1232,17 +1240,17 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
                 config.etherBalance += uint256(delta.etherDelta);
             }
 
-            emit L2ExecutionPerformed(delta.rollupId, delta.newState);
+            emit L2ExecutionPerformed(delta.rollupId, delta.newRoot);
         }
     }
 
-    /// @notice Whether every state-root pin of a top-level static entry equals the live root.
+    /// @notice Whether every root pin of a top-level static entry equals the live root.
     ///         Part of the MATCH predicate (full-scan semantics) — a mismatch skips the
     ///         candidate instead of reverting.
-    function _stateRootsMatch(StaticExecutionEntry storage staticEntry) internal view returns (bool) {
-        ExpectedStateRootPerRollup[] storage pins = staticEntry.expectedStateRoots;
+    function _rootsMatch(StaticExecutionEntry storage staticEntry) internal view returns (bool) {
+        ExpectedRootPerRollup[] storage pins = staticEntry.expectedRoots;
         for (uint256 i = 0; i < pins.length; i++) {
-            if (rollups[pins[i].rollupId].stateRoot != pins[i].stateRoot) return false;
+            if (rollups[pins[i].rollupId].root != pins[i].root) return false;
         }
         return true;
     }
@@ -1265,7 +1273,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///      ONLY its transient pool (the
     ///      transient phase is self-contained — see docs/CAVEATS.md); otherwise the routed rollup's
     ///      persistent `staticEntryQueue`. Match: a top-level `StaticExecutionEntry` with `proxyEntryHash` and
-    ///      every state-root pin live (full scan — a non-matching candidate is skipped). tload works
+    ///      every root pin live (full scan — a non-matching candidate is skipped). tload works
     ///      in static context, so the transient tracking variables are readable.
     /// @dev TODO (perf): linear scans are O(n) — sort + binary-search once profiling shows
     ///      it matters (the publicInputsHash already binds the arrays, so prover re-ordering
@@ -1315,7 +1323,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained — see docs/CAVEATS.md), otherwise
         // `destRid`'s persistent queue. Static entries do not expire with the block: they stay
-        // resolvable for as long as their state-root pins hold.
+        // resolvable for as long as their root pins hold.
         StaticExecutionEntry[] storage staticEntries =
             _transientEntries.length != 0 ? _transientStaticEntries : verificationByRollup[destRid].staticEntryQueue;
         for (uint256 i = 0; i < staticEntries.length; i++) {
@@ -1326,7 +1334,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             // queue-routed by destination, so this is always true for them.
             if (
                 staticEntry.proxyEntryHash == crossChainCallHash && staticEntry.destinationRollupId == destRid
-                    && _stateRootsMatch(staticEntry)
+                    && _rootsMatch(staticEntry)
             ) {
                 return _resolveStaticEntry(
                     staticEntry.l2ToL1Calls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
@@ -1376,7 +1384,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             if (l2ToL1Call.revertNextNCalls != 0) revert StaticCallWithRevertSpan();
 
             // No source check: sub-call sources are validated ∈ proven set in `_validateBatchStructure`
-            // — nested reads via the entry's reentrant walk, top-level via the static entry's `expectedStateRoots`.
+            // — nested reads via the entry's reentrant walk, top-level via the static entry's `expectedRoots`.
             address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
@@ -1399,8 +1407,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     // ── "Allowed rollups" set ────────────────────────────────────────────────────────────────────
     // Runtime proxy-protection for reentrant / static-read TARGETS only. A target's rollup is whichever
     // proxy re-enters (no clear-text field to validate at post time), so it's checked here against the
-    // executing entry's `stateUpdates` — populated into `_verifiedRollupInCurrentExecutingEntry` by `_executeEntry`. Call
-    // SOURCES need no runtime check: `_validateBatchStructure` already pins them ∈ `stateUpdates`.
+    // executing entry's `rootUpdates` — populated into `_verifiedRollupInCurrentExecutingEntry` by `_executeEntry`. Call
+    // SOURCES need no runtime check: `_validateBatchStructure` already pins them ∈ `rootUpdates`.
 
     /// @notice True iff `rollupId` is in the current entry's allowed set. Linear scan (deltas are few).
     function _isRollupAllowed(uint64 rollupId) internal view returns (bool) {
@@ -1416,26 +1424,26 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     //  Rollup management (only the registered rollup contract)
     // ──────────────────────────────────────────────
     //
-    // `setStateRoot` below is the only path through which the registered rollup contract
+    // `setRoot` below is the only path through which the registered rollup contract
     // can mutate central state. The rollup contract passes its rollupId explicitly (learned via the
     // `rollupContractRegistered` callback — there is no reverse-lookup mapping) and the
     // registry validates `msg.sender == rollups[rid].rollupContract`. Gated on the registry's
     // `lastVerifiedBlock(rid) == block.number` predicate, the single source of truth for
     // "this rollup is mid-flow this block — don't mutate". The rollup contract itself
-    // has no lockout modifier on its owner ops because (a) only `setStateRoot` reaches
+    // has no lockout modifier on its owner ops because (a) only `setRoot` reaches
     // central state and (b) it's already gated here.
 
-    /// @notice Owner escape hatch for setting the state root directly. Callable only by the
+    /// @notice Owner escape hatch for setting the root directly. Callable only by the
     ///         registered rollup contract for `rollupId`. Locked out for the rest of the block
     ///         once any postAndVerifyBatch has touched this rollup (see `RollupBatchActiveThisBlock`).
-    function setStateRoot(uint64 rollupId, bytes32 newStateRoot) external {
+    function setRoot(uint64 rollupId, bytes32 newRoot) external {
         if (msg.sender != rollups[rollupId].rollupContract) revert NotRollupContract();
-        if (_insideExecution()) revert SetStateRootNotAllowedDuringExecution();
+        if (_insideExecution()) revert SetRootNotAllowedDuringExecution();
         if (verificationByRollup[rollupId].lastVerifiedBlock == uint64(block.number)) {
             revert RollupBatchActiveThisBlock(rollupId);
         }
-        rollups[rollupId].stateRoot = newStateRoot;
-        emit StateUpdated(rollupId, newStateRoot);
+        rollups[rollupId].root = newRoot;
+        emit RootUpdated(rollupId, newRoot);
     }
 
     // ──────────────────────────────────────────────
@@ -1468,7 +1476,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @dev Binary (vs `_containsRollupInList`'s linear): a whole batch can carry many rollups, and this list is
     ///      kept sorted, so the log(n) lookup is worth it. Per-entry / per-static-entry sets are small, so
     ///      they use a linear scan instead — see `_containsRollupInList`.
-    function _containsRollupInBatch(ProofSystemBatchPerVerificationEntries calldata batch, uint64 rollupId)
+    function _containsRollupInBatch(
+        ProofSystemBatchPerVerificationEntries calldata batch,
+        uint64 rollupId
+    )
         internal
         pure
         returns (bool)
@@ -1486,14 +1497,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     }
 
     // ──────────────────────────────────────────────
-    //  Proxy-protection: call SOURCES are validated ∈ `stateUpdates` in `_validateBatchStructure`.
+    //  Proxy-protection: call SOURCES are validated ∈ `rootUpdates` in `_validateBatchStructure`.
     //  Reentrant / static-read TARGETS have no clear-text field, so they're checked at RUNTIME via
-    //  `_isRollupAllowed` against the per-entry allowed-rollups set (`stateUpdates`, set by `_executeEntry`).
+    //  `_isRollupAllowed` against the per-entry allowed-rollups set (`rootUpdates`, set by `_executeEntry`).
     // ──────────────────────────────────────────────
 
     /// @notice True if `rollupId` appears in `ids`. Strict membership — no MAINNET exemption.
     /// @dev Linear scan (vs `_containsRollupInBatch`'s binary search): `ids` here is a single entry's
-    ///      `stateUpdates` rollups or one static entry's `expectedStateRoots` pins — usually only a handful, and the
+    ///      `rootUpdates` rollups or one static entry's `expectedRoots` pins — usually only a handful, and the
     ///      pin set isn't sorted — so a linear scan is the simpler, general fit. A whole batch can
     ///      hold many rollups, which is why the batch-wide check is sorted + binary instead.
     function _containsRollupInList(uint64[] memory ids, uint64 rollupId) internal pure returns (bool) {
@@ -1506,7 +1517,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Copies the `n`-call span at `start` into a fresh memory array (field-by-field, so
     ///         the structs don't alias the caller's). The caller zeroes the trigger's
     ///         `revertNextNCalls` before slicing, so the isolated re-run won't recurse into the same span.
-    function _sliceL2ToL1Calls(L2ToL1Call[] memory calls, uint256 start, uint256 n)
+    function _sliceL2ToL1Calls(
+        L2ToL1Call[] memory calls,
+        uint256 start,
+        uint256 n
+    )
         internal
         pure
         returns (L2ToL1Call[] memory span)

@@ -169,7 +169,10 @@ contract EEZL2 is EEZBase {
     ///      committed incoming values is a prover constraint.
     /// @param _entries The execution entries to load
     /// @param _staticEntries The top-level static entries to load
-    function loadExecutionTable(ExecutionEntry[] calldata _entries, StaticExecutionEntry[] calldata _staticEntries)
+    function loadExecutionTable(
+        ExecutionEntry[] calldata _entries,
+        StaticExecutionEntry[] calldata _staticEntries
+    )
         external
         payable
         onlySystemAddress
@@ -179,7 +182,10 @@ contract EEZL2 is EEZBase {
 
     /// @notice Internal: replaces the execution table and resets the consumption cursor
     /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`
-    function _loadExecutionTable(ExecutionEntry[] calldata _entries, StaticExecutionEntry[] calldata _staticEntries)
+    function _loadExecutionTable(
+        ExecutionEntry[] calldata _entries,
+        StaticExecutionEntry[] calldata _staticEntries
+    )
         internal
     {
         delete entries;
@@ -204,7 +210,10 @@ contract EEZL2 is EEZBase {
     /// @param sourceAddress The original caller address (msg.sender as seen by the proxy)
     /// @param callData The original calldata sent to the proxy
     /// @return result The return data from the execution
-    function executeCrossChainCall(address sourceAddress, bytes calldata callData)
+    function executeCrossChainCall(
+        address sourceAddress,
+        bytes calldata callData
+    )
         external
         payable
         returns (bytes memory result)
@@ -424,7 +433,11 @@ contract EEZL2 is EEZBase {
     /// @notice Forward-scans `entries` from `startIndex` for the FIRST entry whose `proxyEntryHash`
     ///         matches `crossChainCallHash`, returning its index. Reverts `EntryNotFound` if the
     ///         scan reaches the end with no match.
-    function _findMatchingEntry(uint256 startIndex, bytes32 crossChainCallHash, uint64 callGas)
+    function _findMatchingEntry(
+        uint256 startIndex,
+        bytes32 crossChainCallHash,
+        uint64 callGas
+    )
         internal
         view
         returns (uint256)
@@ -539,9 +552,9 @@ contract EEZL2 is EEZBase {
                         abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
                     );
                 } else {
-                    (success, retData) = sourceProxy.call{
-                        value: cc.value
-                    }(abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data)));
+                    (success, retData) = sourceProxy.call{value: cc.value}(
+                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
+                    );
                 }
 
                 _rollingHashCallEnd(success, retData);
@@ -715,7 +728,11 @@ contract EEZL2 is EEZBase {
     ///         (not element assignment) so the fresh structs don't alias the caller's array. The
     ///         caller zeroes the trigger's `revertNextNCalls` before slicing (so `span[0]` copies 0
     ///         and the isolated re-run won't recurse into the same span).
-    function _sliceCrossChainCalls(CrossChainCall[] memory calls, uint256 start, uint256 n)
+    function _sliceCrossChainCalls(
+        CrossChainCall[] memory calls,
+        uint256 start,
+        uint256 n
+    )
         internal
         pure
         returns (CrossChainCall[] memory span)

@@ -25,14 +25,14 @@ import {TableStitcher} from "./TableStitcher.sol";
 //      blobsToData    bytes32[][] blobs        → bytes stream        (§4 unpack)
 //      dataToBlobs    bytes stream             → bytes32[][] blobs   (§4 pack)
 //      dataToTables   bytes stream (+ tail)    → Tables              (decode → parse → generate)
-//      tablesToData   Tables                   → bytes stream + tail (stitch → emit → encode)
+//      dataFromTables   Tables                   → bytes stream + tail (stitch → emit → encode)
 //
 //  `Tables` bundles everything the Table → Blob direction needs: the L1 batch
 //  artifacts, each L2 chain's units in execution order, and the SIDECAR of data
 //  that provably never reaches any table (tx boundaries, static call fields,
 //  chain ops, region sizes, per-call callGas — see TableStitcher). Because
 //  `dataToTables` emits the sidecar alongside the tables, its output feeds
-//  `tablesToData` directly and round-trips to the exact input bytes.
+//  `dataFromTables` directly and round-trips to the exact input bytes.
 //
 //  callGas: tables are derived with a zero callGas oracle — correct for every
 //  current deployment (`useGasLeft = false`, all keys fold 0). Under a future
@@ -130,12 +130,12 @@ contract BlobTranslator is TestHashes {
     /// @notice Rebuilds the exact stream the tables came from (stitch → emit → encode).
     ///         Every stored rollingHash is cross-checked during the stitch — a
     ///         tampered table reverts `RoundTripMismatch`.
-    function tablesToData(Tables memory t) public returns (bytes memory blobData, bytes memory callDataTail) {
-        return BlobCodec.encode(tablesToMessages(t));
+    function dataFromTables(Tables memory t) public returns (bytes memory blobData, bytes memory callDataTail) {
+        return BlobCodec.encode(messagesFromTables(t));
     }
 
     /// @notice Message-level exit point of the same direction.
-    function tablesToMessages(Tables memory t) public returns (BlobMessage[] memory msgs) {
+    function messagesFromTables(Tables memory t) public returns (BlobMessage[] memory msgs) {
         TableStitcher stitcher = new TableStitcher();
         stitcher.loadL1(t.l1Entries, t.l1Statics);
         for (uint256 i = 0; i < t.units.length; i++) {
@@ -174,9 +174,9 @@ contract BlobTranslator is TestHashes {
         return dataToTables(BlobPacking.unpack(blobs), callDataTail);
     }
 
-    function tablesToBlobs(Tables memory t) public returns (bytes32[][] memory blobs, bytes memory callDataTail) {
+    function blobsFromTables(Tables memory t) public returns (bytes32[][] memory blobs, bytes memory callDataTail) {
         bytes memory blobData;
-        (blobData, callDataTail) = tablesToData(t);
+        (blobData, callDataTail) = dataFromTables(t);
         blobs = BlobPacking.pack(blobData);
     }
 

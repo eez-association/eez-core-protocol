@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -123,11 +123,11 @@ abstract contract ReentrantActions {
     // ── Entry builders ──
 
     function _l1Entries(address rcL1, address rcL2) internal pure returns (ExecutionEntry[] memory entries) {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-reentrant"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-reentrant"),
             etherDelta: 0
         });
 
@@ -170,7 +170,7 @@ abstract contract ReentrantActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: topCalls,
@@ -360,7 +360,9 @@ contract Execute is Script, ReentrantActions {
         vm.startBroadcast();
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
-                immediateSingleRollupBatch(proofSystemAddr, L2_ROLLUP_ID, _l1Entries(rcL1Addr, rcL2Addr), noStaticEntries())
+                immediateSingleRollupBatch(
+                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(rcL1Addr, rcL2Addr), noStaticEntries()
+                )
             );
         // Trigger: plain call — rcL1's code fires the cross-chain leg itself.
         (bool ok,) = rcL1Addr.call(_dc(3));

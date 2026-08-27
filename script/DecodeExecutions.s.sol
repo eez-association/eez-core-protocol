@@ -16,7 +16,7 @@ import {Vm} from "forge-std/Vm.sol";
 ///       a Forge script is awkward (no direct cheatcode for it), so this
 ///       decoder reports execution flow purely from emitted events. The events
 ///       it relies on are rich enough for almost all debugging use cases:
-///       BatchPosted, RollupCreated, StateUpdated,
+///       BatchPosted, RollupCreated, RootUpdated,
 ///       L2ExecutionPerformed, L2TxSkipped, ExecutionConsumed,
 ///       L2TxExecuted, EntryExecuted, CrossChainCallExecuted (L1 + L2 kinds), CallResult,
 ///       CallsReverted, CrossChainProxyCreated,
@@ -33,7 +33,7 @@ contract DecodeExecutions is Script {
     // RevertSpanExecuted→CallsReverted; L2TxExecuted carries only the rollupId.
     bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
     bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint64,address,bytes32)");
-    bytes32 constant SIG_STATE_UPDATED = keccak256("StateUpdated(uint64,bytes32)");
+    bytes32 constant SIG_ROOT_UPDATED = keccak256("RootUpdated(uint64,bytes32)");
     bytes32 constant SIG_L2_EXEC_PERFORMED = keccak256("L2ExecutionPerformed(uint64,bytes32)");
     bytes32 constant SIG_IMMEDIATE_SKIPPED = keccak256("L2TxSkipped(uint256,bytes)");
     bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint64,uint256)");
@@ -123,8 +123,8 @@ contract DecodeExecutions is Script {
             _printBatchPosted(topics, p);
         } else if (sig == SIG_ROLLUP_CREATED) {
             _printRollupCreated(topics, data, p);
-        } else if (sig == SIG_STATE_UPDATED) {
-            _printStateUpdated(topics, data, p);
+        } else if (sig == SIG_ROOT_UPDATED) {
+            _printRootUpdated(topics, data, p);
         } else if (sig == SIG_L2_EXEC_PERFORMED) {
             _printL2ExecPerformed(topics, data, p);
         } else if (sig == SIG_IMMEDIATE_SKIPPED) {
@@ -165,10 +165,10 @@ contract DecodeExecutions is Script {
     }
 
     function _printRollupCreated(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // event RollupCreated(uint256 indexed rollupId, address indexed rollupContract, bytes32 initialState)
+        // event RollupCreated(uint256 indexed rollupId, address indexed rollupContract, bytes32 initialRoot)
         uint256 rollupId = uint256(topics[1]);
         address rollupContract = address(uint160(uint256(topics[2])));
-        bytes32 initialState = abi.decode(data, (bytes32));
+        bytes32 initialRoot = abi.decode(data, (bytes32));
         console.log(
             string.concat(
                 p,
@@ -177,28 +177,26 @@ contract DecodeExecutions is Script {
                 ", contract=",
                 _shortAddr(rollupContract),
                 ", initState=",
-                _shortHash(initialState),
+                _shortHash(initialRoot),
                 ")"
             )
         );
     }
 
-    function _printStateUpdated(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // StateUpdated(uint256 indexed rollupId, bytes32 newStateRoot)
+    function _printRootUpdated(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
+        // RootUpdated(uint256 indexed rollupId, bytes32 newRoot)
         uint256 rollupId = uint256(topics[1]);
-        bytes32 newState = abi.decode(data, (bytes32));
-        console.log(
-            string.concat(p, "StateUpdated(id=", vm.toString(rollupId), ", newState=", _shortHash(newState), ")")
-        );
+        bytes32 newRoot = abi.decode(data, (bytes32));
+        console.log(string.concat(p, "RootUpdated(id=", vm.toString(rollupId), ", newRoot=", _shortHash(newRoot), ")"));
     }
 
     function _printL2ExecPerformed(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // L2ExecutionPerformed(uint256 indexed rollupId, bytes32 newState)
+        // L2ExecutionPerformed(uint256 indexed rollupId, bytes32 newRoot)
         uint256 rollupId = uint256(topics[1]);
-        bytes32 newState = abi.decode(data, (bytes32));
+        bytes32 newRoot = abi.decode(data, (bytes32));
         console.log(
             string.concat(
-                p, "L2ExecutionPerformed(rollup=", vm.toString(rollupId), ", newState=", _shortHash(newState), ")"
+                p, "L2ExecutionPerformed(rollup=", vm.toString(rollupId), ", newRoot=", _shortHash(newRoot), ")"
             )
         );
     }
@@ -425,7 +423,7 @@ contract DecodeExecutions is Script {
         uint256 reverts;
         uint256 l2tx;
         uint256 immediateSkipped;
-        uint256 stateUpdates;
+        uint256 rootUpdates;
         uint256 proxiesCreated;
 
         for (uint256 i = 0; i < logs.length; i++) {
@@ -445,8 +443,8 @@ contract DecodeExecutions is Script {
                 l2tx++;
             } else if (sig == SIG_IMMEDIATE_SKIPPED) {
                 immediateSkipped++;
-            } else if (sig == SIG_STATE_UPDATED) {
-                stateUpdates++;
+            } else if (sig == SIG_ROOT_UPDATED) {
+                rootUpdates++;
             } else if (sig == SIG_PROXY_CREATED) {
                 proxiesCreated++;
             }
@@ -469,8 +467,8 @@ contract DecodeExecutions is Script {
             vm.toString(l2tx),
             " skipped=",
             vm.toString(immediateSkipped),
-            " stateUpdates=",
-            vm.toString(stateUpdates),
+            " rootUpdates=",
+            vm.toString(rootUpdates),
             " proxies=",
             vm.toString(proxiesCreated)
         );

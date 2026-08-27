@@ -2,12 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {Base} from "./Base.t.sol";
-import {
-    ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
-    RollupIdWithProofSystems
-} from "../src/EEZ.sol";
-import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ProofSystemBatchPerVerificationEntries, ExpectedRootPerRollup, RollupIdWithProofSystems} from "../src/EEZ.sol";
+import {ExecutionEntry, RootUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -62,7 +58,7 @@ abstract contract GasFixture is Base {
     RollupHandle internal rB; // second touched rollup + reentrant target's rollup
     RollupHandle internal rS; // queue seeded FULL-shape in setUp → steady-state post measurements
     RollupHandle internal rS2; // queue seeded BARE in setUp → control: call/expected NOT pre-filled
-    RollupHandle internal rS3; // queue seeded 2-StateUpdate full in setUp → marginal per-StateUpdate
+    RollupHandle internal rS3; // queue seeded 2-RootUpdate full in setUp → marginal per-RootUpdate
 
     // L1 mainnet rollup id — the rollup an L1-executed call's target lives on, and the source
     // rollup of any reentrant L1→L2 call (EEZ forces it via `executeCrossChainCall`).
@@ -164,7 +160,7 @@ abstract contract GasFixture is Base {
         rS2 = _makeRollup(keccak256("rS2-init")); // id 4
         _postBatchTwo(rB.id, rS2.id, _savedFor(rS2.id, 1, 0, 0));
 
-        // Seeded with a 2-StateUpdate full entry → measure the marginal cost of one extra StateUpdate.
+        // Seeded with a 2-RootUpdate full entry → measure the marginal cost of one extra RootUpdate.
         rS3 = _makeRollup(keccak256("rS3-init")); // id 5
         _postBatchTwo(rB.id, rS3.id, _one(_steadyShaped2(rS3.id)));
     }
@@ -172,15 +168,20 @@ abstract contract GasFixture is Base {
     /// @notice `nEntries` identical DEFERRED (saved, never executed) entries routed to `dest`, each
     ///         carrying `nCalls` placeholder L2ToL1Calls and `nExpected` placeholder
     ///         ExpectedL1ToL2Calls. Rolling hash / keys are placeholders (consumption never happens).
-    ///         Source/StateUpdate pin to `dest` so the entry passes post-validation.
-    function _savedFor(uint256 dest, uint256 nEntries, uint256 nCalls, uint256 nExpected)
+    ///         Source/RootUpdate pin to `dest` so the entry passes post-validation.
+    function _savedFor(
+        uint256 dest,
+        uint256 nEntries,
+        uint256 nCalls,
+        uint256 nExpected
+    )
         internal
         view
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory d = new StateUpdate[](1);
-        d[0] = StateUpdate({
-            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
+        RootUpdate[] memory d = new RootUpdate[](1);
+        d[0] = RootUpdate({
+            rollupId: uint64(dest), currentRoot: _getRollupState(dest), newRoot: bytes32(uint256(0x50)), etherDelta: 0
         });
         L2ToL1Call[] memory calls = new L2ToL1Call[](nCalls);
         for (uint256 i = 0; i < nCalls; i++) {
@@ -200,7 +201,7 @@ abstract contract GasFixture is Base {
             exp[i] = _deferredExpected();
         }
         ExecutionEntry memory e;
-        e.stateUpdates = d;
+        e.rootUpdates = d;
         e.proxyEntryHash = keccak256("save-defer");
         e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
@@ -212,18 +213,15 @@ abstract contract GasFixture is Base {
         }
     }
 
-    /// @notice Same full shape as `_savedFor(dest, 1, 1, 1)` but with TWO StateUpdates (rB + dest),
-    ///         so the marginal cost of one extra StateUpdate can be measured.
+    /// @notice Same full shape as `_savedFor(dest, 1, 1, 1)` but with TWO RootUpdates (rB + dest),
+    ///         so the marginal cost of one extra RootUpdate can be measured.
     function _steadyShaped2(uint256 dest) internal view returns (ExecutionEntry memory e) {
-        StateUpdate[] memory d = new StateUpdate[](2);
-        d[0] = StateUpdate({
-            rollupId: uint64(rB.id),
-            currentState: _getRollupState(rB.id),
-            newState: bytes32(uint256(0xB0)),
-            etherDelta: 0
+        RootUpdate[] memory d = new RootUpdate[](2);
+        d[0] = RootUpdate({
+            rollupId: uint64(rB.id), currentRoot: _getRollupState(rB.id), newRoot: bytes32(uint256(0xB0)), etherDelta: 0
         });
-        d[1] = StateUpdate({
-            rollupId: uint64(dest), currentState: _getRollupState(dest), newState: bytes32(uint256(0x50)), etherDelta: 0
+        d[1] = RootUpdate({
+            rollupId: uint64(dest), currentRoot: _getRollupState(dest), newRoot: bytes32(uint256(0x50)), etherDelta: 0
         });
 
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
@@ -240,7 +238,7 @@ abstract contract GasFixture is Base {
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
         exp[0] = _deferredExpected();
 
-        e.stateUpdates = d;
+        e.rootUpdates = d;
         e.proxyEntryHash = keccak256("steady2");
         e.destinationRollupId = uint64(dest);
         e.l2ToL1Calls = calls;
@@ -291,7 +289,7 @@ abstract contract GasFixture is Base {
         rps[1] = RollupIdWithProofSystems({rollupId: uint64(r2), proofSystemIndexes: psIdx});
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+            expectedRootPerRollup: new ExpectedRootPerRollup[](0),
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
@@ -307,26 +305,26 @@ abstract contract GasFixture is Base {
         rollups.postAndVerifyBatch(batch);
     }
 
-    /// @notice Two StateUpdates (rA, rB) — touches 2 rollups.
-    function _twoDeltas(bytes32 newA, bytes32 newB) internal view returns (StateUpdate[] memory deltas) {
-        deltas = new StateUpdate[](2);
+    /// @notice Two RootUpdates (rA, rB) — touches 2 rollups.
+    function _twoDeltas(bytes32 newA, bytes32 newB) internal view returns (RootUpdate[] memory deltas) {
+        deltas = new RootUpdate[](2);
         deltas[0] =
-            StateUpdate({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            RootUpdate({rollupId: uint64(rA.id), currentRoot: _getRollupState(rA.id), newRoot: newA, etherDelta: 0});
         deltas[1] =
-            StateUpdate({rollupId: uint64(rB.id), currentState: _getRollupState(rB.id), newState: newB, etherDelta: 0});
+            RootUpdate({rollupId: uint64(rB.id), currentRoot: _getRollupState(rB.id), newRoot: newB, etherDelta: 0});
     }
 
-    /// @notice One StateUpdate (rA) — touches a single rollup.
-    function _oneDelta(bytes32 newA) internal view returns (StateUpdate[] memory deltas) {
-        deltas = new StateUpdate[](1);
+    /// @notice One RootUpdate (rA) — touches a single rollup.
+    function _oneDelta(bytes32 newA) internal view returns (RootUpdate[] memory deltas) {
+        deltas = new RootUpdate[](1);
         deltas[0] =
-            StateUpdate({rollupId: uint64(rA.id), currentState: _getRollupState(rA.id), newState: newA, etherDelta: 0});
+            RootUpdate({rollupId: uint64(rA.id), currentRoot: _getRollupState(rA.id), newRoot: newA, etherDelta: 0});
     }
 
     /// @notice Assembles a single entry routed to rA, with the given calls/expected/hash. `success`
     ///         is always true (these entries return their `returnData`).
     function _entry(
-        StateUpdate[] memory deltas,
+        RootUpdate[] memory deltas,
         bytes32 proxyEntryHash,
         L2ToL1Call[] memory calls,
         ExpectedL1ToL2Call[] memory expected,
@@ -337,7 +335,7 @@ abstract contract GasFixture is Base {
         view
         returns (ExecutionEntry memory entry)
     {
-        entry.stateUpdates = deltas;
+        entry.rootUpdates = deltas;
         entry.proxyEntryHash = proxyEntryHash;
         entry.destinationRollupId = uint64(rA.id);
         entry.l2ToL1Calls = calls;
@@ -403,7 +401,7 @@ abstract contract GasFixture is Base {
     }
 
     /// @notice SAME-rollup reentrant call: actorA re-enters EEZ for rA (the entry's own rollup),
-    ///         so the entry needs only ONE StateUpdate (rA).
+    ///         so the entry needs only ONE RootUpdate (rA).
     function _reentrantCallA() internal view returns (L2ToL1Call memory) {
         return L2ToL1Call({
             gas: 0,
@@ -462,7 +460,12 @@ abstract contract GasFixture is Base {
     ///      CALL_BEGIN(cch_k) / CALL_END(true, rets[k]); each call flagged in `reentrant` additionally
     ///      opens a no-sub-call NESTED success frame, and its `ExpectedL1ToL2Call` is position-keyed on
     ///      the rolling hash at the instant it fires (after CALL_BEGIN, before NESTED_BEGIN).
-    function _foldGeneric(bytes32 seed, L2ToL1Call[] memory calls, bool[] memory reentrant, bytes[] memory rets)
+    function _foldGeneric(
+        bytes32 seed,
+        L2ToL1Call[] memory calls,
+        bool[] memory reentrant,
+        bytes[] memory rets
+    )
         internal
         view
         returns (bytes32 h, ExpectedL1ToL2Call[] memory expected)
@@ -500,7 +503,12 @@ abstract contract GasFixture is Base {
 
     /// @notice `_foldGeneric` for the common shape where only the LAST call re-enters (`reentrant`),
     ///         or none does.
-    function _foldExec(bytes32 seed, L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant)
+    function _foldExec(
+        bytes32 seed,
+        L2ToL1Call[] memory calls,
+        bytes[] memory rets,
+        bool reentrant
+    )
         internal
         view
         returns (bytes32 h, ExpectedL1ToL2Call[] memory expected)
@@ -515,8 +523,9 @@ abstract contract GasFixture is Base {
     // ──────────────────────────────────────────────
 
     /// @notice Colds the protocol-side accounts/slots (EEZ registry, both rollup managers, the
-    ///         proof system). Models a fresh transaction: prior batches left non-zero VALUES, but
-    ///         EVM warm/cold access state resets every transaction, so the slots are cold again.
+    ///         proof system). `vm.cool` models a full transaction boundary for the account: access
+    ///         warmth resets AND current storage values become the originals (as if committed), so
+    ///         a measured call prices exactly like a fresh transaction against the current state.
     function _coolProtocol() internal {
         vm.cool(address(rollups));
         vm.cool(address(rA.manager));

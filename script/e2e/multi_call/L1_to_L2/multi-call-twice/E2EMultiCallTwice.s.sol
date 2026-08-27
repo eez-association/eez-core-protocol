@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -55,19 +55,19 @@ abstract contract MultiCallActions {
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, caller);
 
-        StateUpdate[] memory deltasA = new StateUpdate[](1);
-        deltasA[0] = StateUpdate({
+        RootUpdate[] memory deltasA = new RootUpdate[](1);
+        deltasA[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-twice-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-twice-1"),
             etherDelta: 0
         });
 
-        StateUpdate[] memory deltasB = new StateUpdate[](1);
-        deltasB[0] = StateUpdate({
+        RootUpdate[] memory deltasB = new RootUpdate[](1);
+        deltasB[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-state-after-twice-1"),
-            newState: keccak256("l2-state-after-twice-2"),
+            currentRoot: keccak256("l2-state-after-twice-1"),
+            newRoot: keccak256("l2-state-after-twice-2"),
             etherDelta: 0
         });
 
@@ -75,7 +75,7 @@ abstract contract MultiCallActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltasA,
+            rootUpdates: deltasA,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -85,7 +85,7 @@ abstract contract MultiCallActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateUpdates: deltasB,
+            rootUpdates: deltasB,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -108,7 +108,11 @@ abstract contract MultiCallActions {
     }
 
     /// @dev 1-entry table for the n-th executeIncomingCrossChainCall tx.
-    function _l2TableForCall(address counterL2, address caller, uint256 n)
+    function _l2TableForCall(
+        address counterL2,
+        address caller,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory table)
@@ -117,7 +121,11 @@ abstract contract MultiCallActions {
         table[0] = _buildL2Entry(counterL2, caller, abi.encode(n));
     }
 
-    function _buildL2Entry(address counterL2, address caller, bytes memory retData)
+    function _buildL2Entry(
+        address counterL2,
+        address caller,
+        bytes memory retData
+    )
         private
         pure
         returns (L2ExecutionEntry memory)

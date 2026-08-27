@@ -100,7 +100,7 @@ export type EntryExecutedArgs = {
 export type RollupCreatedArgs = {
   rollupId: bigint;
   rollupContract: `0x${string}`;
-  initialState: `0x${string}`;
+  initialRoot: `0x${string}`;
 };
 
 export type RollupContractChangedArgs = {

@@ -55,8 +55,8 @@ export function useEventStream() {
         addKnownAddresses(discovery.addressInfos);
 
       // Process rollup state
-      const stateUpdates = extractRollupState(event);
-      for (const { key, value } of stateUpdates) {
+      const rootUpdates = extractRollupState(event);
+      for (const { key, value } of rootUpdates) {
         updateContractState(key, value);
       }
 

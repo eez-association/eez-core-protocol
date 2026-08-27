@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {IEEZ, ProxyInfo, StateUpdate} from "../interfaces/IEEZ.sol";
+import {IEEZ, ProxyInfo, RootUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -164,7 +164,10 @@ abstract contract EEZBase is IEEZ {
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint64 originalRollupId)
+    function _createCrossChainProxyInternal(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         internal
         returns (address proxy)
     {
@@ -179,7 +182,10 @@ abstract contract EEZBase is IEEZ {
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
-    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
+    function computeCrossChainProxyAddress(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         public
         view
         returns (address)
@@ -249,7 +255,10 @@ abstract contract EEZBase is IEEZ {
     ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the
     ///         live `_rollingHash` at the instant it fires. One comparison replaces the old
     ///         (hash, rollingHash, isStatic) triple.
-    function _computeExpectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash)
+    function _computeExpectedL1toL2Hash(
+        bytes32 crossChainCallHash,
+        bytes32 rollingHash
+    )
         internal
         pure
         returns (bytes32)
@@ -284,24 +293,23 @@ abstract contract EEZBase is IEEZ {
     // concept, NOT a direction (the directional naming lives in the per-side children).
 
     /// @notice Initializes `_rollingHash` to an entry's BEGIN seed — the ordered
-    ///         `(rollupId, currentState)` state context closed with the entry's identity
+    ///         `(rollupId, currentRoot)` state context closed with the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
-    /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateUpdate`); L2 has no
+    /// @dev The one rolling-hash helper that names a per-side struct (L1 `RootUpdate`); L2 has no
     ///      state deltas, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
     ///      an empty delta prefix. Deltas are strictly-increasing-by-rollupId, so the fold is
     ///      deterministic.
-    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function _rollingHashEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
+    function _rollingHashEntryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
 
-        bytes32 _rollupStatesHash;
+        bytes32 _rollupRootsHash;
         for (uint256 i = 0; i < deltas.length; i++) {
-            _rollupStatesHash =
-                keccak256(abi.encodePacked(_rollupStatesHash, deltas[i].rollupId, deltas[i].currentState));
+            _rollupRootsHash = keccak256(abi.encodePacked(_rollupRootsHash, deltas[i].rollupId, deltas[i].currentRoot));
         }
-        _rollingHash = keccak256(abi.encodePacked(_rollupStatesHash, proxyEntryHash));
+        _rollingHash = keccak256(abi.encodePacked(_rollupRootsHash, proxyEntryHash));
     }
 
     /// @notice Folds a CALL_BEGIN event into `_rollingHash`, binding the call's IDENTITY

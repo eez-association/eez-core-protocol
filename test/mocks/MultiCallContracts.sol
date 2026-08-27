@@ -49,7 +49,11 @@ contract CallTwiceNestedAndOnce {
 /// @notice Calls two different L2 counter proxies, then conditionally reverts
 ///         based on the second counter's return value.
 contract ConditionalCallTwice {
-    function callBothConditional(address counterA, address counterB, uint256 revertThreshold)
+    function callBothConditional(
+        address counterA,
+        address counterB,
+        uint256 revertThreshold
+    )
         external
         returns (uint256 a, uint256 b)
     {

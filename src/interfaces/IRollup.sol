@@ -5,18 +5,18 @@ pragma solidity 0.8.34;
 /// @notice Per-rollup contract interface — the canonical (or custom) handle that owns proof
 ///         system membership, vkeys, threshold, and ownership for ONE rollup. Held by the
 ///         central EEZ registry as `rollups[rid].rollupContract` and queried by the registry
-///         during postAndVerifyBatch + state-root escape paths.
-/// @dev The central EEZ contract holds the source of truth for state root, ether balance,
+///         during postAndVerifyBatch + root escape paths.
+/// @dev The central EEZ contract holds the source of truth for root, ether balance,
 ///      the deferred queue, and the proxy registry. Everything that mutates a rollup's PS
 ///      group / threshold / owner happens on this contract; the only call back into the
-///      central registry is `setStateRoot` (the owner escape hatch), which `EEZ` allows
+///      central registry is `setRoot` (the owner escape hatch), which `EEZ` allows
 ///      because `msg.sender` equals the registered `rollupContract`.
 interface IRollupContract {
     /// @notice Notification fired by `EEZ` when this contract becomes the registered manager
     ///         for a rollup via `EEZ.registerRollup`. The implementation MUST accept calls
     ///         only from the central `EEZ` registry.
     /// @dev The rollupId is stored so that subsequent calls from this contract back into the
-    ///      registry (`EEZ.setStateRoot(rid, root)`) can pass the id explicitly — the
+    ///      registry (`EEZ.setRoot(rid, root)`) can pass the id explicitly — the
     ///      registry has no reverse-lookup mapping from contract address to rollupId.
     function rollupContractRegistered(uint64 rollupId) external;
 

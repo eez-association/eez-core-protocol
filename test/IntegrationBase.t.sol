@@ -5,12 +5,12 @@ import {Test} from "forge-std/Test.sol";
 import {
     EEZ,
     ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {ExecutionEntry, StateUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RootUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry
@@ -40,8 +40,8 @@ abstract contract IntegrationBase is Test {
     uint64 constant MAINNET_ROLLUP_ID = 0;
     address constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
     bytes32 constant DEFAULT_VK = keccak256("verificationKey");
-    /// @dev Initial state root the L2 rollup is registered with; entries consuming the rollup's
-    ///      first transition pin it as their `currentState`.
+    /// @dev Initial root the L2 rollup is registered with; entries consuming the rollup's
+    ///      first transition pin it as their `currentRoot`.
     bytes32 constant L2_GENESIS_STATE = keccak256("l2-initial-state");
 
     // ── Rolling hash tag constants (must match EEZBase) ──
@@ -74,10 +74,10 @@ abstract contract IntegrationBase is Test {
         managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS, false);
     }
 
-    /// @notice Reads `rollups[rollupId].stateRoot`.
+    /// @notice Reads `rollups[rollupId].root`.
     function _getRollupState(uint64 rollupId) internal view returns (bytes32) {
-        (, bytes32 stateRoot,) = rollups.rollups(rollupId);
-        return stateRoot;
+        (, bytes32 root,) = rollups.rollups(rollupId);
+        return root;
     }
 
     // ──────────────────────────────────────────────
@@ -120,7 +120,7 @@ abstract contract IntegrationBase is Test {
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
-            expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+            expectedRootPerRollup: new ExpectedRootPerRollup[](0),
             blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
@@ -185,11 +185,11 @@ abstract contract IntegrationBase is Test {
     }
 
     /// @notice Mirror of L1 `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
-    ///         (`(rollupId, currentState)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    ///         (`(rollupId, currentRoot)` per delta) closed with `proxyEntryHash`.
+    function _hEntryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
-            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
+            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentRoot));
         }
         return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
     }

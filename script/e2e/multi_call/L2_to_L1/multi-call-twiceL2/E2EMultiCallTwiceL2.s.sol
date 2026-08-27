@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
@@ -65,7 +65,10 @@ abstract contract MultiCallTwiceL2Actions {
     /// @dev Two L2 source entries — same proxyEntryHash, sequential consumption, cached returns
     ///      1 then 2 (mirror of the L1 entries in multi-call-twice). Both carry the seed-only
     ///      rolling hash, so they share one (proxyEntryHash, rollingHash) identity.
-    function _l2Entries(address counterL1, address callTwiceL2)
+    function _l2Entries(
+        address counterL1,
+        address callTwiceL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -113,11 +116,11 @@ abstract contract MultiCallTwiceL2Actions {
         });
         calls[1] = calls[0];
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-multi-call-twiceL2"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-multi-call-twiceL2"),
             etherDelta: 0
         });
 
@@ -130,7 +133,7 @@ abstract contract MultiCallTwiceL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

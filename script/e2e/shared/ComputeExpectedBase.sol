@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -73,7 +73,7 @@ abstract contract ComputeExpectedBase is Script {
     function _printL1Steps(ExecutionEntry[] memory entries, HashStep[][] memory steps) internal pure {
         require(steps.length == entries.length, "steps/entries length mismatch");
         for (uint256 i = 0; i < entries.length; i++) {
-            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].stateUpdates, entries[i].proxyEntryHash);
+            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].rootUpdates, entries[i].proxyEntryHash);
             require(RollingHashBuilder.foldSteps(seed, steps[i]) == entries[i].rollingHash, "steps drift from table");
         }
         _printTableLine("EXPECTED_L1_STEPS=%s", abi.encode(steps));
@@ -208,13 +208,13 @@ abstract contract ComputeExpectedBase is Script {
             e.expectedL1ToL2Calls.length
         );
 
-        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
-            StateUpdate memory sd = e.stateUpdates[d];
+        for (uint256 d = 0; d < e.rootUpdates.length; d++) {
+            RootUpdate memory sd = e.rootUpdates[d];
             string memory etherStr =
                 sd.etherDelta == 0 ? "" : string.concat("  ether: ", _fmtEtherSigned(sd.etherDelta));
             console.log(
                 string.concat(
-                    "      state: rollup ", vm.toString(sd.rollupId), " -> ", _shortHash(sd.newState), etherStr
+                    "      state: rollup ", vm.toString(sd.rollupId), " -> ", _shortHash(sd.newRoot), etherStr
                 )
             );
         }
@@ -257,7 +257,7 @@ abstract contract ComputeExpectedBase is Script {
         console.log(
             "      success=%s  rootPins=%s  subCalls=%s",
             sc.success ? "true" : "false",
-            vm.toString(sc.expectedStateRoots.length),
+            vm.toString(sc.expectedRoots.length),
             vm.toString(sc.l2ToL1Calls.length)
         );
         if (sc.returnData.length > 0) {

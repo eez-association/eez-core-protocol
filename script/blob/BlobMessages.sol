@@ -70,7 +70,13 @@ library Msg {
     }
 
     /// @notice Call with all remaining gas forwarded (`gas = 0`).
-    function call(uint64 toChain, address fromAddress, address toAddress, uint256 value, bytes memory data)
+    function call(
+        uint64 toChain,
+        address fromAddress,
+        address toAddress,
+        uint256 value,
+        bytes memory data
+    )
         internal
         pure
         returns (BlobMessage memory m)
@@ -100,7 +106,12 @@ library Msg {
     }
 
     /// @notice Static call with all remaining gas forwarded (`gas = 0`).
-    function staticCall(uint64 toChain, address fromAddress, address toAddress, bytes memory data)
+    function staticCall(
+        uint64 toChain,
+        address fromAddress,
+        address toAddress,
+        bytes memory data
+    )
         internal
         pure
         returns (BlobMessage memory m)
@@ -108,7 +119,13 @@ library Msg {
         return staticCall(toChain, fromAddress, toAddress, 0, data);
     }
 
-    function staticCall(uint64 toChain, address fromAddress, address toAddress, uint64 callGas, bytes memory data)
+    function staticCall(
+        uint64 toChain,
+        address fromAddress,
+        address toAddress,
+        uint64 callGas,
+        bytes memory data
+    )
         internal
         pure
         returns (BlobMessage memory m)

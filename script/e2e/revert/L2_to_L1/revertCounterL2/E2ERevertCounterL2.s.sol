@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
@@ -58,14 +58,18 @@ abstract contract RevertL2Actions {
     /// @dev Proxy-entry identity: safeCallerL2 calls the L2 proxy for (RevertCounter@L1) — an
     ///      outgoing call, so the SOURCE L2 matches it with the L2-outgoing key (`callGas` = 0).
     function _proxyEntryHash(address revCounterL1, address safeCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(
-            safeCallerL2, L2_ROLLUP_ID, revCounterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData()
-        );
+        return
+            crossChainCallHashL2Out(
+                safeCallerL2, L2_ROLLUP_ID, revCounterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData()
+            );
     }
 
     /// @dev L2 source entry: nothing executes on L2 — success=false replays the destination's
     ///      revert to the caller (consumption runs, verifies, then reverts with returnData).
-    function _l2Entries(address revCounterL1, address safeCallerL2)
+    function _l2Entries(
+        address revCounterL1,
+        address safeCallerL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -86,7 +90,10 @@ abstract contract RevertL2Actions {
     /// @dev L1 mirror entry — system-driven (proxyEntryHash=0), executed as an immediate L2Tx.
     ///      `l2ToL1Calls[0]` runs the real RevertCounter on L1; the natural revert folds as
     ///      CALL_END(false, ...). CALL_BEGIN folds targetRollupId = MAINNET.
-    function _l1Entries(address revCounterL1, address safeCallerL2)
+    function _l1Entries(
+        address revCounterL1,
+        address safeCallerL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -103,11 +110,11 @@ abstract contract RevertL2Actions {
             data: _incrementCallData()
         });
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-reverted-call"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-reverted-call"),
             etherDelta: 0
         });
 
@@ -120,7 +127,7 @@ abstract contract RevertL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

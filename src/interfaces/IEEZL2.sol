@@ -19,7 +19,7 @@ pragma solidity 0.8.34;
 //
 //  Deliberately LEANER than L1's structs: L2 has a single rollup, no state deltas,
 //  and no per-rollup queue interleaving, so the L1-only fields are dropped entirely
-//  (no `StateUpdate`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
+//  (no `RootUpdate`, `destinationRollupId`, or `ExpectedRootPerRollup`). L2
 //  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`CrossChainCall`,

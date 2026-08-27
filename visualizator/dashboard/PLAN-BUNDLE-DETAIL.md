@@ -26,7 +26,7 @@ Counter B on L2 = `0xe7f1...` = same address as Rollups on L1.
 - Show entries expanding/collapsing with decoded action fields
 
 ### Phase 3: Add Contract State Panel
-- Track rollup state changes from events (BatchPosted stateDeltas, L2ExecutionPerformed, StateUpdated)
+- Track rollup state changes from events (BatchPosted stateDeltas, L2ExecutionPerformed, RootUpdated)
 - Show per-step state panel in BundleDetail with changed values highlighted
 
 ### Phase 4: Call Flow Strip

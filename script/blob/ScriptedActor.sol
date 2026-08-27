@@ -81,7 +81,12 @@ contract ScriptedActor {
     // ──────────────────────────────────────────────
 
     /// @notice Queues a program for invocations carrying `invokeData` (empty for `drive()`).
-    function addProgram(bytes calldata invokeData, Step[] calldata steps, bool finalRevert, bytes calldata finalData)
+    function addProgram(
+        bytes calldata invokeData,
+        Step[] calldata steps,
+        bool finalRevert,
+        bytes calldata finalData
+    )
         external
     {
         uint256 id = _programs.length;

@@ -36,7 +36,7 @@ contract ScenarioCatalog is DslScenarioBase {
     //  1. L2-only transaction — no cross-chain calls at all.
     //     The DSL rejects call-free txs, so this one is authored as raw
     //     messages: Initiate on L2A, Finish, Close. On L1 it is just the
-    //     immediate L2Tx host entry advancing L2A's state root.
+    //     immediate L2Tx host entry advancing L2A's root.
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_Catalog01_L2OnlyTransaction() public {
@@ -51,7 +51,7 @@ contract ScenarioCatalog is DslScenarioBase {
         assertEq(es[0].proxyEntryHash, bytes32(0), "pure L2 tx host");
         assertEq(es[0].destinationRollupId, L2A);
         assertEq(es[0].l2ToL1Calls.length, 0, "nothing lands on L1");
-        assertEq(es[0].stateUpdates.length, 1, "only A advances");
+        assertEq(es[0].rootUpdates.length, 1, "only A advances");
 
         runScenario(Msg.done(l));
     }
@@ -92,8 +92,8 @@ contract ScenarioCatalog is DslScenarioBase {
         (ExecutionEntry[] memory es, StaticExecutionEntry[] memory ss) = _shape(s);
         assertEq(es.length, 0, "a read changes nothing - no ExecutionEntry");
         assertEq(ss.length, 1, "one pool StaticExecutionEntry");
-        assertEq(ss[0].expectedStateRoots.length, 1, "pinned to A's live root");
-        assertEq(ss[0].expectedStateRoots[0].rollupId, L2A);
+        assertEq(ss[0].expectedRoots.length, 1, "pinned to A's live root");
+        assertEq(ss[0].expectedRoots[0].rollupId, L2A);
         assertEq(ss[0].l2ToL1Calls.length, 0, "no sub-reads");
 
         runDsl(s);
@@ -216,7 +216,7 @@ contract ScenarioCatalog is DslScenarioBase {
         string memory s = "L2_A call L1\nL1 call L2_B\nL2_B returnFail\nL1 return\n";
         (ExecutionEntry[] memory es,) = _shape(s);
         assertEq(es.length, 1, "the L2Tx host");
-        assertEq(es[0].stateUpdates.length, 2, "B advances too (its block processed the revert)");
+        assertEq(es[0].rootUpdates.length, 2, "B advances too (its block processed the revert)");
         assertEq(es[0].expectedL1ToL2Calls.length, 1, "REVERTED row");
         assertFalse(es[0].expectedL1ToL2Calls[0].success, "success = false");
 
@@ -274,7 +274,7 @@ contract ScenarioCatalog is DslScenarioBase {
         );
         (ExecutionEntry[] memory es,) = _shape(s);
         assertEq(es.length, 1, "the whole recursion collapses into one origin entry");
-        assertEq(es[0].stateUpdates.length, 2, "A and B both advance");
+        assertEq(es[0].rootUpdates.length, 2, "A and B both advance");
         assertEq(es[0].l2ToL1Calls.length, 1, "the A->L1 callback");
         assertEq(es[0].expectedL1ToL2Calls.length, 1, "the L1->B frame");
         assertEq(es[0].expectedL1ToL2Calls[0].l2ToL1Calls.length, 1, "the frame's OWN B->L1 landing");

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
@@ -62,7 +62,11 @@ abstract contract MultiCallTwoDiffL2Actions {
 
     /// @dev Two L2 source entries — different proxyEntryHashes (counter A, then counter B),
     ///      consumed sequentially, each returning the counter's new value uint256(1).
-    function _l2Entries(address counterA, address counterB, address callerL2)
+    function _l2Entries(
+        address counterA,
+        address counterB,
+        address callerL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -86,7 +90,11 @@ abstract contract MultiCallTwoDiffL2Actions {
     /// @dev Single L1 destination entry — system-driven (proxyEntryHash=0), executed as an
     ///      immediate L2Tx during `postAndVerifyBatch`. l2ToL1Calls[0] targets counter A,
     ///      l2ToL1Calls[1] targets counter B; both from CallTwoDifferent-on-L2.
-    function _l1Entries(address counterA, address counterB, address callerL2)
+    function _l1Entries(
+        address counterA,
+        address counterB,
+        address callerL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -95,11 +103,11 @@ abstract contract MultiCallTwoDiffL2Actions {
         calls[0] = _buildL1Call(counterA, callerL2);
         calls[1] = _buildL1Call(counterB, callerL2);
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-multi-call-two-diffL2"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-multi-call-two-diffL2"),
             etherDelta: 0
         });
 
@@ -111,7 +119,7 @@ abstract contract MultiCallTwoDiffL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -271,9 +279,7 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallTwoDiffL2Actions {
         console.log("EXPECTED_L2_HASHES=[%s,%s]", vm.toString(l2h0), vm.toString(l2h1));
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1h));
         console.log(
-            "EXPECTED_L2_CALL_HASHES=[%s,%s]",
-            vm.toString(l2[0].proxyEntryHash),
-            vm.toString(l2[1].proxyEntryHash)
+            "EXPECTED_L2_CALL_HASHES=[%s,%s]", vm.toString(l2[0].proxyEntryHash), vm.toString(l2[1].proxyEntryHash)
         );
         _printL1Table(l1);
         _printL2Table(l2);

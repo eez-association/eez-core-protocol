@@ -6,7 +6,7 @@ import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {
-    StateUpdate,
+    RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -97,16 +97,21 @@ abstract contract DeepNestedActions {
         return crossChainCallHashL2Out(ncL2, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
-    function _l1Entries(address counterL2, address capL1, address ncL2, address alice)
+    function _l1Entries(
+        address counterL2,
+        address capL1,
+        address ncL2,
+        address alice
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-deep-nested"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-deep-nested"),
             etherDelta: 0
         });
 
@@ -145,7 +150,7 @@ abstract contract DeepNestedActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -156,7 +161,12 @@ abstract contract DeepNestedActions {
         });
     }
 
-    function _l2Entries(address counterL2, address capL1, address ncL2, address alice)
+    function _l2Entries(
+        address counterL2,
+        address capL1,
+        address ncL2,
+        address alice
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)

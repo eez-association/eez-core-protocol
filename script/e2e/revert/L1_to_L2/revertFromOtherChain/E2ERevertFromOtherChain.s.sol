@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -66,22 +66,22 @@ abstract contract RevertFromOtherChainActions {
 
     /// @dev Trigger identity: alice calls the L1 proxy for (S@L2). Same hash on both sides.
     function _proxyEntryHash(address selfCallerL2, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, alice, MAINNET_ROLLUP_ID, selfCallerL2, L2_ROLLUP_ID, 0, _executeData()
-        );
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, selfCallerL2, L2_ROLLUP_ID, 0, _executeData());
     }
 
     /// @dev CALL_BEGIN identity of each increment executed ON L1, sourced from S on L2.
     function _incCallHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData()
-        );
+        return crossChainCallHash(false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev L1 entry — mirrors BOTH increment consumptions S's L2 execution made:
     ///      calls[0] force-reverted (its L2-side frame reverted), calls[1] committed.
     ///      Both run on a counter at 0, so both return abi.encode(1).
-    function _l1Entries(address selfCallerL2, address counterL1, address alice)
+    function _l1Entries(
+        address selfCallerL2,
+        address counterL1,
+        address alice
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -108,11 +108,11 @@ abstract contract RevertFromOtherChainActions {
             data: _incrementData()
         });
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RootUpdate[] memory deltas = new RootUpdate[](1);
+        deltas[0] = RootUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-revert-from-other-chain"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-revert-from-other-chain"),
             etherDelta: 0
         });
 
@@ -126,7 +126,7 @@ abstract contract RevertFromOtherChainActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rootUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -140,7 +140,11 @@ abstract contract RevertFromOtherChainActions {
     /// @dev L2 entry — the delivered execution of S. Its ONE reentrant row is consumed twice:
     ///      innerCall()'s real revert rolls the cursor back, the second increment re-consumes it.
     ///      The committed hash records exactly one NESTED frame.
-    function _l2Entries(address selfCallerL2, address counterL1, address alice)
+    function _l2Entries(
+        address selfCallerL2,
+        address counterL1,
+        address alice
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -158,9 +162,8 @@ abstract contract RevertFromOtherChainActions {
         });
 
         bytes32 proxyEntryHash = _proxyEntryHash(selfCallerL2, alice);
-        bytes32 ccOut = crossChainCallHashL2Out(
-            selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData()
-        );
+        bytes32 ccOut =
+            crossChainCallHashL2Out(selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
 
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, proxyEntryHash);
