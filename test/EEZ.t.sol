@@ -430,7 +430,7 @@ contract EEZTest is Base {
     }
 
     /// @notice Immediate static lookups without immediate entries are unreachable (no immediate
-    ///         drain, no meta hook) — `_validateBatchStructure` rejects the shape.
+    ///         drain, no meta hook) — the post is rejected after the immediate L2Tx run.
     function test_SubBatch_TransientLookupsWithoutTransientEntriesReverts() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
 
@@ -439,6 +439,22 @@ contract EEZTest is Base {
 
         vm.expectRevert(EEZ.ImmediateStaticEntriesWithoutImmediateEntries.selector);
         _postBatchOne(r, _emptyEntries(), lookups, 0, 1);
+    }
+
+    /// @notice A pure-L2Tx immediate prefix is fully drained by the leading run, so no meta hook
+    ///         fires and declared immediate static entries would be dropped — the post is rejected.
+    function test_SubBatch_TransientLookupsWithAllL2TxPrefixReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0] = _immediateEntry(r.id, bytes32(0), bytes32(0)); // canonical no-op L2Txs —
+        entries[1] = _immediateEntry(r.id, bytes32(0), bytes32(0)); // the whole immediate prefix
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        lookups[0] = _revertedStaticLookup(uint64(r.id), keccak256("h"), hex"deadbeef");
+
+        vm.expectRevert(EEZ.ImmediateStaticEntriesWithoutImmediateEntries.selector);
+        _postBatchOne(r, entries, lookups, 2, 1);
     }
 
     /// @notice Meta-hook entries (immediate prefix past the leading L2Tx run) are never persisted,

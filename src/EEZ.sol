@@ -212,8 +212,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     /// @notice Error when `immediateStaticEntryCount` exceeds the static entry count
     error ImmediateStaticEntryCountExceedsStaticEntries();
 
-    /// @notice Error when immediate static entries come without any immediate entries — with no
-    ///         immediate entries no meta hook fires, so the static entries could never be consumed
+    /// @notice Error when immediate static entries are declared but no meta hook fires — only the
+    ///         hook loads them, so they would be silently dropped
     error ImmediateStaticEntriesWithoutImmediateEntries();
 
     /// @notice Error when meta-hook entries remain past the leading L2Tx run but `msg.sender` has no
@@ -423,6 +423,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
                 _transientStaticEntries.push(batch.staticEntries[j]);
             }
             IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions();
+        } else if (batch.immediateStaticEntryCount != 0) {
+            // No meta hook fires, so the declared immediate static entries would never be loaded
+            // (and `_saveRemainderEntries` skips past them) — reject instead of dropping them.
+            revert ImmediateStaticEntriesWithoutImmediateEntries();
         }
 
         // 8. Save the remaining executions to their per-rollup queues, unconditionally. Each entry
@@ -588,14 +592,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             }
         }
 
-        // Transient prefix bounds. Reject the dead-weight shape (static entries without entries) — the
-        // transient static-entry pool is only reachable while transient entries are mid-flight.
+        // Transient prefix bounds. A non-zero `immediateStaticEntryCount` also requires the meta
+        // hook to fire — checked after the immediate L2Tx run in `postAndVerifyBatch`.
         if (batch.immediateEntryCount > batch.entries.length) revert ImmediateCountExceedsEntries();
         if (batch.immediateStaticEntryCount > batch.staticEntries.length) {
             revert ImmediateStaticEntryCountExceedsStaticEntries();
-        }
-        if (batch.immediateEntryCount == 0 && batch.immediateStaticEntryCount != 0) {
-            revert ImmediateStaticEntriesWithoutImmediateEntries();
         }
 
         // Protect honest composers against a poster who under-counts `immediateEntryCount` (an unproven
