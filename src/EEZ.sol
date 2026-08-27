@@ -229,6 +229,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
     ///         the whole post is unwound rather than proceeding on a fully-failed immediate prefix.
     error AllImmediateL2TxsFailed();
 
+    /// @notice Error when an immediate L2Tx ran out of gas (empty revert data). Every real failure
+    ///         reverts with a custom error, so an empty revert means the caller under-gassed the
+    ///         frame to drop the entry — abort the batch instead of skipping.
+    error ImmediateL2TxOutOfGas(uint256 transientIdx);
+
     /// @notice Error when a composer-supplied `expectedRootPerRollup` pin doesn't equal the
     ///         rollup's live root.
     error ExpectedRootMismatch(uint64 rollupId);
@@ -400,6 +405,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient {
             try this._attemptExecuteImmediateL2Txs(batch.entries[i]) {
                 anyExecuted = true;
             } catch (bytes memory revertData) {
+                // Empty revert data means the frame ran out of gas: a real failure always carries a
+                // custom error. A caller could under-gas the frame to silently drop this entry, so
+                // abort the whole batch rather than skip.
+                if (revertData.length == 0) revert ImmediateL2TxOutOfGas(i);
                 emit L2TxSkipped(i, revertData);
             }
         }

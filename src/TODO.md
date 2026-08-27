@@ -10,11 +10,6 @@
       effect on `computeCrossChainProxyAddress` (the derivation would fold the lighter beacon-proxy
       creation code instead).
 
-## Open items (accepted, no fix planned)
-
-- **OOG-skip griefing on unbound posts** (`bindMsgSenderInPublicInput = false`): a front-runner can post a proven batch with tuned gas so individual immediate L2Txs OOG inside the try/catch and get `L2TxSkipped` — dropped (never queued). Recoverable: the skipped transitions never applied, so pins still match and the composer can re-post; `AllImmediateL2TxsFailed` catches total failure. Accepted as the price of unbound posting.
-
-
 # Gas Audit — EEZ hot paths
 
 Scope: the recurring L1 flows — `postAndVerifyBatch`, `executeCrossChainCall` / entry execution, and proxy creation (`createCrossChainProxy` + the auto-create in `_processNCalls`) — plus the shared `CrossChainProxy` hop. Read-only audit: no code was changed.
