@@ -17,9 +17,9 @@ pragma solidity 0.8.34;
 //      reentrant cross-chain call fired FROM this L2 toward a remote rollup
 //      during execution (forward-scanned by the `_lastOutgoingCallConsumed` cursor).
 //
-//  Deliberately LEANER than L1's structs: L2 has a single rollup, no state deltas,
+//  Deliberately LEANER than L1's structs: L2 has a single rollup, no rollup updates,
 //  and no per-rollup queue interleaving, so the L1-only fields are dropped entirely
-//  (no `RootUpdate`, `destinationRollupId`, or `ExpectedRootPerRollup`). L2
+//  (no `RollupUpdate`, `destinationRollupId`, or `ExpectedRootPerRollup`). L2
 //  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`CrossChainCall`,

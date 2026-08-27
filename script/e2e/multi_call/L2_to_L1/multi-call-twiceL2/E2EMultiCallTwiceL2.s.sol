@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
@@ -116,8 +116,8 @@ abstract contract MultiCallTwiceL2Actions {
         });
         calls[1] = calls[0];
 
-        RootUpdate[] memory deltas = new RootUpdate[](1);
-        deltas[0] = RootUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-multi-call-twiceL2"),
@@ -133,7 +133,7 @@ abstract contract MultiCallTwiceL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            rootUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

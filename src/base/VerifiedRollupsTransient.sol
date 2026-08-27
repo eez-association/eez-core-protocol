@@ -40,7 +40,7 @@ abstract contract VerifiedRollupsTransient {
         }
     }
 
-    /// @notice True iff `rollupId` is in the set. Linear scan (the set is an entry's few deltas).
+    /// @notice True iff `rollupId` is in the set. Linear scan (the set is an entry's few rollup updates).
     function _containsVerifiedRollup(uint64 rollupId) internal view returns (bool found) {
         uint256 slot = _VERIFIED_ROLLUPS_SLOT;
         assembly ("memory-safe") {

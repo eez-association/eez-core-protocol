@@ -8,7 +8,7 @@ import {BlobCodec} from "./BlobCodec.sol";
 import {ScenarioStore} from "./ScenarioStore.sol";
 import {TableGenerator} from "./TableGenerator.sol";
 import {UNIT_KIND_ORIGIN_GROUP} from "./BlobConstants.sol";
-import {ExecutionEntry, StaticExecutionEntry, L2ToL1Call, RootUpdate} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, StaticExecutionEntry, L2ToL1Call, RollupUpdate} from "../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../src/interfaces/IEEZL2.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,8 +158,8 @@ contract BlobTools is DslScenarioBase {
             );
             console2.log(string.concat("      proxyEntryHash=", vm.toString(e.proxyEntryHash)));
             console2.log(string.concat("      rollingHash=   ", vm.toString(e.rollingHash)));
-            for (uint256 d = 0; d < e.rootUpdates.length; d++) {
-                RootUpdate memory u = e.rootUpdates[d];
+            for (uint256 d = 0; d < e.rollupUpdates.length; d++) {
+                RollupUpdate memory u = e.rollupUpdates[d];
                 console2.log(
                     string.concat(
                         "      delta rollup ",

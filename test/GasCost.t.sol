@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Test.sol";
 import {GasFixture, ArrayStore} from "./GasFixture.t.sol";
-import {ExecutionEntry, RootUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 
 /// @notice Minimal meta-hook receiver: accepts the callback and returns without consuming,
 ///         so a posted transient prefix is loaded but never run.
@@ -22,7 +22,7 @@ contract NoopMetaReceiver {
 ///         is more expensive"). Numbers are printed via `gasleft()` deltas with `console.log`;
 ///         run with `-vv`.
 ///
-///         Entry shape is held fixed at "touches 2 rollups (2 RootUpdates), one destination
+///         Entry shape is held fixed at "touches 2 rollups (2 RollupUpdates), one destination
 ///         rollup" so cases are comparable. Cases build up incrementally:
 ///           bare entry -> +1 L2ToL1Call -> +1 reentrant ExpectedL1ToL2Call
 ///           -> erc20 / uniswap directly -> erc20 + uniswap + reentrant combined.
@@ -87,15 +87,15 @@ contract GasCost is GasFixture {
         gasUsed = g - gasleft();
     }
 
-    /// @notice Builds + posts one EXECUTED entry routed to rA with `nDeltas` RootUpdates (1 = one
+    /// @notice Builds + posts one EXECUTED entry routed to rA with `nDeltas` RollupUpdates (1 = one
     ///         rollup, 2 = two rollups). Reads live roots, safe across blocks. The batch always
     ///         attests both rA and rB so a reentrant nested call into rB passes its verified gate,
-    ///         independent of how many RootUpdates the entry carries. Computes the entry's rolling
+    ///         independent of how many RollupUpdates the entry carries. Computes the entry's rolling
     ///         hash and reentrant table from the actual calls (seeded with `_hEntryBegin`).
     function _postEntryN(uint8 nDeltas, L2ToL1Call[] memory calls, bytes[] memory rets, bool reentrant) internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
-        RootUpdate[] memory deltas = nDeltas == 2 ? _twoDeltas(newA, newB) : _oneDelta(newA);
+        RollupUpdate[] memory deltas = nDeltas == 2 ? _twoDeltas(newA, newB) : _oneDelta(newA);
         bytes32 ph = _triggerHash();
         (bytes32 h, ExpectedL1ToL2Call[] memory expected) = _foldExec(_hEntryBegin(deltas, ph), calls, rets, reentrant);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
@@ -124,9 +124,9 @@ contract GasCost is GasFixture {
         require(ok, "exec trigger reverted");
     }
 
-    /// @notice Default execution measurement. Touches a single rollup (1 RootUpdate) unless the
+    /// @notice Default execution measurement. Touches a single rollup (1 RollupUpdate) unless the
     ///         entry is `reentrant`: a reentrant L1→L2 destination must be in the entry's own
-    ///         rootUpdates (src/EEZ.sol `ReentrantDestinationNotVerified`), so a cross-rollup
+    ///         rollupUpdates (src/EEZ.sol `ReentrantDestinationNotVerified`), so a cross-rollup
     ///         reentrant entry necessarily touches 2 rollups.
     function _measureExec(
         L2ToL1Call[] memory calls,
@@ -191,7 +191,7 @@ contract GasCost is GasFixture {
     function test_PostCost_1vs2Entries() public {
         bytes32 ph = keccak256("deferred-trigger");
 
-        // 1 RootUpdate, deferred (never executed). The reentrant flat call's source is rA, so a
+        // 1 RollupUpdate, deferred (never executed). The reentrant flat call's source is rA, so a
         // single delta passes post-validation; the reentrant table carries no routing.
         ExpectedL1ToL2Call[] memory exp = new ExpectedL1ToL2Call[](1);
         exp[0] = ExpectedL1ToL2Call({
@@ -236,7 +236,7 @@ contract GasCost is GasFixture {
         uint256 gA = _measureExec(_calls(_sinkCall()), _rets(""), false);
 
         // (b) entry whose single L2ToL1Call re-enters once — SAME-rollup reentry, so still a single
-        //     RootUpdate (1 rollup). Uses _measureExecN(1, ...).
+        //     RollupUpdate (1 rollup). Uses _measureExecN(1, ...).
         vm.roll(block.number + 1);
         _measureExecN(1, _calls(_reentrantCallA()), _rets(""), true); // warm-up
         vm.roll(block.number + 1);
@@ -251,8 +251,8 @@ contract GasCost is GasFixture {
     //  EXECUTION COST — "usual" behaviours directly (erc20, uniswap)
     // ══════════════════════════════════════════════════════════════════════════
 
-    // Marginal execution cost of touching an extra rollup (one more RootUpdate): same plain-call
-    // entry executed with 1 vs 2 RootUpdates. The delta is the read of the extra delta + the
+    // Marginal execution cost of touching an extra rollup (one more RollupUpdate): same plain-call
+    // entry executed with 1 vs 2 RollupUpdates. The delta is the read of the extra delta + the
     // SSTORE of that rollup's root at consumption.
     function test_ExecCost_PerRollupDelta() public {
         _measureExecN(1, _calls(_sinkCall()), _rets(""), false); // warm-up
@@ -266,7 +266,7 @@ contract GasCost is GasFixture {
 
         console.log("exec_1rollup", oneRollup);
         console.log("exec_2rollup", twoRollup);
-        console.log("  +1 rollup (RootUpdate)", twoRollup - oneRollup);
+        console.log("  +1 rollup (RollupUpdate)", twoRollup - oneRollup);
     }
 
     // Profiling target: a single cooled "Entry · 1 plain call" execution. Run with -vvvv to read
@@ -333,7 +333,7 @@ contract GasCost is GasFixture {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
         bytes32 peh = execute ? bytes32(0) : keccak256("not-immediate");
-        RootUpdate[] memory deltas = _twoDeltas(newA, newB);
+        RollupUpdate[] memory deltas = _twoDeltas(newA, newB);
         L2ToL1Call[] memory calls = _calls(_reentrantCall());
         (bytes32 h, ExpectedL1ToL2Call[] memory exp) = _foldExec(_hEntryBegin(deltas, peh), calls, _rets(""), true);
         ExecutionEntry memory e = _entry(deltas, peh, calls, exp, "", h);
@@ -372,11 +372,11 @@ contract GasCost is GasFixture {
         }
     }
 
-    // Same-rollup (1 RootUpdate) reentrant entry loaded into the transient table; proxyEntryHash==0
+    // Same-rollup (1 RollupUpdate) reentrant entry loaded into the transient table; proxyEntryHash==0
     // → executed inline. Posted as an EOA (no meta-hook).
     function _postImmediateA() internal {
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
-        RootUpdate[] memory deltas = _oneDelta(newA);
+        RollupUpdate[] memory deltas = _oneDelta(newA);
         L2ToL1Call[] memory calls = _calls(_reentrantCallA());
         (bytes32 h, ExpectedL1ToL2Call[] memory exp) =
             _foldExec(_hEntryBegin(deltas, bytes32(0)), calls, _rets(""), true);
@@ -589,13 +589,13 @@ contract GasCost is GasFixture {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    //  POSTING COST — marginal cost of one extra RootUpdate (a posted entry touching
-    //  one more rollup). Full-shape steady post with 1 vs 2 RootUpdates, each on a
+    //  POSTING COST — marginal cost of one extra RollupUpdate (a posted entry touching
+    //  one more rollup). Full-shape steady post with 1 vs 2 RollupUpdates, each on a
     //  rollup seeded with the matching shape so both are steady (non-zero originals).
     // ══════════════════════════════════════════════════════════════════════════
 
-    function test_PostCost_PerRootUpdate() public {
-        // 1 RootUpdate (rS seeded 1-delta full)
+    function test_PostCost_PerRollupUpdate() public {
+        // 1 RollupUpdate (rS seeded 1-delta full)
         vm.roll(block.number + 1);
         _postBatchTwo(rB.id, rS.id, _savedFor(rS.id, 1, 1, 1)); // prior block
         vm.roll(block.number + 1);
@@ -605,7 +605,7 @@ contract GasCost is GasFixture {
         _postBatchTwo(rB.id, rS.id, _savedFor(rS.id, 1, 1, 1));
         uint256 oneDelta = g1 - gasleft();
 
-        // 2 RootUpdates (rS3 seeded 2-delta full)
+        // 2 RollupUpdates (rS3 seeded 2-delta full)
         vm.roll(block.number + 1);
         _postBatchTwo(rB.id, rS3.id, _one(_steadyShaped2(rS3.id))); // prior block
         vm.roll(block.number + 1);
@@ -617,7 +617,7 @@ contract GasCost is GasFixture {
 
         console.log("post_1statedelta_steady", oneDelta);
         console.log("post_2statedelta_steady", twoDelta);
-        console.log("  +1 RootUpdate (steady)", twoDelta - oneDelta);
+        console.log("  +1 RollupUpdate (steady)", twoDelta - oneDelta);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -740,11 +740,12 @@ contract GasCost is GasFixture {
         bytes32 ph = _ccHash(NOT_STATIC_CALL, address(s1A), MAINNET_ROLLUP_ID, s1B, uint64(rB.id), 0, incrementCalldata);
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0x1)));
 
-        RootUpdate[] memory d = new RootUpdate[](1);
-        d[0] = RootUpdate({rollupId: uint64(rB.id), currentRoot: _getRollupState(rB.id), newRoot: newB, etherDelta: 0});
+        RollupUpdate[] memory d = new RollupUpdate[](1);
+        d[0] =
+            RollupUpdate({rollupId: uint64(rB.id), currentRoot: _getRollupState(rB.id), newRoot: newB, etherDelta: 0});
 
         ExecutionEntry[] memory e = new ExecutionEntry[](1);
-        e[0].rootUpdates = d;
+        e[0].rollupUpdates = d;
         e[0].proxyEntryHash = ph;
         e[0].destinationRollupId = uint64(rB.id);
         e[0].rollingHash = _hEntryBegin(d, ph);
@@ -801,7 +802,7 @@ contract GasCost is GasFixture {
 
         bytes32 newA = keccak256(abi.encodePacked(_getRollupState(rA.id), uint8(0xA)));
         bytes32 newB = keccak256(abi.encodePacked(_getRollupState(rB.id), uint8(0xB)));
-        RootUpdate[] memory deltas = _twoDeltas(newA, newB);
+        RollupUpdate[] memory deltas = _twoDeltas(newA, newB);
 
         // Top-level call's identity (target s4D on L1 = MAINNET, source alice on rB).
         bytes32 cchTop =
@@ -823,7 +824,7 @@ contract GasCost is GasFixture {
         });
 
         ExecutionEntry[] memory e = new ExecutionEntry[](1);
-        e[0].rootUpdates = deltas;
+        e[0].rollupUpdates = deltas;
         e[0].proxyEntryHash = ph;
         e[0].destinationRollupId = uint64(rB.id);
         e[0].l2ToL1Calls = calls;

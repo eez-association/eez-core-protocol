@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -55,16 +55,16 @@ abstract contract MultiCallActions {
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, caller);
 
-        RootUpdate[] memory deltasA = new RootUpdate[](1);
-        deltasA[0] = RootUpdate({
+        RollupUpdate[] memory deltasA = new RollupUpdate[](1);
+        deltasA[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-twice-1"),
             etherDelta: 0
         });
 
-        RootUpdate[] memory deltasB = new RootUpdate[](1);
-        deltasB[0] = RootUpdate({
+        RollupUpdate[] memory deltasB = new RollupUpdate[](1);
+        deltasB[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-state-after-twice-1"),
             newRoot: keccak256("l2-state-after-twice-2"),
@@ -75,7 +75,7 @@ abstract contract MultiCallActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            rootUpdates: deltasA,
+            rollupUpdates: deltasA,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -85,7 +85,7 @@ abstract contract MultiCallActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            rootUpdates: deltasB,
+            rollupUpdates: deltasB,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

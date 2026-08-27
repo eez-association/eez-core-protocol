@@ -77,7 +77,7 @@ struct RollupVerification {
 /// @dev `currentRoot` is re-checked against the live root when the entry is consumed, so an entry
 ///      only ever runs from the exact state it was proven against — which is what makes skipping or
 ///      orphaning queued entries safe.
-struct RootUpdate {
+struct RollupUpdate {
     uint64 rollupId; // the rollup this update applies to
     int192 etherDelta; // net ether change for this rollup (negative when outflows exceed inflows for this entry); int192 far exceeds total ETH supply and packs with `rollupId` into one storage slot
     bytes32 currentRoot; // expected pre-state, checked against `rollups[rollupId].root`
@@ -125,7 +125,7 @@ struct ExpectedL1ToL2Call {
 ///      reentrant frame, since an `ExpectedL1ToL2Call` cannot carry a child table of its own
 ///      (Solidity forbids recursive structs).
 struct ExecutionEntry {
-    RootUpdate[] rootUpdates; // per-rollup state updates — the entry's full state transition (≥1, enforced on-chain)
+    RollupUpdate[] rollupUpdates; // per-rollup state updates — the entry's full state transition (≥1, enforced on-chain)
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); bytes32(0) for L2 txs
     L2ToL1Call[] l2ToL1Calls; // L2→L1 calls to be executed, run in order; reentrant frames (nested L1→L2 calls) carry their own L2→L1 calls
     ExpectedL1ToL2Call[] expectedL1ToL2Calls; // pre-computed results for reentrant L1→L2 calls

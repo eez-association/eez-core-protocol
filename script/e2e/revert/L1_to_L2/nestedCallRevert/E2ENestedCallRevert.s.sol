@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -93,8 +93,8 @@ abstract contract NestedCallRevertActions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        RootUpdate[] memory deltas = new RootUpdate[](1);
-        deltas[0] = RootUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-nested-call-revert"),
@@ -107,7 +107,7 @@ abstract contract NestedCallRevertActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
-            // L1 calls must be sourced from a rollup in the entry's rootUpdates (L2), not MAINNET.
+            // L1 calls must be sourced from a rollup in the entry's rollupUpdates (L2), not MAINNET.
             sourceRollupId: L2_ROLLUP_ID,
             targetAddress: scap,
             value: 0,
@@ -139,7 +139,7 @@ abstract contract NestedCallRevertActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            rootUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,

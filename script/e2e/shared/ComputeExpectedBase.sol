@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -73,7 +73,7 @@ abstract contract ComputeExpectedBase is Script {
     function _printL1Steps(ExecutionEntry[] memory entries, HashStep[][] memory steps) internal pure {
         require(steps.length == entries.length, "steps/entries length mismatch");
         for (uint256 i = 0; i < entries.length; i++) {
-            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].rootUpdates, entries[i].proxyEntryHash);
+            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].rollupUpdates, entries[i].proxyEntryHash);
             require(RollingHashBuilder.foldSteps(seed, steps[i]) == entries[i].rollingHash, "steps drift from table");
         }
         _printTableLine("EXPECTED_L1_STEPS=%s", abi.encode(steps));
@@ -208,8 +208,8 @@ abstract contract ComputeExpectedBase is Script {
             e.expectedL1ToL2Calls.length
         );
 
-        for (uint256 d = 0; d < e.rootUpdates.length; d++) {
-            RootUpdate memory sd = e.rootUpdates[d];
+        for (uint256 d = 0; d < e.rollupUpdates.length; d++) {
+            RollupUpdate memory sd = e.rollupUpdates[d];
             string memory etherStr =
                 sd.etherDelta == 0 ? "" : string.concat("  ether: ", _fmtEtherSigned(sd.etherDelta));
             console.log(

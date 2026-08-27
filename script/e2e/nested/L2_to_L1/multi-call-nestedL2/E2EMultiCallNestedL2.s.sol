@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {RootUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -162,7 +162,7 @@ abstract contract MultiCallNestedL2Actions {
         address counterL2,
         address capL1,
         address app,
-        RootUpdate[] memory deltas,
+        RollupUpdate[] memory deltas,
         uint256 n
     )
         internal
@@ -200,7 +200,7 @@ abstract contract MultiCallNestedL2Actions {
         });
 
         return ExecutionEntry({
-            rootUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — consumed by postAndVerifyBatch/executeL2Txs
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -220,15 +220,15 @@ abstract contract MultiCallNestedL2Actions {
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        RootUpdate[] memory d0 = new RootUpdate[](1);
-        d0[0] = RootUpdate({
+        RollupUpdate[] memory d0 = new RollupUpdate[](1);
+        d0[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-mcnl2-step-1"),
             etherDelta: 0
         });
-        RootUpdate[] memory d1 = new RootUpdate[](1);
-        d1[0] = RootUpdate({
+        RollupUpdate[] memory d1 = new RollupUpdate[](1);
+        d1[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-mcnl2-step-1"),
             newRoot: keccak256("l2-mcnl2-step-2"),

@@ -455,8 +455,8 @@ abstract contract BlobScenarioBase is Test {
         uint64[] memory rids = new uint64[](l2ChainCount);
         uint256 nR = 0;
         for (uint256 i = 0; i < entries.length; i++) {
-            for (uint256 d = 0; d < entries[i].rootUpdates.length; d++) {
-                nR = _addRid(rids, nR, entries[i].rootUpdates[d].rollupId);
+            for (uint256 d = 0; d < entries[i].rollupUpdates.length; d++) {
+                nR = _addRid(rids, nR, entries[i].rollupUpdates[d].rollupId);
             }
         }
         for (uint256 i = 0; i < statics.length; i++) {

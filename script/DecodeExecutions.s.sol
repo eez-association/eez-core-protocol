@@ -423,7 +423,7 @@ contract DecodeExecutions is Script {
         uint256 reverts;
         uint256 l2tx;
         uint256 immediateSkipped;
-        uint256 rootUpdates;
+        uint256 rollupUpdates;
         uint256 proxiesCreated;
 
         for (uint256 i = 0; i < logs.length; i++) {
@@ -444,7 +444,7 @@ contract DecodeExecutions is Script {
             } else if (sig == SIG_IMMEDIATE_SKIPPED) {
                 immediateSkipped++;
             } else if (sig == SIG_ROOT_UPDATED) {
-                rootUpdates++;
+                rollupUpdates++;
             } else if (sig == SIG_PROXY_CREATED) {
                 proxiesCreated++;
             }
@@ -467,8 +467,8 @@ contract DecodeExecutions is Script {
             vm.toString(l2tx),
             " skipped=",
             vm.toString(immediateSkipped),
-            " rootUpdates=",
-            vm.toString(rootUpdates),
+            " rollupUpdates=",
+            vm.toString(rollupUpdates),
             " proxies=",
             vm.toString(proxiesCreated)
         );

@@ -7,7 +7,7 @@ import {IRollupContract} from "../src/interfaces/IRollup.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 import {
     ExecutionEntry,
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
@@ -234,15 +234,15 @@ contract EEZCoverageTest is Base {
         rollups.postAndVerifyBatch(b);
     }
 
-    function test_Validate_RootUpdatesNotIncreasing() public {
+    function test_Validate_RollupUpdatesNotIncreasing() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
-        RootUpdate[] memory deltas = new RootUpdate[](2);
-        deltas[0] = RootUpdate({rollupId: uint64(r.id), currentRoot: bytes32(0), newRoot: bytes32(0), etherDelta: 0});
-        deltas[1] = RootUpdate({rollupId: uint64(r.id), currentRoot: bytes32(0), newRoot: bytes32(0), etherDelta: 0});
+        RollupUpdate[] memory deltas = new RollupUpdate[](2);
+        deltas[0] = RollupUpdate({rollupId: uint64(r.id), currentRoot: bytes32(0), newRoot: bytes32(0), etherDelta: 0});
+        deltas[1] = RollupUpdate({rollupId: uint64(r.id), currentRoot: bytes32(0), newRoot: bytes32(0), etherDelta: 0});
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
-        vm.expectRevert(abi.encodeWithSelector(EEZ.RootUpdatesNotStrictlyIncreasing.selector, uint64(r.id)));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.RollupUpdatesNotStrictlyIncreasing.selector, uint64(r.id)));
         rollups.postAndVerifyBatch(b);
     }
 
@@ -252,13 +252,13 @@ contract EEZCoverageTest is Base {
         entries[0] = _shellEntry(r.id, _oneDelta(r.id, bytes32(0), bytes32(0), 0));
         entries[0].destinationRollupId = 12345; // not in deltas
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
-        vm.expectRevert(abi.encodeWithSelector(EEZ.EntryDestinationNotInRootUpdates.selector, uint64(12345)));
+        vm.expectRevert(abi.encodeWithSelector(EEZ.EntryDestinationNotInRollupUpdates.selector, uint64(12345)));
         rollups.postAndVerifyBatch(b);
     }
 
     function test_Validate_CallSourceNotVerified() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), bytes32(0), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), bytes32(0), 0);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         // sourceRollupId 9999 is not in the entry's deltas.
@@ -274,7 +274,7 @@ contract EEZCoverageTest is Base {
     ///         reentrant TARGET is now validated at runtime via `ReentrantDestinationNotVerified`.)
     function test_Validate_ReentrantCallSourceNotVerified() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), bytes32(0), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), bytes32(0), 0);
 
         ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
         reentrant[0] = ExpectedL1ToL2Call({
@@ -489,7 +489,7 @@ contract EEZCoverageTest is Base {
             value: 0,
             data: cd
         });
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), uint64(r.id), address(target), MAINNET_ROLLUP_ID, 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -507,7 +507,7 @@ contract EEZCoverageTest is Base {
         RollupHandle memory r = _makeRollup(bytes32(0));
         target.setValue(42);
         bytes memory cd = abi.encodeCall(SimpleTarget.getValue, ());
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
         bytes32 cch = _ccHash(IS_STATIC, address(this), uint64(r.id), address(target), MAINNET_ROLLUP_ID, 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -524,7 +524,7 @@ contract EEZCoverageTest is Base {
         RollupHandle memory r = _makeRollup(bytes32(0));
         L2TXReenter reenter = new L2TXReenter(rollups, r.id);
         bytes memory cd = abi.encodeCall(L2TXReenter.poke, ());
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), uint64(r.id), address(reenter), MAINNET_ROLLUP_ID, 0, cd);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
@@ -546,7 +546,7 @@ contract EEZCoverageTest is Base {
         // Inbound proxy-entry hash (this → target on r.id, no value).
         bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), uint64(r.id), 0, cd);
 
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
 
         // Declared hash folds a NESTED frame for a reentrant call the entry never fires (it has no
         // top-level call that re-enters EEZ), so the actual hash stays at the entry-begin seed.
@@ -633,7 +633,7 @@ contract EEZCoverageTest is Base {
             value: 0,
             data: cd
         });
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].proxyEntryHash = ah;
@@ -647,7 +647,7 @@ contract EEZCoverageTest is Base {
     }
 
     /// @notice A reentrant call whose destination rollup is verified this block but is NOT among the
-    ///         executing entry's `rootUpdates` trips the runtime proxy-protection check
+    ///         executing entry's `rollupUpdates` trips the runtime proxy-protection check
     ///         (`ReentrantDestinationNotVerified`). The entry's top-level call captures that revert as its
     ///         `CALL_END` result; pinning the rolling hash to that exact error data proves the path.
     function test_Reentrant_DestinationNotVerified() public {
@@ -739,7 +739,7 @@ contract EEZCoverageTest is Base {
         address topProxy = rollups.createCrossChainProxy(address(fwd), uint64(r.id));
 
         L2ToL1Call[] memory calls = _oneCall(_call(address(caller), uint64(r.id), address(fwd), 0, outerData));
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
 
         bytes32 ah =
             _ccHash(NOT_STATIC_CALL, address(caller), MAINNET_ROLLUP_ID, address(fwd), uint64(r.id), 0, outerData);
@@ -788,7 +788,7 @@ contract EEZCoverageTest is Base {
         view
         returns (ExecutionEntry[] memory entries)
     {
-        RootUpdate[] memory deltas = _oneDelta(rAid, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rAid, bytes32(0), keccak256("s1"), 0);
         L2ToL1Call[] memory calls = _oneCall(_call(address(this), uint64(rAid), reenter, 0, outerData));
 
         bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, reenter, uint64(rAid), 0, outerData);
@@ -806,7 +806,7 @@ contract EEZCoverageTest is Base {
     /// @notice Rolling hash + transient reentrant table for the meta-hook test (top-level call with one
     ///         successful empty reentrant frame returning `7`). Pulled out for stack-depth headroom.
     function _metaReentrantTableAndHash(
-        RootUpdate[] memory deltas,
+        RollupUpdate[] memory deltas,
         bytes32 ah,
         bytes32 cchTop,
         bytes32 reentrantCch

@@ -13,13 +13,13 @@ import {EEZBase} from "../base/EEZBase.sol";
 
 /// @title EEZL2
 /// @notice L2-side contract for cross-chain execution via pre-computed execution tables
-/// @dev No rollups, no state deltas, no ZK proofs. System address loads execution tables,
+/// @dev No rollups, no rollup updates, no ZK proofs. System address loads execution tables,
 ///      which are consumed sequentially via proxy calls (`executeCrossChainCall`).
 /// @dev SELF-RELATIVE directional vocabulary, mirroring L1's directional style: `incomingCalls`
 ///      holds the cross-chain calls executed ON this L2 on behalf of remote callers (the
 ///      counterparty may be L1 OR another L2), and `expectedOutgoingCalls` holds the pre-computed
 ///      results of reentrant calls fired FROM this L2 during execution. See `IEEZL2.sol`.
-/// @dev Mirrors `EEZ` (L1) structurally minus the L1-only machinery — no state deltas / ether
+/// @dev Mirrors `EEZ` (L1) structurally minus the L1-only machinery — no rollup updates / ether
 ///      accounting, no rollup registry, no proofs, no per-rollup queues, no proxy-protection set.
 ///      Each frame carries its OWN flat call array (`_processNCalls` walks it by a local index, no
 ///      global cursor); the reentrant (outgoing) table is a single unified `expectedOutgoingCalls`,
@@ -491,8 +491,8 @@ contract EEZL2 is EEZBase {
 
     /// @notice Initializes `_rollingHash` to the entry's BEGIN seed — binds the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) so nested frames inherit it transitively.
-    /// @dev Mirrors L1's `_rollingHashEntryBegin` with an empty state-delta prefix (L2 has no state
-    ///      deltas), keeping the cross-chain hashing scheme identical modulo the dropped deltas:
+    /// @dev Mirrors L1's `_rollingHashEntryBegin` with an empty rollup-update prefix (L2 has no rollup
+    ///      updates), keeping the cross-chain hashing scheme identical modulo the dropped updates:
     ///        _rollingHash = keccak(bytes32(0), proxyEntryHash)
     function _seedRollingHash(bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();

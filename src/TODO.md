@@ -24,8 +24,8 @@ Scope: the recurring L1 flows — `postAndVerifyBatch`, `executeCrossChainCall` 
 | Same entry via the meta-hook transient tables | 534,628 |
 | Save 1 bare entry to a per-rollup queue (marginal) | 139,924 |
 | Execute a deferred entry via proxy (tx 2 of save+exec) | 153,338 |
-| Marginal cost per extra `RootUpdate` (post, steady) | 29,054 |
-| Marginal cost per extra `RootUpdate` (exec side) | 15,761 |
+| Marginal cost per extra `RollupUpdate` (post, steady) | 29,054 |
+| Marginal cost per extra `RollupUpdate` (exec side) | 15,761 |
 | Marginal reentrant `ExpectedL1ToL2Call`, executed inline (net of refunds) | 34,003 |
 | Handle one entry: storage save vs existing transient serializer | 482,985 vs 143,725 |
 
@@ -39,7 +39,7 @@ The last row is the repo's own A/B proof that the `ExpectedL1ToL2CallTransient` 
 
 `postAndVerifyBatch` step 7 `push`es every meta-hook entry into the storage array `_transientEntries`, then `delete`s it in step 9 — all within one tx. Measured: the same entry costs **121,872 inline vs 534,628 via the meta hook (+412,756)**, and the refund model already loses to the EIP-3529 cap (measured raw refund 39,800 vs cap 36,797 — clipped). Net cost is ~16–20k per storage word vs ~200 per transient word.
 
-The codebase already contains the fix pattern: `ExpectedL1ToL2CallTransient` serializes a full struct array into a namespaced EIP-1153 region (packed, length-authoritative, revert-safe), and `test_StorageVsTransient_HandleEntry` measures it at **143,725 vs 482,985** for one entry. Extend that serializer to full `ExecutionEntry` (incl. `RootUpdate` rows) and `StaticExecutionEntry`, then point the four read sites at it (`_getExpectedL1toL2Calls` branch (b), `_consumeAndExecuteEntry` transient branch, `staticCrossChainCall` pool branch, and the `PostBatchReentry` guard — the guard just reads the tstored length word instead of `.length`).
+The codebase already contains the fix pattern: `ExpectedL1ToL2CallTransient` serializes a full struct array into a namespaced EIP-1153 region (packed, length-authoritative, revert-safe), and `test_StorageVsTransient_HandleEntry` measures it at **143,725 vs 482,985** for one entry. Extend that serializer to full `ExecutionEntry` (incl. `RollupUpdate` rows) and `StaticExecutionEntry`, then point the four read sites at it (`_getExpectedL1toL2Calls` branch (b), `_consumeAndExecuteEntry` transient branch, `staticCrossChainCall` pool branch, and the `PostBatchReentry` guard — the guard just reads the tstored length word instead of `.length`).
 
 The same applies on L2 to `executeIncomingCrossChainCall` (atomic, same-tx — transient-eligible). `loadExecutionTable` must **stay** storage: its entries are consumed by *later txs* in the same block, and transient storage dies with the tx.
 

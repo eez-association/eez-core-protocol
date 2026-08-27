@@ -8,7 +8,7 @@ import {
 } from "../../../src/EEZ.sol";
 import {
     IEEZ,
-    RootUpdate,
+    RollupUpdate,
     ExecutionEntry,
     StaticExecutionEntry,
     L2ToL1Call,
@@ -119,7 +119,7 @@ library RollingHashBuilder {
     ///         then closes with the entry identity (`proxyEntryHash`).
     ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function entryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function entryBegin(RollupUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
             statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentRoot));

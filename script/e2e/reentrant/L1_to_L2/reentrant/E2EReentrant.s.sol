@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -123,8 +123,8 @@ abstract contract ReentrantActions {
     // ── Entry builders ──
 
     function _l1Entries(address rcL1, address rcL2) internal pure returns (ExecutionEntry[] memory entries) {
-        RootUpdate[] memory deltas = new RootUpdate[](1);
-        deltas[0] = RootUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-reentrant"),
@@ -170,7 +170,7 @@ abstract contract ReentrantActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            rootUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: topCalls,

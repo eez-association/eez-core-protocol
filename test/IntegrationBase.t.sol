@@ -10,7 +10,7 @@ import {
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {ExecutionEntry, RootUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry
@@ -186,7 +186,7 @@ abstract contract IntegrationBase is Test {
 
     /// @notice Mirror of L1 `EEZBase._rollingHashEntryBegin`: folds the entry's starting state
     ///         (`(rollupId, currentRoot)` per delta) closed with `proxyEntryHash`.
-    function _hEntryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function _hEntryBegin(RollupUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
             statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentRoot));

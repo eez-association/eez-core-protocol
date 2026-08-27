@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {
     ExecutionEntry,
-    RootUpdate,
+    RollupUpdate,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
     ExpectedRootPerRollup
@@ -615,9 +615,9 @@ contract TableGenerator is TestHashes {
             uint64 rid = sorted[i];
             bytes32 cur = _ledgerGet(rid);
             bytes32 newRoot = keccak256(abi.encodePacked("blobfw-step", cur, idx));
-            entry.rootUpdates
+            entry.rollupUpdates
                 .push(
-                    RootUpdate({
+                    RollupUpdate({
                         rollupId: rid, currentRoot: cur, newRoot: newRoot, etherDelta: int192(_l1Ether[idx][rid])
                     })
                 );
@@ -628,7 +628,7 @@ contract TableGenerator is TestHashes {
         ctx.active = true;
         ctx.hostIsL1 = true;
         ctx.hostEntry = idx;
-        ctx.liveHash = _hEntryBegin(entry.rootUpdates, entry.proxyEntryHash);
+        ctx.liveHash = _hEntryBegin(entry.rollupUpdates, entry.proxyEntryHash);
         _clearFrames(ctx);
     }
 
@@ -636,8 +636,8 @@ contract TableGenerator is TestHashes {
     ///         consumption reverts, so the live roots stay at the entry's currentRoot.
     function _rollbackLedgerForEntry(uint256 idx) internal {
         ExecutionEntry storage entry = _l1Entries[idx];
-        for (uint256 i = 0; i < entry.rootUpdates.length; i++) {
-            _ledger[entry.rootUpdates[i].rollupId] = entry.rootUpdates[i].currentRoot;
+        for (uint256 i = 0; i < entry.rollupUpdates.length; i++) {
+            _ledger[entry.rollupUpdates[i].rollupId] = entry.rollupUpdates[i].currentRoot;
         }
     }
 

@@ -6,7 +6,7 @@ import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} f
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {
     ExecutionEntry,
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
@@ -304,11 +304,11 @@ abstract contract Base is Test, TestHashes {
     )
         internal
         pure
-        returns (RootUpdate[] memory deltas)
+        returns (RollupUpdate[] memory deltas)
     {
-        deltas = new RootUpdate[](1);
+        deltas = new RollupUpdate[](1);
         deltas[0] =
-            RootUpdate({rollupId: uint64(rid), currentRoot: currentRoot, newRoot: newRoot, etherDelta: etherDelta});
+            RollupUpdate({rollupId: uint64(rid), currentRoot: currentRoot, newRoot: newRoot, etherDelta: etherDelta});
     }
 
     /// @notice An immediate entry (`proxyEntryHash == 0`) transitioning `rid` from
@@ -322,18 +322,18 @@ abstract contract Base is Test, TestHashes {
         pure
         returns (ExecutionEntry memory entry)
     {
-        entry.rootUpdates = _oneDelta(rid, currentRoot, newRoot, 0);
+        entry.rollupUpdates = _oneDelta(rid, currentRoot, newRoot, 0);
         entry.proxyEntryHash = bytes32(0);
         entry.destinationRollupId = uint64(rid);
         entry.l2ToL1Calls = _emptyCalls();
         entry.expectedL1ToL2Calls = _emptyReentrant();
-        entry.rollingHash = _hEntryBegin(entry.rootUpdates, bytes32(0));
+        entry.rollingHash = _hEntryBegin(entry.rollupUpdates, bytes32(0));
         entry.success = true;
         entry.returnData = "";
     }
 
     /// @notice An immediate entry with a single no-op state delta (`proxyEntryHash == 0`, empty
-    ///         calls). The delta exists only so `destinationRollupId ∈ rootUpdates` (postBatch
+    ///         calls). The delta exists only so `destinationRollupId ∈ rollupUpdates` (postBatch
     ///         requires it); entries built with this helper are not consumed, so the state values
     ///         are placeholders. Useful for tests that want to verify postAndVerifyBatch flow.
     function _emptyImmediateEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
@@ -342,8 +342,12 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice A "shell" entry: given deltas, default everything else (`proxyEntryHash = 0`,
     ///         no calls, `rollingHash = 0`, `success = true`); destination = `destRid`.
-    function _shellEntry(uint256 destRid, RootUpdate[] memory deltas) internal pure returns (ExecutionEntry memory e) {
-        e.rootUpdates = deltas;
+    function _shellEntry(uint256 destRid, RollupUpdate[] memory deltas)
+        internal
+        pure
+        returns (ExecutionEntry memory e)
+    {
+        e.rollupUpdates = deltas;
         e.proxyEntryHash = bytes32(0);
         e.destinationRollupId = uint64(destRid);
         e.l2ToL1Calls = _emptyCalls();
@@ -355,7 +359,7 @@ abstract contract Base is Test, TestHashes {
 
     /// @notice Rolling hash for an entry with exactly one top-level call.
     function _oneCallHash(
-        RootUpdate[] memory deltas,
+        RollupUpdate[] memory deltas,
         bytes32 proxyEntryHash,
         bytes32 crossChainCallHash,
         bool success,

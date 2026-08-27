@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {RootUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -160,14 +160,14 @@ abstract contract FlashLoanActions {
         bytes32 rootAfterFwd = keccak256("l2-state-after-flash-loan-fwd");
 
         // Entry 0: forward bridge leg — no L1-side calls, seed-only rolling hash.
-        RootUpdate[] memory fwdDeltas = new RootUpdate[](1);
-        fwdDeltas[0] = RootUpdate({
+        RollupUpdate[] memory fwdDeltas = new RollupUpdate[](1);
+        fwdDeltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID, currentRoot: keccak256("l2-initial-state"), newRoot: rootAfterFwd, etherDelta: 0
         });
 
         // Entry 1: claim leg — one top-level l2ToL1Call: the return bridge leg runs on L1.
-        RootUpdate[] memory claimDeltas = new RootUpdate[](1);
-        claimDeltas[0] = RootUpdate({
+        RollupUpdate[] memory claimDeltas = new RollupUpdate[](1);
+        claimDeltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: rootAfterFwd,
             newRoot: keccak256("l2-state-after-flash-loan-claim"),
@@ -192,7 +192,7 @@ abstract contract FlashLoanActions {
 
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            rootUpdates: fwdDeltas,
+            rollupUpdates: fwdDeltas,
             proxyEntryHash: _fwdHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -202,7 +202,7 @@ abstract contract FlashLoanActions {
             returnData: ""
         });
         entries[1] = ExecutionEntry({
-            rootUpdates: claimDeltas,
+            rollupUpdates: claimDeltas,
             proxyEntryHash: _claimHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: claimCalls,

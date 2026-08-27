@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -95,13 +95,13 @@ abstract contract CounterMultiTxActions {
 
         entries = new ExecutionEntry[](NUM_TXS);
         for (uint256 n = 1; n <= NUM_TXS; n++) {
-            RootUpdate[] memory deltas = new RootUpdate[](1);
-            deltas[0] = RootUpdate({
+            RollupUpdate[] memory deltas = new RollupUpdate[](1);
+            deltas[0] = RollupUpdate({
                 rollupId: L2_ROLLUP_ID, currentRoot: _rootAfter(n - 1), newRoot: _rootAfter(n), etherDelta: 0
             });
 
             entries[n - 1] = ExecutionEntry({
-                rootUpdates: deltas,
+                rollupUpdates: deltas,
                 proxyEntryHash: ah,
                 destinationRollupId: L2_ROLLUP_ID,
                 l2ToL1Calls: noCalls(),

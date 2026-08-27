@@ -10,7 +10,7 @@ import {
 } from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IProofSystem} from "../../src/interfaces/IProofSystem.sol";
-import {ExecutionEntry, RootUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
 import {_deployBridge} from "../DeployBridge.s.sol";
 import {
@@ -121,8 +121,8 @@ contract E2EBridgeExecute is Script {
         bytes32 callHash =
             crossChainCallHash(false, bridgeAddr, MAINNET_ROLLUP_ID, destination, L2_ROLLUP_ID, 1 ether, bytes(""));
 
-        RootUpdate[] memory rootUpdates = new RootUpdate[](1);
-        rootUpdates[0] = RootUpdate({
+        RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+        rollupUpdates[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
@@ -130,11 +130,11 @@ contract E2EBridgeExecute is Script {
         });
 
         // No L1 top-level calls; rolling hash is just the entry-begin seed.
-        bytes32 rh = RollingHashBuilder.entryBegin(rootUpdates, callHash);
+        bytes32 rh = RollingHashBuilder.entryBegin(rollupUpdates, callHash);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            rootUpdates: rootUpdates,
+            rollupUpdates: rollupUpdates,
             proxyEntryHash: callHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

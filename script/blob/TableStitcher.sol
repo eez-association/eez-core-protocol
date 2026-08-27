@@ -701,7 +701,7 @@ contract TableStitcher is TestHashes {
         ctx.active = true;
         ctx.hostIsL1 = true;
         ctx.hostEntry = entryIdx;
-        ctx.liveHash = _hEntryBegin(_l1Entries[entryIdx].rootUpdates, _l1Entries[entryIdx].proxyEntryHash);
+        ctx.liveHash = _hEntryBegin(_l1Entries[entryIdx].rollupUpdates, _l1Entries[entryIdx].proxyEntryHash);
         ctx.rowCursor = 0;
         ctx.topCursor = 0;
         _clearFrames(ctx);

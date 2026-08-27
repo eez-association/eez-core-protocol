@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IntegrationBase} from "./IntegrationBase.t.sol";
-import {ExecutionEntry, RootUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -22,7 +22,7 @@ contract TestToken is ERC20 {
 /// @notice End-to-end tests of L1 <-> L2 bridging flows for ETH and ERC20 tokens
 ///
 /// Execution model (flat calls + rolling hash):
-///   - L1 ExecutionEntry has: rootUpdates, proxyEntryHash, destinationRollupId, l2ToL1Calls[],
+///   - L1 ExecutionEntry has: rollupUpdates, proxyEntryHash, destinationRollupId, l2ToL1Calls[],
 ///     expectedL1ToL2Calls[], rollingHash, success, returnData
 ///   - L2 ExecutionEntry (IEEZL2.sol) has: proxyEntryHash, incomingCalls[], expectedOutgoingCalls[],
 ///     rollingHash, success, returnData
@@ -120,18 +120,18 @@ contract IntegrationTestBridge is IntegrationBase {
 
         // L1 deferred entry: no calls (seed-only rolling hash), returnData = ""
         {
-            RootUpdate[] memory rootUpdates = new RootUpdate[](1);
-            rootUpdates[0] = RootUpdate({
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] = RollupUpdate({
                 rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 1 ether
             });
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].rootUpdates = rootUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = l1ActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(rootUpdates, l1ActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, l1ActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -250,17 +250,17 @@ contract IntegrationTestBridge is IntegrationBase {
 
         // L1 deferred entry: no calls, seed-only rolling hash
         {
-            RootUpdate[] memory rootUpdates = new RootUpdate[](1);
-            rootUpdates[0] =
-                RootUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 0});
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].rootUpdates = rootUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = l1ActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(rootUpdates, l1ActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, l1ActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -376,17 +376,17 @@ contract IntegrationTestBridge is IntegrationBase {
         bytes32 s1 = keccak256("l2-state-after-roundtrip-fwd");
 
         {
-            RootUpdate[] memory rootUpdates = new RootUpdate[](1);
-            rootUpdates[0] =
-                RootUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: s1, etherDelta: 0});
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: s1, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].rootUpdates = rootUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = fwdActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(rootUpdates, fwdActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, fwdActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -520,19 +520,19 @@ contract IntegrationTestBridge is IntegrationBase {
             data: retCalldata
         });
 
-        RootUpdate[] memory rootUpdates = new RootUpdate[](1);
-        rootUpdates[0] = RootUpdate({rollupId: L2_ROLLUP_ID, currentRoot: s1, newRoot: s2, etherDelta: 0});
+        RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+        rollupUpdates[0] = RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: s1, newRoot: s2, etherDelta: 0});
 
         // Rolling hash: receiveTokens returns void → success=true, retData="". Target runs on L1 (MAINNET).
         bytes32 retCch =
             _ccHash(false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retCalldata);
-        bytes32 retRollingHash = _hEntryBegin(rootUpdates, bytes32(0));
+        bytes32 retRollingHash = _hEntryBegin(rollupUpdates, bytes32(0));
         retRollingHash = _hCallBegin(retRollingHash, retCch);
         retRollingHash = _hCallEnd(retRollingHash, true, "");
 
         {
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].rootUpdates = rootUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = bytes32(0); // immediate / L2Tx
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = retL1Calls;

@@ -132,7 +132,7 @@ success row omits its NESTED frame and diverges the entry hash.
 **Static read** — `staticCrossChainCall`, in-execution branch:
 
 1. (L1 only) proxy protection: the read's target rollup must be in the executing entry's
-   allowed set (`_isRollupAllowed`, from its `rootUpdates`) — else
+   allowed set (`_isRollupAllowed`, from its `rollupUpdates`) — else
    `ReentrantDestinationNotVerified`.
 2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
@@ -254,7 +254,7 @@ candidate is skipped and the scan continues; no dedicated error). The pins are:
   `MAINNET_ROLLUP_ID`, a mainnet pin — `ExpectedRootsNotStrictlyIncreasing`); every
   pinned rollup in the batch (`RollupNotInBatch`); `destinationRollupId` among the pins
   (`StaticEntryDestinationNotPinned` — the routing target must be pinned to proven state,
-  mirroring the entry `destination ∈ rootUpdates` rule); and every sub-call's
+  mirroring the entry `destination ∈ rollupUpdates` rule); and every sub-call's
   `sourceRollupId` among the pins (`CallSourceNotVerified`).
 
 The prover decides which rollups to pin, but the set can never be empty on L1:
@@ -295,7 +295,7 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
   (see CORE_PROTOCOL_SPEC §C.2/§C.3).
 - **Proxy protection**: L1's reentrant static branch checks `_isRollupAllowed(destRid)`
-  against the executing entry's `rootUpdates`; L2 has no allowed-rollups set.
+  against the executing entry's `rollupUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
   immediate-L2Tx table, the transient entry at `_currentEntryIndex`, or the persistent queue
   entry of `_currentEntryRollupId`; an empty parked table with `_currentEntryRollupId == 0`

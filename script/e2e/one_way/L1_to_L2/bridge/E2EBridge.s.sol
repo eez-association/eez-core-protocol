@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -29,7 +29,7 @@ import {
 //  L1 side (Execute):
 //    BridgeSender.bridge{value: 1 ether}() → L2_PROXY.call{value: 1 ether}("")
 //    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 1 ether
-//    (the etherDelta on the RootUpdate records the cross-chain effect on L2's view).
+//    (the etherDelta on the RollupUpdate records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
 //    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: 1 ether}(...)
@@ -67,8 +67,8 @@ abstract contract BridgeActions {
     }
 
     function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
-        RootUpdate[] memory deltas = new RootUpdate[](1);
-        deltas[0] = RootUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
@@ -78,7 +78,7 @@ abstract contract BridgeActions {
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            rootUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),

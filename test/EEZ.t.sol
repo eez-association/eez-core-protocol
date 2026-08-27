@@ -7,7 +7,7 @@ import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {
     ExecutionEntry,
-    RootUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     StaticExecutionEntry,
@@ -133,7 +133,7 @@ contract EEZTest is Base {
     function _boundaryEntry(uint256 rid) internal pure returns (ExecutionEntry memory entry) {
         entry = _immediateEntry(rid, bytes32(0), bytes32(0));
         entry.proxyEntryHash = keccak256("boundary"); // non-zero ⇒ not an L2Tx
-        entry.rollingHash = _hEntryBegin(entry.rootUpdates, entry.proxyEntryHash);
+        entry.rollingHash = _hEntryBegin(entry.rollupUpdates, entry.proxyEntryHash);
     }
 
     /// @notice Builds a reverting top-level entry (`success == false`): runs, verifies its rolling
@@ -151,7 +151,7 @@ contract EEZTest is Base {
     {
         e = _shellEntry(rid, _oneDelta(rid, currentRoot, keccak256("rev-newstate"), 0));
         e.proxyEntryHash = proxyEntryHash;
-        e.rollingHash = _hEntryBegin(e.rootUpdates, proxyEntryHash);
+        e.rollingHash = _hEntryBegin(e.rollupUpdates, proxyEntryHash);
         e.success = false;
         e.returnData = payload;
     }
@@ -258,7 +258,7 @@ contract EEZTest is Base {
     //  postAndVerifyBatch — immediate state update
     // ──────────────────────────────────────────────
 
-    function test_PostBatch_ImmediateRootUpdate() public {
+    function test_PostBatch_ImmediateRollupUpdate() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         bytes32 newRoot = keccak256("new state");
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
@@ -309,11 +309,11 @@ contract EEZTest is Base {
         RollupHandle memory r1 = _makeRollup(bytes32(0));
         RollupHandle memory r2 = _makeRollup(bytes32(0));
 
-        RootUpdate[] memory deltas = new RootUpdate[](2);
+        RollupUpdate[] memory deltas = new RollupUpdate[](2);
         deltas[0] =
-            RootUpdate({rollupId: uint64(r1.id), currentRoot: bytes32(0), newRoot: keccak256("s1"), etherDelta: 0});
+            RollupUpdate({rollupId: uint64(r1.id), currentRoot: bytes32(0), newRoot: keccak256("s1"), etherDelta: 0});
         deltas[1] =
-            RootUpdate({rollupId: uint64(r2.id), currentRoot: bytes32(0), newRoot: keccak256("s2"), etherDelta: 0});
+            RollupUpdate({rollupId: uint64(r2.id), currentRoot: bytes32(0), newRoot: keccak256("s2"), etherDelta: 0});
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r1.id, deltas); // any rollup in batch is fine for inline
@@ -377,7 +377,7 @@ contract EEZTest is Base {
         ExecutionEntry[] memory e1 = new ExecutionEntry[](1);
         e1[0] = _shellEntry(rid, _oneDelta(rid, bytes32(0), bytes32(0), 0));
         e1[0].proxyEntryHash = ah;
-        e1[0].rollingHash = _hEntryBegin(e1[0].rootUpdates, ah);
+        e1[0].rollingHash = _hEntryBegin(e1[0].rollupUpdates, ah);
         _postBatchOne(r, e1, _emptyStaticEntries(), 0, 0);
         assertEq(rollups.queueLength(rid), 1);
 
@@ -512,7 +512,7 @@ contract EEZTest is Base {
         bytes memory cd = abi.encodeCall(TestTarget.setValue, (42));
         bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), MAINNET_ROLLUP_ID, address(target), rid, 0, cd);
 
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("after"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("after"), 0);
 
         // CALL_BEGIN folds the call's identity (target executed ON L1 = MAINNET, source on `rid`).
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, address(target), MAINNET_ROLLUP_ID, 0, cd);
@@ -584,11 +584,11 @@ contract EEZTest is Base {
         RollupHandle memory r2 = _makeRollup(bytes32(0));
         _fundRollup(r1.id, 5 ether);
 
-        RootUpdate[] memory deltas = new RootUpdate[](2);
-        deltas[0] = RootUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](2);
+        deltas[0] = RollupUpdate({
             rollupId: uint64(r1.id), currentRoot: bytes32(0), newRoot: keccak256("s1"), etherDelta: -2 ether
         });
-        deltas[1] = RootUpdate({
+        deltas[1] = RollupUpdate({
             rollupId: uint64(r2.id), currentRoot: bytes32(0), newRoot: keccak256("s2"), etherDelta: 2 ether
         });
 
@@ -605,7 +605,7 @@ contract EEZTest is Base {
     function test_PostBatch_EtherDeltasNonZeroSum_ImmediateSkipped() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         _fundRollup(r.id, 5 ether);
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 1 ether);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 1 ether);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
@@ -621,7 +621,7 @@ contract EEZTest is Base {
 
     function test_PostBatch_InsufficientRollupBalance_ImmediateSkipped() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
-        RootUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), -1 ether);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), -1 ether);
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
@@ -654,7 +654,7 @@ contract EEZTest is Base {
             _ccHash(NOT_STATIC_CALL, address(forwarder), MAINNET_ROLLUP_ID, L2_REMOTE, rid, 1.5 ether, depositData);
 
         bytes memory forwardData = abi.encodeCall(ValueForwarder.forward, (1.5 ether));
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
 
         // Rolling hash: the reentrant call fires right after the top call's CALL_BEGIN, so its
         // position key is keyed on `_rollingHash` at that instant. A SUCCESS frame folds
@@ -728,7 +728,7 @@ contract EEZTest is Base {
     /// @notice Rolling hash for `_nestedOutflowEntry` (top-level forward + nested outflow + return).
     ///         Pulled out so the builder stays under the stack-depth limit under coverage instrumentation.
     function _nestedOutflowRollingHash(
-        RootUpdate[] memory deltas,
+        RollupUpdate[] memory deltas,
         bytes32 cchTop,
         bytes32 nestedHash,
         bytes32 cchSink
@@ -768,7 +768,7 @@ contract EEZTest is Base {
         // Consumed INSIDE the nested frame — sends 1 ether out of EEZ to `sink`.
         L2ToL1Call[] memory subCalls = _oneCall(_call(L2_SENDER, rid, sink, 1 ether, ""));
 
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), etherDelta);
 
         bytes32 cchTop =
             _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(forwarder), MAINNET_ROLLUP_ID, 2 ether, forwardData);
@@ -786,7 +786,7 @@ contract EEZTest is Base {
     /// @notice Final entry assembly for `_nestedOutflowEntry`, in a sub-frame for stack-depth headroom.
     function _assembleNestedOutflowEntry(
         uint64 rid,
-        RootUpdate[] memory deltas,
+        RollupUpdate[] memory deltas,
         L2ToL1Call[] memory calls,
         L2ToL1Call[] memory subCalls,
         bytes32 nestedKey,
@@ -935,7 +935,7 @@ contract EEZTest is Base {
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
         calls[0] = _call(address(this), rid, address(target), 0, cd);
         calls[1] = calls[0];
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s"), 0);
 
         // rollingHash accounts for ONE call; two are provided → divergence.
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, address(target), MAINNET_ROLLUP_ID, 0, cd);
@@ -1088,7 +1088,7 @@ contract EEZTest is Base {
         returns (ExecutionEntry memory e)
     {
         bytes memory subCd = abi.encodeCall(TestTarget.setValue, (subValue));
-        RootUpdate[] memory deltas = _oneDelta(rid, _getRollupState(rid), keccak256("rev"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, _getRollupState(rid), keccak256("rev"), 0);
 
         bytes32 cch = _ccHash(NOT_STATIC_CALL, address(this), rid, subTarget, MAINNET_ROLLUP_ID, 0, subCd);
 
@@ -1201,7 +1201,7 @@ contract EEZTest is Base {
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
         bytes32 innerHash = _ccHash(NOT_STATIC_CALL, address(scap), MAINNET_ROLLUP_ID, counterL2, rid, 0, innerCd);
 
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
 
         bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(scap), MAINNET_ROLLUP_ID, 0, outerCd);
         // The reentrant call fires after the top call's CALL_BEGIN.
@@ -1251,7 +1251,7 @@ contract EEZTest is Base {
         bytes memory innerCd = abi.encodeCall(Counter.increment, ());
         bytes32 innerHash = _ccHash(NOT_STATIC_CALL, address(cap), MAINNET_ROLLUP_ID, counterL2, rid, 0, innerCd);
 
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
 
         bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(cap), MAINNET_ROLLUP_ID, 0, outerCd);
         bytes32 fireHash = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cchTop);
@@ -1294,7 +1294,7 @@ contract EEZTest is Base {
 
         bytes memory outerCd = abi.encodeCall(SafeCounterAndProxy.incrementProxy, ());
 
-        RootUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
 
         bytes32 cchTop = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(scap), MAINNET_ROLLUP_ID, 0, outerCd);
         bytes32 fireHash = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cchTop);

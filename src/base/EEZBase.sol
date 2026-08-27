@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {IEEZ, ProxyInfo, RootUpdate} from "../interfaces/IEEZ.sol";
+import {IEEZ, ProxyInfo, RollupUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -317,18 +317,19 @@ abstract contract EEZBase is IEEZ {
     ///         `(rollupId, currentRoot)` state context closed with the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
-    /// @dev The one rolling-hash helper that names a per-side struct (L1 `RootUpdate`); L2 has no
-    ///      state deltas, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
-    ///      an empty delta prefix. Deltas are strictly-increasing-by-rollupId, so the fold is
+    /// @dev The one rolling-hash helper that names a per-side struct (L1 `RollupUpdate`); L2 has no
+    ///      rollup updates, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
+    ///      an empty update prefix. Updates are strictly-increasing-by-rollupId, so the fold is
     ///      deterministic.
     ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function _rollingHashEntryBegin(RootUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
+    function _rollingHashEntryBegin(RollupUpdate[] memory rollupUpdates, bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
 
         bytes32 _rollupRootsHash;
-        for (uint256 i = 0; i < deltas.length; i++) {
-            _rollupRootsHash = keccak256(abi.encodePacked(_rollupRootsHash, deltas[i].rollupId, deltas[i].currentRoot));
+        for (uint256 i = 0; i < rollupUpdates.length; i++) {
+            _rollupRootsHash =
+                keccak256(abi.encodePacked(_rollupRootsHash, rollupUpdates[i].rollupId, rollupUpdates[i].currentRoot));
         }
         _rollingHash = keccak256(abi.encodePacked(_rollupRootsHash, proxyEntryHash));
     }
