@@ -4,11 +4,12 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {IEEZ, RootUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -163,12 +164,7 @@ contract DeployL2 is Script {
         EEZL2 manager = EEZL2(managerAddr);
 
         // Trigger proxy: proxy for (RevertCounter@L1, MAINNET_ROLLUP_ID) on L2
-        address counterProxy;
-        try manager.createCrossChainProxy(revCounterL1, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = manager.computeCrossChainProxyAddress(revCounterL1, MAINNET_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(manager)), revCounterL1, MAINNET_ROLLUP_ID);
 
         // The caller: try/catches the reverting cross-chain call so the trigger tx succeeds.
         SafeCounterAndProxy safeCaller = new SafeCounterAndProxy(Counter(counterProxy));

@@ -5,6 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
+    IEEZ,
     RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
@@ -20,6 +21,7 @@ import {
 import {ReentrantCounter} from "../../../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -273,12 +275,7 @@ contract Deploy is Script {
         EEZ rollups = EEZ(rollupsAddr);
 
         // Proxy for rcL2@L2 on L1 (rcL1's peer)
-        address rcL2ProxyOnL1;
-        try rollups.createCrossChainProxy(rcL2Addr, L2_ROLLUP_ID) returns (address p) {
-            rcL2ProxyOnL1 = p;
-        } catch {
-            rcL2ProxyOnL1 = rollups.computeCrossChainProxyAddress(rcL2Addr, L2_ROLLUP_ID);
-        }
+        address rcL2ProxyOnL1 = getOrCreateProxy(IEEZ(address(rollups)), rcL2Addr, L2_ROLLUP_ID);
 
         // Deploy rcL1 on L1 with peer = rcL2ProxyOnL1
         ReentrantCounter rcL1 = new ReentrantCounter(rcL2ProxyOnL1);
@@ -299,12 +296,7 @@ contract DeploySetupL2 is Script {
         EEZL2 manager = EEZL2(managerAddr);
 
         // Proxy for rcL1@MAINNET on L2 (rcL2's peer)
-        address rcL1ProxyOnL2;
-        try manager.createCrossChainProxy(rcL1Addr, MAINNET_ROLLUP_ID) returns (address p) {
-            rcL1ProxyOnL2 = p;
-        } catch {
-            rcL1ProxyOnL2 = manager.computeCrossChainProxyAddress(rcL1Addr, MAINNET_ROLLUP_ID);
-        }
+        address rcL1ProxyOnL2 = getOrCreateProxy(IEEZ(address(manager)), rcL1Addr, MAINNET_ROLLUP_ID);
 
         // Set rcL2's peer
         ReentrantCounter(rcL2Addr).setPeer(rcL1ProxyOnL2);

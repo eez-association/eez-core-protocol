@@ -5,6 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
+    IEEZ,
     RootUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
@@ -20,6 +21,7 @@ import {
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -256,23 +258,13 @@ contract Deploy is Script {
         RevertCounter counterL1 = new RevertCounter();
 
         // counterProxy: proxy for Counter@L2 on L1 (NOT an actual Counter)
-        address counterProxy;
-        try rollups.createCrossChainProxy(counterL2, L2_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = rollups.computeCrossChainProxyAddress(counterL2, L2_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2, L2_ROLLUP_ID);
 
         // SafeCounterAndProxy wraps counterProxy — try/catch on target.increment()
         SafeCounterAndProxy scap = new SafeCounterAndProxy(Counter(counterProxy));
 
         // Trigger proxy: proxy for (SCAP, L2_ROLLUP_ID) on L1
-        address scapProxy;
-        try rollups.createCrossChainProxy(address(scap), L2_ROLLUP_ID) returns (address p) {
-            scapProxy = p;
-        } catch {
-            scapProxy = rollups.computeCrossChainProxyAddress(address(scap), L2_ROLLUP_ID);
-        }
+        address scapProxy = getOrCreateProxy(IEEZ(address(rollups)), address(scap), L2_ROLLUP_ID);
 
         console.log("COUNTER_L1=%s", address(counterL1));
         console.log("COUNTER_PROXY=%s", counterProxy);
@@ -293,12 +285,7 @@ contract DeployL2Step2 is Script {
         EEZL2 manager = EEZL2(managerAddr);
 
         // Proxy on L2 for the reverting Counter@MAINNET.
-        address counterProxyL2;
-        try manager.createCrossChainProxy(counterL1, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxyL2 = p;
-        } catch {
-            counterProxyL2 = manager.computeCrossChainProxyAddress(counterL1, MAINNET_ROLLUP_ID);
-        }
+        address counterProxyL2 = getOrCreateProxy(IEEZ(address(manager)), counterL1, MAINNET_ROLLUP_ID);
 
         // SafeCAP on L2 targeting the L2-side counter proxy. When invoked through its
         // own source-proxy by `_processNCalls`, `target.increment()` dispatches into

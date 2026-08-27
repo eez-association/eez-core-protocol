@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {IEEZ, RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -13,6 +13,7 @@ import {
 } from "../../../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
     noNestedActions,
@@ -153,12 +154,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address l2Proxy;
-        try rollups.createCrossChainProxy(l2DestAddr, L2_ROLLUP_ID) returns (address p) {
-            l2Proxy = p;
-        } catch {
-            l2Proxy = rollups.computeCrossChainProxyAddress(l2DestAddr, L2_ROLLUP_ID);
-        }
+        address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, L2_ROLLUP_ID);
 
         BridgeSender sender = new BridgeSender(l2Proxy, l2DestAddr);
         console.log("L2_PROXY=%s", l2Proxy);

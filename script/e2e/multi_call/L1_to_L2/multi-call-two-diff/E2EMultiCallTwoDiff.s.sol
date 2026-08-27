@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {IEEZ, RootUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -15,6 +15,7 @@ import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
 import {CallTwoDifferent} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
     noL2StaticEntries,
@@ -185,19 +186,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address proxyA;
-        try rollups.createCrossChainProxy(counterA, L2_ROLLUP_ID) returns (address p) {
-            proxyA = p;
-        } catch {
-            proxyA = rollups.computeCrossChainProxyAddress(counterA, L2_ROLLUP_ID);
-        }
-
-        address proxyB;
-        try rollups.createCrossChainProxy(counterB, L2_ROLLUP_ID) returns (address p) {
-            proxyB = p;
-        } catch {
-            proxyB = rollups.computeCrossChainProxyAddress(counterB, L2_ROLLUP_ID);
-        }
+        address proxyA = getOrCreateProxy(IEEZ(address(rollups)), counterA, L2_ROLLUP_ID);
+        address proxyB = getOrCreateProxy(IEEZ(address(rollups)), counterB, L2_ROLLUP_ID);
 
         CallTwoDifferent caller = new CallTwoDifferent();
         console.log("PROXY_A=%s", proxyA);
