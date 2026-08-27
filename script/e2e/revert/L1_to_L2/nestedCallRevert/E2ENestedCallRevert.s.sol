@@ -17,7 +17,7 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../src/interfaces/IEEZL2.sol";
-import {Counter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
+import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
     crossChainCallHash,
@@ -64,6 +64,10 @@ abstract contract NestedCallRevertActions {
 
     function _incrementData() internal pure returns (bytes memory) {
         return abi.encodeWithSelector(Counter.increment.selector);
+    }
+
+    function _revertData() internal pure returns (bytes memory) {
+        return abi.encodeWithSignature("Error(string)", "always reverts");
     }
 
     /// @dev Proxy-entry hash: alice → SCAP via SCAP's proxy (target=SCAP @ L2, source=alice @ MAINNET).
@@ -134,7 +138,7 @@ abstract contract NestedCallRevertActions {
             l2ToL1Calls: noCalls(),
             revertedOrStaticRollingHash: revertedSubHash,
             success: false,
-            returnData: bytes("inner reverts")
+            returnData: _revertData()
         });
 
         entries = new ExecutionEntry[](1);
@@ -208,7 +212,7 @@ abstract contract NestedCallRevertActions {
             incomingCalls: noL2Calls(),
             revertedOrStaticRollingHash: revertedSubHash,
             success: false,
-            returnData: bytes("inner reverts")
+            returnData: _revertData()
         });
 
         entries = new L2ExecutionEntry[](1);
@@ -227,22 +231,20 @@ abstract contract NestedCallRevertActions {
 //  Deploys
 // ═══════════════════════════════════════════════════════════════════════
 
-/// @title DeployL2 — L2: deploy Counter (the L1 inner-call target lives here only as an
-/// address-reference for the off-chain hash; the inner reentrant never actually executes
-/// because the success=false ExpectedL1ToL2Call short-circuits the proxy before it dispatches).
+/// @title DeployL2 — L2: deploy the reverting inner-call target. The contract makes the
+/// network scenario produce the same failed nested outcome that the manually supplied
+/// execution table commits to.
 contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
-        Counter counter = new Counter();
+        RevertCounter counter = new RevertCounter();
         console.log("COUNTER_L2=%s", address(counter));
         vm.stopBroadcast();
     }
 }
 
-/// @title Deploy — L1: deploy the L1 trigger contracts plus a placeholder Counter that
-/// represents "Counter on MAINNET" from the L2 mirror's perspective (used only as an
-/// address constant in the L2 inner action hash; never invoked because the L2-side
-/// reentrant call short-circuits via the success=false ExpectedOutgoingCrossChainCall).
+/// @title Deploy — L1: deploy the L1 trigger contracts plus the reverting target used by
+/// the L2-side mirror. This keeps both directions faithful to the committed failed outcome.
 contract Deploy is Script {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -251,9 +253,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        // Placeholder Counter on L1 — only its address matters (referenced by the L2
-        // inner action hash). Never called.
-        Counter counterL1 = new Counter();
+        RevertCounter counterL1 = new RevertCounter();
 
         // counterProxy: proxy for Counter@L2 on L1 (NOT an actual Counter)
         address counterProxy;
@@ -292,8 +292,7 @@ contract DeployL2Step2 is Script {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
 
-        // Proxy on L2 for Counter@MAINNET — never actually invoked end-to-end because the
-        // L2 success=false ExpectedOutgoingCrossChainCall short-circuits the proxy's reentrant call.
+        // Proxy on L2 for the reverting Counter@MAINNET.
         address counterProxyL2;
         try manager.createCrossChainProxy(counterL1, MAINNET_ROLLUP_ID) returns (address p) {
             counterProxyL2 = p;
