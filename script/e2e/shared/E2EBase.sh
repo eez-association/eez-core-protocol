@@ -253,7 +253,33 @@ execute_same_block() {
     local forge_pid=$!
     _E2E_PIDS+=("$forge_pid")
 
-    sleep 3
+    # Forge simulates the script before submitting its transaction bundle. A
+    # fixed sleep races that simulation: slower scenarios can enqueue after the
+    # mine and then wait forever because automine is disabled. Wait until the
+    # pool is non-empty and its size has settled instead.
+    local last_pending=-1
+    local stable_polls=0
+    local deadline=$((SECONDS + 60))
+    while ((SECONDS < deadline)); do
+        local pool pending_hex queued_hex pending
+        pool=$(cast rpc txpool_status --rpc-url "$rpc" 2>/dev/null || true)
+        pending_hex=$(jq -r '.pending // "0x0"' <<< "$pool" 2>/dev/null || echo "0x0")
+        queued_hex=$(jq -r '.queued // "0x0"' <<< "$pool" 2>/dev/null || echo "0x0")
+        pending=$((pending_hex + queued_hex))
+
+        if ((pending > 0)); then
+            if ((pending == last_pending)); then
+                stable_polls=$((stable_polls + 1))
+            else
+                last_pending=$pending
+                stable_polls=0
+            fi
+            ((stable_polls >= 4)) && break
+        fi
+
+        kill -0 "$forge_pid" 2>/dev/null || break
+        sleep 0.25
+    done
 
     cast rpc evm_mine --rpc-url "$rpc" > /dev/null 2>&1
 
