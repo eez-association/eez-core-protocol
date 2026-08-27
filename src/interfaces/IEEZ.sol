@@ -132,7 +132,7 @@ struct ExecutionEntry {
     bytes32 rollingHash; // expected rolling hash, which contains all calls (including the ones inside expectedL1ToL2Calls), their return/revert values
     uint64 destinationRollupId; // rollup this entry is destined for — published into that rollup's queue, and only consumable by a call targeting that rollup or by `executeL2Txs` for that rollup
     bool success; // indicates whether the entry returns or reverts
-    bytes returnData; // top-level return value (revert payload when !success)
+    bytes returnData; // return data of the whole execution (revert payload when !success)
 }
 
 /// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via

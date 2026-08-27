@@ -76,7 +76,7 @@ struct ExecutionEntry {
     ExpectedOutgoingCrossChainCall[] expectedOutgoingCalls; // pre-computed results for reentrant outgoing calls (successful, static, and reverted — one table)
     bytes32 rollingHash; // expected rolling hash, which contains all calls, their return/revert values and reentrant frames
     bool success; // indicates whether the entry returns or reverts
-    bytes returnData; // pre-computed top-level return value (revert payload when !success)
+    bytes returnData; // return data of the whole execution (revert payload when !success)
 }
 
 /// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via

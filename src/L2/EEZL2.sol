@@ -449,9 +449,9 @@ contract EEZL2 is EEZBase {
         revert EntryNotFound(crossChainCallHash, callGas);
     }
 
-    /// @notice Seeds the rolling hash, processes the entry's top-level calls, verifies the rolling
+    /// @notice Seeds the rolling hash, processes the entry's direct calls, verifies the rolling
     ///         hash, and (when `!success`) reverts with the entry's `returnData`.
-    /// @dev `entry.incomingCalls` is its TOP-LEVEL calls only (each reentrant frame carries its own
+    /// @dev `entry.incomingCalls` is only the calls it runs directly (each reentrant frame carries its own
     ///      sub-calls); `_processNCalls` runs the whole array, so completeness is structural (no
     ///      cursor-vs-length check). `_executing` is set true for the whole span (backs
     ///      `_insideExecution()`) so a reentrant call routes through `_consumeNestedCall`. Proxy
@@ -463,7 +463,7 @@ contract EEZL2 is EEZBase {
         _seedRollingHash(entry.proxyEntryHash); // initial hash: binds the entry identity
         _lastOutgoingCallConsumed = 0;
 
-        // Storage→memory copy of the top-level calls (mirrors L1's by-`memory` processing).
+        // Storage→memory copy of the entry's calls (mirrors L1's by-`memory` processing).
         _processNCalls(entry.incomingCalls);
 
         // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
@@ -510,7 +510,7 @@ contract EEZL2 is EEZBase {
         revert ContextResult(_rollingHash, _lastOutgoingCallConsumed, 0);
     }
 
-    /// @notice Processes the WHOLE `calls` array (the entry's top-level calls, a reentrant sub-frame's
+    /// @notice Processes the WHOLE `calls` array (the calls an entry runs directly, a reentrant frame's
     ///         own calls, or a force-revert span slice), walked by a plain LOCAL index, folding the
     ///         rolling hash.
     /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the outer

@@ -292,7 +292,7 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
     //
     // The entry-level `_rollingHash` accumulator is updated at five event points during
-    // entry execution: at the start and end of each top-level call, at the start and end of
+    // entry execution: at the start and end of each executed call, at the start and end of
     // each reentrant frame, and when a reentrant call finds no matching row. Each event is
     // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
     // so the same set of inputs can't collide across event types. The final value is checked
