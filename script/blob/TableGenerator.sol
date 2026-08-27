@@ -616,7 +616,11 @@ contract TableGenerator is TestHashes {
             bytes32 cur = _ledgerGet(rid);
             bytes32 newRoot = keccak256(abi.encodePacked("blobfw-step", cur, idx));
             entry.rootUpdates
-                .push(RootUpdate({rollupId: rid, currentRoot: cur, newRoot: newRoot, etherDelta: _l1Ether[idx][rid]}));
+                .push(
+                    RootUpdate({
+                        rollupId: rid, currentRoot: cur, newRoot: newRoot, etherDelta: int192(_l1Ether[idx][rid])
+                    })
+                );
             _ledgerSet(rid, newRoot);
         }
 

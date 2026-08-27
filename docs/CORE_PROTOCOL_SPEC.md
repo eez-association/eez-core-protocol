@@ -47,9 +47,9 @@ Every entry must carry **at least one** `RootUpdate`, and the deltas must be **s
 ```solidity
 struct RootUpdate {
     uint64  rollupId;       // which rollup's state changes
+    int192  etherDelta;     // signed change in rollup's ETH balance; packs with rollupId into one slot
     bytes32 currentRoot;   // expected pre-root on rollupId — checked against rollups[rid].root
     bytes32 newRoot;       // post-execution root
-    int256  etherDelta;     // signed change in rollup's ETH balance
 }
 ```
 

@@ -205,9 +205,9 @@ Both homes resolve through `_resolveStaticEntry`: run the entry's read-only sub-
 ```solidity
 struct RootUpdate {
     uint64  rollupId;       // which rollup's state changes
+    int192  etherDelta;     // signed ETH change for this rollup; packs with rollupId into one slot
     bytes32 currentRoot;   // expected pre-root on rollupId — checked against rollups[rid].root
     bytes32 newRoot;       // post-execution root
-    int256  etherDelta;     // signed ETH change for this rollup
 }
 ```
 

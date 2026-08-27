@@ -640,7 +640,7 @@ contract EEZTest is Base {
     ///         cross-chain call. Net for the rollup: -0.5 ether.
     function _reentrantValueEntry(
         uint64 rid,
-        int256 etherDelta
+        int192 etherDelta
     )
         internal
         returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)
@@ -750,7 +750,7 @@ contract EEZTest is Base {
     function _nestedOutflowEntry(
         uint64 rid,
         address sink,
-        int256 etherDelta
+        int192 etherDelta
     )
         internal
         returns (ExecutionEntry[] memory entries, ValueForwarder forwarder)

@@ -79,9 +79,9 @@ struct RollupVerification {
 ///      orphaning queued entries safe.
 struct RootUpdate {
     uint64 rollupId; // the rollup this update applies to
+    int192 etherDelta; // net ether change for this rollup (negative when outflows exceed inflows for this entry); int192 far exceeds total ETH supply and packs with `rollupId` into one storage slot
     bytes32 currentRoot; // expected pre-state, checked against `rollups[rollupId].root`
     bytes32 newRoot; // post-execution root
-    int256 etherDelta; // net ether change for this rollup (negative when outflows exceed inflows for this entry)
 }
 
 /// @notice A cross-chain call executed on L1 on behalf of a caller from another rollup.

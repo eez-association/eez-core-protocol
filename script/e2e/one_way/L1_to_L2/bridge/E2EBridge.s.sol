@@ -72,7 +72,7 @@ abstract contract BridgeActions {
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
-            etherDelta: int256(1 ether)
+            etherDelta: int192(1 ether)
         });
 
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);

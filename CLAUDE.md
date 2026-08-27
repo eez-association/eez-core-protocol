@@ -44,9 +44,9 @@ The rolling-hash frame vocabulary (`NESTED_BEGIN`/`NESTED_END`, `_consumeNestedC
 ```solidity
 struct RootUpdate {
     uint64  rollupId;
+    int192  etherDelta;     // signed ETH change for this rollup; packs with rollupId
     bytes32 currentRoot;   // expected pre-state; checked against rollups[rid].root
     bytes32 newRoot;       // post-execution root
-    int256  etherDelta;     // signed ETH change for this rollup
 }
 
 struct L2ToL1Call {

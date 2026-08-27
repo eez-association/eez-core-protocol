@@ -126,7 +126,7 @@ contract E2EBridgeExecute is Script {
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
-            etherDelta: int256(1 ether)
+            etherDelta: int192(1 ether)
         });
 
         // No L1 top-level calls; rolling hash is just the entry-begin seed.

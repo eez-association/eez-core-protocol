@@ -55,13 +55,6 @@ Each nested call / static read copies the **whole** `expectedL1ToL2Calls` table 
 - **Change:** medium (~60–100 lines: keyed scan helpers for storage + transient layouts).
 - **Risk:** medium; content-addressing semantics must stay byte-identical.
 
-### G-6. Struct packing: `RootUpdate` wastes a slot; `ExpectedL1ToL2Call.success` wastes a slot
-
-- `RootUpdate` = uint64 + bytes32 + bytes32 + int256 → **4 slots**, with 24 dead bytes beside `rollupId`. Narrowing `etherDelta` to `int192` (±3.1e57 wei — far beyond total ETH supply) packs it with `rollupId` → **3 slots (−25%)**. Measured steady post cost per `RootUpdate` is 29,054 → est. ~21–24k after; fresh (first-use) queue slots save a full ~22k each.
-- `ExpectedL1ToL2Call.success` (bool) sits alone in a full slot — ~20k per queued row. No small-field partner exists in the struct; the only fix is an encoding trick (e.g. a bit inside `revertedOrStaticRollingHash`), which isn't worth the obscurity. **Documented as accepted.**
-
-⚠️ **Protocol-visible:** entry structs are folded into the public input via `keccak256(abi.encode(entry))`, so changing a field type changes the prover-side encoding, the blob framework, and every off-chain tool. Cheap in Solidity (~5 lines), expensive in coordination — batch it with the next planned struct break, not alone.
-
 ### G-7. Queue wipe on every verify — checked, keep as is
 
 Considered replacing `_markVerifiedBlockAndDeletePreviousEntries`'s `delete` with epoch-keyed queues (never delete, address fresh slots per verify). The suite's own measurement kills it: re-posting over previously-populated slots costs **204,780** vs **361,568** over zeroed slots (`test_Doc_SeedShapeMatters` — a 156,788 zero-init premium). Epoching would pay full zero-init every batch *and* forfeit clear refunds *and* bloat state. The current wipe-then-push is the right call. No change.
@@ -88,7 +81,7 @@ Considered replacing `_markVerifiedBlockAndDeletePreviousEntries`'s `delete` wit
 |---|---|---|
 | Meta-hook batch (1 entry) | 534,628 | ~130–180k (−65–75%) |
 
-Recommended order: **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2) → **G-6** only alongside the next protocol-encoding break. G-7/G-8/G-9 need no action.
+Recommended order: **G-2** (the big one; reuse and extend the existing serializer + stale-table tests) → **G-5** (naturally follows G-2). G-7/G-8/G-9 need no action.
 
 All estimates should be re-measured with the existing `GasCost` / `GasExecPaths` suites after each step — they already isolate exactly these paths.
 

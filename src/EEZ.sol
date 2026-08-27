@@ -1260,14 +1260,15 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             RootUpdate memory delta = deltas[i];
             RollupConfig storage config = rollups[delta.rollupId];
             config.root = delta.newRoot;
-            totalEtherDelta += delta.etherDelta;
+            totalEtherDelta += int256(delta.etherDelta);
 
             if (delta.etherDelta < 0) {
-                uint256 decrement = uint256(-delta.etherDelta);
+                // Widen to int256 before negating so `type(int192).min` cannot overflow.
+                uint256 decrement = uint256(-int256(delta.etherDelta));
                 if (config.etherBalance < decrement) revert InsufficientRollupBalance();
                 config.etherBalance -= decrement;
             } else if (delta.etherDelta > 0) {
-                config.etherBalance += uint256(delta.etherDelta);
+                config.etherBalance += uint256(int256(delta.etherDelta));
             }
 
             emit L2ExecutionPerformed(delta.rollupId, delta.newRoot);

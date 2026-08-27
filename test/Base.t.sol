@@ -300,7 +300,7 @@ abstract contract Base is Test, TestHashes {
         uint256 rid,
         bytes32 currentRoot,
         bytes32 newRoot,
-        int256 etherDelta
+        int192 etherDelta
     )
         internal
         pure
