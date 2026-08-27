@@ -24,9 +24,10 @@ import {
 //  RevertCounter — a cross-chain call whose DESTINATION naturally reverts;
 //  the revert IS the response. Two-sided, L1→L2.
 //
-//  No revertNextNCalls anywhere: the destination (`RevertCounter.increment()`
-//  on L2) always reverts("always reverts"), and that revert data travels back
-//  to the L1 caller as the call's result.
+//  The destination (`RevertCounter.increment()` on L2) naturally reverts with
+//  "always reverts". The enclosing L1 proxy frame also reverts before
+//  SafeCaller catches it, so the corresponding L2 call is carried in a
+//  one-call rollback window (`revertNextNCalls=1`).
 //
 //  L1 side (Execute) — trigger + source entry:
 //    alice ──tx──▶ SafeCaller(L1).incrementProxy()
@@ -116,7 +117,9 @@ abstract contract RevertActions {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
             gas: 0,
-            revertNextNCalls: 0,
+            // SafeCaller catches the revert of the enclosing L1 proxy frame;
+            // the trace therefore rolls back this one-call remote region too.
+            revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: safeCaller,
             sourceRollupId: MAINNET_ROLLUP_ID,
@@ -222,8 +225,9 @@ contract ExecuteNetwork is Script {
 }
 
 /// @title ExecuteL2 — local mode: system-driven delivery of the reverting call.
-/// @dev incomingCalls[0] runs the real RevertCounter on L2; its natural revert is
-///      captured as CALL_END(false, ...) and the entry completes.
+/// @dev incomingCalls[0] runs the real RevertCounter on L2 inside the rollback
+///      window inherited from the reverted L1 proxy frame. Its natural revert
+///      is captured as CALL_END(false, ...) and the entry completes.
 /// Env: MANAGER_L2, REV_COUNTER_L2, SAFE_CALLER
 contract ExecuteL2 is Script, RevertActions {
     function run() external {
@@ -274,7 +278,7 @@ contract ComputeExpected is ComputeExpectedBase, RevertActions {
         console.log("=== EXPECTED L1 TABLE (1 entry, no calls, success=false: destination revert replay) ===");
         _logEntry(0, l1[0]);
         console.log("");
-        console.log("=== EXPECTED L2 TABLE (1 entry, 1 call w/ natural revert CALL_END(false)) ===");
+        console.log("=== EXPECTED L2 TABLE (1 entry, 1-call rollback w/ natural CALL_END(false)) ===");
         _logL2Entry(0, l2[0]);
     }
 }

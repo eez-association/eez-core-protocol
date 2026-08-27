@@ -161,8 +161,8 @@ verify_l1_batch() { _run_verifier VerifyL1BatchInRange "$1" "run(uint256,uint256
 # matches EntryExecuted rolling hashes as keccak(0, rollingHash) entry identities.
 verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(uint256,uint256,address,bytes32[],bytes)" "$2" "$3" "$4" "$5" "${6:-0x}"; }
 
-# Usage: verify_l2_table RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_ENTRY_HASHES [EXPECTED_TABLE]
-verify_l2_table() { _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[],bytes)" "$2" "$3" "$4" "${5:-0x}"; }
+# Usage: verify_l2_table RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_ENTRY_HASHES [EXPECTED_TABLE] [EVENTLESS_ENTRY_HASHES]
+verify_l2_table() { _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[],bytes,bytes32[])" "$2" "$3" "$4" "${5:-0x}" "${6:-[]}"; }
 
 # Usage: verify_l2_calls RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_CALL_HASHES [EXPECTED_TABLE]
 verify_l2_calls() { _run_verifier VerifyL2Calls "$1" "run(uint256[],address,bytes32[],bytes)" "$2" "$3" "$4" "${5:-0x}"; }
@@ -400,8 +400,10 @@ build_trigger_txs() {
 # Sets EXPECTED_L1_HASHES / EXPECTED_L2_HASHES / EXPECTED_L1_CALL_HASHES /
 # EXPECTED_L2_CALL_HASHES, the abi-encoded EXPECTED_L1_TABLE / EXPECTED_L2_TABLE
 # blobs ("0x" = hash-only checks, field-level comparison off), EXPECTED_L1_STEPS
-# (recorded fold steps for the calldata verifier; "0x" = content-match only) and
-# ABSENT_L2_HASHES; prints the field-level ON/OFF notes and the scenario's
+# (recorded fold steps for the calldata verifier; "0x" = content-match only),
+# EVENTLESS_L2_HASHES (loaded entries whose enclosing frame intentionally
+# unwinds their EntryExecuted event), and ABSENT_L2_HASHES; prints the
+# field-level ON/OFF notes and the scenario's
 # EXPECTED SUMMARY block if present.
 extract_expected_outputs() {
     local out="$1"
@@ -435,6 +437,12 @@ extract_expected_outputs() {
         echo "L2 expected table: $((${#EXPECTED_L2_TABLE} / 2 - 1)) bytes (field-level checks ON)"
     else
         echo "NOTE: no EXPECTED_L2_TABLE printed - L2 field-level checks OFF (hash-only)"
+    fi
+
+    EVENTLESS_L2_HASHES=$(extract "$out" "EVENTLESS_L2_HASHES")
+    EVENTLESS_L2_HASHES="${EVENTLESS_L2_HASHES:-[]}"
+    if [[ "$EVENTLESS_L2_HASHES" != "[]" ]]; then
+        echo "L2 eventless after enclosing rollback: $EVENTLESS_L2_HASHES"
     fi
 
     ABSENT_L2_HASHES=$(extract "$out" "ABSENT_L2_HASHES")

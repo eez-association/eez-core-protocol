@@ -252,14 +252,42 @@ else
     echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
     # Retry with a deadline: a load-balanced public RPC can briefly serve nodes
     # that don't have the just-mined block yet (eth_getLogs comes back empty).
-    _l1_verify_block() {
-        forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-            --rpc-url "$RPC" \
-            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-            "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
-    }
+    # A failed deferred entry intentionally unwinds ExecutionConsumed and
+    # EntryExecuted. Discover that settlement from the successful anchor's
+    # EntryExecuted event, then let the calldata stage below pin the exact
+    # failed entry. This is the same root-agnostic path used by L2-triggered
+    # zero-hash effects.
+    if [[ -z "$EXPECTED_L1_CALL_HASHES" || "$EXPECTED_L1_CALL_HASHES" == "[]" ]]; then
+        if [[ "$EXPECTED_L1_TABLE" == "0x" ]]; then
+            echo "ERROR: eventless L1 entries need EXPECTED_L1_TABLE for network verification - add _printL1Table to ComputeExpected"
+            FAILED=true
+        fi
+        _l1_verify_block() {
+            forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange \
+                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
+                "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS"
+        }
+        _l1_range_scan_latest() {
+            forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange \
+                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
+                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS"
+        }
+    else
+        _l1_verify_block() {
+            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
+                --rpc-url "$RPC" \
+                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+                "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+        }
+        _l1_range_scan_latest() {
+            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
+                --rpc-url "$RPC" \
+                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+        }
+    fi
     L1_OK=false
-    if retry_until_deadline "${L1_VERIFY_TIMEOUT:-90}" 10 _l1_verify_block; then
+    if [[ "${FAILED:-false}" != true ]] && retry_until_deadline "${L1_VERIFY_TIMEOUT:-90}" 10 _l1_verify_block; then
         L1_OK=true
     fi
     L1_VERIFY="$RETRY_OUT"
@@ -270,13 +298,7 @@ else
     # numbers — range-scan [receipt block..latest] for the same expected hashes.
     if ! $L1_OK; then
         echo "batch not in the trigger block — scanning [$L1_BLOCK..latest] (deadline ${L1_SETTLE_TIMEOUT:-300}s)"
-        _l1_range_scan_latest() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-                --rpc-url "$RPC" \
-                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
-        }
-        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_range_scan_latest; then
+        if [[ "${FAILED:-false}" != true ]] && retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_range_scan_latest; then
             L1_OK=true
         fi
         L1_VERIFY="$RETRY_OUT"
@@ -473,7 +495,7 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_OK=false
 else
-    run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
+    run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" "$EVENTLESS_L2_HASHES"
     L2_OK=$VERIFY_STEP_OK
 fi
 

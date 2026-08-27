@@ -252,10 +252,12 @@ contract ComputeExpected is ComputeExpectedBase, RevertFromOtherChainL2Actions {
         L2ExecutionEntry[] memory l2 = _l2Entries(counterL1, selfCallerL2);
         ExecutionEntry[] memory l1 = _l1Entries(counterL1, selfCallerL2);
 
+        console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(_entryHash(l2[0])));
+        console.log("EVENTLESS_L2_HASHES=[%s]", vm.toString(_entryHash(l2[0])));
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(_entryHash(l1[0])));
-        // NO event-level L2 expectations: the entry's only consumption unwinds with the
-        // frame revert, taking its ExecutionConsumed AND EntryExecuted events with it.
-        // The L2 side is pinned by the ExecuteL2 assertion; L1 by EntryExecuted + table.
+        // No EXPECTED_L2_CALL_HASHES: the entry's only consumption unwinds with the
+        // frame revert, taking its ExecutionConsumed event with it. EXPECTED_L2_HASHES
+        // still pins the loaded table through VerifyL2TableInRange.
         _printL1Table(l1);
         _printL2Table(l2);
         console.log("");

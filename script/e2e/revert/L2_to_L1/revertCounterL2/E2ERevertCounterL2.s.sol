@@ -89,8 +89,9 @@ abstract contract RevertL2Actions {
     }
 
     /// @dev L1 mirror entry — system-driven (proxyEntryHash=0), executed as an immediate L2Tx.
-    ///      `l2ToL1Calls[0]` runs the real RevertCounter on L1; the natural revert folds as
-    ///      CALL_END(false, ...). CALL_BEGIN folds targetRollupId = MAINNET.
+    ///      `l2ToL1Calls[0]` runs the real RevertCounter on L1. The source frame also
+    ///      reverted, so the composer marks the one-call region for forced rollback;
+    ///      the call's natural revert still folds as CALL_END(false, ...).
     function _l1Entries(
         address revCounterL1,
         address safeCallerL2
@@ -102,7 +103,7 @@ abstract contract RevertL2Actions {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
             gas: 0,
-            revertNextNCalls: 0,
+            revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: safeCallerL2,
             sourceRollupId: L2_ROLLUP_ID,
@@ -271,7 +272,7 @@ contract ComputeExpected is ComputeExpectedBase, RevertL2Actions {
         console.log("=== EXPECTED L2 TABLE (1 entry, no calls, success=false: destination revert replay) ===");
         _logL2Entry(0, l2[0]);
         console.log("");
-        console.log("=== EXPECTED L1 TABLE (1 entry, 1 call w/ natural revert CALL_END(false)) ===");
+        console.log("=== EXPECTED L1 TABLE (1 entry, 1 force-rollback call w/ CALL_END(false)) ===");
         _logEntry(0, l1[0]);
     }
 }
