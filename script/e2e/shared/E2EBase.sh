@@ -263,7 +263,11 @@ execute_same_block() {
     fi
     rm -f "$discovery_file"
     dry_json="broadcast/$(basename "$sol")/$(cast chain-id --rpc-url "$rpc")/dry-run/run-latest.json"
-    expected_txs=$(jq -r '.transactions | length' "$dry_json" 2>/dev/null || echo 0)
+    # Sender-filtered on purpose: the pending-pool poll below counts only THIS
+    # broadcaster's txs, so the expected count must use the same scope.
+    expected_txs=$(jq -r --arg sender "$sender" \
+        '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $sender)] | length' \
+        "$dry_json" 2>/dev/null || echo 0)
     if ((expected_txs <= 0)); then
         echo "ERROR: could not discover a non-empty broadcast bundle ($dry_json)" >&2
         rm -f "$tmpfile"
