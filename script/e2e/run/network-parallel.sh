@@ -30,8 +30,9 @@
 #   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
 #   DEVNET_ENV       env file with endpoints/addresses (default chain.env)
 #
-# Worker and faucet wallets are throwaway; keys are recorded in the run dir
-# (wallets.csv, faucet.txt) so leftover funds are recoverable.
+# Worker wallets are throwaway and recorded in the run dir. The run faucet is
+# persistent (`script/e2e/run/faucet.txt`) so unused top-ups are reused instead
+# of being stranded in a fresh account on every invocation.
 # Logs: tmp/e2e-parallel-net/<ts>/<job>.log
 #
 # Known benign race: N parallel runs of the SAME scenario share
@@ -118,14 +119,21 @@ if $DIRECT; then
     FAUCET_ADDR=$(cast wallet address --private-key "$FAUCET_PK")
     echo "Direct mode: funding workers from $FAUCET_ADDR (no faucet account)"
 else
-    # ── Step 1: fresh faucet account for this run ──
-    FAUCET_FILE="$RUN_DIR/faucet.txt"
-    new=$(cast wallet new)
-    FAUCET_ADDR=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-    FAUCET_PK=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-    printf 'address: %s\npvtKey:  %s\n' "$FAUCET_ADDR" "$FAUCET_PK" > "$FAUCET_FILE"
-    chmod 600 "$FAUCET_FILE"
-    echo "Created run faucet $FAUCET_ADDR → $FAUCET_FILE"
+    # ── Step 1: persistent faucet account ──
+    FAUCET_FILE="$SCRIPT_DIR/faucet.txt"
+    if [[ -f "$FAUCET_FILE" ]]; then
+        FAUCET_ADDR=$(sed -n 's/^address: *//p' "$FAUCET_FILE")
+        FAUCET_PK=$(sed -n 's/^pvtKey: *//p' "$FAUCET_FILE")
+        [[ -n "$FAUCET_ADDR" && -n "$FAUCET_PK" ]] || { echo "Malformed $FAUCET_FILE"; exit 1; }
+        echo "Reusing faucet $FAUCET_ADDR"
+    else
+        new=$(cast wallet new)
+        FAUCET_ADDR=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
+        FAUCET_PK=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+        printf 'address: %s\npvtKey:  %s\n' "$FAUCET_ADDR" "$FAUCET_PK" > "$FAUCET_FILE"
+        chmod 600 "$FAUCET_FILE"
+        echo "Created faucet $FAUCET_ADDR → $FAUCET_FILE"
+    fi
 
     # ── Step 2: fund the run faucet from the source key ──
     # bc, not $(( )) — FUND_ETH may be fractional (e.g. 0.2). Send the amount in
@@ -133,10 +141,16 @@ else
     NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + 0.1" | bc)")
     for chain in L1 L2; do
         rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
-        echo "Faucet funding on $chain: $(cast from-wei "$NEED_WEI") ETH from source key"
-        cast send "$FAUCET_ADDR" --value "$NEED_WEI" \
-            --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
-            echo "Faucet funding FAILED on $chain"; exit 1; }
+        HAVE_WEI=$(cast balance "$FAUCET_ADDR" --rpc-url "$rpc")
+        if [[ $(echo "$HAVE_WEI < $NEED_WEI" | bc) -eq 1 ]]; then
+            TOPUP_WEI=$(echo "$NEED_WEI - $HAVE_WEI" | bc)
+            echo "Faucet top-up on $chain: $(cast from-wei "$TOPUP_WEI") ETH from source key"
+            cast send "$FAUCET_ADDR" --value "$TOPUP_WEI" \
+                --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
+                echo "Faucet funding FAILED on $chain"; exit 1; }
+        else
+            echo "Faucet on $chain already has sufficient balance"
+        fi
     done
 fi
 

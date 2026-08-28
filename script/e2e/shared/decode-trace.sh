@@ -33,7 +33,7 @@ fi
 
 # ── Constants ──
 L2_CONTEXT="0x5FbDB2315678afecb367f032d93F642f64180aa3"
-SIG_BATCH_POSTED="0xd6f8d71ce42a799b91f399271f4b0e91f85eb87fac7bb2cedd4b3a52fad36182"
+SIG_BATCH_POSTED="$(cast keccak "BatchPosted(uint256)")"  # derived, never stale
 
 # ── Parse args ──
 TX_HASH=""

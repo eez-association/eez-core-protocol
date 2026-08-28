@@ -59,7 +59,7 @@ if [[ "$L2_BALANCE" == "0" ]] || [[ $(echo "$L2_BALANCE < $MIN_BALANCE" | bc) -e
     cast send "$PROXY_ADDRESS" \
         --value 0.05ether \
         --gas-limit 500000 \
-        --private-key "$PK" --rpc-url "$L1_FRONT" > /dev/null || true
+        --private-key "$PK" --rpc-url "$L1_FRONT" > /dev/null
 
     echo "Waiting for bridge to complete..."
     BRIDGE_DEADLINE=$((SECONDS + 90))

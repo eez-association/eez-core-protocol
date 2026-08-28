@@ -71,8 +71,28 @@ function crossChainCallHash(
     pure
     returns (bytes32)
 {
+    return crossChainCallHashWithGas(
+        isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, 0, data
+    );
+}
+
+/// @notice Full hash builder for observed events, where the emitted callGas must
+///         remain part of the preimage even if the current devnet normally uses zero.
+function crossChainCallHashWithGas(
+    bool isStatic,
+    address sourceAddress,
+    uint256 sourceRollupId,
+    address targetAddress,
+    uint256 targetRollupId,
+    uint256 value,
+    uint256 callGas,
+    bytes memory data
+)
+    pure
+    returns (bytes32)
+{
     return keccak256(
-        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, uint256(0), data)
+        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
     );
 }
 

@@ -10,10 +10,14 @@ PK="${PK:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 
 # ── PIDs to clean up on exit ──
 _E2E_PIDS=()
+_E2E_AUTOMINE_RPCS=()
 
 cleanup() {
     for pid in "${_E2E_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
+    done
+    for rpc in "${_E2E_AUTOMINE_RPCS[@]}"; do
+        cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1 || true
     done
 }
 trap cleanup EXIT
@@ -240,10 +244,37 @@ trace_failed_txs() {
 # managers' same-block consumption gates without any helper contract on-chain.
 execute_same_block() {
     local sol="$1" contract="$2" rpc="$3" pk="$4"
-    local tmpfile
+    local tmpfile discovery_file sender dry_json expected_txs
     tmpfile=$(mktemp)
+    discovery_file=$(mktemp)
+    sender=$(cast wallet address --private-key "$pk" | tr '[:upper:]' '[:lower:]')
 
-    cast rpc evm_setAutomine false --rpc-url "$rpc" > /dev/null 2>&1
+    # Discover the exact bundle size from a DRY RUN (no --broadcast): the whole
+    # bundle simulates at one fork height, so the managers' same-block gates hold
+    # — a real rehearsal under automine would split the bundle across blocks and
+    # revert at those gates. The dry run writes the planned tx list to
+    # broadcast/<sol>/<chainid>/dry-run/run-latest.json; its length removes all
+    # timing guesses from the real mine.
+    if ! forge script "$sol:$contract" --rpc-url "$rpc" --isolate --private-key "$pk" \
+        > "$discovery_file" 2>&1; then
+        cat "$discovery_file"
+        rm -f "$tmpfile" "$discovery_file"
+        return 1
+    fi
+    rm -f "$discovery_file"
+    dry_json="broadcast/$(basename "$sol")/$(cast chain-id --rpc-url "$rpc")/dry-run/run-latest.json"
+    expected_txs=$(jq -r '.transactions | length' "$dry_json" 2>/dev/null || echo 0)
+    if ((expected_txs <= 0)); then
+        echo "ERROR: could not discover a non-empty broadcast bundle ($dry_json)" >&2
+        rm -f "$tmpfile"
+        return 1
+    fi
+
+    if ! cast rpc evm_setAutomine false --rpc-url "$rpc" > /dev/null 2>&1; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    _E2E_AUTOMINE_RPCS+=("$rpc")
 
     # --isolate: simulate each broadcast call as its OWN transaction (fresh
     # transient storage), matching on-chain execution — without it, scenarios
@@ -253,40 +284,69 @@ execute_same_block() {
     local forge_pid=$!
     _E2E_PIDS+=("$forge_pid")
 
-    # Forge simulates the script before submitting its transaction bundle. A
-    # fixed sleep races that simulation: slower scenarios can enqueue after the
-    # mine and then wait forever because automine is disabled. Wait until the
-    # pool is non-empty and its size has settled instead.
-    local last_pending=-1
-    local stable_polls=0
+    # Count only executable pending transactions from THIS broadcaster. Queued
+    # transactions and sibling jobs must neither trigger nor suppress our mine.
     local deadline=$((SECONDS + 60))
+    local pending=0 content tx_hashes=""
     while ((SECONDS < deadline)); do
-        local pool pending_hex queued_hex pending
-        pool=$(cast rpc txpool_status --rpc-url "$rpc" 2>/dev/null || true)
-        pending_hex=$(jq -r '.pending // "0x0"' <<< "$pool" 2>/dev/null || echo "0x0")
-        queued_hex=$(jq -r '.queued // "0x0"' <<< "$pool" 2>/dev/null || echo "0x0")
-        pending=$((pending_hex + queued_hex))
+        content=$(cast rpc txpool_content --rpc-url "$rpc" 2>/dev/null || true)
+        pending=$(jq -r --arg sender "$sender" '
+            [.pending // {} | to_entries[] | select((.key | ascii_downcase) == $sender) | .value | keys[]] | length
+        ' <<< "$content" 2>/dev/null || echo 0)
 
-        if ((pending > 0)); then
-            if ((pending == last_pending)); then
-                stable_polls=$((stable_polls + 1))
-            else
-                last_pending=$pending
-                stable_polls=0
-            fi
-            ((stable_polls >= 4)) && break
+        if ((pending == expected_txs)); then
+            tx_hashes=$(jq -r --arg sender "$sender" '
+                .pending // {} | to_entries[] | select((.key | ascii_downcase) == $sender) | .value[] | .hash
+            ' <<< "$content" 2>/dev/null)
+            [[ $(wc -w <<< "$tx_hashes") -eq $expected_txs ]] && break
+        elif ((pending > expected_txs)); then
+            break
         fi
 
         kill -0 "$forge_pid" 2>/dev/null || break
         sleep 0.25
     done
 
-    cast rpc evm_mine --rpc-url "$rpc" > /dev/null 2>&1
+    if ((pending != expected_txs)) || [[ $(wc -w <<< "$tx_hashes") -ne $expected_txs ]]; then
+        echo "ERROR: broadcaster queued $pending executable tx(s), expected exactly $expected_txs" >> "$tmpfile"
+        kill "$forge_pid" 2>/dev/null || true
+        wait "$forge_pid" 2>/dev/null || true
+        cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1 || true
+        cat "$tmpfile"
+        rm -f "$tmpfile"
+        return 1
+    fi
 
+    if ! cast rpc evm_mine --rpc-url "$rpc" > /dev/null 2>&1; then
+        cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1 || true
+        kill "$forge_pid" 2>/dev/null || true
+        wait "$forge_pid" 2>/dev/null || true
+        cat "$tmpfile"
+        rm -f "$tmpfile"
+        return 1
+    fi
+    # Cleanup precedes wait: if the pending-set inference was ever wrong, forge
+    # can still submit and finish instead of deadlocking behind disabled automine.
+    cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1
+
+    local wait_deadline=$((SECONDS + 60))
+    while kill -0 "$forge_pid" 2>/dev/null && ((SECONDS < wait_deadline)); do sleep 0.25; done
+    if kill -0 "$forge_pid" 2>/dev/null; then
+        echo "ERROR: forge broadcaster did not finish after mining" >> "$tmpfile"
+        kill "$forge_pid" 2>/dev/null || true
+    fi
     wait "$forge_pid" 2>/dev/null
     local exit_code=$?
 
-    cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1
+    local tx receipt_block mined_block=""
+    for tx in $tx_hashes; do
+        receipt_block=$(cast receipt "$tx" blockNumber --rpc-url "$rpc" 2>/dev/null || true)
+        [[ -n "$receipt_block" && -z "$mined_block" ]] && mined_block="$receipt_block"
+        if [[ -z "$receipt_block" || "$receipt_block" != "$mined_block" ]]; then
+            echo "ERROR: intended tx $tx was not included in the common block ${mined_block:-<missing>}" >> "$tmpfile"
+            exit_code=1
+        fi
+    done
 
     cat "$tmpfile"
     rm -f "$tmpfile"
@@ -458,7 +518,6 @@ extract_expected_outputs() {
     fi
 }
 
-# ── Publish a pre-signed raw tx ──
 # ── Send one pre-signed raw tx; echoes the accepted hash (errors → stderr) ──
 _send_raw_tx() {
     local rpc="$1" raw="$2"

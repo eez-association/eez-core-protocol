@@ -15,8 +15,9 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {EEZ} from "../../../src/EEZ.sol";
 import {ComputeExpectedBase} from "./ComputeExpectedBase.sol";
-import {crossChainCallHash, HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
+import {crossChainCallHashWithGas, HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Minimal read interfaces for live on-chain checks
@@ -388,10 +389,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         for (uint256 i = 0; i < expected.length; i++) {
             if (!_checkL1Entry(logs, executed, i, expected[i])) ok = false;
         }
-        if (!_checkLiveRoots(rollupsAddr, expected)) ok = false;
         if (ok) {
             console.log(
-                "PASS: L1 field checks on %s entries (EntryExecuted, rollupId, rollupUpdates, live roots)",
+                "PASS: L1 field checks on %s entries (EntryExecuted, rollupId, rollupUpdates)",
                 expected.length
             );
         }
@@ -460,20 +460,18 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
     }
 
-    /// @dev Reads the live registry root per touched rollup: it must equal the last committing
-    ///      update's newRoot (exact settlement), or at minimum have moved off the pre-batch
-    ///      root. Rollups touched only by success=false entries are exempt — those root
-    ///      writes unwind with the entry's revert, so their live root stays at the pre-state.
+    /// @dev Simulates the root cursor per rollup in entry order. Every update must start at
+    ///      the cursor; success advances it, failure leaves it unchanged. The runner invokes
+    ///      the calldata verifier at the settlement block, so live must equal the final cursor.
     function _checkLiveRoots(address rollupsAddr, ExecutionEntry[] memory expected) internal view returns (bool ok) {
         uint256 maxUpdates;
         for (uint256 i = 0; i < expected.length; i++) {
             maxUpdates += expected[i].rollupUpdates.length;
         }
         uint64[] memory rids = new uint64[](maxUpdates);
-        bytes32[] memory pre = new bytes32[](maxUpdates);
-        bytes32[] memory post = new bytes32[](maxUpdates);
-        bool[] memory committing = new bool[](maxUpdates);
+        bytes32[] memory cursor = new bytes32[](maxUpdates);
         uint256 n;
+        ok = true;
         for (uint256 i = 0; i < expected.length; i++) {
             for (uint256 d = 0; d < expected[i].rollupUpdates.length; d++) {
                 RollupUpdate memory sd = expected[i].rollupUpdates[d];
@@ -483,45 +481,28 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                 }
                 if (k == n) {
                     rids[n] = sd.rollupId;
-                    pre[n] = sd.currentRoot;
-                    post[n] = sd.currentRoot; // baseline: root only moves via committing entries
+                    cursor[n] = sd.currentRoot;
                     n++;
                 }
-                // A success=false entry's root write unwinds with its revert, so only
-                // committing entries advance the tracked final root (in entry order).
-                if (expected[i].success) {
-                    post[k] = sd.newRoot;
-                    committing[k] = true;
+                if (sd.currentRoot != cursor[k]) {
+                    console.log("FAIL: rollup %s update chain broken at entry %s", sd.rollupId, i);
+                    console.log("      current %s", vm.toString(sd.currentRoot));
+                    console.log("      cursor  %s", vm.toString(cursor[k]));
+                    ok = false;
                 }
+                // A failed entry observes the current cursor but its write unwinds.
+                // Only a committing entry advances the simulated live root.
+                if (expected[i].success) cursor[k] = sd.newRoot;
             }
         }
-        ok = true;
         for (uint256 k = 0; k < n; k++) {
             (, bytes32 live,) = IRollupsRegistryView(rollupsAddr).rollups(rids[k]);
-            if (!committing[k]) {
-                // Every entry touching this rollup is success=false: nothing persists, so
-                // the live root legitimately stays at the pre-state (or advances via
-                // later, unrelated batches).
-                if (live == pre[k]) {
-                    console.log("PASS: rollup %s root unchanged (only failed entries touch it)", rids[k]);
-                } else {
-                    console.log("PASS: rollup %s root changed (advanced beyond this batch)", rids[k]);
-                }
-                continue;
-            }
-            // The table as a whole must move each touched rollup's root (per-entry movement is
-            // not required — same-L2-block entries share one transition).
-            if (pre[k] == post[k]) {
-                console.log("FAIL: rollup %s root does not move across the table", rids[k]);
-                ok = false;
-            }
-            if (live == post[k]) {
-                console.log("PASS: rollup %s live root == expected newRoot", rids[k]);
-            } else if (live != pre[k]) {
-                console.log("PASS: rollup %s root changed (advanced beyond this batch)", rids[k]);
+            if (live == cursor[k]) {
+                console.log("PASS: rollup %s live root == simulated committed cursor", rids[k]);
             } else {
-                console.log("FAIL: rollup %s root UNCHANGED - still the pre-batch root:", rids[k]);
-                console.log("      %s", vm.toString(live));
+                console.log("FAIL: rollup %s live root differs from simulated committed cursor", rids[k]);
+                console.log("      live   %s", vm.toString(live));
+                console.log("      cursor %s", vm.toString(cursor[k]));
                 ok = false;
             }
         }
@@ -774,12 +755,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                         );
                         ok = false;
                     }
-                    lastPost[k] = sd.newRoot;
+                    if (posted[i].success) lastPost[k] = sd.newRoot;
                     break;
                 }
                 if (!seen) {
                     rids[n] = sd.rollupId;
-                    lastPost[n] = sd.newRoot;
+                    lastPost[n] = posted[i].success ? sd.newRoot : sd.currentRoot;
                     n++;
                 }
             }
@@ -947,6 +928,37 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
         ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
         ok = true;
+        // Exemptions are assertions, not a trust input: every declared hash must
+        // identify an expected committing entry whose EntryExecuted evidence is
+        // genuinely absent. Reject unused, duplicate, failed-entry, and unnecessary
+        // declarations before applying them below.
+        for (uint256 h = 0; h < eventlessEntryHashes.length; h++) {
+            uint256 matches;
+            uint256 matchedIndex;
+            for (uint256 i = 0; i < expected.length; i++) {
+                if (_entryHash(expected[i]) == eventlessEntryHashes[h]) {
+                    matches++;
+                    matchedIndex = i;
+                }
+            }
+            for (uint256 p = 0; p < h; p++) {
+                if (eventlessEntryHashes[p] == eventlessEntryHashes[h]) matches++;
+            }
+            if (matches != 1 || !expected[matchedIndex].success) {
+                console.log("FAIL: invalid or over-declared EVENTLESS_L2_HASHES entry %s", vm.toString(eventlessEntryHashes[h]));
+                ok = false;
+            } else if (
+                _hasTriple(
+                    executed,
+                    expected[matchedIndex].rollingHash,
+                    expected[matchedIndex].incomingCalls.length,
+                    expected[matchedIndex].expectedOutgoingCalls.length
+                )
+            ) {
+                console.log("FAIL: eventless exemption declared for entry that emitted EntryExecuted");
+                ok = false;
+            }
+        }
         for (uint256 i = 0; i < expected.length; i++) {
             bool eventlessAllowed = _containsHash(eventlessEntryHashes, _entryHash(expected[i]));
             if (!_checkL2Entry(actual, executed, i, expected[i], eventlessAllowed)) ok = false;
@@ -1142,7 +1154,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
             uint256 callGas,
             bytes memory data
         ) = abi.decode(eventData, (bool, address, uint256, address, uint256, uint256, bytes));
-        bytes32 computed = keccak256(abi.encode(isStatic, src, srcRollup, dest, uint256(rid), value, callGas, data));
+        bytes32 computed =
+            crossChainCallHashWithGas(isStatic, src, srcRollup, dest, uint256(rid), value, callGas, data);
         if (computed != emittedHash) {
             console.log("FAIL: IncomingCrossChainCallExecuted fields do not hash to the emitted crossChainCallHash");
             console.log("      emitted    %s", vm.toString(emittedHash));
@@ -1400,6 +1413,14 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
         uint256 nSeen;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != SIG_BATCH_POSTED) continue;
+            bool executed;
+            for (uint256 j = 0; j < logs.length; j++) {
+                if (logs[j].transactionHash == logs[i].transactionHash && logs[j].topics[0] == SIG_ENTRY_EXECUTED) {
+                    executed = true;
+                    break;
+                }
+            }
+            if (!executed) continue;
             bool dup = false;
             for (uint256 k = 0; k < nSeen; k++) {
                 if (seenTxs[k] == logs[i].transactionHash) {
@@ -1416,7 +1437,7 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
             console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
         }
         if (nSeen == 0) revert("no settlement txs in range yet");
-        console.log("PASS: %s settlement tx(s) with BatchPosted in range", nSeen);
+        console.log("PASS: %s settlement tx(s) with BatchPosted + EntryExecuted in range", nSeen);
     }
 }
 
@@ -1428,9 +1449,9 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1BatchCalldata is VerifyHelpers {
-    // postAndVerifyBatch(ProofSystemBatchPerVerificationEntries) — derived from the full
-    // tuple signature (forge inspect EEZ methodIdentifiers).
-    bytes4 constant SEL_POST_BATCH = 0xcafef125;
+    // Derived from the contract so a batch-struct change can never leave a stale
+    // hardcoded selector behind.
+    bytes4 constant SEL_POST_BATCH = EEZ.postAndVerifyBatch.selector;
 
     function run(
         bytes calldata batchInput,

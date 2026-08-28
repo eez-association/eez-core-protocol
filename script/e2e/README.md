@@ -71,7 +71,7 @@ cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L2_RPC
 
 ```bash
 source chain.env
-bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
+bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
 ```
 
 ### 4. Check the deployment is alive

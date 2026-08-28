@@ -185,6 +185,23 @@ FAILED=false
 L1_OK=true
 L2_OK=true
 L2_CALL_OK=true
+RETRY_OUT=""
+
+# One range wrapper serves both trigger directions. The settlement lister has
+# no expected arguments; content-addressed verification takes the expected
+# hashes/table. Keeping this in one place also makes calldata re-scans behave
+# identically for L1- and L2-triggered eventless entries.
+_l1_scan() {  # $1=fromBlock $2=toBlock
+    if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
+        forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+            --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
+            "$1" "$2" "$ROLLUPS" 2>&1
+    else
+        forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+            --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+            "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
+    fi
+}
 
 # ── Verify L1 batch entries ──
 # L1 trigger: the batch is in the SAME block as the user tx — verify that block.
@@ -213,18 +230,6 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
         _L1_CONTRACT="VerifyL1SettlementTxsInRange"
         _L1_EXPECTED="$EXPECTED_L1_HASHES"
     fi
-    # Range scan for the selected verifier; the lister takes no expected args.
-    _l1_scan() {  # $1=fromBlock $2=toBlock
-        if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
-            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
-                "$1" "$2" "$ROLLUPS" 2>&1
-        else
-            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
-        fi
-    }
     echo ""
     echo "====== Verify L1 Batch ($_L1_CONTRACT, range $L1_BLOCK_BEFORE.., deadline ${L1_SETTLE_TIMEOUT:-300}s) ======"
     # Settlement (batch post + entry consumption) can take a while — retry the
@@ -258,32 +263,26 @@ else
     # posted-calldata stage below pin the exact entries; the expected table is
     # mandatory there.
     if [[ -z "$EXPECTED_L1_CALL_HASHES" || "$EXPECTED_L1_CALL_HASHES" == "[]" ]]; then
+        _L1_CONTRACT="VerifyL1SettlementTxsInRange"
+        _L1_EXPECTED="$EXPECTED_L1_HASHES"
         if [[ "$EXPECTED_L1_TABLE" == "0x" ]]; then
             echo "ERROR: eventless L1 entries need EXPECTED_L1_TABLE for network verification - add _printL1Table to ComputeExpected"
             FAILED=true
         fi
         _l1_verify_block() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
-                "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS"
+            _l1_scan "$L1_BLOCK" "$L1_BLOCK"
         }
         _l1_range_scan_latest() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
-                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS"
+            _l1_scan "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")"
         }
     else
+        _L1_CONTRACT="VerifyL1BatchInRange"
+        _L1_EXPECTED="$EXPECTED_L1_CALL_HASHES"
         _l1_verify_block() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-                --rpc-url "$RPC" \
-                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+            _l1_scan "$L1_BLOCK" "$L1_BLOCK"
         }
         _l1_range_scan_latest() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-                --rpc-url "$RPC" \
-                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+            _l1_scan "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")"
         }
     fi
     L1_OK=false
@@ -356,8 +355,11 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
                 continue
             fi
             [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
+            _BATCH_BLOCK=$(cast receipt "$_TX" blockNumber --rpc-url "$RPC" 2>/dev/null)
+            [[ -z "$_BATCH_BLOCK" ]] && continue
             if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" \
+                --fork-block-number "$((_BATCH_BLOCK))" \
                 --sig "run(bytes,address,bytes,bytes)" \
                 "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" 2>&1); then
                 echo "Matched settlement tx $_TX"
@@ -371,10 +373,11 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
         # No candidate contained our entries. For L2 triggers our entry may
         # simply not have settled yet — re-scan the growing range for new
         # settlement txs until the deadline.
-        [[ $(date +%s) -ge $_CD_DEADLINE || "$_TRIGGER_CHAIN" != "L2" ]] && break
+        [[ $(date +%s) -ge $_CD_DEADLINE || "$_L1_CONTRACT" != "VerifyL1SettlementTxsInRange" ]] && break
         sleep 10
         _L1_CUR=$(cast block-number --rpc-url "$RPC")
-        L1_RESCAN=$(_l1_scan "$L1_BLOCK_BEFORE" "$_L1_CUR") || continue
+        _L1_SCAN_FROM="${L1_BLOCK_BEFORE:-$L1_BLOCK}"
+        L1_RESCAN=$(_l1_scan "$_L1_SCAN_FROM" "$_L1_CUR") || continue
         _NEW=$(echo "$L1_RESCAN" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
         [[ -n "$_NEW" ]] && _CANDIDATES="$_NEW"
     done
