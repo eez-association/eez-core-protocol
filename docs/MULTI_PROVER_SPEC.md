@@ -61,7 +61,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 | `src/interfaces/IEEZL2.sol` | L2 execution structs with self-relative directional names (`CrossChainCall`, `ExpectedOutgoingCrossChainCall`, `ExecutionEntry`, `StaticExecutionEntry`) — leaner than L1's (no `RollupUpdate` / `destinationRollupId` / `ExpectedRootPerRollup`) |
 | `src/interfaces/IMetaCrossChainReceiver.sol` | Callback fired on `postAndVerifyBatch`'s sender to drive the transient stream |
 | `src/base/CrossChainProxy.sol` | CREATE2-deployed proxy per (originalAddress, originalRollupId); immutable `EEZ` points at the manager |
-| `src/base/ExpectedL1ToL2CallTransient.sol` | Standalone transient-storage experiment for the reentrant table; not imported by any deployed contract |
+| `src/base/ExpectedL1ToL2CallTransient.sol` | EIP-1153 transient-storage implementation for the immediate L1→L2 reentrant table; inherited by `EEZ` and used while immediate entries execute |
 
 ### Deleted in this refactor
 

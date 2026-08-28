@@ -6,8 +6,8 @@
 # so anvil instances and forge broadcast/ dirs don't collide.
 #
 # Bad-script caveats:
-#   - No retry, no resource throttling. If your machine can't host 17 anvil pairs,
-#     pass MAX_PARALLEL to cap the worker count.
+#   - No retry, no automatic resource-based throttling. If your machine cannot host
+#     one anvil pair per selected scenario, pass MAX_PARALLEL to cap the worker count.
 #   - Each test gets its own log under tmp/e2e-parallel/<scenario>.log.
 #   - Success logs are kept in tmp/e2e-success/, failures in tmp/e2e-failures/.
 #

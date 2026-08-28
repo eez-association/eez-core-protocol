@@ -11,7 +11,9 @@
 #   Execute            → L1 execution (postAndVerifyBatch + user action, same-block)
 source "$(dirname "$0")/../shared/E2EBase.sh"
 
-SOL="$1"; shift || { echo "Usage: local.sh <E2E.s.sol>"; exit 1; }
+[[ $# -ge 1 ]] || { echo "Usage: local.sh <E2E.s.sol>"; exit 1; }
+SOL="$1"
+shift
 [[ -f "$SOL" ]] || { echo "File not found: $SOL"; exit 1; }
 
 L1_PORT="${L1_PORT:-8545}"
