@@ -151,7 +151,7 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L2 TABLE" inline verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
+        run_verify_step "L2 TABLE" inline verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" "$EVENTLESS_L2_HASHES"
     else
         echo ""
         echo "====== Verify L2 Table (SKIP: no L2 block or no EXPECTED_L2_HASHES printed) ======"

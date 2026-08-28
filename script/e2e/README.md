@@ -185,8 +185,9 @@ chains by block number. The link is **content**, in three layers:
 
 Concretely: the settlement block is discovered by scanning `[snapshot..latest]` —
 by expected call hashes on L1 proxy-consumed entries (`VerifyL1BatchInRange`), by
-listing `EntryExecuted` txs + calldata content-match for L1 zero-hash entries
-(`VerifyL1SettlementTxsInRange`), by call hashes on L2 (`VerifyL2CallsInRange`) —
+listing persistent `BatchPosted` txs + calldata content-match for L1 zero-hash or
+eventless reverted entries (`VerifyL1SettlementTxsInRange`), by call hashes on L2
+(`VerifyL2CallsInRange`) —
 and the receipt block of the trigger tx is
 only ever a *candidate* — the composer may bundle the actual consumption in a
 later block on either chain.

@@ -460,8 +460,10 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
     }
 
-    /// @dev Reads the live registry root per touched rollup: it must equal the last update's
-    ///      newRoot (exact settlement), or at minimum have moved off the pre-batch root.
+    /// @dev Reads the live registry root per touched rollup: it must equal the last committing
+    ///      update's newRoot (exact settlement), or at minimum have moved off the pre-batch
+    ///      root. Rollups touched only by success=false entries are exempt — those root
+    ///      writes unwind with the entry's revert, so their live root stays at the pre-state.
     function _checkLiveRoots(address rollupsAddr, ExecutionEntry[] memory expected) internal view returns (bool ok) {
         uint256 maxUpdates;
         for (uint256 i = 0; i < expected.length; i++) {
@@ -470,35 +472,49 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         uint64[] memory rids = new uint64[](maxUpdates);
         bytes32[] memory pre = new bytes32[](maxUpdates);
         bytes32[] memory post = new bytes32[](maxUpdates);
+        bool[] memory committing = new bool[](maxUpdates);
         uint256 n;
         for (uint256 i = 0; i < expected.length; i++) {
             for (uint256 d = 0; d < expected[i].rollupUpdates.length; d++) {
                 RollupUpdate memory sd = expected[i].rollupUpdates[d];
-                bool seen = false;
-                for (uint256 k = 0; k < n; k++) {
-                    if (rids[k] == sd.rollupId) {
-                        post[k] = sd.newRoot; // updates apply in entry order — track the final root
-                        seen = true;
-                        break;
-                    }
+                uint256 k;
+                while (k < n && rids[k] != sd.rollupId) {
+                    k++;
                 }
-                if (!seen) {
+                if (k == n) {
                     rids[n] = sd.rollupId;
                     pre[n] = sd.currentRoot;
-                    post[n] = sd.newRoot;
+                    post[n] = sd.currentRoot; // baseline: root only moves via committing entries
                     n++;
+                }
+                // A success=false entry's root write unwinds with its revert, so only
+                // committing entries advance the tracked final root (in entry order).
+                if (expected[i].success) {
+                    post[k] = sd.newRoot;
+                    committing[k] = true;
                 }
             }
         }
         ok = true;
         for (uint256 k = 0; k < n; k++) {
+            (, bytes32 live,) = IRollupsRegistryView(rollupsAddr).rollups(rids[k]);
+            if (!committing[k]) {
+                // Every entry touching this rollup is success=false: nothing persists, so
+                // the live root legitimately stays at the pre-state (or advances via
+                // later, unrelated batches).
+                if (live == pre[k]) {
+                    console.log("PASS: rollup %s root unchanged (only failed entries touch it)", rids[k]);
+                } else {
+                    console.log("PASS: rollup %s root changed (advanced beyond this batch)", rids[k]);
+                }
+                continue;
+            }
             // The table as a whole must move each touched rollup's root (per-entry movement is
             // not required — same-L2-block entries share one transition).
             if (pre[k] == post[k]) {
                 console.log("FAIL: rollup %s root does not move across the table", rids[k]);
                 ok = false;
             }
-            (, bytes32 live,) = IRollupsRegistryView(rollupsAddr).rollups(rids[k]);
             if (live == post[k]) {
                 console.log("PASS: rollup %s live root == expected newRoot", rids[k]);
             } else if (live != pre[k]) {
@@ -918,7 +934,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     function _verifyL2TableFields(
         L2ExecutionEntry[] memory actual,
         Vm.EthGetLogs[] memory logs,
-        bytes memory expectedTable
+        bytes memory expectedTable,
+        bytes32[] memory eventlessEntryHashes
     )
         internal
         pure
@@ -931,18 +948,29 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
         ok = true;
         for (uint256 i = 0; i < expected.length; i++) {
-            if (!_checkL2Entry(actual, executed, i, expected[i])) ok = false;
+            bool eventlessAllowed = _containsHash(eventlessEntryHashes, _entryHash(expected[i]));
+            if (!_checkL2Entry(actual, executed, i, expected[i], eventlessAllowed)) ok = false;
         }
         if (ok) {
-            console.log("PASS: L2 field checks on %s entries (full struct, invariants, EntryExecuted)", expected.length);
+            console.log(
+                "PASS: L2 field checks on %s entries (full struct, invariants, execution-event policy)", expected.length
+            );
         }
+    }
+
+    function _containsHash(bytes32[] memory values, bytes32 needle) internal pure returns (bool) {
+        for (uint256 i = 0; i < values.length; i++) {
+            if (values[i] == needle) return true;
+        }
+        return false;
     }
 
     function _checkL2Entry(
         L2ExecutionEntry[] memory actual,
         ExecutedTriple[] memory executed,
         uint256 i,
-        L2ExecutionEntry memory e
+        L2ExecutionEntry memory e,
+        bool eventlessAllowed
     )
         internal
         pure
@@ -987,8 +1015,16 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // an upper bound (see _hasTriple). A `success: false` entry's event is discarded with
         // its rollback — only required for committing entries.
         if (e.success && !_hasTriple(executed, e.rollingHash, e.incomingCalls.length, e.expectedOutgoingCalls.length)) {
-            console.log("FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, outgoingConsumed)", i);
-            ok = false;
+            if (eventlessAllowed) {
+                // The loaded entry is exact, but its only consumption ran inside an
+                // enclosing frame that reverted — EntryExecuted unwinds with that frame.
+                console.log("NOTE: entry %s is explicitly eventless after enclosing-frame rollback", i);
+            } else {
+                console.log(
+                    "FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, outgoingConsumed)", i
+                );
+                ok = false;
+            }
         }
     }
 
@@ -1349,10 +1385,10 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
 }
 
 /// @title VerifyL1SettlementTxsInRange — root-agnostic settlement discovery (network,
-/// zero-hash entries). The expected entry hashes fold placeholder roots, but the
-/// on-chain rolling-hash seed folds the REAL roots the composer settles, so event-level
-/// hash matching cannot work against a live devnet. Instead: list every distinct tx in
-/// range that emitted EntryExecuted on the registry (first as L1_MATCH_BLOCK /
+/// zero-hash or eventless entries). The expected entry hashes may fold placeholder roots,
+/// and a reverted entry rolls back its execution events, so event-level entry matching
+/// cannot work against a live devnet. Instead: list every distinct tx in the range that
+/// emitted the persistent BatchPosted event on the registry (first as L1_MATCH_BLOCK /
 /// L1_BATCH_TX, all as L1_BATCH_TX_CANDIDATE) and let the runner pin OUR settlement by
 /// decoding each candidate's posted calldata (VerifyL1BatchCalldata, roots neutralized).
 /// Reverts while nothing has settled so the runner's deadline loop keeps waiting.
@@ -1363,7 +1399,7 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
         bytes32[] memory seenTxs = new bytes32[](logs.length);
         uint256 nSeen;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
+            if (logs[i].topics[0] != SIG_BATCH_POSTED) continue;
             bool dup = false;
             for (uint256 k = 0; k < nSeen; k++) {
                 if (seenTxs[k] == logs[i].transactionHash) {
@@ -1380,7 +1416,7 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
             console.log("L1_BATCH_TX_CANDIDATE=%s", vm.toString(logs[i].transactionHash));
         }
         if (nSeen == 0) revert("no settlement txs in range yet");
-        console.log("PASS: %s settlement tx(s) with EntryExecuted in range", nSeen);
+        console.log("PASS: %s settlement tx(s) with BatchPosted in range", nSeen);
     }
 }
 
@@ -1439,7 +1475,7 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
 
 contract VerifyL2Blocks is VerifyHelpers {
     function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedEntryHashes) external view {
-        run(l2Blocks, managerL2, expectedEntryHashes, "");
+        _run(l2Blocks, managerL2, expectedEntryHashes, "", new bytes32[](0));
     }
 
     /// @dev Blob-aware variant: `expectedTable` is abi.encode(L2ExecutionEntry[]) from
@@ -1452,7 +1488,36 @@ contract VerifyL2Blocks is VerifyHelpers {
         bytes32[] calldata expectedEntryHashes,
         bytes memory expectedTable
     )
-        public
+        external
+        view
+    {
+        _run(l2Blocks, managerL2, expectedEntryHashes, expectedTable, new bytes32[](0));
+    }
+
+    /// @dev `eventlessEntryHashes`: loaded entries whose only consumption ran inside an
+    ///      enclosing frame that reverted — their EntryExecuted event unwinds with that
+    ///      frame, so the field check accepts its absence for exactly these entries.
+    function run(
+        uint256[] calldata l2Blocks,
+        address managerL2,
+        bytes32[] calldata expectedEntryHashes,
+        bytes memory expectedTable,
+        bytes32[] calldata eventlessEntryHashes
+    )
+        external
+        view
+    {
+        _run(l2Blocks, managerL2, expectedEntryHashes, expectedTable, eventlessEntryHashes);
+    }
+
+    function _run(
+        uint256[] calldata l2Blocks,
+        address managerL2,
+        bytes32[] calldata expectedEntryHashes,
+        bytes memory expectedTable,
+        bytes32[] memory eventlessEntryHashes
+    )
+        internal
         view
     {
         if (l2Blocks.length == 0) {
@@ -1468,7 +1533,7 @@ contract VerifyL2Blocks is VerifyHelpers {
             _reportL2Failure(l2Blocks, managerL2, expectedEntryHashes);
             revert("Verification failed");
         }
-        if (expectedTable.length > 0 && !_verifyL2TableFields(entries, logs, expectedTable)) {
+        if (expectedTable.length > 0 && !_verifyL2TableFields(entries, logs, expectedTable, eventlessEntryHashes)) {
             revert("Field verification failed");
         }
         console.log(
