@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
@@ -13,6 +14,7 @@ import {
 } from "../../../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
     noNestedActions,
@@ -114,7 +116,6 @@ abstract contract BridgeActions {
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);
         // L2-side cross-chain call hash: targetRollupId folded as the L2's own id (ROLLUP_ID).
         bytes32 ccHash = _callHash(l2Destination, sender);
-        // PENDING EEZL2: rolling-hash seed/append shape mirrors L1; re-verify once EEZL2.sol lands.
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
         rh = RollingHashBuilder.appendCallBegin(rh, ccHash);
         rh = RollingHashBuilder.appendCallEnd(rh, true, "");
@@ -153,12 +154,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address l2Proxy;
-        try rollups.createCrossChainProxy(l2DestAddr, L2_ROLLUP_ID) returns (address p) {
-            l2Proxy = p;
-        } catch {
-            l2Proxy = rollups.computeCrossChainProxyAddress(l2DestAddr, L2_ROLLUP_ID);
-        }
+        address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, L2_ROLLUP_ID);
 
         BridgeSender sender = new BridgeSender(l2Proxy, l2DestAddr);
         console.log("L2_PROXY=%s", l2Proxy);

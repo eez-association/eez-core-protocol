@@ -3,12 +3,14 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -87,6 +89,14 @@ abstract contract RevertL2Actions {
         });
     }
 
+    /// @dev Identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
+    function _l1CallHash(address revCounterL1, address safeCallerL2) internal pure returns (bytes32) {
+        return
+            crossChainCallHash(
+                false, safeCallerL2, L2_ROLLUP_ID, revCounterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData()
+            );
+    }
+
     /// @dev L1 mirror entry — system-driven (proxyEntryHash=0), executed as an immediate L2Tx.
     ///      `l2ToL1Calls[0]` runs the real RevertCounter on L1; the natural revert folds as
     ///      CALL_END(false, ...). CALL_BEGIN folds targetRollupId = MAINNET.
@@ -118,9 +128,7 @@ abstract contract RevertL2Actions {
             etherDelta: 0
         });
 
-        bytes32 ccTop = crossChainCallHash(
-            false, safeCallerL2, L2_ROLLUP_ID, revCounterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData()
-        );
+        bytes32 ccTop = _l1CallHash(revCounterL1, safeCallerL2);
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccTop);
         rh = RollingHashBuilder.appendCallEnd(rh, false, _revertData());
@@ -163,12 +171,7 @@ contract DeployL2 is Script {
         EEZL2 manager = EEZL2(managerAddr);
 
         // Trigger proxy: proxy for (RevertCounter@L1, MAINNET_ROLLUP_ID) on L2
-        address counterProxy;
-        try manager.createCrossChainProxy(revCounterL1, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = manager.computeCrossChainProxyAddress(revCounterL1, MAINNET_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(manager)), revCounterL1, MAINNET_ROLLUP_ID);
 
         // The caller: try/catches the reverting cross-chain call so the trigger tx succeeds.
         SafeCounterAndProxy safeCaller = new SafeCounterAndProxy(Counter(counterProxy));

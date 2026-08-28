@@ -3,12 +3,14 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, SelfCallerWithRevert} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -58,6 +60,11 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
     ///      first consumption unwinds with innerCall()'s revert, the second survives.
     function _proxyEntryHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
         return crossChainCallHashL2Out(selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+    }
+
+    /// @dev Identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
+    function _l1CallHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
+        return crossChainCallHash(false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev L2 source entry: nothing executes on L2 — it just hands S the pre-computed L1
@@ -123,8 +130,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
             etherDelta: 0
         });
 
-        bytes32 ccInc =
-            crossChainCallHash(false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+        bytes32 ccInc = _l1CallHash(counterL1, selfCallerL2);
         bytes32 rh = RollingHashBuilder.entryBegin(deltas, bytes32(0));
         rh = RollingHashBuilder.appendCallBegin(rh, ccInc);
         rh = RollingHashBuilder.appendCallEnd(rh, true, abi.encode(uint256(1)));
@@ -170,12 +176,7 @@ contract DeployL2 is Script {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
 
-        address counterProxy;
-        try manager.createCrossChainProxy(counterL1, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = manager.computeCrossChainProxyAddress(counterL1, MAINNET_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(manager)), counterL1, MAINNET_ROLLUP_ID);
 
         SelfCallerWithRevert selfCaller = new SelfCallerWithRevert(Counter(counterProxy));
 

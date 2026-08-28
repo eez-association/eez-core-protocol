@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
@@ -13,6 +14,7 @@ import {
 import {Counter, SelfCallerWithRevert} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -218,12 +220,7 @@ contract DeployL2Side is Script {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
 
-        address counterProxy;
-        try manager.createCrossChainProxy(counterL1, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = manager.computeCrossChainProxyAddress(counterL1, MAINNET_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(manager)), counterL1, MAINNET_ROLLUP_ID);
 
         SelfCallerWithRevert selfCaller = new SelfCallerWithRevert(Counter(counterProxy));
 
@@ -243,12 +240,7 @@ contract DeployTriggerProxy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address selfCallerProxy;
-        try rollups.createCrossChainProxy(selfCallerL2, L2_ROLLUP_ID) returns (address p) {
-            selfCallerProxy = p;
-        } catch {
-            selfCallerProxy = rollups.computeCrossChainProxyAddress(selfCallerL2, L2_ROLLUP_ID);
-        }
+        address selfCallerProxy = getOrCreateProxy(IEEZ(address(rollups)), selfCallerL2, L2_ROLLUP_ID);
 
         console.log("SELF_CALLER_PROXY=%s", selfCallerProxy);
         vm.stopBroadcast();

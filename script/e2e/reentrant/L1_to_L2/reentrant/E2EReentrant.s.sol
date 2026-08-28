@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {
     RollupUpdate,
@@ -20,6 +21,7 @@ import {
 import {ReentrantCounter} from "../../../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -102,12 +104,6 @@ abstract contract ReentrantActions {
     // ── L2 cross-chain call hashes (self = L2_ROLLUP_ID). The outgoing reentry keys with
     //    the L2-outgoing hash (`callGas` = 0 — the devnet deploys `EEZL2` with
     //    `useGasLeft = false`); calls executed ON the L2 fold CALL_BEGIN with callGas = 0. ──
-
-    /// @dev L2 top-level incoming dC(2): executed ON L2 (target rcL2 L2), sourced from rcL1
-    ///      MAINNET. Equals `_sharedProxyEntryHash` — same eight fields.
-    function _cchL2Top2(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(2));
-    }
 
     /// @dev L2 outgoing reentry dC(1): rcL2 -> rcL1Proxy.dC(1). Source rollup forced to L2;
     ///      target=rcL1 MAINNET. Outgoing — L2-outgoing key (NESTED_BEGIN fold + expectedOutgoingHash).
@@ -215,12 +211,13 @@ abstract contract ReentrantActions {
             data: _dc(0)
         });
 
-        bytes32 cch2 = _cchL2Top2(rcL2, rcL1);
         bytes32 cch1 = _cchL2Out1(rcL1, rcL2);
         bytes32 cch0 = _cchL2Sub0(rcL2, rcL1);
 
         bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
-        rh = RollingHashBuilder.appendCallBegin(rh, cch2); // top-level incoming dC(2) begins
+        // Top-level incoming dC(2) begins; its CALL_BEGIN folds the same eight fields as
+        // the shared key.
+        rh = RollingHashBuilder.appendCallBegin(rh, proxyEntryHash);
         bytes32 rhFire = rh; // outgoing reentry dC(1) fires here (rcL2's code calls its peer)
         rh = RollingHashBuilder.appendNestedBegin(rh, cch1);
         rh = RollingHashBuilder.appendCallBegin(rh, cch0); // incoming sub-call dC(0) begins
@@ -273,12 +270,7 @@ contract Deploy is Script {
         EEZ rollups = EEZ(rollupsAddr);
 
         // Proxy for rcL2@L2 on L1 (rcL1's peer)
-        address rcL2ProxyOnL1;
-        try rollups.createCrossChainProxy(rcL2Addr, L2_ROLLUP_ID) returns (address p) {
-            rcL2ProxyOnL1 = p;
-        } catch {
-            rcL2ProxyOnL1 = rollups.computeCrossChainProxyAddress(rcL2Addr, L2_ROLLUP_ID);
-        }
+        address rcL2ProxyOnL1 = getOrCreateProxy(IEEZ(address(rollups)), rcL2Addr, L2_ROLLUP_ID);
 
         // Deploy rcL1 on L1 with peer = rcL2ProxyOnL1
         ReentrantCounter rcL1 = new ReentrantCounter(rcL2ProxyOnL1);
@@ -299,12 +291,7 @@ contract DeploySetupL2 is Script {
         EEZL2 manager = EEZL2(managerAddr);
 
         // Proxy for rcL1@MAINNET on L2 (rcL2's peer)
-        address rcL1ProxyOnL2;
-        try manager.createCrossChainProxy(rcL1Addr, MAINNET_ROLLUP_ID) returns (address p) {
-            rcL1ProxyOnL2 = p;
-        } catch {
-            rcL1ProxyOnL2 = manager.computeCrossChainProxyAddress(rcL1Addr, MAINNET_ROLLUP_ID);
-        }
+        address rcL1ProxyOnL2 = getOrCreateProxy(IEEZ(address(manager)), rcL1Addr, MAINNET_ROLLUP_ID);
 
         // Set rcL2's peer
         ReentrantCounter(rcL2Addr).setPeer(rcL1ProxyOnL2);
