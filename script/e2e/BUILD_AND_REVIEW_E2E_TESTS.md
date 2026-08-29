@@ -126,6 +126,9 @@ contract Execute                     // L1-side trigger / simulation
 contract ExecuteNetwork{,L2}         // network-mode user-tx helpers (only `view` — emit envs)
 contract ComputeExpected             // computes expected tables — DRIVES all verification
                                      // (its EXPECTED_* output lines switch every check on/off)
+contract VerifyNetwork{,L2}          // OPTIONAL network-mode self-verification: read-only
+                                     // asserts on live state after the trigger (L1/L2 RPC);
+                                     // mandatory when ComputeExpected is omitted
 ```
 
 `run/local.sh` auto-runs `ExecuteL2` first, then `Execute`. If only one is present the
@@ -207,9 +210,13 @@ Authoring notes specific to static scenarios:
   and a posted L1 `staticEntries` batch emits nothing per-entry either. Export
   `EXPECTED_*` lines only for sides that actually have `ExecutionEntry`s
   (`staticCounterL2` exports L1 only); a scenario with NO entries on either side
-  (`topLevelStaticCounter`) must omit `ComputeExpected` entirely — the runner fails a
-  ComputeExpected that drives zero verifiers — and carry its proof in the trigger tx,
-  the no-tx query, and in-script `require`s.
+  (`topLevelStaticCounter`) must omit `ComputeExpected` entirely and carry its proof
+  in the trigger tx, the no-tx query, and in-script `require`s. An eventless L2 side
+  that still has a ComputeExpected exports `EXPECTED_L2_HASHES=[]` explicitly
+  (`staticCounterL2`) — the network runner treats a MISSING export as an error. In
+  network mode the in-script asserts live in `VerifyNetwork` / `VerifyNetworkL2`
+  contracts (read-only, run by network.sh after the trigger against the L1/L2 RPC);
+  a scenario with no ComputeExpected MUST define at least one of them.
 - **A sub-call-less static entry needs `rollingHash == 0`** (the untagged static
   accumulator seeds at zero and an empty sub-array is always compared).
 

@@ -240,6 +240,20 @@ contract ExecuteNetworkL2 is Script {
     }
 }
 
+/// @title VerifyNetworkL2 — network mode: read-only asserts on L2 after the trigger,
+///        mirroring ExecuteL2's. The trigger succeeding proves the system loaded a
+///        resolvable static pool entry in the same block; this pins the cached value
+///        the reader actually consumed.
+/// Env: READER_L2
+contract VerifyNetworkL2 is Script {
+    function run() external view {
+        StaticReadCounter reader = StaticReadCounter(vm.envAddress("READER_L2"));
+        require(reader.lastRead() == 1, "static read returned wrong value");
+        require(reader.counter() == 1, "reader did not run");
+        console.log("VERIFY_PASS reader.lastRead=%s reader.counter=%s", reader.lastRead(), reader.counter());
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  ComputeExpected — only the L1 side has entries/events; the L2 side is a
 //  pool of static entries (no ExecutionEntry, no consumption events), pinned
@@ -286,6 +300,10 @@ contract ComputeExpected is ComputeExpectedBase, StaticCounterL2Actions {
     }
 
     function _logL2Pool(address counterL1Addr, address readerL2Addr) private view {
+        // The L2 table holds ONLY the static pool entry, resolved via the view path —
+        // no ExecutionEntry, no consumption events, so there are no L2 entry hashes to
+        // match; VerifyNetworkL2's reader asserts are the L2-side proof.
+        console.log("EXPECTED_L2_HASHES=[]");
         console.log("");
         console.log("=== EXPECTED L2 STATIC POOL (1 entry, no events) ===");
         _logStaticLookup(0, _staticEntries(counterL1Addr, readerL2Addr)[0]);

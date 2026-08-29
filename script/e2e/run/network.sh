@@ -126,9 +126,27 @@ build_trigger_txs "$SOL" network
 echo ""
 echo "====== Compute Expected Entries ======"
 _SENDER=$(cast wallet address --private-key "$PK")
-COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
-
-extract_expected_outputs "$COMPUTE_OUT"
+if grep -qE '^contract ComputeExpected\b' "$SOL"; then
+    _HAS_COMPUTE=true
+    COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
+    extract_expected_outputs "$COMPUTE_OUT"
+else
+    # Self-verifying scenario: a pure view-path flow (e.g. a top-level static
+    # read) resolves without emitting events, so there are no expected entries
+    # to match — the proof is the trigger tx plus the scenario's VerifyNetwork*
+    # asserts (step 8b), which are mandatory here.
+    _HAS_COMPUTE=false
+    COMPUTE_OUT=""
+    EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"
+    EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
+    EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L2_TABLE="0x"
+    EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
+    if ! grep -qE '^contract VerifyNetwork(L2)? ' "$SOL"; then
+        echo "ERROR: scenario has neither ComputeExpected nor a VerifyNetwork/VerifyNetworkL2 contract - nothing would be verified"
+        exit 1
+    fi
+    echo "no ComputeExpected - event verification off; VerifyNetwork* asserts are the proof"
+fi
 
 # ══════════════════════════════════════════════
 #  4. Send the pre-signed user tx
@@ -207,7 +225,11 @@ _l1_scan() {  # $1=fromBlock $2=toBlock
 # L1 trigger: the batch is in the SAME block as the user tx — verify that block.
 # L2 trigger: the settlement block is unknown a priori (batches no longer encode
 # L2 block references), so scan the recorded L1 range for ExecutionConsumed events.
-if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+if ! $_HAS_COMPUTE; then
+    echo ""
+    echo "====== Verify L1 Batch ======"
+    echo "SKIP: no ComputeExpected - no expected entries/events to match (self-verifying scenario)"
+elif [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     # Two settlement signals, depending on the scenario's L1 entry shape:
     #  - proxy-consumed entries (proxyEntryHash != 0): ExecutionConsumed carries the
     #    call hash → VerifyL1BatchInRange with EXPECTED_L1_CALL_HASHES.
@@ -478,7 +500,7 @@ if [[ -z "${EXPECTED_L2_HASHES:-}" ]]; then
     FAILED=true
     L2_OK=false
 elif [[ "$EXPECTED_L2_HASHES" == "[]" ]]; then
-    echo "No L2 entries expected (terminal revert)"
+    echo "No L2 entry events expected (terminal revert, or an eventless static pool)"
     # If ABSENT_L2_HASHES provided, actively verify they're NOT on L2
     if [[ -n "${ABSENT_L2_HASHES:-}" && "$ABSENT_L2_HASHES" != "[]" ]]; then
         if [[ "$L2_BLOCKS" == "[]" ]]; then
@@ -520,6 +542,33 @@ else
     run_verify_step "L2 CALL" defer verify_l2_calls "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"
     L2_CALL_OK=$VERIFY_STEP_OK
 fi
+
+# ══════════════════════════════════════════════
+#  8b. Scenario self-verification (optional)
+#      If the scenario defines VerifyNetwork (checked on L1) and/or
+#      VerifyNetworkL2 (checked on L2), run them read-only after the trigger.
+#      They assert live on-chain state (reader counters, cached read values,
+#      no-tx queries) — the only proof layer for view-path resolutions that
+#      emit no events, and an extra state check for any other scenario.
+# ══════════════════════════════════════════════
+_run_verify_network() {  # $1=contract $2=rpc $3=chain label
+    local _VN_NAME="$1" _VN_RPC="$2" _VN_LABEL="$3"
+    grep -qE "^contract $_VN_NAME " "$SOL" || return 0
+    echo ""
+    echo "====== Scenario Self-Verification ($_VN_NAME, $_VN_LABEL) ======"
+    if retry_until_deadline "${VERIFY_NETWORK_TIMEOUT:-60}" 5 \
+        forge script "$SOL:$_VN_NAME" --rpc-url "$_VN_RPC" --sender "$_SENDER"; then
+        echo "$RETRY_OUT" | grep -E "VERIFY_PASS|PASS" || echo "PASS: $_VN_NAME asserts held"
+    else
+        FAILED=true
+        echo ""
+        echo "--- $_VN_NAME DIAGNOSTICS ---"
+        echo "$RETRY_OUT" | strip_traces
+        echo "$_VN_NAME FAILED"
+    fi
+}
+_run_verify_network VerifyNetwork "$RPC" L1
+_run_verify_network VerifyNetworkL2 "$L2_RPC" L2
 
 # ══════════════════════════════════════════════
 #  9. On failure: show diagnostics

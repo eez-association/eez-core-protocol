@@ -42,10 +42,11 @@ import {
 //  delivery; the producer is CounterL2's live state, captured at deploy.
 //
 //  Verification: static resolution is a `view` path — it emits no events, so
-//  this scenario has no ComputeExpected (the runner fails a ComputeExpected
-//  that drives zero verifiers). The proof is the trigger tx + the no-tx query:
-//  a wrong key, destination, or root pin reverts them (ExecutionNotFound), and
-//  Execute asserts both against the predicted value.
+//  this scenario has no ComputeExpected (there are no expected entries or
+//  events to match). The proof is the trigger tx + the no-tx query: a wrong
+//  key, destination, or root pin reverts them (ExecutionNotFound). Execute
+//  asserts both against the predicted value in local mode; VerifyNetwork
+//  makes the same asserts after the trigger in network mode.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
@@ -183,5 +184,28 @@ contract ExecuteNetwork is Script {
         console.log("TARGET=%s", vm.envAddress("READER_L1"));
         console.log("VALUE=0");
         console.log("CALLDATA=%s", vm.toString(abi.encodeWithSelector(StaticReadCounter.increment.selector)));
+    }
+}
+
+/// @title VerifyNetwork — network mode: read-only asserts after the trigger, mirroring
+///        Execute's. The trigger succeeding already proves the composer posted a
+///        resolvable static entry (reader.increment() reverts ExecutionNotFound
+///        otherwise); this pins the value it returned and re-resolves the same entry
+///        via the standard no-tx query (only valid while the entry's root pin still
+///        equals the live L2 root — immediately after the trigger in a sequential run).
+/// Env: ROLLUPS, COUNTER_PROXY, READER_L1, PREDICTED_STATIC_RESULT
+contract VerifyNetwork is Script {
+    function run() external {
+        StaticReadCounter reader = StaticReadCounter(vm.envAddress("READER_L1"));
+        uint256 predictedValue = abi.decode(vm.envBytes("PREDICTED_STATIC_RESULT"), (uint256));
+
+        require(reader.lastRead() == predictedValue, "static read returned wrong value");
+        require(reader.counter() == 1, "reader did not run");
+
+        vm.prank(address(reader));
+        uint256 probed = Counter(vm.envAddress("COUNTER_PROXY")).counter();
+        require(probed == predictedValue, "no-tx static query returned wrong value");
+
+        console.log("VERIFY_PASS reader.lastRead=%s no-tx query=%s (predicted %s)", reader.lastRead(), probed, predictedValue);
     }
 }

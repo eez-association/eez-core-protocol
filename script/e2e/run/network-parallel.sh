@@ -4,8 +4,13 @@
 #
 # Wallet hierarchy:
 #   source key (anvil #2 or SOURCE_PK)       — funds the run faucet ↓ (or workers directly with --direct)
-#   run faucet (fresh wallet, in the run dir)  — funds ↓
+#   run faucet (fresh wallet, in the run dir)  — funds ↓ via MultiSend (one batched tx per chain)
 #   one ephemeral wallet per job             — runs the scenario, nonce-isolated
+#
+# Worker funding goes through a MultiSend contract (script/e2e/shared/MultiSend.sol,
+# address cached per chain-id in multisend.txt): one `fund(address[],uint256)` tx per
+# chain funds every worker, instead of one tx per worker — devnet txpools cap pending
+# txs per account (~20), which capped the old per-worker funding at ~20 jobs.
 #
 # Usage:
 #   bash script/e2e/run/network-parallel.sh [flags] <target>[:count] ...
@@ -27,6 +32,7 @@
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
 #   FUND_ETH         ETH given to each worker per chain (default 0.1)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
+#   MULTISEND_BATCH  workers funded per MultiSend tx (default 100 — block-gas headroom)
 #   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
 #   DEVNET_ENV       env file with endpoints/addresses (default chain.env)
 #
@@ -107,6 +113,10 @@ RUN_DIR="tmp/e2e-parallel-net/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 echo "== $NJOBS job(s), max $MAX_PARALLEL parallel, ${FUND_ETH} ETH/worker/chain — logs in $RUN_DIR"
 
+# ── Step 0: build once — MultiSend deployment below and the parallel forge
+# invocations later both need warm artifacts (parallel builds race the cache).
+forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
+
 # Steps 1–3 hold an exclusive lock: concurrent orchestrator instances share the
 # source funding key, and racing its nonce yields "replacement transaction
 # underpriced".
@@ -154,43 +164,61 @@ else
     done
 fi
 
-# ── Step 3: one ephemeral wallet per job, funded in PARALLEL from our faucet ──
-# One faucet key + many txs in flight → assign nonces explicitly and submit
-# --async (no receipt wait), then wait once for the faucet nonce to advance.
-WALLET_PKS=()
+# ── Step 3: one ephemeral wallet per job, funded via MultiSend ──
+# One `fund(address[],uint256)` tx per chain (chunked by MULTISEND_BATCH) funds
+# every worker — a single-sender tx count that devnet txpool per-account limits
+# never touch.
+MULTISEND_BATCH="${MULTISEND_BATCH:-100}"
+MULTISEND_FILE="$SCRIPT_DIR/multisend.txt"
+
+# Returns (stdout) the MultiSend address for the chain at $1, deploying it from
+# the faucet key and caching it in multisend.txt (keyed by chain id) if needed.
+ensure_multisend() {
+    local rpc=$1 chain_id addr
+    chain_id=$(cast chain-id --rpc-url "$rpc") || return 1
+    addr=$(sed -n "s/^$chain_id: *//p" "$MULTISEND_FILE" 2>/dev/null)
+    if [[ -n "$addr" && $(cast code "$addr" --rpc-url "$rpc") != "0x" ]]; then
+        echo "$addr"; return 0
+    fi
+    addr=$(forge create script/e2e/shared/MultiSend.sol:MultiSend --broadcast \
+        --private-key "$FAUCET_PK" --rpc-url "$rpc" 2>/dev/null \
+        | grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' | grep -oE '0x[0-9a-fA-F]{40}')
+    [[ -n "$addr" ]] || { echo "MultiSend deploy FAILED (chain $chain_id)" >&2; return 1; }
+    { [[ -f "$MULTISEND_FILE" ]] && grep -v "^$chain_id: " "$MULTISEND_FILE"; \
+      echo "$chain_id: $addr"; } > "$MULTISEND_FILE.tmp" && mv "$MULTISEND_FILE.tmp" "$MULTISEND_FILE"
+    echo "MultiSend deployed on chain $chain_id → $addr" >&2
+    echo "$addr"
+}
+
+WALLET_PKS=(); WALLET_ADDRS=()
 echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
 chmod 600 "$RUN_DIR/wallets.csv"
-# pending, not latest — an in-flight faucet tx would make us reuse its nonce
-L1_BASE_NONCE=$(cast nonce "$FAUCET_ADDR" --block pending --rpc-url "$L1_RPC")
-L2_BASE_NONCE=$(cast nonce "$FAUCET_ADDR" --block pending --rpc-url "$L2_RPC")
 for ((i = 0; i < NJOBS; i++)); do
     new=$(cast wallet new)
     waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
     wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-    WALLET_PKS+=("$wpk")
+    WALLET_PKS+=("$wpk"); WALLET_ADDRS+=("$waddr")
     echo "${JOB_NAMES[$i]},$waddr,$wpk" >> "$RUN_DIR/wallets.csv"
-    cast send "$waddr" --value "${FUND_ETH}ether" --async --nonce $((L1_BASE_NONCE + i)) \
-        --private-key "$FAUCET_PK" --rpc-url "$L1_RPC" > /dev/null || {
-        echo "Worker funding submit FAILED on L1 (${JOB_NAMES[$i]})"; exit 1; }
-    cast send "$waddr" --value "${FUND_ETH}ether" --async --nonce $((L2_BASE_NONCE + i)) \
-        --private-key "$FAUCET_PK" --rpc-url "$L2_RPC" > /dev/null || {
-        echo "Worker funding submit FAILED on L2 (${JOB_NAMES[$i]})"; exit 1; }
-    echo "  funding submitted ${JOB_NAMES[$i]} → $waddr"
 done
-echo "Waiting for $((NJOBS * 2)) funding txs to mine..."
-FUND_DEADLINE=$((SECONDS + 120))
-until (( $(cast nonce "$FAUCET_ADDR" --rpc-url "$L1_RPC") >= L1_BASE_NONCE + NJOBS )) \
-   && (( $(cast nonce "$FAUCET_ADDR" --rpc-url "$L2_RPC") >= L2_BASE_NONCE + NJOBS )); do
-    (( SECONDS < FUND_DEADLINE )) || { echo "Funding txs not mined after 120s"; exit 1; }
-    sleep 2
+
+FUND_WEI=$(cast to-wei "$FUND_ETH")
+for chain in L1 L2; do
+    rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
+    ms=$(ensure_multisend "$rpc") || exit 1
+    for ((off = 0; off < NJOBS; off += MULTISEND_BATCH)); do
+        slice=("${WALLET_ADDRS[@]:off:MULTISEND_BATCH}")
+        total=$(echo "$FUND_WEI * ${#slice[@]}" | bc)
+        cast send "$ms" "fund(address[],uint256)" \
+            "[$(IFS=,; echo "${slice[*]}")]" "$FUND_WEI" --value "$total" \
+            --private-key "$FAUCET_PK" --rpc-url "$rpc" > /dev/null || {
+            echo "Worker funding FAILED on $chain (workers $off..$((off + ${#slice[@]} - 1)))"; exit 1; }
+        echo "  funded ${#slice[@]} worker(s) on $chain via MultiSend $ms"
+    done
 done
 echo "All workers funded."
 flock -u 9   # faucet no longer touched — let concurrent runs proceed
 
-# ── Step 4: build once so parallel forge invocations don't race the cache ──
-forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
-
-# ── Step 5: launch with a concurrency cap ──
+# ── Step 4: launch with a concurrency cap ──
 run_job() {  # $1=sol $2=worker_pk $3=logfile
     RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/run/network.sh "$1" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
@@ -207,7 +235,7 @@ for ((i = 0; i < NJOBS; i++)); do
     PIDS+=($!)
 done
 
-# ── Step 6: collect results ──
+# ── Step 5: collect results ──
 PASS=0; FAIL=0; FAILED_LIST=()
 for ((i = 0; i < NJOBS; i++)); do
     if wait "${PIDS[$i]}"; then

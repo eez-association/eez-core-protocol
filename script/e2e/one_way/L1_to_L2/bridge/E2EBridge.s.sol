@@ -29,18 +29,22 @@ import {
 //  Bridge scenario — L1→L2 with ETH value transfer, two-sided
 //
 //  L1 side (Execute):
-//    BridgeSender.bridge{value: 1 ether}() → L2_PROXY.call{value: 1 ether}("")
-//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by 1 ether
+//    BridgeSender.bridge{value: BRIDGE_AMOUNT}() → L2_PROXY.call{value: BRIDGE_AMOUNT}("")
+//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by BRIDGE_AMOUNT
 //    (the etherDelta on the RollupUpdate records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
-//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: 1 ether}(...)
+//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: BRIDGE_AMOUNT}(...)
 //    → _processNCalls forwards through the source proxy into BridgeReceiver, which
-//    accepts the ETH via receive(). After: BridgeReceiver.balance == 1 ether.
+//    accepts the ETH via receive(). After: BridgeReceiver.balance == BRIDGE_AMOUNT.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
+// Same amount on both bridge scenarios: this deposit is exactly the escrow that
+// bridgeL2's release draws on, and it stays small enough for a parallel worker
+// funded with the default 0.1 ETH to run the trigger tx (value + gas).
+uint256 constant BRIDGE_AMOUNT = 0.001 ether;
 
 /// @notice Minimal user contract: receives a value-bearing call and forwards it to the L2 proxy.
 contract BridgeSender {
@@ -65,7 +69,7 @@ contract BridgeReceiver {
 
 abstract contract BridgeActions {
     function _callHash(address l2Destination, address sender) internal pure returns (bytes32) {
-        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, 1 ether, "");
+        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, BRIDGE_AMOUNT, "");
     }
 
     function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
@@ -74,7 +78,7 @@ abstract contract BridgeActions {
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
-            etherDelta: int192(1 ether)
+            etherDelta: int192(int256(BRIDGE_AMOUNT))
         });
 
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);
@@ -109,7 +113,7 @@ abstract contract BridgeActions {
             sourceAddress: sender,
             sourceRollupId: MAINNET_ROLLUP_ID,
             targetAddress: l2Destination,
-            value: 1 ether,
+            value: BRIDGE_AMOUNT,
             data: ""
         });
 
@@ -174,7 +178,7 @@ contract ExecuteL2 is Script, BridgeActions {
         address senderAddr = vm.envAddress("BRIDGE_SENDER");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).executeIncomingCrossChainCall{value: 1 ether}(
+        EEZL2(managerAddr).executeIncomingCrossChainCall{value: BRIDGE_AMOUNT}(
             _l2Entries(l2DestAddr, senderAddr), noL2StaticEntries()
         );
 
@@ -184,7 +188,7 @@ contract ExecuteL2 is Script, BridgeActions {
     }
 }
 
-/// @title Execute — local mode: postAndVerifyBatch tx + bridge{value: 1 ether}() tx from the EOA.
+/// @title Execute — local mode: postAndVerifyBatch tx + bridge{value: BRIDGE_AMOUNT}() tx from the EOA.
 ///        The runner mines both in one block (execute_l1_same_block), satisfying the
 ///        same-block consumption gate.
 contract Execute is Script, BridgeActions {
@@ -201,7 +205,7 @@ contract Execute is Script, BridgeActions {
                     proofSystemAddr, L2_ROLLUP_ID, _l1Entries(l2DestAddr, senderAddr), noStaticEntries()
                 )
             );
-        BridgeSender(senderAddr).bridge{value: 1 ether}();
+        BridgeSender(senderAddr).bridge{value: BRIDGE_AMOUNT}();
         console.log("done");
         vm.stopBroadcast();
     }
@@ -212,7 +216,7 @@ contract ExecuteNetwork is Script {
     function run() external view {
         address target = vm.envAddress("BRIDGE_SENDER");
         console.log("TARGET=%s", target);
-        console.log("VALUE=1000000000000000000"); // 1 ether
+        console.log("VALUE=%s", BRIDGE_AMOUNT);
         console.log("CALLDATA=%s", vm.toString(abi.encodeWithSelector(BridgeSender.bridge.selector)));
     }
 }
@@ -242,11 +246,11 @@ contract ComputeExpected is ComputeExpectedBase, BridgeActions {
         _printL2Table(l2);
 
         console.log("");
-        console.log("=== EXPECTED L1 TABLE (1 entry, 1 ETH bridge) ===");
+        console.log("=== EXPECTED L1 TABLE (1 entry, value bridge) ===");
         _logEntry(0, l1[0]);
 
         console.log("");
-        console.log("=== EXPECTED L2 TABLE (1 entry, 1 ETH receive) ===");
+        console.log("=== EXPECTED L2 TABLE (1 entry, value receive) ===");
         _logL2Entry(0, l2[0]);
     }
 }
