@@ -8,9 +8,10 @@
 #   one pooled wallet per job                — runs the scenario, nonce-isolated
 #
 # Worker funding goes through a MultiSend contract (script/e2e/shared/MultiSend.sol,
-# address cached per chain-id in multisend.txt): one `fundUpTo(address[],uint256)` tx
-# per chain tops every worker up to FUND_ETH and refunds the remainder, instead of one
-# tx per worker — devnet txpools cap pending txs per account (~20), which capped the
+# address cached per chain-id in multisend.txt): one `fundUpTo(address[],uint256,uint256)`
+# tx per chain tops every worker below FLOOR_ETH up to FUND_ETH (workers at or above
+# the floor keep their balance — no dust transfers) and refunds the remainder, instead
+# of one tx per worker — devnet txpools cap pending txs per account (~20), which capped the
 # old per-worker funding at ~20 jobs.
 #
 # Worker wallets persist in wallet-pool.csv (address,private_key — gitignored) and are
@@ -34,12 +35,17 @@
 #   --direct         skip the run faucet: fund workers directly from the
 #                    source key (anvil #2, or SOURCE_PK if set).
 #   --fund <eth>     ETH given to each worker per chain (same as FUND_ETH env)
+#   --floor <eth>    skip topping up workers already holding this much (same as
+#                    FLOOR_ETH env; default FUND_ETH / 2). Must cover the most
+#                    expensive scenario's per-chain spend, or floor-admitted
+#                    workers can run dry mid-scenario.
 #   --fresh          mint brand-new worker wallets instead of reusing the pool
 #                    (still appended to the pool, so their leftovers are reused later)
 #
 # Env knobs:
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
 #   FUND_ETH         ETH given to each worker per chain (default 0.1)
+#   FLOOR_ETH        top-up trigger threshold (default FUND_ETH / 2)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
 #   MULTISEND_BATCH  workers funded per MultiSend tx (default 100 — block-gas headroom)
 #   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
@@ -86,11 +92,15 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
         --direct) DIRECT=true; shift ;;
         --fresh)  FRESH=true; shift ;;
         --fund)   FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
+        --floor)  FLOOR_ETH="${2:?--floor needs an amount}"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fresh] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
+# Default floor = half the target; resolved after flag parsing so --fund moves it.
+FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
+
+[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fresh] [--fund <eth>] [--floor <eth>] <scenario>[:count] ..."; exit 1; }
 
 # ── Expand args into a flat job list ──
 # Each arg is <target>[:count]; target = scenario name, category/direction dir
@@ -233,14 +243,15 @@ for ((i = 0; i < NJOBS; i++)); do
 done
 
 FUND_WEI=$(cast to-wei "$FUND_ETH")
+FLOOR_WEI=$(cast to-wei "$FLOOR_ETH")
 for chain in L1 L2; do
     rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
     ms=$(ensure_multisend "$rpc") || exit 1
     for ((off = 0; off < NJOBS; off += MULTISEND_BATCH)); do
         slice=("${WALLET_ADDRS[@]:off:MULTISEND_BATCH}")
         total=$(echo "$FUND_WEI * ${#slice[@]}" | bc)
-        cast send "$ms" "fundUpTo(address[],uint256)" \
-            "[$(IFS=,; echo "${slice[*]}")]" "$FUND_WEI" --value "$total" \
+        cast send "$ms" "fundUpTo(address[],uint256,uint256)" \
+            "[$(IFS=,; echo "${slice[*]}")]" "$FUND_WEI" "$FLOOR_WEI" --value "$total" \
             --private-key "$FAUCET_PK" --rpc-url "$rpc" > /dev/null || {
             echo "Worker funding FAILED on $chain (workers $off..$((off + ${#slice[@]} - 1)))"; exit 1; }
         echo "  topped up ${#slice[@]} worker(s) on $chain via MultiSend $ms"
