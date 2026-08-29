@@ -221,6 +221,9 @@ contract Execute is Script, BridgeL2Actions {
 }
 
 /// @title ExecuteNetworkL2 — network mode: user tx fields for the L2 bridge trigger.
+/// @dev PRECONDITION: rollup 1 must already hold escrow >= BRIDGE_AMOUNT on the devnet
+///      (ether in the registry + `rollups(1).etherBalance`) — run `one_way/L1_to_L2/bridge`
+///      first if unsure; a full sequential run satisfies it automatically.
 /// Env: BRIDGE_SENDER_L2
 contract ExecuteNetworkL2 is Script {
     function run() external view {
