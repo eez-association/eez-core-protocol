@@ -35,24 +35,29 @@ Implemented today:
 1. `counter` — L1→L2 simplest, single deferred entry (no calls, no nested)
 2. `counterL2` — L2→L1 mirror (`loadExecutionTable` + proxy trigger on L2)
 3. `bridge` — L1→L2 with value + `etherDelta` state delta
-4. `multi-call-twice` — two deferred entries with **same** `proxyEntryHash` consumed sequentially
-5. `multi-call-twiceL2` — L2→L1 mirror of `multi-call-twice` (two L2 source entries, one zero-hash L1 entry with 2 calls)
-6. `multi-call-two-diff` — two deferred entries with **different** `proxyEntryHash`es
-7. `multi-call-two-diffL2` — L2→L1 mirror of `multi-call-two-diff`
-8. `counter-multi-tx` — three deferred entries with the same `proxyEntryHash`, each consumed by its OWN top-level user tx (vs `multi-call-twice`'s single-tx trigger); L2 side delivers each inbound call as its own `executeIncomingCrossChainCall` tx. Network mode fires all triggers WITHOUT waiting (pre-signed consecutive nonces — `NUM_TXS` output + `publish_user_txs_nowait`) and prints every tx hash.
-9. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
-10. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
-11. `revertCounter` — natural destination revert: the delivered call (`RevertCounter.increment()` on L2) reverts; `CALL_END(false, ...)` captures it and the source entry (`success=false`) replays the revert to the L1 caller (a `SafeCounterAndProxy` try/catch absorbs it)
-12. `revertCounterL2` — `revertCounter` mirror, L2→L1 (destination `RevertCounter` on L1)
-13. `revertFromOtherChain` — the real `revertNextNCalls` producer: `SelfCallerWithRevert` on L2 consumes the same reentrant row twice (first unwound by its inner revert); the L1 entry mirrors BOTH consumptions — `[increment span=1, increment plain]` — so the other chain's revert force-reverts the first increment on L1 (counter ends 1, not 2)
-14. `revertFromOtherChainL2` — the SIMPLEST span producer: alice calls `SelfCallerRevertOnly` on L2 directly; its one consumption unwinds with the inner revert, and L1 mirrors it as a single `increment` with `revertNextNCalls=1` — counter ends 0 (ran, returned 1, state erased)
-15. `revertFromOtherChainAndCallAgainL2` — same plus a surviving retry: two consumptions of one source entry (first unwound), mirrored on L1 as `[increment span=1, increment plain]` — counter ends 1
-16. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
-17. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
-18. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
-19. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
-20. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
-21. `flash-loan` — DeFi composite: flash loan repaid via a full L1→L2→L1 bridge round trip in one user tx (2 proxy-keyed L1 entries — the second's top-level `l2ToL1Call` releases the escrow on L1; 2 L2 deliveries — the second consumes an outgoing return leg from `expectedOutgoingCalls`)
+4. `bridgeL2` — L2→L1 ETH release (0.001 ether): the L2 trigger burns the value and the immediate zero-hash L2Tx entry releases it to the receiver (`etherDelta -`, receiver-balance assert). A release needs PRIOR escrow: local mode sets it directly on the anvil node (`anvil_setBalance` + `anvil_setStorageAt`, self-checked — `_fundEscrow`); network mode needs the devnet to already hold escrow for rollup 1, guaranteed in a full sequential run because `bridge` (1-ether deposit) sorts first
+5. `multi-call-twice` — two deferred entries with **same** `proxyEntryHash` consumed sequentially
+6. `multi-call-twiceL2` — L2→L1 mirror of `multi-call-twice` (two L2 source entries, one zero-hash L1 entry with 2 calls)
+7. `multi-call-two-diff` — two deferred entries with **different** `proxyEntryHash`es
+8. `multi-call-two-diffL2` — L2→L1 mirror of `multi-call-two-diff`
+9. `counter-multi-tx` — three deferred entries with the same `proxyEntryHash`, each consumed by its OWN top-level user tx (vs `multi-call-twice`'s single-tx trigger); L2 side delivers each inbound call as its own `executeIncomingCrossChainCall` tx. Network mode fires all triggers WITHOUT waiting (pre-signed consecutive nonces — `NUM_TXS` output + `publish_user_txs_nowait`) and prints every tx hash.
+10. `nestedCounter` — outer entry with `L2ToL1Calls[]` + `expectedL1ToL2Calls[]`; reentrant proxy call consumes a precomputed nested return
+11. `nestedCounterL2` — L2 mirror of `nestedCounter` (single entry, 1 call + 1 nested)
+12. `revertCounter` — natural destination revert: the delivered call (`RevertCounter.increment()` on L2) reverts; `CALL_END(false, ...)` captures it and the source entry (`success=false`) replays the revert to the L1 caller (a `SafeCounterAndProxy` try/catch absorbs it)
+13. `revertCounterL2` — `revertCounter` mirror, L2→L1 (destination `RevertCounter` on L1)
+14. `revertFromOtherChain` — the real `revertNextNCalls` producer: `SelfCallerWithRevert` on L2 consumes the same reentrant row twice (first unwound by its inner revert); the L1 entry mirrors BOTH consumptions — `[increment span=1, increment plain]` — so the other chain's revert force-reverts the first increment on L1 (counter ends 1, not 2)
+15. `revertFromOtherChainL2` — the SIMPLEST span producer: alice calls `SelfCallerRevertOnly` on L2 directly; its one consumption unwinds with the inner revert, and L1 mirrors it as a single `increment` with `revertNextNCalls=1` — counter ends 0 (ran, returned 1, state erased)
+16. `revertFromOtherChainAndCallAgainL2` — same plus a surviving retry: two consumptions of one source entry (first unwound), mirrored on L1 as `[increment span=1, increment plain]` — counter ends 1
+17. `nestedCallRevert` — reverting reentrant expressed as a `success: false` row in the unified reentrant table
+18. `deepNested` — two levels of nesting (`NestedCaller → CAP → Counter`)
+19. `multi-call-nested` — multi-entry mix of pure and nested entries on both L1 and L2
+20. `multi-call-nestedL2` — L2-side mirror of `multi-call-nested` (single entry, 2 calls × 1 nested each)
+21. `reentrant` — 4-hop cross-chain reentrant chain via `ReentrantCounter.deepCall(3)` (L1 entry has 2 calls + 2 cascading nested actions)
+22. `flash-loan` — DeFi composite: flash loan repaid via a full L1→L2→L1 bridge round trip in one user tx (2 proxy-keyed L1 entries — the second's top-level `l2ToL1Call` releases the escrow on L1; 2 L2 deliveries — the second consumes an outgoing return leg from `expectedOutgoingCalls`)
+23. `topLevelStaticCounter` — L1→L2 TOP-LEVEL static read, the ONLY view-only case: the batch posts 1 root-pinned reader-keyed `StaticExecutionEntry` whose cached returnData is the exported off-chain prediction (`PREDICTED_STATIC_RESULT` env bytes, captured by the actual staticcall at deploy); NOTHING executes on L2. No ComputeExpected (no events) — proof = the trigger tx, the standard no-tx eth_call query as the reader, and in-script asserts
+24. `staticCounterL2` — L2→L1 TOP-LEVEL static read: the L2 pool (same-block gate) resolves the reader-keyed entry, and the read EXECUTES for real on L1 as an immediate zero-hash L2Tx entry with one `isStatic: true` call; ComputeExpected exports the L1 side only
+25. `nestedStaticCounter` — L1→L2→STATIC-L1 nested read: the L2 delivery resolves a STATIC-kind row of `expectedOutgoingCalls` (keyed at rhFire, folds nothing); the L1 source entry EXECUTES the read for real (`isStatic` `l2ToL1Call`, same staticCcHash digest on both sides)
+26. `nestedStaticCounterL2` — L2→L1→L2→STATIC-L1, nested read at depth 2: the L1 L2Tx entry's reentrant frame carries the read in its OWN sub-array (real STATICCALL inside the NESTED frame folds); the L2 source entry resolves the STATIC row from its unified table
 
 `siblingScopes` from main is deliberately **not** ported — scope arrays don't exist in the flatten model. Its coverage is subsumed by `multi-call-two-diff`.
 

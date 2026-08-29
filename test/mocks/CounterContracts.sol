@@ -6,7 +6,14 @@ pragma solidity ^0.8.24;
 ///      test-side probe with the same attach reproduces (equals `BaseL2.CALL_GAS`).
 uint256 constant PROXY_CALL_GAS = 5_000_000;
 
-contract Counter {
+/// @notice View surface of `Counter`. Gives call sites a compile-checked handle on the
+///         auto-generated `counter()` getter (`Counter.counter.selector` is not reachable
+///         through the contract type).
+interface ICounterView {
+    function counter() external view returns (uint256);
+}
+
+contract Counter is ICounterView {
     uint256 public counter;
 
     function increment() external returns (uint256) {
@@ -55,6 +62,25 @@ contract CounterAndProxy {
     function incrementProxy() external {
         targetCounter = target.increment{gas: PROXY_CALL_GAS}();
         counter++;
+    }
+}
+
+/// @notice Counter that STATICCALL-reads a remote Counter through its cross-chain proxy before
+///         incrementing. Shares `Counter`'s `increment()` shape so proxy-driving contracts
+///         (e.g. `CounterAndProxy`) can target it unchanged; returns the value read.
+contract StaticReadCounter {
+    Counter public readTarget; // cross-chain proxy of the remote Counter
+    uint256 public counter;
+    uint256 public lastRead;
+
+    constructor(Counter _readTarget) {
+        readTarget = _readTarget;
+    }
+
+    function increment() external returns (uint256) {
+        lastRead = readTarget.counter(); // view getter -> STATICCALL through the proxy
+        counter++;
+        return lastRead;
     }
 }
 

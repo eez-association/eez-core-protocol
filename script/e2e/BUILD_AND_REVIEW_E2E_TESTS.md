@@ -16,6 +16,10 @@ Living references — when this doc and the code disagree, the code wins:
 - Nested revert, both anchorings: `revert/L1_to_L2/nestedCallRevert` and
   `revert/L2_to_L1/nestedCallRevertL2`.
 - Successful L2-originated nesting kept in one frame: `nested/L2_to_L1/nestedCounterL2`.
+- Static reads, all four homes: `static/L1_to_L2/topLevelStaticCounter` (top-level, the ONLY
+  view-only case), `static/L2_to_L1/staticCounterL2` (top-level, read executed on L1),
+  `static/L1_to_L2/nestedStaticCounter` and `static/L2_to_L1/nestedStaticCounterL2`
+  (nested, STATIC-kind rows + real `isStatic` execution) — see "Static reads" below.
 
 ## The frame-coherence invariant
 
@@ -155,6 +159,60 @@ other phase is skipped — keep both for two-sided.
   and the cross-chain tie is the mapping checklist below plus destination-state
   assertions.
 
+## Static reads (cross-chain STATICCALLs)
+
+A cross-chain read RESOLVES from prover-supplied data on the reader's chain
+(`staticCrossChainCall`, a `view` path) but — with one exception — still EXECUTES for
+real on the chain that owns the read state. Split by where the read fires:
+
+- **Inside an execution** (nested): the reader's chain resolves it from a STATIC-kind
+  row of the active entry's unified reentrant table, keyed
+  `keccak(staticCcHash, rollingHash-at-fire)` — position-pinned, never consumed, and
+  folding NOTHING into the rolling hash (the surrounding `CALL_END` retData pins the
+  value instead). The chain that owns the state executes the read for real: that is
+  what `isStatic: true` on `L2ToL1Call` exists for — put the read in the destination
+  entry's `l2ToL1Calls[]` (or the reentrant frame's own sub-array when it fires inside
+  a nested frame) and `_processNCalls` dispatches it via STATICCALL through the
+  reader's source proxy into the live contract, folding
+  `CALL_BEGIN(staticCcHash)` / `CALL_END(success, realRetData)`.
+- **Top-level from L2** (outside any execution, reading L1): the reader's chain
+  resolves it from the `staticEntries` pool (same-block gate, matched by hash alone),
+  and the read still executes for real on L1 — the L2 user tx maps to its usual
+  zero-hash L2Tx entry, whose `l2ToL1Calls[0]` is the `isStatic: true` read.
+- **Top-level from L1 reading L2** — the ONLY view-only case: L2 executes NOTHING (no
+  delivery exists for it). The read resolves from the routed rollup's
+  `staticEntryQueue` on L1 (match = key + `destinationRollupId` + every root pin
+  live; no block gate — the pins bound staleness), and the L2-side truth is the pins
+  plus asserting the real producer's live value where it is set.
+
+The cross-chain tie for every static read is digest equality: both the reader-side key
+and the destination-side executed call fold the SAME `crossChainCallHash` preimage —
+`isStatic = true`, source = the reader contract at ITS chain's rollup id, `value = 0`,
+`callGas = 0` always (static keys never fold gas, even under `USE_GAS_LEFT`) — plus
+identical result bytes, which must come from the real contract's live state (rule 3).
+
+Authoring notes specific to static scenarios:
+
+- **Keys fold the proxy caller's address.** A static entry only matches reads from the
+  caller it was keyed to — any other sender gets `ExecutionNotFound`.
+- **Predictions are obtained, not hardcoded** (view-only top-level L1→L2 case only,
+  `topLevelStaticCounter`): the producer-chain deploy performs the actual staticcall
+  and exports its raw returndata (`PREDICTED_STATIC_RESULT`, env bytes — generic over
+  return types); the entry caches those bytes verbatim, replicating how a composer
+  predicts the result from the node. A client learns the same result through the
+  standard no-tx query: an eth_call through the proxy impersonating the READER
+  (`vm.prank(address(reader))` — forge never broadcasts static calls), resolving the
+  SAME entry the trigger uses.
+- **ComputeExpected only for sides with events.** Static resolution emits no events
+  and a posted L1 `staticEntries` batch emits nothing per-entry either. Export
+  `EXPECTED_*` lines only for sides that actually have `ExecutionEntry`s
+  (`staticCounterL2` exports L1 only); a scenario with NO entries on either side
+  (`topLevelStaticCounter`) must omit `ComputeExpected` entirely — the runner fails a
+  ComputeExpected that drives zero verifiers — and carry its proof in the trigger tx,
+  the no-tx query, and in-script `require`s.
+- **A sub-call-less static entry needs `rollingHash == 0`** (the untagged static
+  accumulator seeds at zero and an empty sub-array is always compared).
+
 ## Authoring rules (the audit checklist)
 
 Every scenario must satisfy all of these; they are what the suite is audited against.
@@ -272,8 +330,8 @@ deliveries for nested calls, and call/result multiplicity across both views.
 
 ## Gotchas
 
-- **No `@L1` / `@L2` in `///` docblocks.** Solidity natspec parses `@…` as a tag. Use
-  `(CAP on L1, MAINNET)` phrasing in `///` blocks; `//` comments are fine.
+Scenario-model gotchas:
+
 - **`msg.value` conservation** for `executeIncomingCrossChainCall` — `msg.value` mints
   the total inbound ETH the committed calls consume — a prover constraint, no on-chain
   check (an under-mint fails as a value call with insufficient balance).
@@ -282,6 +340,26 @@ deliveries for nested calls, and call/result multiplicity across both views.
   manually in `Execute`/`ExecuteL2`.
 - **Strict ascending order** for `proofSystems` and `rollupIdsWithProofSystems` in the
   batch. The `E2EHelpers.sol` builders handle the single-prover / single-rollup case.
+
+Solidity / toolchain gotchas:
+
+- **No `@L1` / `@L2` in `///` docblocks.** Solidity natspec parses `@…` as a tag. Use
+  `(CAP on L1, MAINNET)` phrasing in `///` blocks; `//` comments are fine.
+- **Unattributed via-ir stack-too-deep.** solc can fail with `Variable ... too deep in
+  the stack` naming NO contract when a `ComputeExpected` carries several big
+  `abi.encode`s. The failure is order-sensitive: printing `EXPECTED_L1_STEPS` BEFORE
+  `EXPECTED_L1_TABLE` is what resolves it in `staticCounterL2`. Bisect by disabling
+  function bodies, and trust only the full `forge build` — a single-file
+  `forge build --contracts <file>` composes a different compilation unit and can blame
+  an innocent file.
+- **Public getter selectors.** `Counter.counter.selector` does not compile (contract-
+  type lookup can't see public-variable getters) and the instance-bound form
+  (`Counter(address(0)).counter.selector`) is not `pure` for solc. Declare a small
+  interface the mock implements (`ICounterView` in `test/mocks/CounterContracts.sol`)
+  and use `abi.encodeCall(ICounterView.counter, ())` / `ICounterView.counter.selector`.
+- **`forge fmt` mangles `override` on public variables.** A state variable declared
+  `public override` makes fmt mis-indent every following contract in the file; interface
+  implementations don't need the keyword — drop it.
 
 ## Verifying your scenario
 
