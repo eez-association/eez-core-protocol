@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @notice Devnet funding helper: sends the same amount of ether to many
-///         accounts in one transaction, so the parallel e2e runner submits one
-///         funding tx per chain instead of one per worker (devnet txpools cap
-///         pending txs per account at ~20).
+/// @notice Devnet funding helper: tops many accounts up to a target balance in
+///         one transaction, so the parallel e2e runner submits one funding tx
+///         per chain instead of one per worker (devnet txpools cap pending txs
+///         per account at ~20).
 contract MultiSend {
-    error ValueMismatch(uint256 provided, uint256 required);
     error SendFailed(address to);
+    error RefundFailed();
 
-    /// Sends `amount` wei to every address in `to`; msg.value must match exactly.
-    function fund(address[] calldata to, uint256 amount) external payable {
-        uint256 required = to.length * amount;
-        if (msg.value != required) revert ValueMismatch(msg.value, required);
+    /// Tops every account in `to` up to `target` wei (accounts already at or
+    /// above it get nothing) and refunds the unspent msg.value to the caller —
+    /// so the caller attaches the worst case (to.length * target) without
+    /// overpaying for reused, still-funded accounts.
+    function fundUpTo(address[] calldata to, uint256 target) external payable {
         for (uint256 i = 0; i < to.length; i++) {
-            (bool ok,) = to[i].call{value: amount}("");
+            uint256 bal = to[i].balance;
+            if (bal >= target) continue;
+            (bool ok,) = to[i].call{value: target - bal}("");
             if (!ok) revert SendFailed(to[i]);
+        }
+        if (address(this).balance > 0) {
+            (bool ok,) = msg.sender.call{value: address(this).balance}("");
+            if (!ok) revert RefundFailed();
         }
     }
 }

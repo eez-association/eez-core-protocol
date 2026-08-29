@@ -5,12 +5,19 @@
 # Wallet hierarchy:
 #   source key (anvil #2 or SOURCE_PK)       — funds the run faucet ↓ (or workers directly with --direct)
 #   run faucet (fresh wallet, in the run dir)  — funds ↓ via MultiSend (one batched tx per chain)
-#   one ephemeral wallet per job             — runs the scenario, nonce-isolated
+#   one pooled wallet per job                — runs the scenario, nonce-isolated
 #
 # Worker funding goes through a MultiSend contract (script/e2e/shared/MultiSend.sol,
-# address cached per chain-id in multisend.txt): one `fund(address[],uint256)` tx per
-# chain funds every worker, instead of one tx per worker — devnet txpools cap pending
-# txs per account (~20), which capped the old per-worker funding at ~20 jobs.
+# address cached per chain-id in multisend.txt): one `fundUpTo(address[],uint256)` tx
+# per chain tops every worker up to FUND_ETH and refunds the remainder, instead of one
+# tx per worker — devnet txpools cap pending txs per account (~20), which capped the
+# old per-worker funding at ~20 jobs.
+#
+# Worker wallets persist in wallet-pool.csv (address,private_key — gitignored) and are
+# reused across runs: leftover balances count toward the next run's top-up, so nothing
+# is stranded. The pool grows on demand when a run needs more wallets than it holds.
+# Because runs share the pool from index 0, do NOT run two orchestrator instances
+# concurrently — they would hand the same wallets to different jobs and race nonces.
 #
 # Usage:
 #   bash script/e2e/run/network-parallel.sh [flags] <target>[:count] ...
@@ -27,6 +34,8 @@
 #   --direct         skip the run faucet: fund workers directly from the
 #                    source key (anvil #2, or SOURCE_PK if set).
 #   --fund <eth>     ETH given to each worker per chain (same as FUND_ETH env)
+#   --fresh          mint brand-new worker wallets instead of reusing the pool
+#                    (still appended to the pool, so their leftovers are reused later)
 #
 # Env knobs:
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
@@ -70,16 +79,18 @@ MAX_PARALLEL="${MAX_PARALLEL:-$DEFAULT_MAX_PARALLEL}"
 FUND_ETH="${FUND_ETH:-$DEFAULT_FUND_ETH}"
 SOURCE_PK="${SOURCE_PK:-$DEFAULT_SOURCE_PK}"
 DIRECT=false
+FRESH=false
 
 while [[ $# -gt 0 && "$1" == --* ]]; do
     case "$1" in
         --direct) DIRECT=true; shift ;;
+        --fresh)  FRESH=true; shift ;;
         --fund)   FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
+[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fresh] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
 
 # ── Expand args into a flat job list ──
 # Each arg is <target>[:count]; target = scenario name, category/direction dir
@@ -123,6 +134,9 @@ forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
 exec 9>"$SCRIPT_DIR/.faucet.lock"
 flock 9
 
+MULTISEND_BATCH="${MULTISEND_BATCH:-100}"
+NCHUNKS=$(( (NJOBS + MULTISEND_BATCH - 1) / MULTISEND_BATCH ))
+
 if $DIRECT; then
     # ── Direct mode: fund workers straight from the source key ──
     FAUCET_PK="$SOURCE_PK"
@@ -148,7 +162,9 @@ else
     # ── Step 2: fund the run faucet from the source key ──
     # bc, not $(( )) — FUND_ETH may be fractional (e.g. 0.2). Send the amount in
     # wei: bc prints 0.6 as ".6", which cast's <eth>ether parser rejects.
-    NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + 0.1" | bc)")
+    # 0.05/chunk covers each MultiSend tx's own gas (observed ~0.035 at 100
+    # workers/chunk); fundUpTo refunds the value reused wallets don't need.
+    NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + $NCHUNKS * 0.05 + 0.1" | bc)")
     for chain in L1 L2; do
         rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
         HAVE_WEI=$(cast balance "$FAUCET_ADDR" --rpc-url "$rpc")
@@ -164,20 +180,24 @@ else
     done
 fi
 
-# ── Step 3: one ephemeral wallet per job, funded via MultiSend ──
-# One `fund(address[],uint256)` tx per chain (chunked by MULTISEND_BATCH) funds
-# every worker — a single-sender tx count that devnet txpool per-account limits
-# never touch.
-MULTISEND_BATCH="${MULTISEND_BATCH:-100}"
+# ── Step 3: one pooled wallet per job, topped up via MultiSend ──
+# One `fundUpTo(address[],uint256)` tx per chain (chunked by MULTISEND_BATCH)
+# tops every worker up to FUND_ETH — a single-sender tx count that devnet
+# txpool per-account limits never touch. Reused wallets keep their leftover
+# balance; the unspent value refunds to the faucet in the same tx.
 MULTISEND_FILE="$SCRIPT_DIR/multisend.txt"
+POOL_FILE="$SCRIPT_DIR/wallet-pool.csv"
 
 # Returns (stdout) the MultiSend address for the chain at $1, deploying it from
-# the faucet key and caching it in multisend.txt (keyed by chain id) if needed.
+# the faucet key and caching it in multisend.txt (keyed by chain id). The cached
+# address is reused only when its on-chain code matches the local artifact, so a
+# contract edit (or a devnet reset) triggers a redeploy.
+MULTISEND_CODE=$(forge inspect MultiSend deployedBytecode)
 ensure_multisend() {
     local rpc=$1 chain_id addr
     chain_id=$(cast chain-id --rpc-url "$rpc") || return 1
     addr=$(sed -n "s/^$chain_id: *//p" "$MULTISEND_FILE" 2>/dev/null)
-    if [[ -n "$addr" && $(cast code "$addr" --rpc-url "$rpc") != "0x" ]]; then
+    if [[ -n "$addr" && $(cast code "$addr" --rpc-url "$rpc") == "$MULTISEND_CODE" ]]; then
         echo "$addr"; return 0
     fi
     addr=$(forge create script/e2e/shared/MultiSend.sol:MultiSend --broadcast \
@@ -190,13 +210,24 @@ ensure_multisend() {
     echo "$addr"
 }
 
+# Take the first NJOBS wallets from the persistent pool, minting (and appending)
+# new ones only when the pool runs short.
+touch "$POOL_FILE"; chmod 600 "$POOL_FILE"
+POOL_LINES=()
+$FRESH || mapfile -t POOL_LINES < "$POOL_FILE"
+echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed$($FRESH && echo ' (--fresh: minting new)')"
 WALLET_PKS=(); WALLET_ADDRS=()
 echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
 chmod 600 "$RUN_DIR/wallets.csv"
 for ((i = 0; i < NJOBS; i++)); do
-    new=$(cast wallet new)
-    waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-    wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+    if (( i < ${#POOL_LINES[@]} )); then
+        waddr="${POOL_LINES[$i]%%,*}"; wpk="${POOL_LINES[$i]##*,}"
+    else
+        new=$(cast wallet new)
+        waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
+        wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+        echo "$waddr,$wpk" >> "$POOL_FILE"
+    fi
     WALLET_PKS+=("$wpk"); WALLET_ADDRS+=("$waddr")
     echo "${JOB_NAMES[$i]},$waddr,$wpk" >> "$RUN_DIR/wallets.csv"
 done
@@ -208,11 +239,11 @@ for chain in L1 L2; do
     for ((off = 0; off < NJOBS; off += MULTISEND_BATCH)); do
         slice=("${WALLET_ADDRS[@]:off:MULTISEND_BATCH}")
         total=$(echo "$FUND_WEI * ${#slice[@]}" | bc)
-        cast send "$ms" "fund(address[],uint256)" \
+        cast send "$ms" "fundUpTo(address[],uint256)" \
             "[$(IFS=,; echo "${slice[*]}")]" "$FUND_WEI" --value "$total" \
             --private-key "$FAUCET_PK" --rpc-url "$rpc" > /dev/null || {
             echo "Worker funding FAILED on $chain (workers $off..$((off + ${#slice[@]} - 1)))"; exit 1; }
-        echo "  funded ${#slice[@]} worker(s) on $chain via MultiSend $ms"
+        echo "  topped up ${#slice[@]} worker(s) on $chain via MultiSend $ms"
     done
 done
 echo "All workers funded."
