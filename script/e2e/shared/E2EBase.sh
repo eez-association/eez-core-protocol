@@ -132,7 +132,97 @@ deploy_contracts() {
             return 1
         fi
         _export_outputs "$out" --echo
+        # Staged prepare: persist the outputs — the deferred verify stage runs in
+        # a fresh process and reloads them from this file.
+        if [[ -n "${E2E_JOB_DIR:-}" ]]; then
+            _export_outputs "$out" --echo >> "$E2E_JOB_DIR/deploy-env.env"
+        fi
     done <<< "$contracts"
+}
+
+# ── Pre-sign one Deploy* contract's txs from a DRY RUN (staged wave prepare) ──
+# Runs the INDEX-th (1-based) Deploy* contract of SOL WITHOUT --broadcast. The
+# simulation prints the same address outputs a real run would — CREATE addresses
+# depend only on wallet+nonce, which stays truthful because the orchestrator
+# mines each wave before the next one is dry-run — and forge writes the planned
+# txs to <out_dir>/broadcast/<sol>/<chainid>/dry-run/run-latest.json (private
+# per job via FOUNDRY_BROADCAST, so parallel jobs of the same scenario don't
+# clobber each other). Each planned tx is re-signed with cast mktx and appended
+# to OUT_DIR/deploytxs-wave<INDEX>.txt as "<L1|L2> <rawtx>"; exported env
+# outputs accumulate in OUT_DIR/deploy-env.env for later waves and the finish
+# step. Returns 2 when SOL has fewer than INDEX Deploy contracts (job done).
+presign_deploy_contract() {
+    local sol="$1" index="$2" l1_rpc="$3" l2_rpc="$4" pk="$5" out_dir="$6"
+    local contract
+    contract=$(grep -oE 'contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | sed -n "${index}p")
+    [[ -n "$contract" ]] || return 2
+
+    local rpc label
+    if [[ "$contract" == *L2* ]]; then rpc="$l2_rpc"; label="L2"; else rpc="$l1_rpc"; label="L1"; fi
+
+    # Earlier waves' outputs feed this wave's vm.env* reads.
+    if [[ -f "$out_dir/deploy-env.env" ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source "$out_dir/deploy-env.env"
+        set +a
+    fi
+
+    # Forge only rewrites run-latest.json when the script plans txs; clear the
+    # previous wave's file so a zero-tx contract reads as "nothing to sign"
+    # instead of re-signing already-mined txs.
+    local out rc=0 dry_json sender
+    dry_json="$out_dir/broadcast/$(basename "$sol")/$(cast chain-id --rpc-url "$rpc")/dry-run/run-latest.json"
+    rm -f "$dry_json"
+    out=$(FOUNDRY_BROADCAST="$out_dir/broadcast" forge script "$sol:$contract" \
+        --rpc-url "$rpc" --private-key "$pk" 2>&1) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "DRY RUN FAILED: $contract ($label) — forge output tail:"
+        echo "$out" | tail -25
+        return 1
+    fi
+    local vars
+    vars=$(echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true)
+    if [[ -n "$vars" ]]; then
+        echo "$vars"
+        echo "$vars" >> "$out_dir/deploy-env.env"
+        while IFS= read -r line; do export "$line"; done <<< "$vars"
+    fi
+
+    [[ -f "$dry_json" ]] || { echo "$contract ($label): no planned txs"; return 0; }
+    sender=$(cast wallet address --private-key "$pk" | tr '[:upper:]' '[:lower:]')
+
+    # Re-sign each planned tx. The dry-run nonces are correct as-is: earlier
+    # waves are mined before this one is simulated, and the wallet is dedicated.
+    local n i to nonce value gas input raw
+    n=$(jq -r --arg s "$sender" \
+        '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)] | length' "$dry_json")
+    (( n > 0 )) || { echo "No planned txs for $sender in $dry_json"; return 1; }
+    for ((i = 0; i < n; i++)); do
+        IFS=$'\t' read -r to nonce value gas input < <(jq -r --arg s "$sender" --argjson i "$i" \
+            '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)][$i].transaction
+             | "\(.to)\t\(.nonce)\t\(.value)\t\(.gas)\t\(.input)"' "$dry_json") || true
+        [[ -n "${input:-}" && "$input" != "null" ]] || { echo "Bad planned tx $i in $dry_json"; return 1; }
+        gas=$(( $(printf "%d" "$gas") * 5 / 4 ))   # +25% over the dry-run estimate
+        # Explicit rc checks: callers invoke this function inside a condition
+        # (`|| rc=$?`), which suspends set -e for the whole body — an unguarded
+        # mktx failure would silently produce an empty raw tx.
+        # For --create the flags must PRECEDE it: cast parses everything after
+        # <CODE> as [SIG] [ARGS].
+        raw=""
+        if [[ "$to" == "null" || -z "$to" ]]; then
+            raw=$(cast mktx --value "$(printf "%d" "$value")wei" --nonce "$(printf "%d" "$nonce")" \
+                --gas-limit "$gas" --private-key "$pk" --rpc-url "$rpc" \
+                --create "$input") || raw=""
+        else
+            raw=$(cast mktx "$to" "$input" \
+                --value "$(printf "%d" "$value")wei" --nonce "$(printf "%d" "$nonce")" \
+                --gas-limit "$gas" --private-key "$pk" --rpc-url "$rpc") || raw=""
+        fi
+        [[ -n "$raw" ]] || { echo "cast mktx FAILED for planned tx $i of $contract ($label)"; return 1; }
+        echo "$label $raw" >> "$out_dir/deploytxs-wave$index.txt"
+    done
+    echo "presigned $n tx(s) for $contract ($label) → deploytxs-wave$index.txt"
 }
 
 # ── Strip forge execution traces ──

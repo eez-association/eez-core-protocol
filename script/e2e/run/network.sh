@@ -81,6 +81,77 @@ for var in RPC PK ROLLUPS L2_RPC MANAGER_L2; do
     fi
 done
 
+# ── Stage split (driven by network-staged.sh) ──
+#   E2E_STAGE=prepare → steps 1–3 only: deploy, pre-sign the trigger tx(s), run
+#     ComputeExpected, persist everything in E2E_JOB_DIR, exit without sending.
+#   E2E_STAGE=verify  → reload that manifest plus the mined trigger receipts
+#     (E2E_JOB_DIR/txs.txt, written by the staged sender) and run only the
+#     verification steps (5+).
+#   E2E_STAGE=full (default) → the classic single-run behavior.
+E2E_STAGE="${E2E_STAGE:-full}"
+
+if [[ "$E2E_STAGE" == "verify" ]]; then
+# ══════════════════════════════════════════════
+#  Verify stage: rebuild the state steps 1–4 would have produced.
+# ══════════════════════════════════════════════
+[[ -n "${E2E_JOB_DIR:-}" && -f "$E2E_JOB_DIR/manifest.env" ]] || {
+    echo "E2E_STAGE=verify needs E2E_JOB_DIR containing manifest.env"; exit 1; }
+# shellcheck disable=SC1091
+source "$E2E_JOB_DIR/manifest.env"
+COMPUTE_OUT=$(cat "$E2E_JOB_DIR/compute.out")
+# Deploy* outputs (COUNTER_PROXY, READER_L1, ...) — the VerifyNetwork* self-checks
+# read them from the environment, same as in a full run.
+if [[ -f "$E2E_JOB_DIR/deploy-env.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$E2E_JOB_DIR/deploy-env.env"
+    set +a
+fi
+# Pre-send block snapshot, recorded ONCE by the orchestrator right before its
+# send phase — it bounds every job's scan ranges (the per-run analogue of the
+# per-job *_BLOCK_BEFORE snapshots the full run takes).
+# shellcheck disable=SC1090
+source "${E2E_SNAPSHOT:-$E2E_JOB_DIR/../../snapshot.env}"
+
+mapfile -t TX_HASHES < "$E2E_JOB_DIR/txs.txt"
+[[ ${#TX_HASHES[@]} -gt 0 ]] || { echo "ERROR: no sent txs in $E2E_JOB_DIR/txs.txt"; exit 1; }
+# Every pre-signed trigger must have gone out — a partial multi-tx send is an
+# orchestration failure, not something the protocol checks below should judge.
+[[ ${#TX_HASHES[@]} -eq "${_TX_COUNT:-1}" ]] || {
+    echo "ERROR: ${#TX_HASHES[@]} sent tx(s) but the manifest expects ${_TX_COUNT:-1} - partial send (see the run's send-failed.log)"; exit 1; }
+if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+    _RECEIPT_RPC="${L2_FRONT:-$L2_RPC}"
+else
+    _RECEIPT_RPC="${L1_FRONT:-$RPC}"
+fi
+TX_BLOCK_NUMBERS=()
+for _h in "${TX_HASHES[@]}"; do
+    _b=$(cast receipt "$_h" blockNumber --rpc-url "$_RECEIPT_RPC" 2>/dev/null) || _b=""
+    [[ -n "$_b" ]] || { echo "ERROR: no receipt for sent tx $_h - it was never mined (monitor stage should have caught this)"; exit 1; }
+    TX_BLOCK_NUMBERS+=("$_b")
+done
+TX_HASH="${TX_HASHES[0]}"
+TX_BLOCK_NUMBER="${TX_BLOCK_NUMBERS[0]}"
+for _b in "${TX_BLOCK_NUMBERS[@]}"; do
+    [[ "$_b" -lt "$TX_BLOCK_NUMBER" ]] && TX_BLOCK_NUMBER="$_b"
+done
+if [[ "${_TX_COUNT:-1}" -gt 1 ]]; then
+    _UNIQ_BLOCKS=$(printf "%s\n" "${TX_BLOCK_NUMBERS[@]}" | sort -un | paste -sd, -)
+    echo "trigger blocks: $_UNIQ_BLOCKS"
+    [[ "$_UNIQ_BLOCKS" == *,* ]] && echo "NOTE: composer split the triggers across blocks - single-batch verification below may fail; use the tx hashes above with decode-block.sh"
+fi
+
+L1_BATCH_TX=""
+if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+    L2_BLOCK="$TX_BLOCK_NUMBER"; L1_BLOCK=""
+else
+    L1_BLOCK="$TX_BLOCK_NUMBER"; L2_BLOCK=""
+fi
+echo "reloaded $E2E_JOB_DIR: ${#TX_HASHES[@]} trigger tx(s), first block $TX_BLOCK_NUMBER ($_TRIGGER_CHAIN trigger)"
+
+else
+# ══ full + prepare stages: steps 1–4 (the `fi` closing this block sits after step 4) ══
+
 # ══════════════════════════════════════════════
 #  1. Deploy app contracts
 #     Auto-discovers Deploy* contracts in file order.
@@ -101,8 +172,32 @@ if [[ -n "${L1_FRONT:-}" ]]; then
     done
 fi
 
+# Wave-mode prepare (E2E_PREPARE_STEP, set by network-staged.sh):
+#   deploy:<k> → dry-run + pre-sign ONLY the k-th Deploy* contract, then exit
+#                (0 = txs written, 2 = no such contract, 1 = failure); the
+#                orchestrator sends and mines each wave before the next.
+#   finish     → deploys are already mined; reload their exported addresses and
+#                continue with trigger signing + ComputeExpected below.
+# Unset → classic one-pass prepare/full behavior.
+if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == deploy:* ]]; then
+    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_PREPARE_STEP=deploy needs E2E_JOB_DIR"; exit 1; }
+    mkdir -p "$E2E_JOB_DIR"
+    _RC=0
+    presign_deploy_contract "$SOL" "${E2E_PREPARE_STEP#deploy:}" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
+    exit "$_RC"
+fi
+
 echo "====== Deploy ======"
-deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "finish" ]]; then
+    [[ -f "${E2E_JOB_DIR:-}/deploy-env.env" ]] || { echo "E2E_PREPARE_STEP=finish needs E2E_JOB_DIR/deploy-env.env"; exit 1; }
+    set -a
+    # shellcheck disable=SC1091
+    source "$E2E_JOB_DIR/deploy-env.env"
+    set +a
+    echo "reloaded deploy outputs from deploy-env.env (deploys mined by the wave orchestrator)"
+else
+    deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+fi
 
 # ══════════════════════════════════════════════
 #  2. Create signed raw transaction
@@ -146,6 +241,21 @@ else
         exit 1
     fi
     echo "no ComputeExpected - event verification off; VerifyNetwork* asserts are the proof"
+fi
+
+if [[ "$E2E_STAGE" == "prepare" ]]; then
+    # Persist everything the staged send + verify phases need, broadcast nothing.
+    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_STAGE=prepare needs E2E_JOB_DIR"; exit 1; }
+    mkdir -p "$E2E_JOB_DIR"
+    printf '%s\n' "${RLP_ENCODED_TXS[@]}" > "$E2E_JOB_DIR/rawtxs.txt"
+    echo "$COMPUTE_OUT" > "$E2E_JOB_DIR/compute.out"
+    declare -p _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
+        EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L2_TABLE EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
+        > "$E2E_JOB_DIR/manifest.env"
+    echo ""
+    echo "====== Prepared ($_TX_COUNT pre-signed tx, $_TRIGGER_CHAIN trigger) → $E2E_JOB_DIR ======"
+    exit 0
 fi
 
 # ══════════════════════════════════════════════
@@ -192,6 +302,8 @@ else
     fi
     L1_BLOCK="$TX_BLOCK_NUMBER"  # batch lands with the (first) user tx; later blocks via range scan
 fi
+
+fi  # ── end of the full/prepare-stage block (steps 1–4); verification below is stage-shared ──
 
 # ══════════════════════════════════════════════
 #  5. Find & verify L1 batch (BatchPosted event)
@@ -359,26 +471,74 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
     # not kill the script under set -e — the fallback below pins the single tx.
     _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
     [[ -z "$_CANDIDATES" ]] && _CANDIDATES="$L1_BATCH_TX"
+
+    # Candidate calldata/metadata, cached per run when the orchestrator provides
+    # E2E_L1TX_CACHE: parallel verify jobs sift the SAME settlement txs, so each
+    # input/receipt should hit the RPC once per run, not once per job.
+    _cand_input() {  # $1=txhash → calldata on stdout
+        local cf="${E2E_L1TX_CACHE:-}/$1.input" inp
+        [[ -n "${E2E_L1TX_CACHE:-}" && -s "$cf" ]] && { cat "$cf"; return 0; }
+        inp=$(cast tx "$1" input --rpc-url "$RPC" 2>/dev/null) || return 1
+        if [[ -n "${E2E_L1TX_CACHE:-}" ]]; then
+            mkdir -p "$E2E_L1TX_CACHE"
+            printf '%s' "$inp" > "$cf.$$" && mv "$cf.$$" "$cf"   # tmp+mv: concurrent jobs write the same file
+        fi
+        printf '%s' "$inp"
+    }
+    _cand_meta() {  # $1=txhash → "to blockNumber" on stdout
+        local cf="${E2E_L1TX_CACHE:-}/$1.meta" to blk
+        [[ -n "${E2E_L1TX_CACHE:-}" && -s "$cf" ]] && { cat "$cf"; return 0; }
+        to=$(cast tx "$1" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        blk=$(cast receipt "$1" blockNumber --rpc-url "$RPC" 2>/dev/null)
+        [[ -n "$to" && -n "$blk" ]] || return 1
+        if [[ -n "${E2E_L1TX_CACHE:-}" ]]; then
+            mkdir -p "$E2E_L1TX_CACHE"
+            printf '%s %s' "$to" "$blk" > "$cf.$$" && mv "$cf.$$" "$cf"
+        fi
+        printf '%s %s' "$to" "$blk"
+    }
+
+    # Prefilter: the expected table's 32-byte words shaped like ABI-encoded
+    # addresses are job-distinctive (every job deploys its own app contracts) and
+    # appear verbatim in the posted calldata (addresses are never neutralized).
+    # A candidate containing none of them cannot hold our entries — skip it
+    # without a forge decode. Words below 2^48 (52+ leading zero chars) are
+    # excluded: ABI offsets/lengths/ids match the address shape but are small
+    # numbers, and one of those in the filter would match every batch. Real
+    # addresses keep high bytes non-zero (a zero top-12-hex-digit address is a
+    # 2^-48 event). No qualifying words → filter off, try all candidates.
+    _ADDR_FILTER=$(echo "${EXPECTED_L1_TABLE#0x}" | fold -w64 \
+        | grep -iE '^0{24}[0-9a-f]{40}$' | grep -vE '^0{52}' | sort -u | paste -sd'|' - || true)
+
     echo ""
-    echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx) ======"
+    echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx$([[ -n "$_ADDR_FILTER" ]] && echo ", address prefilter on")) ======"
     _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-180} ))
     _CALLDATA_OK=false
     _LAST_FAIL=""
     _REJECTED=""   # memo of non-registry candidates: skip silently on re-scan iterations
     while true; do
         for _TX in $_CANDIDATES; do
+            # Deadline inside the pass too: with the prefilter off (address-less
+            # tables) a big range means hundreds of forge decodes — candidates
+            # come in block order, so the true batch is early and a timeout here
+            # is a genuine miss, not impatience.
+            [[ $(date +%s) -ge $_CD_DEADLINE ]] && break
             [[ ",$_REJECTED," == *",$_TX,"* ]] && continue
-            _BATCH_TO=$(cast tx "$_TX" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-            _BATCH_INPUT=$(cast tx "$_TX" input --rpc-url "$RPC" 2>/dev/null)
+            _BATCH_INPUT=$(_cand_input "$_TX") || continue
+            [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
+            if [[ -n "$_ADDR_FILTER" ]] && ! grep -qiE "$_ADDR_FILTER" <<< "$_BATCH_INPUT"; then
+                _REJECTED="$_REJECTED,$_TX"   # holds none of our app addresses → not our batch
+                continue
+            fi
+            _BATCH_TO=""; _BATCH_BLOCK=""
+            read -r _BATCH_TO _BATCH_BLOCK < <(_cand_meta "$_TX") || true
+            [[ -z "$_BATCH_BLOCK" ]] && continue
             if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
                 # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
                 echo "NOTE: candidate $_TX targets ${_BATCH_TO:-<unknown>} (not the registry) - skipped"
                 _REJECTED="$_REJECTED,$_TX"
                 continue
             fi
-            [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
-            _BATCH_BLOCK=$(cast receipt "$_TX" blockNumber --rpc-url "$RPC" 2>/dev/null)
-            [[ -z "$_BATCH_BLOCK" ]] && continue
             if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" \
                 --fork-block-number "$((_BATCH_BLOCK))" \
