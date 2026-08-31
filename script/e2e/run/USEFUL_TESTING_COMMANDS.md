@@ -16,6 +16,25 @@ still appended to it, so their leftovers are recovered later).
 export DEVNET_ENV=chain.env2
 ```
 
+## Build the artifacts first
+
+Every runner starts with a `forge build`; with `via_ir = true` a **cold** build
+takes ~3 minutes and the staged runner prints nothing else meanwhile (it shows
+`== forge build (warming artifacts…)`), so run it yourself once to see the
+compiler output and skip the wait inside the run:
+
+```bash
+forge build
+```
+
+Why it goes cold: `forge script <file>:<Contract>` rewrites
+`cache/solidity-files-cache.json` with only that script's dependency subset, so
+after any run's parallel forge phases the next `forge build` recompiles the rest.
+`network-staged.sh` guards against this (it keeps the warm cache from its first
+build and restores it before every forge phase and on exit — back-to-back
+staged runs build in well under a second); `network-parallel.sh` /
+`network-sequential.sh` do not, so expect a cold build after those.
+
 ## Big parallel load mix (770 jobs)
 
 100× the counters, 50× the nested / multi-call / multi-tx / revert families, 20× reentrant:
@@ -65,6 +84,9 @@ bash script/e2e/run/network-staged.sh counter:2
 # The 770-job load mix through the staged runner
 DEVNET_ENV=chain.env2 PREPARE_PARALLEL=30 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
+# Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
+bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10
+
 # Send-only now, assess later at a gentle pace
 DEVNET_ENV=chain.env2 bash script/e2e/run/network-staged.sh --no-verify counter:1000
 VERIFY_PARALLEL=4 bash script/e2e/run/network-staged.sh --verify-only tmp/e2e-staged-net/<ts>
@@ -101,6 +123,28 @@ skips jobs whose verify.log already passed. Jobs the prepare phase dropped keep 
 `.prepare-failed` marker so they stay in the fail count even on a truncated run. Verification shares a per-run settlement-calldata
 cache and prefilters candidate txs by the job's own contract addresses, so
 hundreds of parallel sibling settlements don't grind the calldata matcher.
+
+## Settlement correlation RPC (`eez_getSettlementByL2Block` & co.)
+
+Composer/follower L2 nodes can expose the canonical L2-block ⇄ L1-settlement
+mapping. `network.sh` probes the L2 RPC once per verification
+(`eez_correlation_detect` in `E2EBase.sh`) and, when the method exists:
+
+- L2 trigger: `eez_getSettlementByL2Block(<receipt block>)` is polled until the
+  block is settled, then only that L1 block is verified and only the named
+  posting tx is calldata-decoded — no `[L1_BLOCK_BEFORE..latest]` scan, no
+  candidate sifting.
+- L1 trigger: `eez_getSettledL2RangesByL1Block(<settlement block>)` gives the
+  L2 range the batch proved; the composer puts every cross-chain system tx of a
+  batch in the LAST block of that range, so the L2 call scan starts at
+  `lastBlockNumber` instead of at the pre-trigger snapshot (upper bound stays
+  "latest").
+
+Networks without the method (-32601 / no answer) keep today's range scans;
+`E2E_CORRELATION=off` forces them. Response field names are matched by shape
+(`_eez_pick`); an unrecognised shape is logged as
+`eez_…: unrecognised response shape: {…}` and falls back — pin the exact keys
+in `eez_settlement_by_l2_block` / `eez_l2_ranges_by_l1_block` once seen.
 
 ## Verify contracts on the devnet explorer from tx hashes
 

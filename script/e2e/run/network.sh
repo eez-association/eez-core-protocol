@@ -317,6 +317,13 @@ L2_OK=true
 L2_CALL_OK=true
 RETRY_OUT=""
 
+# Settlement correlation RPC (see E2EBase.sh): when the L2 node exposes it, an
+# L2 trigger's settlement is one lookup instead of an L1 range scan, and an L1
+# trigger's L2 delivery scan starts at the settled range. _CORR_TX pins the
+# settlement tx for step 5b when the lookup succeeded.
+_CORR_TX=""; _CORR_BLOCK=""
+eez_correlation_detect "$L2_RPC"
+
 # One range wrapper serves both trigger directions. The settlement lister has
 # no expected arguments; content-addressed verification takes the expected
 # hashes/table. Keeping this in one place also makes calldata re-scans behave
@@ -369,9 +376,30 @@ elif [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     # Settlement (batch post + entry consumption) can take a while — retry the
     # range scan against a growing [before..latest] window until the deadline.
     _l1_scan_latest() { _l1_scan "$L1_BLOCK_BEFORE" "$(cast block-number --rpc-url "$RPC")"; }
+    _L1_SCAN_DEADLINE="${L1_SETTLE_TIMEOUT:-300}"
+    if [[ -n "$EEZ_CORR_RPC" && "${FAILED:-false}" != true ]]; then
+        # Ask the node which L1 tx settled our L2 block; poll while it is still
+        # unsettled (null). A recognised answer narrows the scan to that one
+        # block and pins the tx; anything else falls back to the range scan.
+        echo "settlement lookup: eez_getSettlementByL2Block($L2_BLOCK)"
+        _corr_deadline=$(( $(date +%s) + ${L1_SETTLE_TIMEOUT:-300} ))
+        while true; do
+            _corr_rc=0; _corr_out=$(eez_settlement_by_l2_block "$EEZ_CORR_RPC" "$L2_BLOCK") || _corr_rc=$?
+            [[ $_corr_rc -eq 0 ]] && { read -r _CORR_BLOCK _ _ _CORR_TX <<< "$_corr_out"; break; }
+            [[ $_corr_rc -eq 2 && $(date +%s) -lt $_corr_deadline ]] || break
+            sleep 10
+        done
+        if [[ -n "$_CORR_TX" ]]; then
+            echo "L2 block $L2_BLOCK settled by L1 tx $_CORR_TX (L1 block $_CORR_BLOCK)"
+            _l1_scan_latest() { _l1_scan "$_CORR_BLOCK" "$_CORR_BLOCK"; }
+            _L1_SCAN_DEADLINE="${L1_VERIFY_TIMEOUT:-90}"   # the block is known; only RPC lag to absorb
+        else
+            echo "NOTE: correlation lookup gave no settlement (rc $_corr_rc) - falling back to the range scan"
+        fi
+    fi
     L1_OK=false
     if [[ "${FAILED:-false}" != true ]]; then
-        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_scan_latest; then
+        if retry_until_deadline "$_L1_SCAN_DEADLINE" 10 _l1_scan_latest; then
             L1_OK=true
         fi
         L1_VERIFY="$RETRY_OUT"
@@ -471,6 +499,7 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
     # not kill the script under set -e — the fallback below pins the single tx.
     _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
     [[ -z "$_CANDIDATES" ]] && _CANDIDATES="$L1_BATCH_TX"
+    [[ -n "$_CORR_TX" ]] && _CANDIDATES="$_CORR_TX"   # the node named the settlement tx: decode only that one
 
     # Candidate calldata/metadata, cached per run when the orchestrator provides
     # E2E_L1TX_CACHE: parallel verify jobs sift the SAME settlement txs, so each
@@ -555,7 +584,7 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE
         # No candidate contained our entries. For L2 triggers our entry may
         # simply not have settled yet — re-scan the growing range for new
         # settlement txs until the deadline.
-        [[ $(date +%s) -ge $_CD_DEADLINE || "$_L1_CONTRACT" != "VerifyL1SettlementTxsInRange" ]] && break
+        [[ $(date +%s) -ge $_CD_DEADLINE || "$_L1_CONTRACT" != "VerifyL1SettlementTxsInRange" || -n "$_CORR_TX" ]] && break
         sleep 10
         _L1_CUR=$(cast block-number --rpc-url "$RPC")
         _L1_SCAN_FROM="${L1_BLOCK_BEFORE:-$L1_BLOCK}"
@@ -614,6 +643,20 @@ fi
 #   L2 trigger: scan from the receipt block (consumption can land blocks later).
 if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]; then
     _SCAN_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
+    # L1 trigger + correlation RPC: the settlement tx proves an L2 range, and
+    # the composer places every cross-chain system tx of a batch in the LAST
+    # block of that range — so the scan starts right there instead of at the
+    # pre-trigger snapshot (far behind on big runs). The upper bound stays
+    # "latest": it costs nothing and a wrong one would burn the deadline.
+    if [[ -n "$EEZ_CORR_RPC" && "$_TRIGGER_CHAIN" != "L2" && -n "${L1_BATCH_TX:-}" ]]; then
+        _corr_ranges=$(eez_l2_ranges_by_l1_block "$EEZ_CORR_RPC" "${_BATCH_BLOCK:-$L1_BLOCK}") || _corr_ranges=""
+        while read -r _ _rf _rt _rtx; do
+            [[ "$_rtx" == "$L1_BATCH_TX" ]] || continue
+            echo "settlement tx $L1_BATCH_TX proved L2 blocks $_rf..$_rt - cross-chain txs land in $_rt (eez_getSettledL2RangesByL1Block)"
+            (( _rt > _SCAN_FROM )) && _SCAN_FROM="$_rt"
+            break
+        done <<< "$_corr_ranges"
+    fi
     echo ""
     echo "====== Search L2 Blocks for Calls (from $_SCAN_FROM, deadline ${L2_SETTLE_TIMEOUT:-180}s) ======"
     _l2_calls_scan_latest() {

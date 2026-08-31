@@ -127,6 +127,25 @@ _bind_run_network() {  # $1=run dir
     fi
 }
 
+# ── forge compile-cache guard ──
+# `forge script <file>:<Contract>` rewrites cache/solidity-files-cache.json with
+# only that script's dependency subset (~70 of ~157 files here), so after any
+# parallel forge phase the next `forge build` recompiles the rest — ~3 min under
+# via-IR — and looks like a hang. Keep the warm cache from the one-time build
+# and put it back before every forge-heavy phase and on exit (artifacts in out/
+# are never deleted, so the restored index is always valid).
+_FORGE_CACHE_JSON="cache/solidity-files-cache.json"
+_warm_forge_cache() {
+    echo "== forge build (warming artifacts; a cold via-IR build takes ~3 min)"
+    forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
+    cp "$_FORGE_CACHE_JSON" "$RUN_DIR/.forge-cache.json"
+}
+_restore_forge_cache() {
+    [[ -n "${RUN_DIR:-}" && -f "$RUN_DIR/.forge-cache.json" ]] && cp "$RUN_DIR/.forge-cache.json" "$_FORGE_CACHE_JSON"
+    return 0
+}
+trap _restore_forge_cache EXIT
+
 # ── Lightweight JSON-RPC helpers (the whole send/monitor path uses only these) ──
 _rpc_send_raw() {  # $1=rpc $2=raw signed tx → accepted hash on stdout
     local out hash
@@ -236,6 +255,7 @@ verify_phase() {
     local JOBS_ROWS=()
     mapfile -t JOBS_ROWS < <(tail -n +2 "$RUN_DIR/jobs.csv")
     local V_NAMES=() V_PIDS=() PRE_FAILED=() NOT_PREPARED=0 SKIPPED_OK=0 row name sol dir want_n sent_n
+    _restore_forge_cache
     for row in "${JOBS_ROWS[@]}"; do
         name="${row%%,*}"; sol="${row#*,}"
         dir="$RUN_DIR/jobs/$name"
@@ -293,6 +313,7 @@ verify_phase() {
 if [[ -n "$VERIFY_ONLY" ]]; then
     RUN_DIR="${VERIFY_ONLY%/}"
     _bind_run_network "$RUN_DIR"
+    _warm_forge_cache
     verify_phase
     exit $?
 fi
@@ -347,9 +368,10 @@ done < "$RUN_DIR/jobs.csv"
 RESUME_TRUNCATED=true
 touch "$RUN_DIR/.truncated"   # later --verify-only passes report unprepared jobs as truncated, not failed
 
+_warm_forge_cache
 if (( ${#_FINISH_IDX[@]} > 0 )); then
     echo "== RESUME $RUN_DIR: finishing ${#_FINISH_IDX[@]} deploy-complete job(s) ($PREPARE_PARALLEL parallel)"
-    forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
+    _restore_forge_cache
     F_PIDS=(); F_IDX=()
     for i in "${_FINISH_IDX[@]}"; do
         while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
@@ -389,8 +411,8 @@ for ((i = 0; i < NJOBS; i++)); do
     echo "${JOB_NAMES[$i]},${JOB_SOLS[$i]}" >> "$RUN_DIR/jobs.csv"
 done
 
-# Warm artifacts once — parallel forge invocations race the build cache.
-forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
+# Warm artifacts once; every forge-heavy phase restores this cache (see guard above).
+_warm_forge_cache
 
 # ══ Phase 1: fund ══
 fund_workers
@@ -409,6 +431,7 @@ if [[ "$PREPARE_MODE" == "waves" ]]; then
     for ((wave = 1; ; wave++)); do
         # ── dry-run + presign every live job's <wave>-th Deploy contract ──
         W_PIDS=(); W_IDX=()
+        _restore_forge_cache
         for ((i = 0; i < NJOBS; i++)); do
             name="${JOB_NAMES[$i]}"
             [[ "$DEAD" == *",$name,"* ]] && continue
@@ -517,6 +540,7 @@ if [[ "$PREPARE_MODE" == "waves" ]]; then
     # ── prepare-finish: trigger presign + ComputeExpected (read-only, fast) ──
     echo ""
     echo "== Prepare finish ($PREPARE_PARALLEL parallel)"
+    _restore_forge_cache
     F_PIDS=(); F_IDX=()
     for ((i = 0; i < NJOBS; i++)); do
         [[ "$DEAD" == *",${JOB_NAMES[$i]},"* ]] && continue
@@ -532,6 +556,7 @@ else
     # ── classic single-pass prepare ──
     echo ""
     echo "== Prepare phase ($PREPARE_PARALLEL parallel, classic)"
+    _restore_forge_cache
     P_PIDS=()
     for ((i = 0; i < NJOBS; i++)); do
         while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 2; done

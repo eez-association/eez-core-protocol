@@ -313,6 +313,67 @@ retry_until_deadline() {
     done
 }
 
+# ── L1/L2 settlement correlation RPC (eez_getSettlementByL2Block & co.) ──
+# Composer/follower L2 nodes can expose the canonical mapping between L2 blocks
+# and the L1 postAndVerifyBatch tx that settled them. When present, one lookup
+# replaces the L1 range scans (and bounds the L2 scans); when absent (older
+# nodes, other networks) the verifiers keep scanning. E2E_CORRELATION=off forces
+# the scan path. Both methods answer with the same settlement object:
+#   { l1BlockNumber, l1BlockHash, l1TransactionHash, l1TransactionIndex,
+#     l2Range: { firstBlockNumber, lastBlockNumber, blockCount, first/lastBlockHash },
+#     l2Blocks: [{ number, hash }], matchedL2Block, canonicalL2, l2Finalized }
+# (one object for a settled L2 block, an array of them for an L1 block); an
+# unrecognised answer is reported on stderr and the caller falls back to scanning.
+_eez_rpc() {  # $1=rpc $2=method $3=params-json → response body (rc 1 on transport error)
+    curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
+        --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"
+}
+_eez_settlement_line() {  # $1=settlement object → "l1Block firstL2 lastL2 l1TxHash" (decimal), rc 1 if malformed
+    local blk f t tx canon
+    read -r blk f t tx canon < <(jq -r '[.l1BlockNumber, .l2Range.firstBlockNumber, .l2Range.lastBlockNumber,
+        .l1TransactionHash, .canonicalL2] | map(. // "-") | join(" ")' <<< "$1" 2>/dev/null) || true
+    [[ "${blk:-}" == 0x* && "${f:-}" == 0x* && "${t:-}" == 0x* && "${tx:-}" == 0x* ]] || {
+        echo "eez settlement: unrecognised shape: $1" >&2; return 1; }
+    [[ "$canon" == "true" ]] || { echo "eez settlement: non-canonical L2 blocks reported: $1" >&2; return 1; }
+    echo "$(printf '%d' "$blk") $(printf '%d' "$f") $(printf '%d' "$t") $tx"
+}
+eez_correlation_detect() {  # $1=L2 rpc; sets EEZ_CORR_RPC ("" = unavailable)
+    EEZ_CORR_RPC=""
+    if [[ "${E2E_CORRELATION:-auto}" == "off" ]]; then
+        echo "settlement correlation RPC: off (E2E_CORRELATION=off)"; return 0
+    fi
+    local out
+    out=$(_eez_rpc "$1" eez_getSettlementByL2Block '["0x1"]') || out=""
+    # a "result" key (even null) means the method exists; -32601 / no answer means it does not
+    if jq -e 'has("result")' <<< "$out" >/dev/null 2>&1; then
+        EEZ_CORR_RPC="$1"
+        echo "settlement correlation RPC: available on $1"
+    else
+        echo "settlement correlation RPC: not available on $1 - using range scans"
+    fi
+}
+# eez_settlement_by_l2_block RPC L2_BLOCK → "l1Block firstL2 lastL2 l1TxHash" (decimal) on stdout.
+# rc 2 = not settled yet (null result); rc 1 = transport error or unrecognised shape.
+eez_settlement_by_l2_block() {
+    local out res
+    out=$(_eez_rpc "$1" eez_getSettlementByL2Block "[\"$(printf '0x%x' "$2")\"]") || return 1
+    res=$(jq -c '.result' <<< "$out" 2>/dev/null) || return 1
+    [[ -n "$res" && "$res" != "null" ]] || return 2
+    _eez_settlement_line "$res"
+}
+# eez_l2_ranges_by_l1_block RPC L1_BLOCK → one "l1Block firstL2 lastL2 l1TxHash" line per accepted batch.
+# rc 2 = no accepted batch in that block ([]); rc 1 = transport error or unrecognised shape.
+eez_l2_ranges_by_l1_block() {
+    local out item
+    out=$(_eez_rpc "$1" eez_getSettledL2RangesByL1Block "[\"$(printf '0x%x' "$2")\"]") || return 1
+    jq -e '.result | type == "array"' <<< "$out" >/dev/null 2>&1 || {
+        echo "eez_getSettledL2RangesByL1Block: unrecognised response: $out" >&2; return 1; }
+    jq -e '.result | length > 0' <<< "$out" >/dev/null || return 2
+    while IFS= read -r item; do
+        _eez_settlement_line "$item" || return 1
+    done < <(jq -c '.result[]' <<< "$out")
+}
+
 # ── Trace failed transactions from forge output ──
 trace_failed_txs() {
     local output="$1"
