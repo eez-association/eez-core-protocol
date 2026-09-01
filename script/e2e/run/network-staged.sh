@@ -307,7 +307,33 @@ verify_phase() {
     local t
     for t in "${FAILED_LIST[@]:-}";  do [[ -n "$t" ]] && echo "  FAILED: $t"; done
     for t in "${PRE_FAILED[@]:-}";   do [[ -n "$t" ]] && echo "  NOT RUN: $t"; done
+    _print_block_summary
     [[ $FAIL -eq 0 && ${#PRE_FAILED[@]} -eq 0 ]]
+}
+
+# ── Block summary: where the run's txs landed on each chain ──
+# Trigger txs come from mined.csv (name,chain,hash,block,status); settlement txs
+# (L1 postBatch / L2 loadTable) from the "(block N)" Summary lines of each
+# job's verify.log — no extra RPC calls.
+_block_list() {   # stdin: one block number per line → "5062 x7  5063 x3"
+    sort -n | uniq -c | awk '{printf "%s%s x%d", (NR>1?"  ":""), $2, $1} END{print ""}'
+}
+_settle_blocks() {   # $1 = summary label ("L1 postBatch" / "L2 loadTable")
+    grep -hE "^$1:.*\(block [0-9]+\)" "$RUN_DIR"/jobs/*/verify.log 2>/dev/null \
+        | sed -E 's/.*\(block ([0-9]+)\)/\1/' | _block_list
+}
+_print_block_summary() {
+    local l1t l2t l1b l2b
+    l1t=$(awk -F, '$2=="L1"{print $4}' "$RUN_DIR/mined.csv" 2>/dev/null | _block_list)
+    l2t=$(awk -F, '$2=="L2"{print $4}' "$RUN_DIR/mined.csv" 2>/dev/null | _block_list)
+    l1b=$(_settle_blocks "L1 postBatch")
+    l2b=$(_settle_blocks "L2 loadTable")
+    echo ""
+    echo "  Blocks mined (block xN = N txs / jobs in that block):"
+    echo "    trigger txs    L1: ${l1t:-none}"
+    echo "                   L2: ${l2t:-none}"
+    echo "    L1 postBatch:  ${l1b:-none}"
+    echo "    L2 loadTable:  ${l2b:-none}"
 }
 
 if [[ -n "$VERIFY_ONLY" ]]; then
