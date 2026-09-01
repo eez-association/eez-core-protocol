@@ -5,6 +5,7 @@ import {console2} from "forge-std/console2.sol";
 import {DslScenarioBase} from "../../test/blob/ScenarioDSL.sol";
 import {BlobMessage, BlobMsgType} from "./BlobMessages.sol";
 import {BlobCodec} from "./BlobCodec.sol";
+import {BlobPacking} from "./BlobPacking.sol";
 import {ScenarioStore} from "./ScenarioStore.sol";
 import {TableGenerator} from "./TableGenerator.sol";
 import {UNIT_KIND_ORIGIN_GROUP} from "./BlobConstants.sol";
@@ -20,6 +21,9 @@ import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../src/inte
 //
 //    Blob-portion hex file (0x… of the logical byte stream) → tables:
 //      forge script script/blob/BlobTools.s.sol --sig "runBlob(string)" my-blob.hex
+//
+//    Raw 4844 blob(s) as posted (0x… of 4096 × 32-byte elements) → tables:
+//      forge script script/blob/BlobTools.s.sol --sig "runPackedBlob(string)" my.blob
 //
 //  Both print the derived L1 batch entries, every L2 chain's units, and the
 //  sidecar summary. Requires `fs_permissions` read access in foundry.toml.
@@ -79,6 +83,35 @@ contract BlobTools is DslScenarioBase {
         _printTables(_derive(msgs));
     }
 
+    /// @notice Reads a hex file holding one or more whole EIP-4844 blobs exactly as
+    ///         posted (4096 × 32-byte field elements each), unpacks them (§4) and
+    ///         prints messages + tables — `runBlob` for the raw blob instead of the stream.
+    function runPackedBlob(string memory path) external {
+        bytes memory raw = vm.parseBytes(vm.trim(vm.readFile(path)));
+        uint256 blobBytes = BlobPacking.FIELD_ELEMENTS_PER_BLOB * 32;
+        require(raw.length != 0 && raw.length % blobBytes == 0, "BlobTools: file is not whole 4844 blobs");
+
+        bytes32[][] memory blobs = new bytes32[][](raw.length / blobBytes);
+        for (uint256 b = 0; b < blobs.length; b++) {
+            bytes32[] memory elements = new bytes32[](BlobPacking.FIELD_ELEMENTS_PER_BLOB);
+            for (uint256 e = 0; e < elements.length; e++) {
+                bytes32 el;
+                uint256 offset = 32 + b * blobBytes + e * 32; // skip the length word
+                assembly {
+                    el := mload(add(raw, offset))
+                }
+                elements[e] = el;
+            }
+            blobs[b] = elements;
+        }
+
+        bytes memory blobData = BlobPacking.unpack(blobs);
+        console2.log("unpacked", blobs.length, "blob(s) ->", blobData.length);
+        BlobMessage[] memory msgs = BlobCodec.decode(blobData, "");
+        _printMessages(msgs);
+        _printTables(_derive(msgs));
+    }
+
     /// @dev Messages → tables with the zero callGas oracle (useGasLeft = false mode) —
     ///      the same derivation BlobTranslator wraps, kept piecemeal here so the
     ///      printer can query one array at a time.
@@ -118,11 +151,16 @@ contract BlobTools is DslScenarioBase {
             if (m.msgType == BlobMsgType.Call || m.msgType == BlobMsgType.StaticCall) {
                 line = string.concat(
                     line,
-                    " to=chain ",
+                    " to_chain=",
                     vm.toString(m.chainId),
-                    " ",
+                    " from=",
+                    vm.toString(m.fromAddress),
+                    " to=",
                     vm.toString(m.toAddress),
-                    m.value > 0 ? string.concat(" value=", vm.toString(m.value)) : "",
+                    " value=",
+                    vm.toString(m.value),
+                    " gas=",
+                    vm.toString(m.gas),
                     " data=",
                     vm.toString(m.data)
                 );
