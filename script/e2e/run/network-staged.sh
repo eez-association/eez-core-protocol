@@ -530,6 +530,9 @@ if [[ "$PREPARE_MODE" == "waves" ]]; then
     # The whole wave design rests on dry-run address prediction; this is the
     # cheap cross-check (one batched eth_getCode per chain). Only exact-address
     # env values count — 32-byte hashes would false-positive a substring grep.
+    # PREDICTED_* outputs are exempt: they name addresses a scenario pre-computes
+    # for a contract that is deployed later, during execution (CREATE2 from a
+    # bridge, say), so they legitimately hold no code at this point.
     _addrs_with_code() {  # $1=rpc; stdin: one address per line → subset holding code
         # Chunked + stdin-fed for the same ARG_MAX reason as _batch_receipts.
         local addrs=() o
@@ -544,7 +547,7 @@ if [[ "$PREPARE_MODE" == "waves" ]]; then
                 | while read -r id; do echo "${chunk[$id]}"; done
         done
     }
-    mapfile -t _ALL_ADDRS < <(sed -n 's/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' \
+    mapfile -t _ALL_ADDRS < <(sed -n '/^PREDICTED_/d; s/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' \
         "$RUN_DIR"/jobs/*/deploy-env.env 2>/dev/null | sort -u)
     if (( ${#_ALL_ADDRS[@]} > 0 )); then
         _CODED=$( { printf '%s\n' "${_ALL_ADDRS[@]}" | _addrs_with_code "$L1_RPC"; \
@@ -558,7 +561,7 @@ if [[ "$PREPARE_MODE" == "waves" ]]; then
                 grep -qiF "$a" <<< "$_CODED" && continue
                 _prep_failed "$name" "predicted address $a has no code on either chain"
                 break
-            done < <(sed -n 's/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' "$envf" | sort -u)
+            done < <(sed -n '/^PREDICTED_/d; s/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' "$envf" | sort -u)
         done
         echo "deploy-liveness: ${#_ALL_ADDRS[@]} predicted address(es) checked"
     fi

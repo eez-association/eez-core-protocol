@@ -298,7 +298,7 @@ abstract contract FlashLoanEnv is Script {
             token: vm.envAddress("TOKEN"),
             executorL1: vm.envAddress("EXECUTOR_L1"),
             executorL2: vm.envAddress("EXECUTOR_L2"),
-            wrappedTokenL2: vm.envAddress("WRAPPED_TOKEN_L2"),
+            wrappedTokenL2: vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2"),
             nftL2: vm.envAddress("FLASH_LOANERS_NFT")
         });
     }
@@ -335,7 +335,7 @@ contract Deploy is Script {
 }
 
 /// Env: MANAGER_L2, TOKEN, BRIDGE, BRIDGE_SALT
-/// Outputs: EXECUTOR_L2, WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
+/// Outputs: EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2 (no code until the forward leg), FLASH_LOANERS_NFT
 contract DeployL2 is Script, FlashLoanActions {
     function run() external {
         address managerAddr = vm.envAddress("MANAGER_L2");
@@ -368,13 +368,13 @@ contract DeployL2 is Script, FlashLoanActions {
         FlashLoanersNFT nft = new FlashLoanersNFT(wrappedTokenL2);
 
         console.log("EXECUTOR_L2=%s", address(executorL2));
-        console.log("WRAPPED_TOKEN_L2=%s", wrappedTokenL2);
+        console.log("PREDICTED_WRAPPED_TOKEN_L2=%s", wrappedTokenL2);
         console.log("FLASH_LOANERS_NFT=%s", address(nft));
         vm.stopBroadcast();
     }
 }
 
-/// Env: ROLLUPS, TOKEN, BRIDGE, EXECUTOR_L2, WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
+/// Env: ROLLUPS, TOKEN, BRIDGE, EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
 /// Outputs: FLASH_LOAN_POOL, EXECUTOR_L1
 contract Deploy2 is Script, FlashLoanActions {
     function run() external {
@@ -382,7 +382,7 @@ contract Deploy2 is Script, FlashLoanActions {
         address tokenAddr = vm.envAddress("TOKEN");
         address bridgeAddr = vm.envAddress("BRIDGE");
         address executorL2Addr = vm.envAddress("EXECUTOR_L2");
-        address wrappedTokenL2 = vm.envAddress("WRAPPED_TOKEN_L2");
+        address wrappedTokenL2 = vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2");
         address nftAddr = vm.envAddress("FLASH_LOANERS_NFT");
 
         vm.startBroadcast();
@@ -487,7 +487,7 @@ contract ComputeExpected is ComputeExpectedBase, FlashLoanEnv, FlashLoanActions 
         if (addr == vm.envAddress("TOKEN")) return "TestToken";
         if (addr == vm.envAddress("EXECUTOR_L1")) return "ExecutorL1";
         if (addr == vm.envAddress("EXECUTOR_L2")) return "ExecutorL2";
-        if (addr == vm.envAddress("WRAPPED_TOKEN_L2")) return "WrappedToken(L2)";
+        if (addr == vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2")) return "WrappedToken(L2)";
         if (addr == vm.envAddress("FLASH_LOANERS_NFT")) return "FlashLoanersNFT";
         return _shortAddr(addr);
     }
