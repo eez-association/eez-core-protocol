@@ -36,7 +36,7 @@ struct ProofSystemBatchPerVerificationEntries {
     ExecutionEntry[] entries; // execution entries: immediate entries are executed in this call, remainder are saved in storage
     StaticExecutionEntry[] staticEntries; // top-level static entries
     uint256 immediateEntryCount; // number of leading `entries` executed this tx (immediate L2Txs + meta-hook entries, not queued)
-    uint256 immediateStaticEntryCount; // number of leading `staticEntries` resolvable this tx via the meta hook; remainder saved to storage. Only loaded when the meta hook fires (≥1 non-L2Tx entry in the immediate prefix) — with a pure-L2Tx immediate prefix the leading static entries are dropped, so set 0 there
+    uint256 immediateStaticEntryCount; // number of leading `staticEntries` resolvable this tx via the meta hook; remainder saved to storage. Only loaded when the meta hook fires (≥1 non-L2Tx entry in the immediate prefix) — with a pure-L2Tx immediate prefix a non-zero count reverts (`ImmediateStaticEntriesWithoutImmediateEntries`), so set 0 there
     address[] proofSystems; // proof systems attesting this batch; strictly increasing, no address(0)
     RollupIdWithProofSystems[] rollupIdsWithProofSystems; // participating rollups + their accepted proof-system subsets; strictly increasing by rollupId
     uint256[] blobIndices; // indices of the tx's EIP-4844 blobs this batch consumes

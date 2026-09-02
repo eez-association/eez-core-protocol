@@ -679,7 +679,7 @@ contract EEZL2 is EEZBase {
     ///         against `StaticExecutionEntry.rollingHash` / `ExpectedOutgoingCrossChainCall.revertedOrStaticRollingHash`.
     /// @dev No `revertNextNCalls` handling — there is no state to roll back (== 0 is a prover
     ///      constraint); referenced proxies must already be deployed (CREATE2 is unavailable
-    ///      inside a STATICCALL frame). See `docs/CORE_PROTOCOL_SPEC.md` §E.2.
+    ///      inside a STATICCALL frame).
     function _processNStaticCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];

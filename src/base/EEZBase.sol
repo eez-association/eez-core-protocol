@@ -107,7 +107,7 @@ abstract contract EEZBase is IEEZ {
     ///         L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
     error NotSelf();
 
-    /// @notice Error when no matching execution entry exists for the action hash
+    /// @notice Error when no matching execution entry exists for the call hash
     error ExecutionNotFound();
 
     /// @notice Error when the computed rolling hash doesn't match the entry's `rollingHash`
@@ -142,12 +142,12 @@ abstract contract EEZBase is IEEZ {
     error NonStaticSubCall();
 
     /// @notice Error when a static-resolution sub-call carries a `revertNextNCalls` span — there is
-    ///         no state to roll back. Defensive check of a prover constraint (spec §C).
+    ///         no state to roll back. Defensive check of a prover constraint.
     error StaticCallWithRevertSpan();
 
     /// @notice Error when a SUCCESS row of the unified reentrant table carries a non-zero
     ///         `revertedOrStaticRollingHash` — the field is only read on the STATIC / REVERTED
-    ///         paths. Defensive check of a prover constraint (spec §C).
+    ///         paths. Defensive check of a prover constraint.
     error SuccessRowWithRevertedOrStaticHash();
 
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
@@ -296,8 +296,7 @@ abstract contract EEZBase is IEEZ {
     // each reentrant frame, and when a reentrant call finds no matching row. Each event is
     // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
     // so the same set of inputs can't collide across event types. The final value is checked
-    // against `entry.rollingHash` at the end of execution. See `docs/CORE_PROTOCOL_SPEC.md`
-    // §E for the full specification.
+    // against `entry.rollingHash` at the end of execution.
     //
     // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
     // prior value), so order, count, and nesting are already bound by the chain + the tags. An
@@ -307,7 +306,7 @@ abstract contract EEZBase is IEEZ {
     //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
     // because they're verified against `StaticExecutionEntry.rollingHash`, a separate accumulator
-    // whose surrounding static-entry key already pins the entry/call/nesting context. See spec §E.2.
+    // whose surrounding static-entry key already pins the entry/call/nesting context.
     //
     // These tags are protocol constants — a call executed on either chain MUST hash the same
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame

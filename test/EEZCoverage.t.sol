@@ -14,7 +14,9 @@ import {
     ExpectedRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
+import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
+import {Vm} from "forge-std/Test.sol";
 
 /// @notice Simple call target used by the execution-path coverage tests.
 contract SimpleTarget {
@@ -139,6 +141,43 @@ contract MetaProxyCaller is IMetaCrossChainReceiver {
     }
 }
 
+/// @notice Burns a caller-chosen amount of gas, then writes once (so it is a real state-changing target).
+contract GasBurner {
+    uint256 public sink;
+
+    function burn(uint256 iters) external {
+        uint256 x;
+        for (uint256 i; i < iters; i++) {
+            x = uint256(keccak256(abi.encode(x, i)));
+        }
+        sink = x;
+    }
+}
+
+/// @notice Owner of a second rollup's manager; from inside an execution it tries the manager's root
+///         escape and records the registry's revert selector.
+contract EscapeDuringExecution {
+    bytes4 public lastError;
+
+    function tryEscape(Rollup manager) external {
+        try manager.setRoot(keccak256("escaped")) {}
+        catch (bytes memory data) {
+            lastError = bytes4(data);
+        }
+    }
+}
+
+/// @notice Fires a reentrant cross-chain call at a proxy and records the revert selector it bubbles
+///         (unlike `CrossReenter`, the outer call itself succeeds).
+contract ReentryProber {
+    bytes4 public lastError;
+
+    function probe(address proxy) external {
+        (bool ok, bytes memory data) = proxy.call(abi.encodeWithSignature("ping()"));
+        if (!ok) lastError = bytes4(data);
+    }
+}
+
 /// @notice Coverage-focused tests for `EEZ` validation guards and execution-path branches not
 ///         already exercised by `EEZ.t.sol`.
 contract EEZCoverageTest is Base {
@@ -150,6 +189,15 @@ contract EEZCoverageTest is Base {
     function setUp() public {
         setUpBase();
         target = new SimpleTarget();
+    }
+
+    // ──────────────────────────────────────────────
+    //  Constructor
+    // ──────────────────────────────────────────────
+
+    function test_Constructor_ZeroRecoveryAddressReverts() public {
+        vm.expectRevert(EEZ.InvalidRecoveryAddress.selector);
+        new EEZ(address(0));
     }
 
     // ──────────────────────────────────────────────
@@ -244,6 +292,14 @@ contract EEZCoverageTest is Base {
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, entries, _emptyStaticEntries(), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(EEZ.RollupUpdatesNotStrictlyIncreasing.selector, uint64(r.id)));
         rollups.postAndVerifyBatch(b);
+    }
+
+    function test_Validate_EntryHasNoRollupUpdates() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(r.id, new RollupUpdate[](0));
+        vm.expectRevert(EEZ.EntryHasNoRollupUpdates.selector);
+        _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
     }
 
     function test_Validate_EntryDestinationNotInDeltas() public {
@@ -463,6 +519,29 @@ contract EEZCoverageTest is Base {
         rollups.setRoot(uint64(r.id), keccak256("x"));
     }
 
+    /// @notice `setRoot` from a rollup contract reached mid-execution is rejected even when that
+    ///         rollup is not block-locked (it is not in the batch).
+    function test_SetRoot_DuringExecutionReverts() public {
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        EscapeDuringExecution escaper = new EscapeDuringExecution();
+        RollupHandle memory r2 = _makeRollupWithOwner(keccak256("r2"), address(escaper));
+        uint64 rid = uint64(r1.id);
+
+        bytes memory data = abi.encodeCall(EscapeDuringExecution.tryEscape, (r2.manager));
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(escaper), 0, 0, data);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(escaper), 0, data));
+        entries[0].rollingHash = _oneCallHash(deltas, bytes32(0), cch, true, "");
+        _postBatchOne(r1, entries, _emptyStaticEntries(), 1, 0);
+
+        assertEq(escaper.lastError(), EEZ.SetRootNotAllowedDuringExecution.selector);
+        assertEq(_getRollupState(r1.id), keccak256("s1"));
+        assertEq(_getRollupState(r2.id), keccak256("r2"));
+    }
+
     function test_CreateProxy_SameNetworkReverts() public {
         // L1's own network id is MAINNET_ROLLUP_ID (0) → proxy creation forbidden.
         vm.expectRevert(abi.encodeWithSelector(EEZBase.SameNetworkProxy.selector, MAINNET_ROLLUP_ID));
@@ -675,6 +754,94 @@ contract EEZCoverageTest is Base {
         assertEq(_getRollupState(rA.id), keccak256("s1"));
     }
 
+    /// @notice A force-revert span whose isolated frame reverts with something other than
+    ///         `ContextResult` (here a static sub-call carrying value) surfaces as `UnexpectedContextRevert`.
+    function test_Span_NonContextRevertSurfacesAsUnexpectedContextRevert() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
+        address proxyAddr = rollups.createCrossChainProxy(L2_REMOTE, rid);
+        bytes memory cd = abi.encodeWithSignature("go()");
+        bytes32 ah = _ccHash(NOT_STATIC_CALL, address(this), 0, L2_REMOTE, rid, 0, cd);
+
+        L2ToL1Call[] memory calls = new L2ToL1Call[](2);
+        calls[0] = _call(L2_SENDER, rid, address(target), 0, "");
+        calls[0].revertNextNCalls = 2;
+        calls[1] = _staticCall(L2_SENDER, rid, address(target), "");
+        calls[1].value = 1; // malformed: rejected inside the isolated frame
+
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].proxyEntryHash = ah;
+        entries[0].l2ToL1Calls = calls;
+        _postBatchOne(r, entries, _emptyStaticEntries(), 0, 0);
+
+        (bool ok, bytes memory ret) = proxyAddr.call(cd);
+        assertFalse(ok);
+        _assertRevertSelector(ret, EEZBase.UnexpectedContextRevert.selector);
+    }
+
+    /// @notice A reentrant call from an immediate L2Tx whose reentrant table is empty cannot resolve
+    ///         against any host and reverts `NoExpectedL1ToL2CallFound` (bubbled to the target).
+    function test_Nested_ImmediateL2TxWithEmptyTableReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
+        ReentryProber prober = new ReentryProber();
+        address remoteProxy = rollups.createCrossChainProxy(L2_REMOTE, rid);
+
+        bytes memory data = abi.encodeCall(ReentryProber.probe, (remoteProxy));
+        RollupUpdate[] memory deltas = _oneDelta(rid, bytes32(0), keccak256("s1"), 0);
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(prober), 0, 0, data);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](1);
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(prober), 0, data));
+        entries[0].rollingHash = _oneCallHash(deltas, bytes32(0), cch, true, "");
+        _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
+
+        assertEq(prober.lastError(), EEZ.NoExpectedL1ToL2CallFound.selector);
+        assertEq(_getRollupState(r.id), keccak256("s1"));
+    }
+
+    /// @notice The immediate-L2Tx gas guard: a frame-level out-of-gas aborts the batch with
+    ///         `ImmediateL2TxOutOfGas`; an under-gassed TARGET call (the frame survives and ends in
+    ///         `RollingHashMismatch`) is skipped like any other failure — the documented limit.
+    function test_ImmediateL2Tx_OutOfGasGuardAndItsLimit() public {
+        bytes32 s0 = keccak256("s0");
+        RollupHandle memory r = _makeRollup(s0);
+        uint64 rid = uint64(r.id);
+        GasBurner burner = new GasBurner();
+
+        bytes memory data = abi.encodeCall(GasBurner.burn, (12_000));
+        RollupUpdate[] memory deltas = _oneDelta(rid, s0, keccak256("s1"), 0);
+        bytes32 cch = _ccHash(NOT_STATIC_CALL, L2_SENDER, rid, address(burner), 0, 0, data);
+
+        ExecutionEntry[] memory entries = new ExecutionEntry[](2);
+        entries[0] = _shellEntry(rid, deltas);
+        entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(burner), 0, data));
+        entries[0].rollingHash = _oneCallHash(deltas, bytes32(0), cch, true, "");
+        entries[1] = _immediateEntry(rid, s0, s0); // survivor, keeps the run from being all-failed
+        bytes memory cd =
+            abi.encodeCall(EEZ.postAndVerifyBatch, (_singleSubBatch(r, entries, _emptyStaticEntries(), 2, 0)));
+
+        bool guardSeen;
+        bool skipSeen;
+        for (uint256 g = 200_000; g <= 2_000_000 && !(guardSeen && skipSeen); g += 20_000) {
+            uint256 snap = vm.snapshotState();
+            vm.recordLogs();
+            (bool ok, bytes memory ret) = address(rollups).call{gas: g}(cd);
+            if (!ok) {
+                if (ret.length >= 4 && bytes4(ret) == EEZ.ImmediateL2TxOutOfGas.selector) guardSeen = true;
+            } else if (_getRollupState(rid) == s0) {
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                if (_findLog(logs, EEZ.L2TxSkipped.selector)) skipSeen = true;
+            }
+            vm.revertToState(snap);
+        }
+        assertTrue(guardSeen, "frame-level OOG never raised ImmediateL2TxOutOfGas");
+        assertTrue(skipSeen, "under-gassed target was never skipped");
+    }
+
     /// @notice A top-level `StaticExecutionEntry` carrying TWO `expectedRoots` pins (strictly increasing)
     ///         exercises the multi-pin validation loop and the multi-pin `_rootsMatch` scan, then
     ///         resolves successfully.
@@ -711,14 +878,22 @@ contract EEZCoverageTest is Base {
     }
 
     /// @notice A batch carrying a non-empty `blobIndices` exercises the `blobhash(...)` loop in
-    ///         `_verifyProofSystemBatch`. With no real blobs `blobhash(0)` returns 0; the line still runs
-    ///         and the batch verifies (MockProofSystem accepts by default).
+    ///         `_verifyProofSystemBatch`. With no blob at the index `blobhash` returns 0 and the post is
+    ///         rejected (`BlobNotFound`); with the tx carrying a blob there, the batch verifies
+    ///         (MockProofSystem accepts by default).
     function test_PostBatch_NonEmptyBlobIndices() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         ProofSystemBatchPerVerificationEntries memory b = _stdBatch(r.id, _emptyEntries(), _emptyStaticEntries(), 0, 0);
         uint256[] memory blobs = new uint256[](1);
         blobs[0] = 0;
         b.blobIndices = blobs;
+
+        vm.expectRevert(abi.encodeWithSelector(EEZ.BlobNotFound.selector, uint256(0)));
+        rollups.postAndVerifyBatch(b);
+
+        bytes32[] memory hashes = new bytes32[](1);
+        hashes[0] = bytes32(uint256(0x01) << 248 | uint256(keccak256("blob")) >> 8); // versioned-hash shape
+        vm.blobhashes(hashes);
         rollups.postAndVerifyBatch(b);
         assertEq(rollups.lastVerifiedBlock(uint64(r.id)), block.number);
     }
