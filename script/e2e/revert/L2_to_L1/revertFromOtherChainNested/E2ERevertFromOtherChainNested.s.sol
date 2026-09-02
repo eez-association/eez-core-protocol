@@ -10,6 +10,7 @@ import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../../../..
 import {Counter, SelfCallerWithRevert} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -188,7 +189,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         Counter counter = new Counter();
-        console.log("COUNTER_L2=%s", address(counter));
+        output("COUNTER_L2", address(counter));
         vm.stopBroadcast();
     }
 }
@@ -200,8 +201,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         address counterProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2, L2_ROLLUP_ID);
         SelfCallerWithRevert selfCaller = new SelfCallerWithRevert(Counter(counterProxyL1));
-        console.log("COUNTER_PROXY_L1=%s", counterProxyL1);
-        console.log("SELF_CALLER_L1=%s", address(selfCaller));
+        output("COUNTER_PROXY_L1", counterProxyL1);
+        output("SELF_CALLER_L1", address(selfCaller));
         vm.stopBroadcast();
     }
 }
@@ -212,7 +213,7 @@ contract DeployL2Trigger is Script {
         address selfCallerL1 = vm.envAddress("SELF_CALLER_L1");
         vm.startBroadcast();
         address proxy = getOrCreateProxy(IEEZ(managerAddr), selfCallerL1, MAINNET_ROLLUP_ID);
-        console.log("SELF_CALLER_PROXY_L2=%s", proxy);
+        output("SELF_CALLER_PROXY_L2", proxy);
         vm.stopBroadcast();
     }
 }

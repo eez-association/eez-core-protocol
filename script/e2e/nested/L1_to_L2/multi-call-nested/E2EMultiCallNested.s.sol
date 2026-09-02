@@ -22,6 +22,7 @@ import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContrac
 import {CallTwiceNestedAndOnce} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -340,8 +341,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
         CallTwiceNestedAndOnce app = new CallTwiceNestedAndOnce();
-        console.log("COUNTER_L1=%s", address(counterL1));
-        console.log("CALL_TWICE_NESTED=%s", address(app));
+        output("COUNTER_L1", address(counterL1));
+        output("CALL_TWICE_NESTED", address(app));
         vm.stopBroadcast();
     }
 }
@@ -365,9 +366,9 @@ contract DeployL2 is Script {
         // CounterL2: plain counter on L2.
         Counter counterL2 = new Counter();
 
-        console.log("COUNTER_L1_PROXY_L2=%s", counterL1ProxyL2);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(cap2));
-        console.log("COUNTER_L2=%s", address(counterL2));
+        output("COUNTER_L1_PROXY_L2", counterL1ProxyL2);
+        output("COUNTER_AND_PROXY_L2", address(cap2));
+        output("COUNTER_L2", address(counterL2));
         vm.stopBroadcast();
     }
 }
@@ -385,8 +386,8 @@ contract Deploy2 is Script {
         address cap2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), cap2, L2_ROLLUP_ID);
         address counterL2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), counterL2, L2_ROLLUP_ID);
 
-        console.log("CAP2_PROXY_L1=%s", cap2ProxyL1);
-        console.log("COUNTER_L2_PROXY_L1=%s", counterL2ProxyL1);
+        output("CAP2_PROXY_L1", cap2ProxyL1);
+        output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
         vm.stopBroadcast();
     }
 }

@@ -19,6 +19,8 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {console} from "forge-std/console.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Rolling hash tag constants (must match EEZBase.sol)
@@ -30,6 +32,28 @@ uint8 constant NESTED_END = 4;
 uint8 constant CALL_NOT_FOUND = 5;
 
 uint64 constant MAINNET_ROLLUP_ID = 0;
+
+// ══════════════════════════════════════════════════════════════════════
+//  Deploy* outputs
+// ══════════════════════════════════════════════════════════════════════
+Vm constant CHEATS = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+/// @notice Publishes a Deploy* output: printed as "NAME=value" for the shell runners and set as
+///         an env var so later contracts in the same forge process (PrepareJob) can vm.env* it.
+function output(string memory name, address value) {
+    console.log("%s=%s", name, value);
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
+
+function output(string memory name, bytes32 value) {
+    console.log("%s=%s", name, CHEATS.toString(value));
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
+
+function output(string memory name, bytes memory value) {
+    console.log("%s=%s", name, CHEATS.toString(value));
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
 
 // ══════════════════════════════════════════════════════════════════════
 //  Idempotent proxy creation helper

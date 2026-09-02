@@ -165,7 +165,7 @@ for each PS k in proofSystems:
   destinationRollupId, success, returnData). Prevents an orchestrator from swapping inputs
   at execution time without invalidating the proof.
 - `staticEntryHashes[i] = keccak256(abi.encode(batch.staticEntries[i]))` — same rationale.
-- `blobHashes[i] = blobhash(batch.blobIndices[i])` — the selected tx-level 4844 blob hashes.
+- `blobHashes[i] = blobhash(batch.blobIndices[i])` — the selected tx-level 4844 blob hashes; an index the tx carries no blob at (`blobhash == 0`) reverts `BlobNotFound(index)`.
 - `customData_r` is the opaque blob fetched per-rollup via
   `IRollupContract.getCustomData(batch.blockNumber)` (rollup-defined L1-view commitment — the
   reference `Rollup` returns ABI-encoded `(timestamp, blockHash)`, an empty blob for

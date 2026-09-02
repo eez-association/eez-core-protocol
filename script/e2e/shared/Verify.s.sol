@@ -8,10 +8,12 @@ import {
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
+    StaticExecutionEntry,
     ProofSystemBatchPerVerificationEntries
 } from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
+    StaticExecutionEntry as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -653,6 +655,127 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                 console.log("PASS: posted rolling hashes reproduced from posted roots (%s entries)", expected.length);
             }
         }
+    }
+
+    // ── Posted top-level static entries (batch.staticEntries) ──
+    // A static entry has no event and no execution frame on L1: the batch calldata is its
+    // only trace, and its content is deterministic except for the pinned root VALUES (the
+    // composer pins the live roots at the resolution point). Everything else — key,
+    // routing, pinned rollup ids, sub-calls, static rolling hash, outcome — is compared.
+
+    /// @dev Root-agnostic key: the whole entry minus the pinned root values.
+    function _staticContentHash(StaticExecutionEntry memory s) internal pure returns (bytes32 h) {
+        h = keccak256(abi.encode(s.proxyEntryHash, s.destinationRollupId, s.rollingHash, s.success, s.returnData));
+        for (uint256 r = 0; r < s.expectedRoots.length; r++) {
+            h = keccak256(abi.encode(h, s.expectedRoots[r].rollupId));
+        }
+        for (uint256 c = 0; c < s.l2ToL1Calls.length; c++) {
+            h = keccak256(abi.encode(h, s.l2ToL1Calls[c]));
+        }
+    }
+
+    function _verifyL1PostedStaticEntries(
+        StaticExecutionEntry[] memory posted,
+        bytes memory expectedTable
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        StaticExecutionEntry[] memory expected = abi.decode(expectedTable, (StaticExecutionEntry[]));
+        bool[] memory used = new bool[](posted.length);
+        ok = true;
+        for (uint256 i = 0; i < expected.length; i++) {
+            bytes32 want = _staticContentHash(expected[i]);
+            uint256 j = type(uint256).max;
+            for (uint256 k = 0; k < posted.length; k++) {
+                if (!used[k] && _staticContentHash(posted[k]) == want) {
+                    j = k;
+                    break;
+                }
+            }
+            if (j == type(uint256).max) {
+                console.log("FAIL: expected static entry %s not in posted batch (%s posted)", i, posted.length);
+                _diffPostedStatic(posted, used, expected[i], i);
+                ok = false;
+                continue;
+            }
+            used[j] = true;
+            // The pins are the match predicate on-chain: a zero root could never equal a live one.
+            for (uint256 r = 0; r < posted[j].expectedRoots.length; r++) {
+                if (posted[j].expectedRoots[r].root == bytes32(0)) {
+                    console.log(
+                        "FAIL: static entry %s pins rollup %s at the zero root", i, posted[j].expectedRoots[r].rollupId
+                    );
+                    ok = false;
+                }
+            }
+        }
+        if (ok) {
+            console.log(
+                "PASS: posted batch static entries match expected static table (%s entries, root pins neutralized)",
+                expected.length
+            );
+        }
+    }
+
+    /// @dev Field-level explanation for an unmatched expected static entry, against the
+    ///      first unused posted entry with the same proxyEntryHash (none → key not posted).
+    function _diffPostedStatic(
+        StaticExecutionEntry[] memory posted,
+        bool[] memory used,
+        StaticExecutionEntry memory e,
+        uint256 i
+    )
+        internal
+        pure
+    {
+        uint256 j = type(uint256).max;
+        for (uint256 k = 0; k < posted.length; k++) {
+            if (!used[k] && posted[k].proxyEntryHash == e.proxyEntryHash) {
+                j = k;
+                break;
+            }
+        }
+        if (j == type(uint256).max) {
+            console.log("      no posted static entry has proxyEntryHash %s", vm.toString(e.proxyEntryHash));
+            return;
+        }
+        StaticExecutionEntry memory a = posted[j];
+        console.log("      closest posted static entry [%s] (same proxyEntryHash) differs:", j);
+        if (a.destinationRollupId != e.destinationRollupId) {
+            console.log(
+                "        destinationRollupId: posted %s expected %s", a.destinationRollupId, e.destinationRollupId
+            );
+        }
+        if (a.success != e.success) console.log("        success: posted %s expected %s", a.success, e.success);
+        if (!_bytesEq(a.returnData, e.returnData)) {
+            console.log(
+                "        returnData: posted %s expected %s", _shortBytes(a.returnData), _shortBytes(e.returnData)
+            );
+        }
+        if (a.rollingHash != e.rollingHash) {
+            console.log(
+                "        rollingHash: posted %s expected %s", vm.toString(a.rollingHash), vm.toString(e.rollingHash)
+            );
+        }
+        if (a.expectedRoots.length != e.expectedRoots.length) {
+            console.log(
+                "        expectedRoots.length: posted %s expected %s", a.expectedRoots.length, e.expectedRoots.length
+            );
+        }
+        uint256 m = a.expectedRoots.length < e.expectedRoots.length ? a.expectedRoots.length : e.expectedRoots.length;
+        for (uint256 r = 0; r < m; r++) {
+            if (a.expectedRoots[r].rollupId != e.expectedRoots[r].rollupId) {
+                console.log(
+                    "        expectedRoots[%s].rollupId: posted %s expected %s",
+                    r,
+                    a.expectedRoots[r].rollupId,
+                    e.expectedRoots[r].rollupId
+                );
+            }
+        }
+        _comparePostedCalls(a.l2ToL1Calls, e.l2ToL1Calls, i);
     }
 
     function _comparePostedEntry(
@@ -1465,7 +1588,10 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
 //  VerifyL1BatchCalldata — decode the settlement tx's postAndVerifyBatch
 //  input and compare the POSTED entries field-by-field against the
 //  expected table. The L1 analogue of the L2 ExecutionTableLoaded check:
-//  L1 events never carry the entries, but the tx calldata does.
+//  L1 events never carry the entries, but the tx calldata does. The
+//  expected static table (batch.staticEntries) is matched the same way —
+//  for a top-level static read the calldata is the ONLY on-chain trace.
+//  Either table may be empty ("0x"); at least one is required.
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1BatchCalldata is VerifyHelpers {
@@ -1477,12 +1603,13 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
         bytes calldata batchInput,
         address rollups,
         bytes calldata expectedTable,
-        bytes calldata expectedSteps
+        bytes calldata expectedSteps,
+        bytes calldata expectedStaticTable
     )
         external
         view
     {
-        require(expectedTable.length > 0, "expected table required");
+        require(expectedTable.length > 0 || expectedStaticTable.length > 0, "expected table required");
         require(batchInput.length > 4, "batch input too short");
         bytes4 sel = bytes4(batchInput[:4]);
         if (sel != SEL_POST_BATCH) {
@@ -1491,7 +1618,11 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
         }
         ProofSystemBatchPerVerificationEntries memory b =
             abi.decode(batchInput[4:], (ProofSystemBatchPerVerificationEntries));
-        console.log("Posted batch decoded from calldata: %s entries", b.entries.length);
+        console.log(
+            "Posted batch decoded from calldata: %s entries, %s static entries",
+            b.entries.length,
+            b.staticEntries.length
+        );
         // Immediate-prefix rules the contract enforces (`ImmediateCountExceedsEntries`,
         // `ImmediateCountStrandsLeadingL2Tx`): the count is in bounds and never strands a
         // leading zero-hash L2Tx into the queue.
@@ -1503,7 +1634,18 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
             console.log("FAIL: immediateEntryCount %s strands a leading zero-hash L2Tx", b.immediateEntryCount);
             revert("Posted-batch calldata verification failed");
         }
-        if (!_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps)) {
+        if (b.immediateStaticEntryCount > b.staticEntries.length) {
+            console.log(
+                "FAIL: immediateStaticEntryCount %s exceeds static entries %s",
+                b.immediateStaticEntryCount,
+                b.staticEntries.length
+            );
+            revert("Posted-batch calldata verification failed");
+        }
+        if (expectedTable.length > 0 && !_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps)) {
+            revert("Posted-batch calldata verification failed");
+        }
+        if (expectedStaticTable.length > 0 && !_verifyL1PostedStaticEntries(b.staticEntries, expectedStaticTable)) {
             revert("Posted-batch calldata verification failed");
         }
     }
@@ -1809,56 +1951,76 @@ contract VerifyL2CallsInRange is VerifyHelpers {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  VerifyL2Absent — check specific entry hashes are NOT present on L2.
-//  Used for terminal revert scenarios where no L2 table should exist.
+//  VerifyL2Absent — assert that the given call KEYS left NO trace on L2
+//  over a block range: no delivery / consumption event indexed by the key
+//  (IncomingCrossChainCallExecuted, CrossChainCallExecuted,
+//  ExecutionConsumed) and no ExecutionTableLoaded carrying an entry or a
+//  static entry with that proxyEntryHash. This is the proof that a LOOKUP
+//  (an L1→L2 call that reverts on L2, a top-level static read) was never
+//  delivered — L2 state and root only move for work L1 can prove executed.
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL2Absent is VerifyHelpers {
-    function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata absentEntryHashes) external view {
-        bytes32[] memory actualHashes = _collectEntryHashes(l2Blocks, managerL2);
+    // ExecutionConsumed on L2: (bytes32 indexed crossChainCallHash, uint256 indexed entryIndex)
+    bytes32 constant SIG_EXECUTION_CONSUMED_L2 = keccak256("ExecutionConsumed(bytes32,uint256)");
 
-        for (uint256 i = 0; i < absentEntryHashes.length; i++) {
-            for (uint256 j = 0; j < actualHashes.length; j++) {
-                if (actualHashes[j] == absentEntryHashes[i]) {
-                    console.log("FAIL: unexpected L2 entry found: %s", vm.toString(absentEntryHashes[i]));
-                    revert("Unexpected L2 entry");
+    function run(uint256 fromBlock, uint256 toBlock, address managerL2, bytes32[] calldata absentKeys) external view {
+        require(absentKeys.length > 0, "absent keys required");
+        bytes32[] memory topics = new bytes32[](0);
+        Vm.EthGetLogs[] memory logs = vm.eth_getLogs(fromBlock, toBlock, managerL2, topics);
+        uint256 nCallEvents;
+        uint256 nLoaded;
+        bool ok = true;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length == 0) continue;
+            bytes32 sig = logs[i].topics[0];
+            if (sig == SIG_TABLE_LOADED) {
+                (L2ExecutionEntry[] memory entries, L2StaticExecutionEntry[] memory statics) =
+                    abi.decode(logs[i].data, (L2ExecutionEntry[], L2StaticExecutionEntry[]));
+                nLoaded += entries.length + statics.length;
+                for (uint256 j = 0; j < entries.length; j++) {
+                    if (!_inKeys(entries[j].proxyEntryHash, absentKeys)) continue;
+                    console.log(
+                        "FAIL: entry %s LOADED on L2 in block %s",
+                        vm.toString(entries[j].proxyEntryHash),
+                        logs[i].blockNumber
+                    );
+                    console.log("      tx %s", vm.toString(logs[i].transactionHash));
+                    ok = false;
                 }
+                for (uint256 j = 0; j < statics.length; j++) {
+                    if (!_inKeys(statics[j].proxyEntryHash, absentKeys)) continue;
+                    console.log(
+                        "FAIL: static entry %s LOADED on L2 in block %s",
+                        vm.toString(statics[j].proxyEntryHash),
+                        logs[i].blockNumber
+                    );
+                    console.log("      tx %s", vm.toString(logs[i].transactionHash));
+                    ok = false;
+                }
+                continue;
             }
+            if (sig != SIG_CROSSCHAIN_CALL && sig != SIG_INCOMING_CROSSCHAIN_CALL && sig != SIG_EXECUTION_CONSUMED_L2) {
+                continue;
+            }
+            if (logs[i].topics.length < 2) continue;
+            nCallEvents++;
+            if (!_inKeys(logs[i].topics[1], absentKeys)) continue;
+            console.log("FAIL: call %s EXECUTED on L2 in block %s", vm.toString(logs[i].topics[1]), logs[i].blockNumber);
+            console.log("      tx %s", vm.toString(logs[i].transactionHash));
+            ok = false;
         }
-
-        if (actualHashes.length == 0) {
-            console.log("PASS: no L2 table entries found (expected for terminal revert)");
-        } else {
-            console.log(
-                "PASS: %s L2 entries found but none match the %s absent hashes",
-                actualHashes.length,
-                absentEntryHashes.length
-            );
-        }
+        if (!ok) revert("Unexpected L2 activity for a lookup");
+        console.log(
+            "PASS: none of %s absent key(s) appears on L2 in blocks %s..%s", absentKeys.length, fromBlock, toBlock
+        );
+        console.log("      (%s call events and %s loaded entries inspected)", nCallEvents, nLoaded);
     }
 
-    function _collectEntryHashes(uint256[] calldata blocks, address managerL2)
-        internal
-        view
-        returns (bytes32[] memory)
-    {
-        uint256 count;
-        for (uint256 i = 0; i < blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            L2ExecutionEntry[] memory entries = _collectTableEntries(logs);
-            count += entries.length;
+    function _inKeys(bytes32 h, bytes32[] calldata keys) internal pure returns (bool) {
+        for (uint256 k = 0; k < keys.length; k++) {
+            if (keys[k] == h) return true;
         }
-        bytes32[] memory result = new bytes32[](count);
-        uint256 idx;
-        for (uint256 i = 0; i < blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory logs = vm.eth_getLogs(blocks[i], blocks[i], managerL2, topics);
-            L2ExecutionEntry[] memory entries = _collectTableEntries(logs);
-            for (uint256 j = 0; j < entries.length; j++) {
-                result[idx++] = _entryHash(entries[j]);
-            }
-        }
-        return result;
+        return false;
     }
 }

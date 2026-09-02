@@ -10,6 +10,7 @@ import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
@@ -156,7 +157,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         RevertCounter revCounter = new RevertCounter();
-        console.log("REV_COUNTER_L1=%s", address(revCounter));
+        output("REV_COUNTER_L1", address(revCounter));
         vm.stopBroadcast();
     }
 }
@@ -176,8 +177,8 @@ contract DeployL2 is Script {
         // The caller: try/catches the reverting cross-chain call so the trigger tx succeeds.
         SafeCounterAndProxy safeCaller = new SafeCounterAndProxy(Counter(counterProxy));
 
-        console.log("COUNTER_PROXY_L2=%s", counterProxy);
-        console.log("SAFE_CALLER_L2=%s", address(safeCaller));
+        output("COUNTER_PROXY_L2", counterProxy);
+        output("SAFE_CALLER_L2", address(safeCaller));
         vm.stopBroadcast();
     }
 }

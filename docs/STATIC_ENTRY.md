@@ -132,7 +132,7 @@ success row omits its NESTED frame and diverges the entry hash.
 **Static read** — `staticCrossChainCall`, in-execution branch:
 
 1. (L1 only) proxy protection: the read's target rollup must be in the executing entry's
-   allowed set (`_isRollupAllowed`, from its `rollupUpdates`) — else
+   allowed set (`_containsVerifiedRollup`, from its `rollupUpdates`) — else
    `ReentrantDestinationNotVerified`.
 2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
@@ -187,6 +187,11 @@ On L2 the pool is the single `staticEntries` table (replaced wholesale by every
 `loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone —
 but unlike L1, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
 is what bounds staleness.
+
+A top-level static read is a *lookup*: it resolves from the pool and never produces a
+destination-side delivery. The same treatment applies to an L1→L2 call that reverts on L2 and
+to one whose L1 frame is reverted afterwards — a signed prediction (return or revert data),
+nothing applied on L2, root unchanged (`CORE_PROTOCOL_SPEC.md` §C, L2 prover constraints).
 
 ### 4.3 `_resolveStaticEntry` / `_processNStaticCalls` (shared body)
 
@@ -294,7 +299,7 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
   (see CORE_PROTOCOL_SPEC §C.2/§C.3).
-- **Proxy protection**: L1's reentrant static branch checks `_isRollupAllowed(destRid)`
+- **Proxy protection**: L1's reentrant static branch checks `_containsVerifiedRollup(destRid)`
   against the executing entry's `rollupUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
   immediate-L2Tx table, the transient entry at `_currentEntryIndex`, or the persistent queue

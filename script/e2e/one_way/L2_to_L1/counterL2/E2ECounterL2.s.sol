@@ -15,6 +15,7 @@ import {
 import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
@@ -157,7 +158,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -177,8 +178,8 @@ contract DeployL2 is Script {
 
         CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
 
-        console.log("COUNTER_PROXY_L2=%s", counterProxy);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(cap));
+        output("COUNTER_PROXY_L2", counterProxy);
+        output("COUNTER_AND_PROXY_L2", address(cap));
         vm.stopBroadcast();
     }
 }

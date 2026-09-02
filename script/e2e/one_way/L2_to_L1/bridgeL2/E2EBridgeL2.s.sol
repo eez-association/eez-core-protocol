@@ -9,6 +9,7 @@ import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/inter
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
@@ -138,7 +139,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         BridgeReceiverL1 receiver = new BridgeReceiverL1();
-        console.log("BRIDGE_RECEIVER_L1=%s", address(receiver));
+        output("BRIDGE_RECEIVER_L1", address(receiver));
         vm.stopBroadcast();
     }
 }
@@ -152,8 +153,8 @@ contract DeployL2 is Script {
         vm.startBroadcast();
         address proxy = getOrCreateProxy(IEEZ(vm.envAddress("MANAGER_L2")), receiverL1, MAINNET_ROLLUP_ID);
         BridgeSenderL2 sender = new BridgeSenderL2(proxy);
-        console.log("L1_PROXY_L2=%s", proxy);
-        console.log("BRIDGE_SENDER_L2=%s", address(sender));
+        output("L1_PROXY_L2", proxy);
+        output("BRIDGE_SENDER_L2", address(sender));
         vm.stopBroadcast();
     }
 }

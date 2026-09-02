@@ -205,18 +205,27 @@ Authoring notes specific to static scenarios:
   predicts the result from the node. A client learns the same result through the
   standard no-tx query: an eth_call through the proxy impersonating the READER
   (`vm.prank(address(reader))` — forge never broadcasts static calls), resolving the
-  SAME entry the trigger uses.
-- **ComputeExpected only for sides with events.** Static resolution emits no events
-  and a posted L1 `staticEntries` batch emits nothing per-entry either. Export
-  `EXPECTED_*` lines only for sides that actually have `ExecutionEntry`s
-  (`staticCounterL2` exports L1 only); a scenario with NO entries on either side
-  (`topLevelStaticCounter`) must omit `ComputeExpected` entirely and carry its proof
-  in the trigger tx, the no-tx query, and in-script `require`s. An eventless L2 side
-  that still has a ComputeExpected exports `EXPECTED_L2_HASHES=[]` explicitly
-  (`staticCounterL2`) — the network runner treats a MISSING export as an error. In
-  network mode the in-script asserts live in `VerifyNetwork` / `VerifyNetworkL2`
-  contracts (read-only, run by network.sh after the trigger against the L1/L2 RPC);
-  a scenario with no ComputeExpected MUST define at least one of them.
+  SAME entry the trigger uses. Exercise it in local `Execute` only (same block): the
+  entry matches just until the next tx that moves the pinned root — possibly later in
+  the SAME block — so a deferred `VerifyNetwork` must never re-issue it.
+- **Eventless sides are verified from calldata, not events.** Static resolution emits
+  no events and a posted L1 `staticEntries` batch emits nothing per-entry either.
+  Export `EXPECTED_*_HASHES` only for sides that actually have `ExecutionEntry`s
+  (`staticCounterL2` exports L1 only), an eventless side explicitly as `[]` (the
+  network runner treats a MISSING export as an error), and the L1 static entries via
+  `_printL1StaticTable` (`EXPECTED_L1_STATIC_TABLE`): both runners match them
+  field-by-field from the settlement tx's `postAndVerifyBatch` calldata with the
+  root-pin VALUES neutralized. A scenario with NO `ExecutionEntry` on either side
+  (`topLevelStaticCounter`) therefore still has a ComputeExpected — all hash lists
+  `[]` plus the static table — and its `VerifyNetwork` asserts persisted state only.
+- **A lookup's absence on L2 is ASSERTED, not assumed.** A scenario whose L1→L2 call is
+  a lookup (reverts on L2: `revertCounter`; top-level static read:
+  `topLevelStaticCounter`) exports `ABSENT_L2_HASHES=[<call key>]`; both runners run
+  `VerifyL2Absent` over the post-trigger L2 range (network: snapshot..latest, scanned
+  once L2 has produced the last block the settlement proved — correlation RPC — or
+  after `L2_ABSENT_GRACE` without it) and
+  fail on any delivery / consumption event or loaded entry / static entry with that key.
+  An empty `EXPECTED_L2_HASHES` alone only skips the L2 checks — it proves nothing.
 - **A sub-call-less static entry needs `rollingHash == 0`** (the untagged static
   accumulator seeds at zero and an empty sub-array is always compared).
 
@@ -232,9 +241,11 @@ Every scenario must satisfy all of these; they are what the suite is audited aga
 
 2. **Every other tx must be derived from a completed top-level frame**
    (`docs/EXECUTION_ENTRY_SPEC.md` §1-to-1 rule) — never invent a transaction to make
-   the scenario work. A delivery exists only for a completed top-level call — the
-   trigger tx itself is the observable cause — even when the source-side consumption
-   is `success=false` and unwinds (`revertCounter`). Reentrant/nested activity NEVER
+   the scenario work. A delivery exists only for a completed top-level call that the
+   destination can be proven to have executed — the trigger tx itself is the observable
+   cause. Lookups get NO delivery: a top-level static read, and an L1→L2 call that
+   reverts on L2 (`revertCounter` has no L2 side at all — the signed revert data travels
+   in its `success=false` source entry). Reentrant/nested activity NEVER
    gets its own delivery, whether its frame commits or reverts: it folds into the
    still-open frame — `incomingCalls[]` of the entry the trigger consumes on L2
    (`nestedCounterL2` committing, `nestedCallRevertL2` reverting) or `l2ToL1Calls[]` /

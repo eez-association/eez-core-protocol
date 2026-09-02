@@ -14,6 +14,7 @@ import {
 import {Counter, ICounterView, StaticReadCounter} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashStatic,
@@ -209,7 +210,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
         counterL1.increment();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -224,8 +225,8 @@ contract DeployL2 is Script {
         vm.startBroadcast();
         address counterProxyL2 = getOrCreateProxy(IEEZ(managerAddr), counterL1Addr, MAINNET_ROLLUP_ID);
         StaticReadCounter reader = new StaticReadCounter(Counter(counterProxyL2));
-        console.log("COUNTER_L1_PROXY_L2=%s", counterProxyL2);
-        console.log("READER_L2=%s", address(reader));
+        output("COUNTER_L1_PROXY_L2", counterProxyL2);
+        output("READER_L2", address(reader));
         vm.stopBroadcast();
     }
 }
@@ -239,7 +240,7 @@ contract Deploy2 is Script {
 
         vm.startBroadcast();
         address readerProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), readerL2Addr, L2_ROLLUP_ID);
-        console.log("READER_PROXY_L1=%s", readerProxyL1);
+        output("READER_PROXY_L1", readerProxyL1);
         vm.stopBroadcast();
     }
 }

@@ -6,7 +6,9 @@ import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry, StaticExecutionEntry, ExpectedRootPerRollup} from "../../../../../src/interfaces/IEEZ.sol";
 import {Counter, ICounterView, StaticReadCounter} from "../../../../../test/mocks/CounterContracts.sol";
+import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHashStatic,
     noCalls,
@@ -42,11 +44,16 @@ import {
 //  delivery; the producer is CounterL2's live state, captured at deploy.
 //
 //  Verification: static resolution is a `view` path — it emits no events, so
-//  this scenario has no ComputeExpected (there are no expected entries or
-//  events to match). The proof is the trigger tx + the no-tx query: a wrong
-//  key, destination, or root pin reverts them (ExecutionNotFound). Execute
-//  asserts both against the predicted value in local mode; VerifyNetwork
-//  makes the same asserts after the trigger in network mode.
+//  there are no entry or call events to match. The proof is (a) the trigger
+//  tx itself — a wrong key, destination, or root pin reverts it
+//  (ExecutionNotFound); (b) the reader's persisted state (lastRead == the
+//  prediction, counter == 1); (c) the static entry the composer posted,
+//  matched from the postAndVerifyBatch calldata (ComputeExpected's
+//  EXPECTED_L1_STATIC_TABLE, root pin neutralized) — the calldata is that
+//  entry's only on-chain trace. The no-tx query is exercised in local mode
+//  only (Execute): it resolves the pool entry against the LIVE L2 root, so it
+//  is valid just until the next tx that moves that root — possibly later in
+//  the same block — which a deferred verifier cannot rely on.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
@@ -109,8 +116,8 @@ contract DeployL2 is Script, StaticCounterActions {
         counterL2.increment();
         (bool ok, bytes memory result) = address(counterL2).staticcall(_counterCallData());
         require(ok, "prediction staticcall failed");
-        console.log("COUNTER_L2=%s", address(counterL2));
-        console.log("PREDICTED_STATIC_RESULT=%s", vm.toString(result));
+        output("COUNTER_L2", address(counterL2));
+        output("PREDICTED_STATIC_RESULT", result);
         vm.stopBroadcast();
     }
 }
@@ -126,8 +133,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         address counterProxy = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, L2_ROLLUP_ID);
         StaticReadCounter reader = new StaticReadCounter(Counter(counterProxy));
-        console.log("COUNTER_PROXY=%s", counterProxy);
-        console.log("READER_L1=%s", address(reader));
+        output("COUNTER_PROXY", counterProxy);
+        output("READER_L1", address(reader));
         vm.stopBroadcast();
     }
 }
@@ -187,25 +194,58 @@ contract ExecuteNetwork is Script {
     }
 }
 
-/// @title VerifyNetwork — network mode: read-only asserts after the trigger, mirroring
-///        Execute's. The trigger succeeding already proves the composer posted a
-///        resolvable static entry (reader.increment() reverts ExecutionNotFound
-///        otherwise); this pins the value it returned and re-resolves the same entry
-///        via the standard no-tx query (only valid while the entry's root pin still
-///        equals the live L2 root — immediately after the trigger in a sequential run).
-/// Env: ROLLUPS, COUNTER_PROXY, READER_L1, PREDICTED_STATIC_RESULT
+/// @title VerifyNetwork — network mode: read-only asserts on the reader's persisted state
+///        after the trigger. The trigger succeeding already proves the composer posted a
+///        resolvable static entry (reader.increment() reverts ExecutionNotFound otherwise);
+///        this pins the value it returned. The entry's content is matched from the batch
+///        calldata (ComputeExpected); the no-tx query is deliberately NOT re-issued here —
+///        it only resolves while the pin equals the live L2 root, which later txs in the
+///        same block already move.
+/// Env: READER_L1, PREDICTED_STATIC_RESULT
 contract VerifyNetwork is Script {
-    function run() external {
+    function run() external view {
         StaticReadCounter reader = StaticReadCounter(vm.envAddress("READER_L1"));
         uint256 predictedValue = abi.decode(vm.envBytes("PREDICTED_STATIC_RESULT"), (uint256));
 
         require(reader.lastRead() == predictedValue, "static read returned wrong value");
         require(reader.counter() == 1, "reader did not run");
 
-        vm.prank(address(reader));
-        uint256 probed = Counter(vm.envAddress("COUNTER_PROXY")).counter();
-        require(probed == predictedValue, "no-tx static query returned wrong value");
+        console.log(
+            "VERIFY_PASS reader.lastRead=%s reader.counter=%s (predicted %s)",
+            reader.lastRead(),
+            reader.counter(),
+            predictedValue
+        );
+    }
+}
 
-        console.log("VERIFY_PASS reader.lastRead=%s no-tx query=%s (predicted %s)", reader.lastRead(), probed, predictedValue);
+// ═══════════════════════════════════════════════════════════════════════
+//  ComputeExpected — the batch carries ONE top-level static entry and no
+//  ExecutionEntry, so every event-level list is empty; the L1 proof is the
+//  posted-calldata match of the static entry (root pin neutralized). Nothing
+//  executes on L2.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Env: COUNTER_L2, READER_L1, PREDICTED_STATIC_RESULT
+contract ComputeExpected is ComputeExpectedBase, StaticCounterActions {
+    function run() external view {
+        StaticExecutionEntry[] memory s = _staticEntries(
+            vm.envAddress("COUNTER_L2"), vm.envAddress("READER_L1"), vm.envBytes("PREDICTED_STATIC_RESULT")
+        );
+
+        console.log("EXPECTED_L1_CALL_HASHES=[]");
+        console.log("EXPECTED_L1_HASHES=[]");
+        console.log("EXPECTED_L2_HASHES=[]");
+        console.log("EXPECTED_L2_CALL_HASHES=[]");
+        // The read is a lookup: its key must leave no trace on L2 (no delivery, no loaded
+        // entry or static entry) — asserted by VerifyL2Absent over the post-trigger range.
+        console.log("ABSENT_L2_HASHES=[%s]", vm.toString(s[0].proxyEntryHash));
+        _printL1StaticTable(s);
+
+        console.log("");
+        console.log(
+            "=== EXPECTED L1 STATIC POOL (1 top-level entry, no ExecutionEntry, no events; key asserted absent on L2) ==="
+        );
+        _logStaticLookup(0, s[0]);
     }
 }

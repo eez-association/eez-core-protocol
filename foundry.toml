@@ -8,8 +8,9 @@ optimizer = true
 optimizer_runs = 1
 via_ir = true
 # Read access for file-based tools (BlobTools.s.sol), scoped to the DSL examples
-# folder only — input files (scenario .dsl / blob hex) must live there.
-fs_permissions = [{access = "read", path = "./script/blob/examples/"}]
+# folder — input files (scenario .dsl / blob hex) must live there — and for the
+# compiled artifacts the e2e PrepareJob driver instantiates via vm.getCode.
+fs_permissions = [{access = "read", path = "./script/blob/examples/"}, {access = "read", path = "./out/"}]
 
 [profile.default.fmt]
 line_length = 120

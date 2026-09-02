@@ -16,6 +16,7 @@ import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
 import {CallTwice} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
@@ -165,7 +166,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         Counter counter = new Counter();
-        console.log("COUNTER_L2=%s", address(counter));
+        output("COUNTER_L2", address(counter));
         vm.stopBroadcast();
     }
 }
@@ -181,8 +182,8 @@ contract Deploy is Script {
         address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
 
         CallTwice caller = new CallTwice();
-        console.log("COUNTER_PROXY=%s", counterProxy);
-        console.log("CALL_TWICE=%s", address(caller));
+        output("COUNTER_PROXY", counterProxy);
+        output("CALL_TWICE", address(caller));
         vm.stopBroadcast();
     }
 }

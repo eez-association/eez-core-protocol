@@ -4,30 +4,28 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
-import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
     noNestedActions,
     noCalls,
-    noL2OutgoingCalls,
-    noL2StaticEntries,
     RollingHashBuilder,
     immediateSingleRollupBatch
 } from "../../../shared/E2EHelpers.sol";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  RevertCounter — a cross-chain call whose DESTINATION naturally reverts;
-//  the revert IS the response. Two-sided, L1→L2.
+//  the revert IS the response. L1→L2, and a LOOKUP: nothing runs on L2.
 //
 //  No revertNextNCalls anywhere: the destination (`RevertCounter.increment()`
-//  on L2) always reverts("always reverts"), and that revert data travels back
-//  to the L1 caller as the call's result.
+//  on L2) always reverts("always reverts"). The composer simulates the call on
+//  L2, the prover signs that revert data into the source entry, and the L1
+//  caller receives it as the call's result.
 //
 //  L1 side (Execute) — trigger + source entry:
 //    alice ──tx──▶ SafeCaller(L1).incrementProxy()
@@ -35,17 +33,16 @@ import {
 //           └─ EEZ.executeCrossChainCall ─ consumes the entry:
 //                { calls: [], success: false, returnData: Error("always reverts") }
 //                runs (nothing) → hash verified → REVERTS with returnData
-//                (cursor + events unwind with the revert)
+//                (cursor, root update and events unwind with the revert)
 //         ◀─ revert Error("always reverts")
 //      └─ catch → lastCallFailed = true; counter++     (trigger tx SUCCEEDS)
 //    result: safeCaller.lastCallFailed == true, targetCounter == 0
 //
-//  L2 side (ExecuteL2) — system-driven delivery:
-//    SYSTEM ──executeIncomingCrossChainCall(entries: [increment from safeCaller@L1])──▶ EEZL2
-//      └─ incomingCalls[0] ─ source proxy ─▶ RevertCounter(L2).increment()
-//           ◀─ revert("always reverts")
-//         folded as CALL_END(false, Error("always reverts")) — the entry itself SUCCEEDS
-//    result: nothing committed (RevertCounter is stateless); hash records the failed call
+//  L2 side: NO delivery. L2 state and the L2 root change only for cross-chain
+//  work L1 can prove it executed; a call that reverts on L2 is not applied, so
+//  no executeIncomingCrossChainCall tx exists for it (CORE spec §C, L2 prover
+//  constraints). The revert data reaches the user through the L1 entry (and
+//  the blob); nothing on L2 records the call.
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
@@ -103,44 +100,6 @@ abstract contract RevertActions {
             returnData: _revertData()
         });
     }
-
-    /// @dev L2 mirror entry: the delivered call runs the real RevertCounter, which reverts —
-    ///      folded as CALL_END(false, Error("always reverts")). The entry itself succeeds.
-    function _l2Entries(
-        address revCounterL2,
-        address safeCaller
-    )
-        internal
-        pure
-        returns (L2ExecutionEntry[] memory entries)
-    {
-        CrossChainCall[] memory calls = new CrossChainCall[](1);
-        calls[0] = CrossChainCall({
-            gas: 0,
-            revertNextNCalls: 0,
-            isStatic: false,
-            sourceAddress: safeCaller,
-            sourceRollupId: MAINNET_ROLLUP_ID,
-            targetAddress: revCounterL2,
-            value: 0,
-            data: _incrementCallData()
-        });
-
-        bytes32 proxyEntryHash = _proxyEntryHash(revCounterL2, safeCaller);
-        bytes32 rh = RollingHashBuilder.entryBeginL2(proxyEntryHash);
-        rh = RollingHashBuilder.appendCallBegin(rh, proxyEntryHash);
-        rh = RollingHashBuilder.appendCallEnd(rh, false, _revertData());
-
-        entries = new L2ExecutionEntry[](1);
-        entries[0] = L2ExecutionEntry({
-            proxyEntryHash: proxyEntryHash,
-            incomingCalls: calls,
-            expectedOutgoingCalls: noL2OutgoingCalls(),
-            rollingHash: rh,
-            success: true,
-            returnData: ""
-        });
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -152,7 +111,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         RevertCounter revCounter = new RevertCounter();
-        console.log("REV_COUNTER_L2=%s", address(revCounter));
+        output("REV_COUNTER_L2", address(revCounter));
         vm.stopBroadcast();
     }
 }
@@ -172,8 +131,8 @@ contract Deploy is Script {
         // The caller: try/catches the reverting cross-chain call so the trigger tx succeeds.
         SafeCounterAndProxy safeCaller = new SafeCounterAndProxy(Counter(counterProxy));
 
-        console.log("COUNTER_PROXY=%s", counterProxy);
-        console.log("SAFE_CALLER=%s", address(safeCaller));
+        output("COUNTER_PROXY", counterProxy);
+        output("SAFE_CALLER", address(safeCaller));
         vm.stopBroadcast();
     }
 }
@@ -183,7 +142,8 @@ contract Deploy is Script {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// @title Execute — local mode: postAndVerifyBatch tx + trigger tx from the EOA.
-///        The runner mines both in one block (execute_l1_same_block).
+///        The runner mines both in one block (execute_l1_same_block). There is no
+///        ExecuteL2: the reverting call is a lookup, nothing is delivered on L2.
 contract Execute is Script, RevertActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -222,25 +182,6 @@ contract ExecuteNetwork is Script {
     }
 }
 
-/// @title ExecuteL2 — local mode: system-driven delivery of the reverting call.
-/// @dev incomingCalls[0] runs the real RevertCounter on L2; its natural revert is
-///      captured as CALL_END(false, ...) and the entry completes.
-/// Env: MANAGER_L2, REV_COUNTER_L2, SAFE_CALLER
-contract ExecuteL2 is Script, RevertActions {
-    function run() external {
-        address managerAddr = vm.envAddress("MANAGER_L2");
-        address revCounterL2 = vm.envAddress("REV_COUNTER_L2");
-        address safeCallerAddr = vm.envAddress("SAFE_CALLER");
-
-        vm.startBroadcast();
-        EEZL2(managerAddr).executeIncomingCrossChainCall(_l2Entries(revCounterL2, safeCallerAddr), noL2StaticEntries());
-
-        console.log("done");
-        console.log("delivered call reverted naturally; entry verified");
-        vm.stopBroadcast();
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 //  ComputeExpected
 // ═══════════════════════════════════════════════════════════════════════
@@ -262,20 +203,23 @@ contract ComputeExpected is ComputeExpectedBase, RevertActions {
         address safeCallerAddr = vm.envAddress("SAFE_CALLER");
 
         ExecutionEntry[] memory l1 = _l1Entries(revCounterL2, safeCallerAddr);
-        L2ExecutionEntry[] memory l2 = _l2Entries(revCounterL2, safeCallerAddr);
 
         // NO event-level L1 expectations: a success=false entry's consumption reverts,
         // unwinding its own ExecutionConsumed/EntryExecuted events. The L1 side is pinned
-        // by the Execute assertions (local) and the posted-calldata table match (network).
-        console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(_entryHash(l2[0])));
-        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
+        // by the Execute assertions (local) and the posted-calldata table match (both modes).
+        // NO L2 expectations at all: the call is a lookup, nothing is delivered on L2 — and
+        // that absence is ASSERTED: the call's key must not appear in any L2 delivery /
+        // consumption event or loaded table (VerifyL2Absent over the post-trigger range).
+        console.log("EXPECTED_L2_HASHES=[]");
+        console.log("EXPECTED_L2_CALL_HASHES=[]");
+        console.log("ABSENT_L2_HASHES=[%s]", vm.toString(l1[0].proxyEntryHash));
         _printL1Table(l1);
-        _printL2Table(l2);
         console.log("");
-        console.log("=== EXPECTED L1 TABLE (1 entry, no calls, success=false: destination revert replay) ===");
+        console.log("=== EXPECTED L1 TABLE (1 entry, no calls, success=false: signed destination revert) ===");
         _logEntry(0, l1[0]);
         console.log("");
-        console.log("=== EXPECTED L2 TABLE (1 entry, 1 call w/ natural revert CALL_END(false)) ===");
-        _logL2Entry(0, l2[0]);
+        console.log(
+            "=== EXPECTED L2: nothing (lookup - the reverting call is never delivered; key asserted absent) ==="
+        );
     }
 }

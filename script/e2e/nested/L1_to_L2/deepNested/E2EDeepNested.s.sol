@@ -21,6 +21,7 @@ import {
 import {Counter, CounterAndProxy, NestedCaller} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -245,7 +246,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL2 = new Counter();
-        console.log("COUNTER_L2=%s", address(counterL2));
+        output("COUNTER_L2", address(counterL2));
         vm.stopBroadcast();
     }
 }
@@ -260,8 +261,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         address counterL2ProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, L2_ROLLUP_ID);
         CounterAndProxy cap = new CounterAndProxy(Counter(counterL2ProxyL1));
-        console.log("COUNTER_L2_PROXY_L1=%s", counterL2ProxyL1);
-        console.log("CAP_L1=%s", address(cap));
+        output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
+        output("CAP_L1", address(cap));
         vm.stopBroadcast();
     }
 }
@@ -276,8 +277,8 @@ contract DeployL2Nested is Script {
         vm.startBroadcast();
         address capProxyL2 = getOrCreateProxy(IEEZ(managerAddr), capL1Addr, MAINNET_ROLLUP_ID);
         NestedCaller nc = new NestedCaller(CounterAndProxy(capProxyL2));
-        console.log("CAP_PROXY_L2=%s", capProxyL2);
-        console.log("NESTED_CALLER_L2=%s", address(nc));
+        output("CAP_PROXY_L2", capProxyL2);
+        output("NESTED_CALLER_L2", address(nc));
         vm.stopBroadcast();
     }
 }
@@ -291,7 +292,7 @@ contract Deploy2 is Script {
 
         vm.startBroadcast();
         address ncProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), ncL2Addr, L2_ROLLUP_ID);
-        console.log("NC_PROXY_L1=%s", ncProxyL1);
+        output("NC_PROXY_L1", ncProxyL1);
         vm.stopBroadcast();
     }
 }

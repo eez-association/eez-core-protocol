@@ -141,7 +141,7 @@ struct StaticExecutionEntry {   // TOP-LEVEL static entry — matched by proxyEn
 }
 ```
 
-Prover obligation (L2): in `executeIncomingCrossChainCall`, `entries[0].incomingCalls[0]` must equal the call that actually arrived from the source rollup, and `msg.value` must equal the sum of committed incoming values (no on-chain balance check — later entries may draw on it); enforced in-circuit (full list: CORE spec §C "Prover constraints"). On-chain the contract checks internal consistency: `entries[0].proxyEntryHash` equals the hash of `incomingCalls[0]` (non-empty; folds its own `gas`). `entries[0]` stays fully general — `success == false` reverts the whole delivery; `revertNextNCalls` on the inbound call rolls back its destination effects while the delivery commits.
+Prover obligation (L2): in `executeIncomingCrossChainCall`, `entries[0].incomingCalls[0]` must equal the call that actually arrived from the source rollup, and `msg.value` must equal the sum of committed incoming values (no on-chain balance check — later entries may draw on it); enforced in-circuit (full list: CORE spec §C "Prover constraints"). On-chain the contract checks internal consistency: `entries[0].proxyEntryHash` equals the hash of `incomingCalls[0]` (non-empty; folds its own `gas`). `entries[0]` stays fully general — `success == false` reverts the whole delivery; `revertNextNCalls` on the inbound call rolls back its destination effects while the delivery commits. Lookups — a top-level static read, an L1→L2 call that reverts on L2, or one whose L1 frame is reverted afterwards — are never delivered: the composer signs the predicted return/revert data, nothing is applied on L2 and the root does not move.
 
 ### L1 batch struct
 

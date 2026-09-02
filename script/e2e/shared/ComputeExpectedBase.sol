@@ -58,6 +58,14 @@ abstract contract ComputeExpectedBase is Script {
         _printTableLine("EXPECTED_L2_TABLE=%s", blob);
     }
 
+    /// @dev Top-level static entries the L1 batch must carry (`batch.staticEntries`). They
+    ///      resolve through the view path and leave no event, so the posted calldata is
+    ///      their only on-chain trace: VerifyL1BatchCalldata matches them with the root pin
+    ///      VALUES neutralized (the composer pins live roots, the scenario placeholders).
+    function _printL1StaticTable(StaticExecutionEntry[] memory entries) internal pure {
+        _printTableLine("EXPECTED_L1_STATIC_TABLE=%s", abi.encode(entries));
+    }
+
     /// @dev Separate frame for the hex conversion + log — keeps the via-ir stack of
     ///      callers that print both tables under the limit.
     function _printTableLine(string memory label, bytes memory blob) private pure {

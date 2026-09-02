@@ -15,6 +15,7 @@ import {
 import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -212,7 +213,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -235,8 +236,8 @@ contract DeployL2 is Script {
         // capL2.incrementProxy() reentrant-calls counterL1 via the proxy.
         CounterAndProxy capL2 = new CounterAndProxy(Counter(counterL1ProxyL2));
 
-        console.log("COUNTER_L1_PROXY_L2=%s", counterL1ProxyL2);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(capL2));
+        output("COUNTER_L1_PROXY_L2", counterL1ProxyL2);
+        output("COUNTER_AND_PROXY_L2", address(capL2));
         vm.stopBroadcast();
     }
 }
@@ -250,7 +251,7 @@ contract Deploy2 is Script {
 
         vm.startBroadcast();
         address capL2Proxy = getOrCreateProxy(IEEZ(rollupsAddr), capL2Addr, L2_ROLLUP_ID);
-        console.log("CAP_L2_PROXY=%s", capL2Proxy);
+        output("CAP_L2_PROXY", capL2Proxy);
         vm.stopBroadcast();
     }
 }

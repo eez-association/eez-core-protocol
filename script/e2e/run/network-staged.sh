@@ -8,12 +8,21 @@
 # Phases:
 #   1. fund     — one pooled wallet per job via the run faucet + MultiSend
 #                 (shared with network-parallel.sh, orchestrator-lib.sh).
-#   2. prepare  — default "waves" mode: per Deploy-contract wave, dry-run +
-#                 pre-sign every job's deploy txs (capped at PREPARE_PARALLEL),
-#                 fire them with the curl workers, mine once, next wave; then a
-#                 read-only finish pass pre-signs triggers + runs ComputeExpected
-#                 (network.sh E2E_STAGE=prepare, E2E_PREPARE_STEP=deploy:<k>/finish).
-#                 PREPARE_MODE=classic = the original per-job forge deploys.
+#   2. prepare  — default "plan" mode: one batched nonce barrier, then ONE forge
+#                 run per job (capped at PREPARE_PARALLEL) that drives all of the
+#                 scenario's Deploy* contracts against in-process forks of both
+#                 chains with the wallet nonces injected and pre-signs the planned
+#                 deploy txs (network.sh E2E_STAGE=prepare, E2E_PREPARE_STEP=plan)
+#                 — nothing waits for a block. ALL deploy txs are then fired at
+#                 once by the curl workers, mined with ONE wait, a batched
+#                 eth_getCode pass asserts every predicted address holds code, and
+#                 the finish step pre-signs the triggers + runs ComputeExpected
+#                 (E2E_PREPARE_STEP=finish).
+#                 PREPARE_MODE=waves = per Deploy-contract dry-run waves against the
+#                 real RPCs, mined one wave at a time (E2E_PREPARE_STEP=deploy:<k>,
+#                 then finish); PREPARE_MODE=classic = per-job forge deploys.
+#                 Every prepare launch is bounded by PREPARE_JOB_TIMEOUT (a hung
+#                 forge run drops its job; the run goes on).
 #   3. snapshot — one L1+L2 block snapshot bounds every job's verification scans.
 #   4. send     — SEND_WORKERS curl-only workers publish the pre-signed raw txs
 #                 fire-and-forget and record job,chain,txhash in sent.csv.
@@ -41,19 +50,27 @@
 #                    not counted as failures)
 #
 # Env knobs:
-#   PREPARE_MODE      waves (default) | classic — see phase 2 above
-#   DEPLOY_MINE_TIMEOUT  seconds to wait for a deploy wave to mine (default 300)
+#   PREPARE_MODE      plan (default) | waves | classic — see phase 2 above
+#   DEPLOY_MINE_TIMEOUT  seconds to wait for the deploy txs to mine (default 300)
+#   DEPLOY_POLL_INTERVAL seconds between deploy receipt polls (default 3)
 #   PREPARE_PARALLEL  concurrent prepare jobs (default 40)
+#   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / wave / finish /
+#                     classic) may run before its job is dropped (default 300)
 #   SEND_WORKERS      send workers (default 80; --workers overrides)
-#   VERIFY_PARALLEL   concurrent verify jobs (default 4 — keep the PC alive)
-#   POLL_INTERVAL     seconds between receipt polls (default 10)
-#   MINE_TIMEOUT      seconds to wait for all receipts (default 600)
+#   VERIFY_PARALLEL   concurrent verify jobs (default 8)
+#   POLL_INTERVAL     seconds between trigger receipt polls (default 10)
+#   MINE_TIMEOUT      seconds to wait for all trigger receipts (default 600)
+#   E2E_TRIGGER_GAS   trigger gas limit, passed through to network.sh (default
+#                     1000000; a scenario's GAS output takes precedence)
 #   FUND_ETH / FLOOR_ETH / SOURCE_PK / MULTISEND_BATCH / DEVNET_ENV  as in
 #   network-parallel.sh.
 #
 # Run dir: tmp/e2e-staged-net/<ts>/ — jobs.csv, wallets.csv, snapshot.env,
-# sent.csv, mined.csv, pending.csv (what never mined), jobs/<job>/{prepare.log,
-# manifest.env, rawtxs.txt, compute.out, txs.txt, verify.log}.
+# deploy-sent.csv / deploy-mined.csv, sent.csv, mined.csv, pending.csv (what
+# never mined), send-notes.log (duplicate sends recovered on resume),
+# jobs/<job>/{prepare.log, deploy-env.env, deploy-addrs.txt, deploytxs.txt,
+# deploy-hashes.txt, .deploys-done, manifest.env, rawtxs.txt, compute.out,
+# txs.txt, verify.log}.
 #
 # Do NOT run two orchestrator instances concurrently (shared wallet pool).
 
@@ -80,10 +97,13 @@ DEFAULT_SOURCE_PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab
 FUND_ETH="${FUND_ETH:-$DEFAULT_FUND_ETH}"
 SOURCE_PK="${SOURCE_PK:-$DEFAULT_SOURCE_PK}"
 PREPARE_PARALLEL="${PREPARE_PARALLEL:-40}"
+PREPARE_JOB_TIMEOUT="${PREPARE_JOB_TIMEOUT:-300}"
 SEND_WORKERS="${SEND_WORKERS:-80}"
-VERIFY_PARALLEL="${VERIFY_PARALLEL:-4}"
+VERIFY_PARALLEL="${VERIFY_PARALLEL:-8}"
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 MINE_TIMEOUT="${MINE_TIMEOUT:-600}"
+DEPLOY_MINE_TIMEOUT="${DEPLOY_MINE_TIMEOUT:-300}"
+DEPLOY_POLL_INTERVAL="${DEPLOY_POLL_INTERVAL:-3}"
 DIRECT=false
 FRESH=false
 NO_VERIFY=false
@@ -148,12 +168,45 @@ trap _restore_forge_cache EXIT
 
 # ── Lightweight JSON-RPC helpers (the whole send/monitor path uses only these) ──
 _rpc_send_raw() {  # $1=rpc $2=raw signed tx → accepted hash on stdout
-    local out hash
+    local out hash err
     out=$(curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendRawTransaction\",\"params\":[\"$2\"]}") || return 1
     hash=$(jq -r '.result // empty' <<< "$out" 2>/dev/null)
-    [[ -n "$hash" ]] || { echo "$out" >&2; return 1; }
+    if [[ -z "$hash" ]]; then
+        # A tx the node already holds (a resume re-sending what a crash between
+        # send and hash-record left unrecorded, or a duplicate worker) is not a
+        # failure: its hash is keccak of the raw bytes, so record that and let
+        # the receipt poll decide. "already known" and its variants name THIS
+        # tx. "nonce too low" / "replacement transaction underpriced" (nodes) and
+        # "invalid nonce ... expected next unreserved nonce" (the fronts) only
+        # say the nonce is taken — by our earlier send, or by a foreign tx — so
+        # the endpoint is asked whether it holds our hash before it is trusted
+        # (fronts answer eth_getTransactionByHash for held and mined txs); if it
+        # does not, this is a nonce collision and the job fails now instead of
+        # after a receipt poll that could never succeed.
+        err=$(jq -r '.error.message // empty' <<< "$out" 2>/dev/null)
+        if [[ "$err" =~ (already\ known|already\ imported|known\ transaction) ]]; then
+            hash=$(cast keccak "$2") || { echo "$out" >&2; return 1; }
+            echo "NOTE: node answered '$err' - treating as already sent ($hash)" >> "$RUN_DIR/send-notes.log"
+        elif [[ "$err" =~ (nonce\ too\ low|replacement\ transaction\ underpriced|invalid\ nonce) ]]; then
+            hash=$(cast keccak "$2") || { echo "$out" >&2; return 1; }
+            if _rpc_has_tx "$1" "$hash"; then
+                echo "NOTE: node answered '$err' and holds $hash - treating as already sent" >> "$RUN_DIR/send-notes.log"
+            else
+                echo "NONCE COLLISION: node answered '$err' and does not hold $hash - a different tx took this nonce" >&2
+                return 1
+            fi
+        else
+            echo "$out" >&2; return 1
+        fi
+    fi
     echo "$hash"
+}
+_rpc_has_tx() {  # $1=rpc $2=tx hash → 0 when the node knows the tx (pending or mined)
+    local out
+    out=$(curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionByHash\",\"params\":[\"$2\"]}") || return 1
+    jq -e '.result != null' <<< "$out" >/dev/null 2>&1
 }
 
 _batch_receipts() {  # $1=rpc; stdin: one tx hash per line → "hash hexblock status" for the mined ones
@@ -205,11 +258,12 @@ _poll_pending_once() {
 }
 
 # ── Monitor a sent-csv until everything is mined or a deadline passes ──
-# $1=sent.csv $2=mined.csv $3=pending.csv $4=timeout $5=rpc mode. Returns 1 on
-# timeout, leaving the unmined rows in $3.
+# $1=sent.csv $2=mined.csv $3=pending.csv $4=timeout $5=rpc mode
+# $6=poll interval (default POLL_INTERVAL). Returns 1 on timeout, leaving the
+# unmined rows in $3.
 _monitor_files() {
     cp "$1" "$3"; : > "$2"
-    local start deadline total left
+    local start deadline total left interval="${6:-$POLL_INTERVAL}"
     start=$(date +%s); deadline=$(( start + $4 )); total=$(wc -l < "$1")
     while true; do
         _poll_pending_once "$3" "$2" "$5"
@@ -217,8 +271,192 @@ _monitor_files() {
         echo "  mined $(( total - left ))/$total ($(( $(date +%s) - start ))s elapsed)"
         (( left == 0 )) && return 0
         (( $(date +%s) >= deadline )) && { echo "MONITOR TIMEOUT: $left tx(s) never mined (see $3)"; return 1; }
-        sleep "$POLL_INTERVAL"
+        sleep "$interval"
     done
+}
+
+# ══════════════════════════════════════════════
+#  Deploy-tx helpers shared by the plan and wave prepare modes
+# ══════════════════════════════════════════════
+# Per-job files: deploytxs<sfx>.txt ("<L1|L2> <rawtx>" lines, nonce order) and
+# deploy-hashes<sfx>.txt (one accepted hash per sent line — a resumed fire
+# continues after them, so nothing is ever sent twice). Run files:
+# deploy-sent<sfx>.csv / deploy-mined<sfx>.csv / deploy-pending<sfx>.csv.
+# sfx is "" (plan mode: one batch) or "-wave<k>". A job holding .deploys-done
+# has nothing left to fire.
+
+# ── Fire every live job's pending deploy txs with the curl workers ──
+# Deploys go to the normal RPCs, never the fronts (fronts swallow ordinary txs).
+# A job whose send fails is dropped: its remaining txs would collide.
+_fire_deploy_txs() {  # $1=sfx
+    local sfx="$1" w pids=()
+    touch "$RUN_DIR/deploy-sent$sfx.csv"
+    : > "$RUN_DIR/deploy-send-failed$sfx.txt"
+    for ((w = 0; w < SEND_WORKERS; w++)); do
+        (
+            local j name dir f chain raw rpc hash done_n
+            for ((j = w; j < NJOBS; j += SEND_WORKERS)); do
+                name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"; f="$dir/deploytxs$sfx.txt"
+                [[ "$DEAD" == *",$name,"* ]] && continue
+                [[ -s "$f" && ! -f "$dir/.deploys-done" ]] || continue
+                done_n=0
+                [[ -f "$dir/deploy-hashes$sfx.txt" ]] && done_n=$(wc -l < "$dir/deploy-hashes$sfx.txt")
+                touch "$dir/deploy-hashes$sfx.txt"
+                while IFS=' ' read -r chain raw; do
+                    [[ -n "$raw" ]] || continue
+                    [[ "$chain" == "L2" ]] && rpc="$L2_RPC" || rpc="$L1_RPC"
+                    if ! hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log"); then
+                        echo "DEPLOY SEND FAILED: $name ($chain)" >> "$RUN_DIR/send-failed.log"
+                        echo "$name" >> "$RUN_DIR/deploy-send-failed$sfx.txt"   # parent marks it dead
+                        break
+                    fi
+                    echo "$hash" >> "$dir/deploy-hashes$sfx.txt"
+                    echo "$name,$chain,$hash" >> "$RUN_DIR/deploy-sent$sfx.csv"
+                done < <(tail -n +$((done_n + 1)) "$f")
+            done
+        ) &
+        pids+=($!)
+    done
+    wait "${pids[@]}"   # the senders only
+    echo "  fired $(wc -l < "$RUN_DIR/deploy-sent$sfx.csv") deploy tx(s)"
+    local name
+    while read -r name; do
+        [[ -n "$name" ]] && _prep_failed "$name" "deploy tx not sent - see send-failed.log"
+    done < "$RUN_DIR/deploy-send-failed$sfx.txt"
+}
+
+# ── Wait for the fired deploy txs; drop jobs whose txs never mined or reverted ──
+_mine_deploy_txs() {  # $1=sfx
+    local sfx="$1" name chain hash blk status
+    [[ -s "$RUN_DIR/deploy-sent$sfx.csv" ]] || return 0
+    _monitor_files "$RUN_DIR/deploy-sent$sfx.csv" "$RUN_DIR/deploy-mined$sfx.csv" \
+        "$RUN_DIR/deploy-pending$sfx.csv" "$DEPLOY_MINE_TIMEOUT" direct "$DEPLOY_POLL_INTERVAL" || true
+    while IFS=, read -r name chain hash; do
+        _prep_failed "$name" "deploy tx $hash never mined"
+    done < "$RUN_DIR/deploy-pending$sfx.csv"
+    while IFS=, read -r name chain hash blk status; do
+        [[ "$status" == "0x1" ]] && continue
+        _prep_failed "$name" "deploy tx $hash reverted"
+    done < "$RUN_DIR/deploy-mined$sfx.csv"
+}
+
+# ── Assert every predicted address really holds code before trusting it ──
+# Both prepare modes rest on forge's dry-run address prediction; this is the
+# cheap cross-check (one batched eth_getCode per chain). Each address the
+# planned txs create (jobs/<job>/deploy-addrs.txt, "<L1|L2> <address>" lines
+# recorded at re-sign) is checked on the chain its tx targets: the same
+# deployer+nonce yields the same CREATE address on both chains, so code on the
+# wrong chain must not pass.
+_addrs_with_code() {  # $1=rpc; stdin: one address per line → subset holding code
+    # Chunked + stdin-fed for the same ARG_MAX reason as _batch_receipts.
+    local addrs=() o
+    mapfile -t addrs
+    (( ${#addrs[@]} > 0 )) || return 0
+    for ((o = 0; o < ${#addrs[@]}; o += 200)); do
+        local chunk=("${addrs[@]:o:200}")
+        printf '%s\n' "${chunk[@]}" | jq -R -s 'split("\n")|map(select(length>0))|to_entries
+            |map({jsonrpc:"2.0",id:.key,method:"eth_getCode",params:[.value,"latest"]})' \
+            | curl -s --max-time 30 -X POST "$1" -H 'Content-Type: application/json' -d @- \
+            | jq -r '.[]? | select(.result != null and .result != "0x") | .id' \
+            | while read -r id; do echo "${chunk[$id]}"; done
+    done
+}
+_check_deploy_liveness() {
+    local chain rpc i name f a n=0
+    local -A CODED=()
+    for chain in L1 L2; do
+        [[ "$chain" == "L1" ]] && rpc="$L1_RPC" || rpc="$L2_RPC"
+        local addrs=()
+        mapfile -t addrs < <(awk -v c="$chain" '$1 == c {print tolower($2)}' "$RUN_DIR"/jobs/*/deploy-addrs.txt 2>/dev/null | sort -u)
+        (( ${#addrs[@]} > 0 )) || continue
+        n=$(( n + ${#addrs[@]} ))
+        while read -r a; do CODED["$chain ${a,,}"]=1; done < <(printf '%s\n' "${addrs[@]}" | _addrs_with_code "$rpc")
+    done
+    (( n > 0 )) || return 0
+    for ((i = 0; i < NJOBS; i++)); do
+        name="${JOB_NAMES[$i]}"
+        [[ "$DEAD" == *",$name,"* ]] && continue
+        f="$RUN_DIR/jobs/$name/deploy-addrs.txt"
+        [[ -f "$f" ]] || continue
+        while read -r chain a; do
+            [[ -n "${CODED["$chain ${a,,}"]:-}" ]] && continue
+            _prep_failed "$name" "predicted address $a has no code on $chain"
+            break
+        done < <(sort -u "$f")
+    done
+    echo "deploy-liveness: $n predicted address(es) checked on their own chain"
+}
+
+# ══════════════════════════════════════════════
+#  Plan-mode prepare helpers
+# ══════════════════════════════════════════════
+# ── Batched nonces: stdin one address per line → "address nonce" (decimal) ──
+_batch_nonces() {  # $1=rpc
+    local addrs=() o
+    mapfile -t addrs
+    (( ${#addrs[@]} > 0 )) || return 0
+    for ((o = 0; o < ${#addrs[@]}; o += 200)); do
+        local chunk=("${addrs[@]:o:200}")
+        printf '%s\n' "${chunk[@]}" | jq -R -s 'split("\n")|map(select(length>0))|to_entries
+            |map({jsonrpc:"2.0",id:.key,method:"eth_getTransactionCount",params:[.value,"latest"]})' \
+            | curl -s --max-time 30 -X POST "$1" -H 'Content-Type: application/json' -d @- \
+            | jq -r '.[]? | select(.result != null) | "\(.id) \(.result)"' \
+            | while read -r id hex; do echo "${chunk[$id]} $(printf '%d' "$hex")"; done
+    done
+}
+
+# ── One read-consistency barrier for every wallet (replaces the per-job one) ──
+# A load-balanced public RPC can lag behind txs the fronts already saw (earlier
+# runs' triggers); planning from a lagging RPC would reuse a spent nonce and
+# every predicted CREATE address would be wrong. Wait until, on each chain whose
+# front differs from its RPC, the RPC's nonce is at least the front's for every
+# wallet.
+_nonce_barrier() {
+    local chain rpc front behind i addr n got ok
+    for chain in L1 L2; do
+        if [[ "$chain" == "L1" ]]; then rpc="$L1_RPC"; front="$L1_FRONT"; else rpc="$L2_RPC"; front="$L2_FRONT"; fi
+        [[ -n "$front" && "$front" != "$rpc" ]] || continue
+        # Every wallet must answer on both endpoints: a missing batch item (a
+        # dropped request, an error entry) would read as "nonce 0 = caught up".
+        local -A FRONT_N=()
+        for i in $(seq 1 10); do
+            FRONT_N=()
+            while read -r addr n; do FRONT_N[$addr]="$n"; done < <(printf '%s\n' "${WALLET_ADDRS[@]}" | _batch_nonces "$front")
+            (( ${#FRONT_N[@]} == ${#WALLET_ADDRS[@]} )) && break
+            echo "nonce barrier: $chain front answered ${#FRONT_N[@]}/${#WALLET_ADDRS[@]} wallets - retrying"
+            sleep 2
+        done
+        (( ${#FRONT_N[@]} == ${#WALLET_ADDRS[@]} )) || { echo "nonce barrier: $chain front unreachable or incomplete - aborting"; exit 1; }
+        ok=false
+        for i in $(seq 1 60); do
+            behind=0; got=0
+            while read -r addr n; do
+                got=$((got+1))
+                (( n < FRONT_N[$addr] )) && behind=$((behind+1))
+            done < <(printf '%s\n' "${WALLET_ADDRS[@]}" | _batch_nonces "$rpc")
+            if (( got == ${#WALLET_ADDRS[@]} && behind == 0 )); then ok=true; break; fi
+            echo "waiting for $chain RPC to catch up ($behind wallet nonce(s) behind the front, $got/${#WALLET_ADDRS[@]} answered)..."
+            sleep 2
+        done
+        $ok || { echo "nonce barrier: $chain RPC still behind the front after 120s - aborting (planning from a lagging RPC would reuse spent nonces)"; exit 1; }
+    done
+}
+
+# ── Plan inputs: the fork block and every wallet's nonce, per chain ──
+# Read once after the barrier and handed to each job's PrepareJob run: the
+# block pins the in-process forks (and lets forge cache what it fetches on
+# disk, shared by every job), the nonce seeds the planned txs.
+declare -A NONCE_L1=() NONCE_L2=()
+BLOCK_L1=""; BLOCK_L2=""
+_read_plan_inputs() {
+    local addr n
+    BLOCK_L1=$(cast block-number --rpc-url "$L1_RPC") && BLOCK_L2=$(cast block-number --rpc-url "$L2_RPC") \
+        && [[ "$BLOCK_L1" =~ ^[0-9]+$ && "$BLOCK_L2" =~ ^[0-9]+$ ]] || { echo "plan: block number lookup failed - RPCs unreachable?"; exit 1; }
+    while read -r addr n; do NONCE_L1[$addr]="$n"; done < <(printf '%s\n' "${WALLET_ADDRS[@]}" | _batch_nonces "$L1_RPC")
+    while read -r addr n; do NONCE_L2[$addr]="$n"; done < <(printf '%s\n' "${WALLET_ADDRS[@]}" | _batch_nonces "$L2_RPC")
+    (( ${#NONCE_L1[@]} == ${#WALLET_ADDRS[@]} && ${#NONCE_L2[@]} == ${#WALLET_ADDRS[@]} )) \
+        || { echo "plan: nonce lookup incomplete (L1 ${#NONCE_L1[@]}, L2 ${#NONCE_L2[@]} of ${#WALLET_ADDRS[@]} wallets)"; exit 1; }
+    echo "== plan inputs: L1 @$BLOCK_L1, L2 @$BLOCK_L2, nonces for ${#WALLET_ADDRS[@]} wallet(s)"
 }
 
 # ══════════════════════════════════════════════
@@ -352,24 +590,75 @@ _prep_failed() {  # $1=job name $2=reason — drop the job and leave a marker th
     touch "$RUN_DIR/jobs/$1/.prepare-failed"
     echo "PREPARE FAILED: $1 ($2)"
 }
+# Bounded by PREPARE_JOB_TIMEOUT: a forge run stuck on a dead RPC would
+# otherwise hold the whole run (every job's deploys are fired together). GNU
+# timeout signals its own process group, so the forge child dies with the
+# runner; rc 124 = timed out.
 _job_launch_prepare() {  # $1=job index $2=E2E_PREPARE_STEP value ("" = classic one-pass)
+    local addr="${WALLET_ADDRS[$1]:-}" nonce_l1="" nonce_l2=""
+    [[ "$2" == "plan" ]] && { nonce_l1="${NONCE_L1[$addr]}"; nonce_l2="${NONCE_L2[$addr]}"; }
     E2E_STAGE=prepare E2E_PREPARE_STEP="$2" E2E_JOB_DIR="$RUN_DIR/jobs/${JOB_NAMES[$1]}" \
-        bash script/e2e/run/network.sh "${JOB_SOLS[$1]}" \
+        E2E_L1_NONCE="$nonce_l1" E2E_L2_NONCE="$nonce_l2" E2E_L1_BLOCK="$BLOCK_L1" E2E_L2_BLOCK="$BLOCK_L2" \
+        timeout "$PREPARE_JOB_TIMEOUT" bash script/e2e/run/network.sh "${JOB_SOLS[$1]}" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
         --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
         --pk "${WALLET_PKS[$1]}" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \
         >> "$RUN_DIR/jobs/${JOB_NAMES[$1]}/prepare.log" 2>&1
 }
+_prep_launch_failed() {  # $1=job name $2=step label $3=rc of the prepare launch
+    if [[ "$3" -eq 124 ]]; then
+        echo "PREPARE TIMEOUT: killed after ${PREPARE_JOB_TIMEOUT}s (PREPARE_JOB_TIMEOUT)" >> "$RUN_DIR/jobs/$1/prepare.log"
+        _prep_failed "$1" "$2 - timed out after ${PREPARE_JOB_TIMEOUT}s"
+    else
+        _prep_failed "$1" "$2 - log: $RUN_DIR/jobs/$1/prepare.log"
+    fi
+}
+_mark_deploys_done() {  # every live job's deploys are mined and hold code
+    local i
+    for ((i = 0; i < NJOBS; i++)); do
+        [[ "$DEAD" == *",${JOB_NAMES[$i]},"* ]] || touch "$RUN_DIR/jobs/${JOB_NAMES[$i]}/.deploys-done"
+    done
+}
+# ── Finish step: trigger presign + ComputeExpected (read-only, fast) for every
+# live job whose deploys all mined and that has no manifest yet. Success clears
+# a .prepare-failed marker left by an earlier, interrupted attempt. ──
+_finish_prepare() {
+    local i k name todo=() pids=() idx=()
+    for ((i = 0; i < NJOBS; i++)); do
+        name="${JOB_NAMES[$i]}"
+        [[ "$DEAD" == *",$name,"* ]] && continue
+        [[ -f "$RUN_DIR/jobs/$name/.deploys-done" && ! -f "$RUN_DIR/jobs/$name/manifest.env" ]] && todo+=("$i")
+    done
+    (( ${#todo[@]} > 0 )) || return 0
+    echo ""
+    echo "== Prepare finish: ${#todo[@]} job(s) ($PREPARE_PARALLEL parallel)"
+    _restore_forge_cache
+    for i in "${todo[@]}"; do
+        while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
+        echo "PREPARE ${JOB_NAMES[$i]}"
+        _job_launch_prepare "$i" finish &
+        pids+=($!); idx+=("$i")
+    done
+    local rc
+    for k in "${!pids[@]}"; do
+        name="${JOB_NAMES[${idx[$k]}]}"
+        rc=0; wait "${pids[$k]}" || rc=$?
+        if (( rc == 0 )); then rm -f "$RUN_DIR/jobs/$name/.prepare-failed"
+        else _prep_launch_failed "$name" finish "$rc"; fi
+    done
+}
 
 if [[ -n "$RESUME" ]]; then
-# ── Resume a stopped run: finish what is deploy-complete, fire what is prepared ──
+# ── Resume a stopped run: mine what was fired, finish what is deploy-complete, fire what is prepared ──
 # A job is fireable once it has a complete manifest (written last by the prepare
-# stage) and has sent nothing yet (double-fire guard). A wave-mode job whose
-# deploys all mined (.deploys-done + deploy-env.env) but that never reached the
-# finish step only lacks the read-only part (trigger presign + ComputeExpected),
-# so that step is re-run here first — no deploy is repeated, and a job killed
-# mid-finish just rewrites its manifest. Everything else in jobs.csv is left for
-# the verify summary to report as "never prepared".
+# stage) and has sent nothing yet (double-fire guard). A job whose pre-signed
+# deploys (deploytxs.txt) have not all mined (no .deploys-done) gets the rest
+# fired first (continuing after any hash already in deploy-hashes.txt) and
+# mined. A job whose deploys all mined but that never reached the finish step
+# only lacks the read-only part (trigger presign + ComputeExpected), so that
+# step is re-run — no deploy is repeated, and a job killed mid-finish just
+# rewrites its manifest. Everything else in jobs.csv is left for the verify
+# summary to report as "never prepared".
 RUN_DIR="${RESUME%/}"
 [[ -f "$RUN_DIR/jobs.csv" && -f "$RUN_DIR/wallets.csv" ]] || {
     echo "Not a staged run dir: $RUN_DIR (missing jobs.csv/wallets.csv)"; exit 1; }
@@ -377,7 +666,7 @@ _bind_run_network "$RUN_DIR"
 declare -A _PK_OF
 while IFS=, read -r _j _a _k; do [[ "$_j" == "job" ]] || _PK_OF[$_j]="$_k"; done < "$RUN_DIR/wallets.csv"
 JOB_NAMES=(); JOB_SOLS=(); WALLET_PKS=()
-_SKIPPED_SENT=0; _FINISH_IDX=()
+_SKIPPED_SENT=0
 while IFS=, read -r _name _sol; do
     [[ "$_name" == "job" ]] && continue
     _jd="$RUN_DIR/jobs/$_name"
@@ -386,33 +675,32 @@ while IFS=, read -r _name _sol; do
         _SKIPPED_SENT=$((_SKIPPED_SENT+1)); continue
     fi
     if [[ ! -f "$_jd/manifest.env" ]]; then
-        [[ -f "$_jd/.deploys-done" && -s "$_jd/deploy-env.env" && -n "${_PK_OF[$_name]:-}" ]] || continue
-        _FINISH_IDX+=(${#JOB_NAMES[@]})
+        [[ -n "${_PK_OF[$_name]:-}" && -s "$_jd/deploy-env.env" ]] || continue
+        [[ -f "$_jd/.deploys-done" || -s "$_jd/deploytxs.txt" ]] || continue
     fi
     JOB_NAMES+=("$_name"); JOB_SOLS+=("$_sol"); WALLET_PKS+=("${_PK_OF[$_name]}")
 done < "$RUN_DIR/jobs.csv"
+NJOBS=${#JOB_NAMES[@]}
 RESUME_TRUNCATED=true
 touch "$RUN_DIR/.truncated"   # later --verify-only passes report unprepared jobs as truncated, not failed
 
 _warm_forge_cache
-if (( ${#_FINISH_IDX[@]} > 0 )); then
-    echo "== RESUME $RUN_DIR: finishing ${#_FINISH_IDX[@]} deploy-complete job(s) ($PREPARE_PARALLEL parallel)"
-    _restore_forge_cache
-    F_PIDS=(); F_IDX=()
-    for i in "${_FINISH_IDX[@]}"; do
-        while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-        echo "PREPARE ${JOB_NAMES[$i]}"
-        _job_launch_prepare "$i" finish &
-        F_PIDS+=($!); F_IDX+=($i)
-    done
-    for k in "${!F_PIDS[@]}"; do
-        if wait "${F_PIDS[$k]}"; then rm -f "$RUN_DIR/jobs/${JOB_NAMES[${F_IDX[$k]}]}/.prepare-failed"
-        else _prep_failed "${JOB_NAMES[${F_IDX[$k]}]}" "finish - log: $RUN_DIR/jobs/${JOB_NAMES[${F_IDX[$k]}]}/prepare.log"; fi
-    done
+_DEPLOYS_PENDING=0
+for ((i = 0; i < NJOBS; i++)); do
+    _jd="$RUN_DIR/jobs/${JOB_NAMES[$i]}"
+    [[ -s "$_jd/deploytxs.txt" && ! -f "$_jd/.deploys-done" ]] && _DEPLOYS_PENDING=$((_DEPLOYS_PENDING+1))
+done
+if (( _DEPLOYS_PENDING > 0 )); then
+    echo "== RESUME $RUN_DIR: firing + mining the deploys of $_DEPLOYS_PENDING job(s)"
+    _fire_deploy_txs ""
+    _mine_deploy_txs ""
+    _check_deploy_liveness
+    _mark_deploys_done
 fi
-# keep only jobs that now hold a manifest (finish failures drop out here)
+_finish_prepare
+# keep only jobs that now hold a manifest (deploy and finish failures drop out here)
 _N=(); _S=(); _P=()
-for ((i = 0; i < ${#JOB_NAMES[@]}; i++)); do
+for ((i = 0; i < NJOBS; i++)); do
     [[ -f "$RUN_DIR/jobs/${JOB_NAMES[$i]}/manifest.env" ]] || continue
     _N+=("${JOB_NAMES[$i]}"); _S+=("${JOB_SOLS[$i]}"); _P+=("${WALLET_PKS[$i]}")
 done
@@ -444,144 +732,22 @@ _warm_forge_cache
 fund_workers
 
 # ══ Phase 2: prepare ══
-# waves (default): dry-run + pre-sign each job's k-th Deploy contract, fire the
-#   whole wave with the curl workers, mine ONCE, then wave k+1 — the run blocks
-#   on deploy mining a handful of times (max Deploy contracts per scenario)
-#   instead of once per script per job. Wave ordering is what keeps the dry-run
-#   nonce (and thus every predicted CREATE address) truthful.
-# classic (PREPARE_MODE=classic): each job's forge deploys and waits for its own
-#   receipts — the original single-pass prepare.
-PREPARE_MODE="${PREPARE_MODE:-waves}"
+# plan (default): one batched nonce barrier, then ONE forge run per job
+#   (PrepareJob.s.sol) that drives all of its Deploy* contracts against
+#   in-process forks of both chains with the wallet nonces injected and
+#   pre-signs the planned deploy txs — nothing waits for a block. ALL deploy txs
+#   are then fired at once, mined with ONE wait and checked for code, and the
+#   finish step pre-signs the triggers + runs ComputeExpected. Triggers are
+#   fired only after the deploys mined (phase 4): a front's acceptance of a
+#   trigger whose nonce is ahead of chain state is unverified.
+# waves: dry-run + pre-sign each job's k-th Deploy contract against the real
+#   RPCs, fire the whole wave, mine ONCE, then wave k+1 — the run blocks on
+#   deploy mining once per Deploy contract. Wave ordering keeps the dry-run
+#   nonce truthful.
+# classic: each job's forge deploys and waits for its own receipts.
+PREPARE_MODE="${PREPARE_MODE:-plan}"
 
-if [[ "$PREPARE_MODE" == "waves" ]]; then
-    for ((wave = 1; ; wave++)); do
-        # ── dry-run + presign every live job's <wave>-th Deploy contract ──
-        W_PIDS=(); W_IDX=()
-        _restore_forge_cache
-        for ((i = 0; i < NJOBS; i++)); do
-            name="${JOB_NAMES[$i]}"
-            [[ "$DEAD" == *",$name,"* ]] && continue
-            [[ -f "$RUN_DIR/jobs/$name/.deploys-done" ]] && continue
-            while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-            mkdir -p "$RUN_DIR/jobs/$name"
-            _job_launch_prepare "$i" "deploy:$wave" &
-            W_PIDS+=($!); W_IDX+=($i)
-        done
-        (( ${#W_PIDS[@]} > 0 )) || break   # every job is done deploying (or dead)
-        echo ""
-        echo "== Prepare wave $wave: dry-run + presign, ${#W_PIDS[@]} job(s) ($PREPARE_PARALLEL parallel)"
-        WAVE_TXS=false
-        for k in "${!W_PIDS[@]}"; do
-            rc=0; wait "${W_PIDS[$k]}" || rc=$?
-            name="${JOB_NAMES[${W_IDX[$k]}]}"
-            case $rc in
-                0) WAVE_TXS=true ;;
-                2) touch "$RUN_DIR/jobs/$name/.deploys-done" ;;   # fewer than <wave> Deploy contracts
-                *) _prep_failed "$name" "wave $wave dry-run - log: $RUN_DIR/jobs/$name/prepare.log" ;;
-            esac
-        done
-        $WAVE_TXS || continue
-
-        # ── fire the wave (curl workers; a job's txs stay in nonce order) ──
-        : > "$RUN_DIR/deploy-sent-$wave.csv"
-        : > "$RUN_DIR/deploy-send-failed-$wave.txt"
-        for ((w = 0; w < SEND_WORKERS; w++)); do
-            (
-                for ((j = w; j < NJOBS; j += SEND_WORKERS)); do
-                    name="${JOB_NAMES[$j]}"; f="$RUN_DIR/jobs/$name/deploytxs-wave$wave.txt"
-                    [[ "$DEAD" == *",$name,"* ]] && continue
-                    [[ -f "$f" ]] || continue
-                    while IFS=' ' read -r chain raw; do
-                        [[ -n "$raw" ]] || continue
-                        [[ "$chain" == "L2" ]] && rpc="$L2_RPC" || rpc="$L1_RPC"  # deploys skip the fronts
-                        if ! hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log"); then
-                            echo "DEPLOY SEND FAILED: $name (wave $wave)" >> "$RUN_DIR/send-failed.log"
-                            echo "$name" >> "$RUN_DIR/deploy-send-failed-$wave.txt"   # parent marks it dead
-                            break
-                        fi
-                        echo "$name,$chain,$hash" >> "$RUN_DIR/deploy-sent-$wave.csv"
-                    done < "$f"
-                done
-            ) &
-        done
-        wait   # only the senders are in flight here
-        echo "  fired $(wc -l < "$RUN_DIR/deploy-sent-$wave.csv") deploy tx(s)"
-        # A job whose deploy never left the machine would dry-run the next wave
-        # from a stale nonce and presign a colliding trigger — drop it now.
-        while read -r name; do
-            [[ -n "$name" ]] && _prep_failed "$name" "wave $wave deploy tx not sent - see send-failed.log"
-        done < "$RUN_DIR/deploy-send-failed-$wave.txt"
-
-        # ── mine the wave (one shared wait) ──
-        if [[ -s "$RUN_DIR/deploy-sent-$wave.csv" ]]; then
-            _monitor_files "$RUN_DIR/deploy-sent-$wave.csv" "$RUN_DIR/deploy-mined-$wave.csv" \
-                "$RUN_DIR/deploy-pending-$wave.csv" "${DEPLOY_MINE_TIMEOUT:-300}" direct || true
-            while IFS=, read -r name chain hash; do
-                _prep_failed "$name" "wave $wave deploy tx $hash never mined"
-            done < "$RUN_DIR/deploy-pending-$wave.csv"
-            while IFS=, read -r name chain hash blk status; do
-                [[ "$status" == "0x1" ]] && continue
-                _prep_failed "$name" "wave $wave deploy tx $hash reverted"
-            done < "$RUN_DIR/deploy-mined-$wave.csv"
-        fi
-    done
-
-    # ── assert every predicted address really holds code before trusting it ──
-    # The whole wave design rests on dry-run address prediction; this is the
-    # cheap cross-check (one batched eth_getCode per chain). Only exact-address
-    # env values count — 32-byte hashes would false-positive a substring grep.
-    # PREDICTED_* outputs are exempt: they name addresses a scenario pre-computes
-    # for a contract that is deployed later, during execution (CREATE2 from a
-    # bridge, say), so they legitimately hold no code at this point.
-    _addrs_with_code() {  # $1=rpc; stdin: one address per line → subset holding code
-        # Chunked + stdin-fed for the same ARG_MAX reason as _batch_receipts.
-        local addrs=() o
-        mapfile -t addrs
-        (( ${#addrs[@]} > 0 )) || return 0
-        for ((o = 0; o < ${#addrs[@]}; o += 200)); do
-            local chunk=("${addrs[@]:o:200}")
-            printf '%s\n' "${chunk[@]}" | jq -R -s 'split("\n")|map(select(length>0))|to_entries
-                |map({jsonrpc:"2.0",id:.key,method:"eth_getCode",params:[.value,"latest"]})' \
-                | curl -s --max-time 30 -X POST "$1" -H 'Content-Type: application/json' -d @- \
-                | jq -r '.[]? | select(.result != null and .result != "0x") | .id' \
-                | while read -r id; do echo "${chunk[$id]}"; done
-        done
-    }
-    mapfile -t _ALL_ADDRS < <(sed -n '/^PREDICTED_/d; s/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' \
-        "$RUN_DIR"/jobs/*/deploy-env.env 2>/dev/null | sort -u)
-    if (( ${#_ALL_ADDRS[@]} > 0 )); then
-        _CODED=$( { printf '%s\n' "${_ALL_ADDRS[@]}" | _addrs_with_code "$L1_RPC"; \
-                    printf '%s\n' "${_ALL_ADDRS[@]}" | _addrs_with_code "$L2_RPC"; } | sort -u )
-        for ((i = 0; i < NJOBS; i++)); do
-            name="${JOB_NAMES[$i]}"
-            [[ "$DEAD" == *",$name,"* ]] && continue
-            envf="$RUN_DIR/jobs/$name/deploy-env.env"
-            [[ -f "$envf" ]] || continue
-            while read -r a; do
-                grep -qiF "$a" <<< "$_CODED" && continue
-                _prep_failed "$name" "predicted address $a has no code on either chain"
-                break
-            done < <(sed -n '/^PREDICTED_/d; s/^[A-Z0-9_]*=\(0x[0-9a-fA-F]\{40\}\)$/\1/p' "$envf" | sort -u)
-        done
-        echo "deploy-liveness: ${#_ALL_ADDRS[@]} predicted address(es) checked"
-    fi
-
-    # ── prepare-finish: trigger presign + ComputeExpected (read-only, fast) ──
-    echo ""
-    echo "== Prepare finish ($PREPARE_PARALLEL parallel)"
-    _restore_forge_cache
-    F_PIDS=(); F_IDX=()
-    for ((i = 0; i < NJOBS; i++)); do
-        [[ "$DEAD" == *",${JOB_NAMES[$i]},"* ]] && continue
-        while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-        echo "PREPARE ${JOB_NAMES[$i]}"
-        _job_launch_prepare "$i" finish &
-        F_PIDS+=($!); F_IDX+=($i)
-    done
-    for k in "${!F_PIDS[@]}"; do
-        wait "${F_PIDS[$k]}" || _prep_failed "${JOB_NAMES[${F_IDX[$k]}]}" "finish - log: $RUN_DIR/jobs/${JOB_NAMES[${F_IDX[$k]}]}/prepare.log"
-    done
-else
+if [[ "$PREPARE_MODE" == "classic" ]]; then
     # ── classic single-pass prepare ──
     echo ""
     echo "== Prepare phase ($PREPARE_PARALLEL parallel, classic)"
@@ -595,8 +761,76 @@ else
         P_PIDS+=($!)
     done
     for ((i = 0; i < ${#P_PIDS[@]}; i++)); do
-        wait "${P_PIDS[$i]}" || _prep_failed "${JOB_NAMES[$i]}" "log: $RUN_DIR/jobs/${JOB_NAMES[$i]}/prepare.log"
+        rc=0; wait "${P_PIDS[$i]}" || rc=$?
+        (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[$i]}" classic "$rc"
     done
+else
+    if [[ "$PREPARE_MODE" == "plan" ]]; then
+        _nonce_barrier
+        _read_plan_inputs
+        echo ""
+        echo "== Prepare (plan mode): one forge run per job, $NJOBS job(s) ($PREPARE_PARALLEL parallel)"
+        _restore_forge_cache
+        P_PIDS=(); P_IDX=()
+        for ((i = 0; i < NJOBS; i++)); do
+            while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
+            mkdir -p "$RUN_DIR/jobs/${JOB_NAMES[$i]}"
+            echo "PREPARE ${JOB_NAMES[$i]}"
+            _job_launch_prepare "$i" plan &
+            P_PIDS+=($!); P_IDX+=($i)
+        done
+        for k in "${!P_PIDS[@]}"; do
+            rc=0; wait "${P_PIDS[$k]}" || rc=$?
+            (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[${P_IDX[$k]}]}" plan "$rc"
+        done
+
+        # ── fire every job's deploys at once, mine with one wait ──
+        echo ""
+        echo "== Deploy: firing all pre-signed deploy txs"
+        _fire_deploy_txs ""
+        _mine_deploy_txs ""
+        _check_deploy_liveness
+        _mark_deploys_done
+    elif [[ "$PREPARE_MODE" == "waves" ]]; then
+        for ((wave = 1; ; wave++)); do
+            # ── dry-run + presign every live job's <wave>-th Deploy contract ──
+            W_PIDS=(); W_IDX=()
+            _restore_forge_cache
+            for ((i = 0; i < NJOBS; i++)); do
+                name="${JOB_NAMES[$i]}"
+                [[ "$DEAD" == *",$name,"* ]] && continue
+                [[ -f "$RUN_DIR/jobs/$name/.deploys-done" ]] && continue
+                while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
+                mkdir -p "$RUN_DIR/jobs/$name"
+                _job_launch_prepare "$i" "deploy:$wave" &
+                W_PIDS+=($!); W_IDX+=($i)
+            done
+            (( ${#W_PIDS[@]} > 0 )) || break   # every job is done deploying (or dead)
+            echo ""
+            echo "== Prepare wave $wave: dry-run + presign, ${#W_PIDS[@]} job(s) ($PREPARE_PARALLEL parallel)"
+            WAVE_TXS=false
+            for k in "${!W_PIDS[@]}"; do
+                rc=0; wait "${W_PIDS[$k]}" || rc=$?
+                name="${JOB_NAMES[${W_IDX[$k]}]}"
+                case $rc in
+                    0) WAVE_TXS=true ;;
+                    2) touch "$RUN_DIR/jobs/$name/.deploys-done" ;;   # fewer than <wave> Deploy contracts
+                    *) _prep_launch_failed "$name" "wave $wave dry-run" "$rc" ;;
+                esac
+            done
+            $WAVE_TXS || continue
+
+            # ── fire the wave, then mine it (one shared wait). A job whose deploy
+            # never left the machine would dry-run the next wave from a stale nonce
+            # and presign a colliding trigger — _fire_deploy_txs drops it. ──
+            _fire_deploy_txs "-wave$wave"
+            _mine_deploy_txs "-wave$wave"
+        done
+        _check_deploy_liveness
+    else
+        echo "Unknown PREPARE_MODE: $PREPARE_MODE (plan | waves | classic)"; exit 1
+    fi
+    _finish_prepare
 fi
 echo "prepared $((NJOBS - PREP_FAIL))/$NJOBS job(s)"
 (( NJOBS - PREP_FAIL > 0 )) || { echo "Nothing prepared - aborting"; exit 1; }

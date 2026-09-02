@@ -144,6 +144,7 @@ L1:
 L2:
 - `executeIncomingCrossChainCall`: `entries[0].incomingCalls[0]` equals the call that actually arrived from the source rollup — a cross-chain fact, *circuit-only*. Its `gas` is bound on-chain (folded into `proxyEntryHash`); the rest of `entries[0]` stays fully general — `success == false` reverts the whole delivery, and `revertNextNCalls` on the inbound call rolls back its destination effects while the delivery commits.
 - `msg.value` on `loadExecutionTable` / `executeIncomingCrossChainCall` equals the total ether the committed incoming calls consume — consumption is user-driven and possibly partial, so no balance check is possible. *Circuit-only.*
+- **Lookups are never delivered.** L2 state and the L2 root change only for cross-chain work L1 can prove it executed. A top-level static read, an L1→L2 call that reverts on L2, and an L1→L2 call whose L1 frame is reverted afterwards are all *lookups*: the composer simulates the call, the prover signs its return or revert data (the L1 entry's `returnData`, and the blob so the user can read it), nothing is applied on L2, the root does not move, and no `executeIncomingCrossChainCall` tx exists for it in the sync block. The rule is uniform — there is no root-only checkpoint or synthetic entry that catches a root up after a failed delivery. On L1 the matching `success == false` entry unwinds its root update with its revert (above), so both sides agree the root did not move. The rule is direction-specific: an L2→L1 call that reverts on L1 IS delivered — the L2Tx entry runs it on L1 and `CALL_END(false, revertData)` records the revert — because L1 executes it itself. *Composer / circuit rule.*
 
 Both sides:
 - SUCCESS rows of the unified reentrant table carry `revertedOrStaticRollingHash == bytes32(0)` — the field is only read on the STATIC / REVERTED paths. *(Defensive check at resolution: `SuccessRowWithRevertedOrStaticHash`.)*
@@ -475,7 +476,7 @@ bytes32 crossChainCallHash = computeCrossChainCallHash(
 // NESTED (inside an execution): scan the active host's unified reentrant table by the
 // content-addressed position key. The isStatic=true hash means only STATIC rows can match.
 if (_insideExecution()):
-    if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid);
+    if (!_containsVerifiedRollup(destRid)) revert ReentrantDestinationNotVerified(destRid);
     key = keccak256(abi.encodePacked(crossChainCallHash, _rollingHash));
     expectedCalls = _getExpectedL1toL2Calls();
     for i in [_lastL1ToL2CallConsumed, expectedCalls.length):   // strict-forward window; a read cannot advance the cursor
@@ -615,7 +616,7 @@ The reentrant resolution path. The cursor advances **only on a match**; a no-mat
 
 ```
 // Proxy protection: the reentrant call's target rollup must be in the entry's proven set.
-if (!_isRollupAllowed(destRid)) revert ReentrantDestinationNotVerified(destRid)
+if (!_containsVerifiedRollup(destRid)) revert ReentrantDestinationNotVerified(destRid)
 
 expectedCalls      = _getExpectedL1toL2Calls()
 expectedL1toL2Hash = keccak256(abi.encodePacked(crossChainCallHash, _rollingHash))

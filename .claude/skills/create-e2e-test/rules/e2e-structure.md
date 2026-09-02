@@ -4,7 +4,9 @@ Authoritative layout rules for every `script/e2e/<category>/<direction>/<scenari
 
 Categories: `one_way`, `multi_call`, `multi_tx` (one user tx per consumption; network mode
 fires all triggers without waiting via an `NUM_TXS=N` ExecuteNetwork output — the runner
-pre-signs N copies with consecutive nonces), `nested`, `reentrant`, `revert`. Directions:
+pre-signs N copies with consecutive nonces), `nested`, `reentrant`, `revert`. Triggers are
+pre-signed with a fixed gas limit (1,000,000; the node reserves limit × gas price of wallet
+balance per trigger) — a scenario needing more prints `GAS=<limit>` from ExecuteNetwork. Directions:
 `L1_to_L2` (trigger on L1) / `L2_to_L1` (trigger on L2). **File names are unique per
 scenario on purpose** — identically named scripts share one `out/` artifact bucket and
 forge can silently pick another scenario's contracts. Contract names inside stay
@@ -84,8 +86,11 @@ ReentrantCounter.sol) can be reused directly.
 
 ## Env var conventions
 
-Every `Deploy*`/`Execute` contract emits outputs as `KEY=VALUE` `console.log` lines;
-the runner re-exports them as env vars for later contracts (`_export_outputs`).
+`Deploy*` contracts emit outputs with `output("KEY", value)` from `E2EHelpers.sol`
+(address / bytes32 / bytes): it prints the `KEY=VALUE` line the runners re-export as
+env vars for later contracts (`_export_outputs`) and sets the env var in-process, so
+the staged runner's single-process `PrepareJob` driver sees it too. `Execute*` /
+`ComputeExpected` contracts print plain `KEY=VALUE` `console.log` lines.
 Screaming-snake-case with a chain suffix: `COUNTER_L1`, `COUNTER_PROXY_L2`,
 `CALL_TWICE_L2`, … Infrastructure vars come from `DeployInfra.s.sol`: `ROLLUPS`,
 `PROOF_SYSTEM`, `MANAGER_L2`, `L2_ROLLUP_ID`. `RLP_ENCODED_TX` is the pre-signed

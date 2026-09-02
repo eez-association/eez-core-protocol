@@ -21,6 +21,7 @@ import {
 import {ReentrantCounter} from "../../../../../test/mocks/ReentrantCounter.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
@@ -256,7 +257,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         ReentrantCounter rcL2 = new ReentrantCounter(address(0));
-        console.log("REENTRANT_L2=%s", address(rcL2));
+        output("REENTRANT_L2", address(rcL2));
         vm.stopBroadcast();
     }
 }
@@ -275,8 +276,8 @@ contract Deploy is Script {
         // Deploy rcL1 on L1 with peer = rcL2ProxyOnL1
         ReentrantCounter rcL1 = new ReentrantCounter(rcL2ProxyOnL1);
 
-        console.log("REENTRANT_L1=%s", address(rcL1));
-        console.log("RC_L2_PROXY_ON_L1=%s", rcL2ProxyOnL1);
+        output("REENTRANT_L1", address(rcL1));
+        output("RC_L2_PROXY_ON_L1", rcL2ProxyOnL1);
         vm.stopBroadcast();
     }
 }
@@ -296,7 +297,7 @@ contract DeploySetupL2 is Script {
         // Set rcL2's peer
         ReentrantCounter(rcL2Addr).setPeer(rcL1ProxyOnL2);
 
-        console.log("RC_L1_PROXY_ON_L2=%s", rcL1ProxyOnL2);
+        output("RC_L1_PROXY_ON_L2", rcL1ProxyOnL2);
         vm.stopBroadcast();
     }
 }

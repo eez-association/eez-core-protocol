@@ -13,6 +13,7 @@ import {
 import {Counter, ICounterView, StaticReadCounter} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHashStatic,
     noL2Calls,
@@ -155,7 +156,7 @@ contract Deploy is Script {
         // Pins the producer: nothing in the flow mutates it, so this is the exact live
         // value the static entry's cached returnData (abi.encode(1)) must equal.
         require(counterL1.counter() == 1, "CounterL1 not at 1");
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         console.log("counterL1.counter=%s (the value the static read must return)", counterL1.counter());
         vm.stopBroadcast();
     }
@@ -172,8 +173,8 @@ contract DeployL2 is Script {
         vm.startBroadcast();
         address counterProxyL2 = getOrCreateProxy(IEEZ(managerAddr), counterL1Addr, MAINNET_ROLLUP_ID);
         StaticReadCounter reader = new StaticReadCounter(Counter(counterProxyL2));
-        console.log("COUNTER_PROXY_L2=%s", counterProxyL2);
-        console.log("READER_L2=%s", address(reader));
+        output("COUNTER_PROXY_L2", counterProxyL2);
+        output("READER_L2", address(reader));
         vm.stopBroadcast();
     }
 }

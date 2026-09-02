@@ -14,6 +14,7 @@ import {
 } from "../../../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
@@ -142,7 +143,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         BridgeReceiver receiver = new BridgeReceiver();
-        console.log("L2_DESTINATION=%s", address(receiver));
+        output("L2_DESTINATION", address(receiver));
         vm.stopBroadcast();
     }
 }
@@ -161,8 +162,8 @@ contract Deploy is Script {
         address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, L2_ROLLUP_ID);
 
         BridgeSender sender = new BridgeSender(l2Proxy, l2DestAddr);
-        console.log("L2_PROXY=%s", l2Proxy);
-        console.log("BRIDGE_SENDER=%s", address(sender));
+        output("L2_PROXY", l2Proxy);
+        output("BRIDGE_SENDER", address(sender));
         vm.stopBroadcast();
     }
 }

@@ -11,6 +11,7 @@ import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
 import {CallTwoDifferent} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     getOrCreateProxy,
@@ -155,8 +156,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         Counter counterA = new Counter();
         Counter counterB = new Counter();
-        console.log("COUNTER_A_L1=%s", address(counterA));
-        console.log("COUNTER_B_L1=%s", address(counterB));
+        output("COUNTER_A_L1", address(counterA));
+        output("COUNTER_B_L1", address(counterB));
         vm.stopBroadcast();
     }
 }
@@ -175,9 +176,9 @@ contract DeployL2 is Script {
         address proxyB = getOrCreateProxy(IEEZ(managerAddr), counterB, MAINNET_ROLLUP_ID);
         CallTwoDifferent callerL2 = new CallTwoDifferent();
 
-        console.log("PROXY_A_L2=%s", proxyA);
-        console.log("PROXY_B_L2=%s", proxyB);
-        console.log("CALL_TWO_DIFF_L2=%s", address(callerL2));
+        output("PROXY_A_L2", proxyA);
+        output("PROXY_B_L2", proxyB);
+        output("CALL_TWO_DIFF_L2", address(callerL2));
         vm.stopBroadcast();
     }
 }

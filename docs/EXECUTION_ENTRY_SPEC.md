@@ -44,7 +44,7 @@ Exception — L1 L2Tx entries (`proxyEntryHash == 0`) have no proxy consumer and
 
 ### IMMEDIATE entries (`proxyEntryHash == 0` — "L2Tx" entries)
 
-A leading run of the batch's immediate prefix (`entries[0..immediateEntryCount)`) may have `proxyEntryHash == 0`. Each such entry is executed inline by `postAndVerifyBatch` itself, **straight from calldata** (never SSTOREd whole; only its reentrant table is parked transiently), and represents the batch's immediate work — pure L2 transactions or L2 transactions that touch L1. State deltas are applied, calls are processed, and the rolling hash is verified, all within `postAndVerifyBatch`. Each entry runs in a `try/catch` self-call (`_attemptExecuteImmediateL2Txs`); if it reverts, the registry emits `L2TxSkipped(transientIdx, revertData)` and the loop advances — not a hard error. Two hard errors do exist: a non-empty leading L2Tx run where **every** entry reverted unwinds the whole post (`AllImmediateL2TxsFailed`), and an `immediateEntryCount` that strands a leading L2Tx into the queue is rejected at validation (`ImmediateCountStrandsLeadingL2Tx`). Immediate-prefix entries past the leading L2Tx run are meta-hook entries (see the Transaction Model section).
+A leading run of the batch's immediate prefix (`entries[0..immediateEntryCount)`) may have `proxyEntryHash == 0`. Each such entry is executed inline by `postAndVerifyBatch` itself, **straight from calldata** (never SSTOREd whole; only its reentrant table is parked transiently), and represents the batch's immediate work — pure L2 transactions or L2 transactions that touch L1. State deltas are applied, calls are processed, and the rolling hash is verified, all within `postAndVerifyBatch`. Each entry runs in a `try/catch` self-call (`_attemptExecuteImmediateL2Txs`); if it reverts, the registry emits `L2TxSkipped(entryIndex, revertData)` and the loop advances — not a hard error. Two hard errors do exist: a non-empty leading L2Tx run where **every** entry reverted unwinds the whole post (`AllImmediateL2TxsFailed`), and an `immediateEntryCount` that strands a leading L2Tx into the queue is rejected at validation (`ImmediateCountStrandsLeadingL2Tx`). Immediate-prefix entries past the leading L2Tx run are meta-hook entries (see the Transaction Model section).
 
 ### DEFERRED entries (`proxyEntryHash != 0`, or L2Txs past the leading run)
 
@@ -298,6 +298,8 @@ The delivery unit is the **top-level cross-chain call**, not the source-chain tr
 - **L2→L1**: User submits an L2 transaction → on L1 the L2Tx entry is consumed inline by `postAndVerifyBatch` or via `executeL2Txs` (1 tx on L1). The L2 user tx itself is the consumption on L2 (no separate setup tx needed beyond `loadExecutionTable`).
 
 Never split a single top-level call into multiple execution transactions on the same chain — and never merge two top-level calls into one.
+
+**Lookups are the one case with zero destination txs**: a top-level static read, an L1→L2 call that reverts on L2, or one whose L1 frame is reverted afterwards is never delivered — its signed return/revert data travels in the source entry and the blob, nothing is applied on L2 and the root does not move (`CORE_PROTOCOL_SPEC.md` §C, L2 prover constraints).
 
 ---
 

@@ -10,6 +10,7 @@ import {ExecutionEntry as L2ExecutionEntry, CrossChainCall} from "../../../../..
 import {Counter, RevertCounter, SafeCounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -235,7 +236,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         RevertCounter revCounter = new RevertCounter();
-        console.log("REV_COUNTER_L2=%s", address(revCounter));
+        output("REV_COUNTER_L2", address(revCounter));
         vm.stopBroadcast();
     }
 }
@@ -255,8 +256,8 @@ contract Deploy is Script {
         // destination's revert is recovered from and the entry commits.
         SafeCounterAndProxy scap = new SafeCounterAndProxy(Counter(revCounterProxyL1));
 
-        console.log("REV_COUNTER_PROXY_L1=%s", revCounterProxyL1);
-        console.log("SAFE_CAP_L1=%s", address(scap));
+        output("REV_COUNTER_PROXY_L1", revCounterProxyL1);
+        output("SAFE_CAP_L1", address(scap));
         vm.stopBroadcast();
     }
 }
@@ -270,7 +271,7 @@ contract DeployL2Trigger is Script {
 
         vm.startBroadcast();
         address scapProxyL2 = getOrCreateProxy(IEEZ(managerAddr), scapL1, MAINNET_ROLLUP_ID);
-        console.log("SAFE_CAP_PROXY_L2=%s", scapProxyL2);
+        output("SAFE_CAP_PROXY_L2", scapProxyL2);
         vm.stopBroadcast();
     }
 }

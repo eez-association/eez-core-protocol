@@ -10,6 +10,7 @@ import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/
 import {Counter, SelfCallerWithRevert} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
@@ -160,7 +161,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counter = new Counter();
-        console.log("COUNTER_L1=%s", address(counter));
+        output("COUNTER_L1", address(counter));
         vm.stopBroadcast();
     }
 }
@@ -180,8 +181,8 @@ contract DeployL2 is Script {
 
         SelfCallerWithRevert selfCaller = new SelfCallerWithRevert(Counter(counterProxy));
 
-        console.log("COUNTER_PROXY_L2=%s", counterProxy);
-        console.log("SELF_CALLER_L2=%s", address(selfCaller));
+        output("COUNTER_PROXY_L2", counterProxy);
+        output("SELF_CALLER_L2", address(selfCaller));
         vm.stopBroadcast();
     }
 }

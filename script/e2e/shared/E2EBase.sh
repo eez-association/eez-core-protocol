@@ -115,7 +115,7 @@ _export_outputs() {
 deploy_contracts() {
     local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4"
     local contracts
-    contracts=$(grep -oE 'contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}')
+    contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}')
     [[ -z "$contracts" ]] && { echo "No Deploy* contracts found"; return 1; }
     while IFS= read -r contract; do
         local rpc label
@@ -154,7 +154,7 @@ deploy_contracts() {
 presign_deploy_contract() {
     local sol="$1" index="$2" l1_rpc="$3" l2_rpc="$4" pk="$5" out_dir="$6"
     local contract
-    contract=$(grep -oE 'contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | sed -n "${index}p")
+    contract=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | sed -n "${index}p")
     [[ -n "$contract" ]] || return 2
 
     local rpc label
@@ -190,25 +190,44 @@ presign_deploy_contract() {
     fi
 
     [[ -f "$dry_json" ]] || { echo "$contract ($label): no planned txs"; return 0; }
-    sender=$(cast wallet address --private-key "$pk" | tr '[:upper:]' '[:lower:]')
 
-    # Re-sign each planned tx. The dry-run nonces are correct as-is: earlier
-    # waves are mined before this one is simulated, and the wallet is dedicated.
-    local n i to nonce value gas input raw
+    # The dry-run nonces are correct as-is: earlier waves are mined before this
+    # one is simulated, and the wallet is dedicated.
+    local n
+    n=$(_resign_planned_txs "$dry_json" "$rpc" "$pk" "$label" "$out_dir/deploytxs-wave$index.txt") || return 1
+    echo "presigned $n tx(s) for $contract ($label) → deploytxs-wave$index.txt"
+}
+
+# ── Re-sign the txs of a forge run JSON with cast mktx ──
+# Usage: _resign_planned_txs RUN_JSON RPC PK LABEL OUT_FILE  → tx count on stdout
+# RUN_JSON is a forge run JSON (a dry-run's run-latest.json or one chain's slice
+# of a multi-chain plan); every tx sent from PK's address is re-signed with its
+# recorded nonce, value, input and gas (+25%) and appended to OUT_FILE as
+# "<LABEL> <rawtx>". The addresses those txs create (CREATE/CREATE2 entries and
+# any additionalContracts, e.g. the proxy a createCrossChainProxy call deploys)
+# are appended to deploy-addrs.txt next to OUT_FILE as "<LABEL> <address>" for
+# the orchestrator's per-chain liveness check.
+_resign_planned_txs() {
+    local json="$1" rpc="$2" pk="$3" label="$4" out_file="$5"
+    local sender n i to nonce value gas input raw
+    sender=$(cast wallet address --private-key "$pk" | tr '[:upper:]' '[:lower:]')
     n=$(jq -r --arg s "$sender" \
-        '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)] | length' "$dry_json")
-    (( n > 0 )) || { echo "No planned txs for $sender in $dry_json"; return 1; }
+        '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)] | length' "$json")
+    (( n > 0 )) || { echo "No planned txs for $sender in $json" >&2; return 1; }
+    jq -r --arg s "$sender" '.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)
+        | (select(.transactionType == "CREATE" or .transactionType == "CREATE2") | .contractAddress),
+          (.additionalContracts[]? | .address)
+        | select(. != null)' "$json" | sed "s/^/$label /" >> "$(dirname "$out_file")/deploy-addrs.txt"
     for ((i = 0; i < n; i++)); do
         IFS=$'\t' read -r to nonce value gas input < <(jq -r --arg s "$sender" --argjson i "$i" \
             '[.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s)][$i].transaction
-             | "\(.to)\t\(.nonce)\t\(.value)\t\(.gas)\t\(.input)"' "$dry_json") || true
-        [[ -n "${input:-}" && "$input" != "null" ]] || { echo "Bad planned tx $i in $dry_json"; return 1; }
-        gas=$(( $(printf "%d" "$gas") * 5 / 4 ))   # +25% over the dry-run estimate
-        # Explicit rc checks: callers invoke this function inside a condition
-        # (`|| rc=$?`), which suspends set -e for the whole body — an unguarded
-        # mktx failure would silently produce an empty raw tx.
-        # For --create the flags must PRECEDE it: cast parses everything after
-        # <CODE> as [SIG] [ARGS].
+             | "\(.to)\t\(.nonce)\t\(.value)\t\(.gas)\t\(.input)"' "$json") || true
+        [[ -n "${input:-}" && "$input" != "null" ]] || { echo "Bad planned tx $i in $json" >&2; return 1; }
+        gas=$(( $(printf "%d" "$gas") * 5 / 4 ))   # +25% over forge's estimate
+        # Explicit rc checks: callers invoke this inside a condition, which
+        # suspends set -e for the whole body — an unguarded mktx failure would
+        # silently produce an empty raw tx. For --create the flags must PRECEDE
+        # it: cast parses everything after <CODE> as [SIG] [ARGS].
         raw=""
         if [[ "$to" == "null" || -z "$to" ]]; then
             raw=$(cast mktx --value "$(printf "%d" "$value")wei" --nonce "$(printf "%d" "$nonce")" \
@@ -219,10 +238,55 @@ presign_deploy_contract() {
                 --value "$(printf "%d" "$value")wei" --nonce "$(printf "%d" "$nonce")" \
                 --gas-limit "$gas" --private-key "$pk" --rpc-url "$rpc") || raw=""
         fi
-        [[ -n "$raw" ]] || { echo "cast mktx FAILED for planned tx $i of $contract ($label)"; return 1; }
-        echo "$label $raw" >> "$out_dir/deploytxs-wave$index.txt"
+        [[ -n "$raw" ]] || { echo "cast mktx FAILED for planned tx $i ($label) in $json" >&2; return 1; }
+        echo "$label $raw" >> "$out_file"
     done
-    echo "presigned $n tx(s) for $contract ($label) → deploytxs-wave$index.txt"
+    echo "$n"
+}
+
+# ── Plan every Deploy* contract of SOL in ONE forge run and pre-sign the txs (staged plan prepare) ──
+# Usage: plan_job_deploys SOL L1_RPC L2_RPC PK OUT_DIR
+# Env in: E2E_L1_NONCE E2E_L2_NONCE E2E_L1_BLOCK E2E_L2_BLOCK (network-staged.sh).
+# PrepareJob.s.sol runs the contracts in file order against in-process forks of
+# both chains with the wallet nonces injected, so the dry run plans exactly the
+# txs the real chain will accept without anything being mined. Forge writes one
+# multi-chain dry-run JSON (private per job via FOUNDRY_BROADCAST); each chain's
+# txs are re-signed in nonce order into OUT_DIR/deploytxs.txt as "<L1|L2> <rawtx>"
+# and the NAME=value outputs go to OUT_DIR/deploy-env.env for the finish step.
+plan_job_deploys() {
+    local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4" out_dir="$5"
+    local contracts l1_chain l2_chain
+    contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | paste -sd,)
+    [[ -n "$contracts" ]] || { echo "No Deploy* contracts found"; return 1; }
+    l1_chain=$(cast chain-id --rpc-url "$l1_rpc") && l2_chain=$(cast chain-id --rpc-url "$l2_rpc") \
+        || { echo "RPCs unreachable ($l1_rpc / $l2_rpc)"; return 1; }
+    rm -rf "$out_dir/broadcast"
+    local out rc=0
+    out=$(E2E_SCENARIO_FILE="$(basename "$sol")" E2E_DEPLOY_CONTRACTS="$contracts" \
+        E2E_WALLET="$(cast wallet address --private-key "$pk")" L1_RPC="$l1_rpc" L2_RPC="$l2_rpc" \
+        FOUNDRY_BROADCAST="$out_dir/broadcast" \
+        forge script script/e2e/shared/PrepareJob.s.sol:PrepareJob --private-key "$pk" 2>&1) || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "PLAN FAILED — forge output tail:"
+        echo "$out" | tail -25
+        return 1
+    fi
+    local vars
+    vars=$(echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true)
+    [[ -n "$vars" ]] && { echo "$vars"; echo "$vars" >> "$out_dir/deploy-env.env"; }
+
+    local json="$out_dir/broadcast/multi/dry-run/PrepareJob.s.sol-latest/run.json"
+    [[ -f "$json" ]] || { echo "planned-tx JSON missing: $json"; find "$out_dir/broadcast" -name '*.json' 2>/dev/null; return 1; }
+    : > "$out_dir/deploytxs.txt"
+    local label chain rpc n
+    for label in L1 L2; do
+        if [[ "$label" == "L1" ]]; then chain="$l1_chain"; rpc="$l1_rpc"; else chain="$l2_chain"; rpc="$l2_rpc"; fi
+        jq --arg c "$chain" '{transactions: [.deployments[] | select((.chain | tostring) == $c) | .transactions[]]}' \
+            "$json" > "$out_dir/plan-$label.json"
+        [[ "$(jq '.transactions | length' "$out_dir/plan-$label.json")" -gt 0 ]] || { echo "no $label txs planned"; continue; }
+        n=$(_resign_planned_txs "$out_dir/plan-$label.json" "$rpc" "$pk" "$label" "$out_dir/deploytxs.txt") || return 1
+        echo "presigned $n $label tx(s) → deploytxs.txt"
+    done
 }
 
 # ── Strip forge execution traces ──
@@ -255,14 +319,45 @@ verify_l1_batch() { _run_verifier VerifyL1BatchInRange "$1" "run(uint256,uint256
 # matches EntryExecuted rolling hashes as keccak(0, rollingHash) entry identities.
 verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(uint256,uint256,address,bytes32[],bytes)" "$2" "$3" "$4" "$5" "${6:-0x}"; }
 
+# Usage: verify_l1_calldata RPC BLOCK ROLLUPS EXPECTED_TABLE EXPECTED_STEPS EXPECTED_STATIC_TABLE
+# Content-addressed L1 check for entries that leave no usable event: a
+# success=false entry unwinds its events with its revert and a top-level static
+# entry never emits one. Lists the settlement txs of BLOCK
+# (VerifyL1SettlementTxsInRange) and decodes each one's postAndVerifyBatch
+# calldata (VerifyL1BatchCalldata, pinned at BLOCK) until one holds the expected
+# entries and static entries. Fills VERIFY_OUT; rc 1 when none matched.
+verify_l1_calldata() {
+    local rpc="$1" block="$2" rollups="$3" table="${4:-0x}" steps="${5:-0x}" static_table="${6:-0x}"
+    local list tx input last="" rc
+    _run_verifier VerifyL1SettlementTxsInRange "$rpc" "run(uint256,uint256,address)" "$block" "$block" "$rollups" || return 1
+    list=$(echo "$VERIFY_OUT" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
+    for tx in $list; do
+        input=$(cast tx "$tx" input --rpc-url "$rpc" 2>/dev/null) || continue
+        rc=0
+        VERIFY_OUT=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata --rpc-url "$rpc" \
+            --fork-block-number "$block" --sig "run(bytes,address,bytes,bytes,bytes)" \
+            "$input" "$rollups" "$table" "$steps" "$static_table" 2>&1) || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            VERIFY_OUT="NOTE: matched settlement tx $tx"$'\n'"$VERIFY_OUT"
+            return 0
+        fi
+        last="$VERIFY_OUT"
+    done
+    VERIFY_OUT="${last:-no settlement tx with decodable calldata in block $block}"
+    return 1
+}
+
 # Usage: verify_l2_table RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_ENTRY_HASHES [EXPECTED_TABLE] [EVENTLESS_ENTRY_HASHES]
 verify_l2_table() { _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[],bytes,bytes32[])" "$2" "$3" "$4" "${5:-0x}" "${6:-[]}"; }
 
 # Usage: verify_l2_calls RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_CALL_HASHES [EXPECTED_TABLE]
 verify_l2_calls() { _run_verifier VerifyL2Calls "$1" "run(uint256[],address,bytes32[],bytes)" "$2" "$3" "$4" "${5:-0x}"; }
 
-# Usage: verify_l2_absent RPC BLOCKS_ARRAY MANAGER_L2 ABSENT_ENTRY_HASHES
-verify_l2_absent() { _run_verifier VerifyL2Absent "$1" "run(uint256[],address,bytes32[])" "$2" "$3" "$4"; }
+# Usage: verify_l2_absent RPC FROM_BLOCK TO_BLOCK MANAGER_L2 ABSENT_KEYS
+# Active proof that a lookup was never delivered: none of the call keys may appear
+# in the L2 manager's logs over the range (delivery / consumption events, loaded
+# entries or static entries).
+verify_l2_absent() { _run_verifier VerifyL2Absent "$1" "run(uint256,uint256,address,bytes32[])" "$2" "$3" "$4" "$5"; }
 
 # ── Run one verification step end-to-end ──
 # Usage: run_verify_step LABEL DIAG FN ARGS...
@@ -548,11 +643,12 @@ get_block_from_broadcast() {
 #                        a cross-chain front does its own on-chain+held nonce
 #                        accounting — query both instead of trusting mktx's default
 # Detects the trigger chain ("contract ExecuteNetworkL2" → L2, else L1), runs
-# the contract read-only for TARGET/VALUE/CALLDATA/NUM_TXS, and pre-signs
+# the contract read-only for TARGET/VALUE/CALLDATA/NUM_TXS/GAS, and pre-signs
 # NUM_TXS txs with consecutive nonces via cast mktx (queries chain for gas
 # price, does NOT broadcast). Sets _TRIGGER_CHAIN, _TRIGGER_CONTRACT,
-# _TRIGGER_RPC, _TX_COUNT, RLP_ENCODED_TXS; exports RLP_ENCODED_TX (the first
-# tx — ComputeExpected reads it from env for action hashing).
+# _TRIGGER_RPC, _TX_COUNT, _TRIGGER_GAS, RLP_ENCODED_TXS; exports
+# RLP_ENCODED_TX (the first tx — ComputeExpected reads it from env for action
+# hashing).
 build_trigger_txs() {
     local sol="$1" nonce_mode="$2"
 
@@ -575,6 +671,14 @@ build_trigger_txs() {
     # NUM_TXS times with consecutive nonces and fired without waiting between sends.
     _TX_COUNT=$(extract "$exec_out" "NUM_TXS")
     _TX_COUNT="${_TX_COUNT:-1}"
+    # Gas limit. A trigger cannot be estimated: its entry exists only once the
+    # composer's batch lands in the same block, so the limit is fixed. The node
+    # reserves gasLimit × gasPrice of wallet balance per trigger even at value
+    # 0, so it stays tight — measured usage: flash-loan 503k, deepNested 181k,
+    # counter 133k. A scenario needing more prints GAS=<limit> from
+    # ExecuteNetwork*; E2E_TRIGGER_GAS overrides the default for a run.
+    _TRIGGER_GAS=$(extract "$exec_out" "GAS")
+    _TRIGGER_GAS="${_TRIGGER_GAS:-${E2E_TRIGGER_GAS:-1000000}}"
 
     local sender nonce_rpc nonce_front tx_nonce
     sender=$(cast wallet address --private-key "$PK")
@@ -585,6 +689,7 @@ build_trigger_txs() {
         echo "target: $target"
         echo "calldata: $calldata"
         echo "value: $value"
+        echo "gas limit: $_TRIGGER_GAS"
         [[ "$_TX_COUNT" -gt 1 ]] && echo "trigger txs: $_TX_COUNT (consecutive nonces, fire-and-forget)"
         if [[ "$_TRIGGER_CHAIN" == "L2" && -n "${L2_FRONT:-}" ]]; then
             nonce_front=$(cast nonce "$sender" --rpc-url "$L2_FRONT" 2>/dev/null || echo 0)
@@ -602,7 +707,7 @@ build_trigger_txs() {
     for (( i = 0; i < _TX_COUNT; i++ )); do
         RLP_ENCODED_TXS+=("$(cast mktx "$target" "$calldata" \
             --value "${value}wei" \
-            --gas-limit 2000000 \
+            --gas-limit "$_TRIGGER_GAS" \
             --nonce "$(( tx_nonce + i ))" \
             --private-key "$PK" \
             --rpc-url "$_TRIGGER_RPC")")
@@ -616,6 +721,8 @@ build_trigger_txs() {
 # EXPECTED_L2_CALL_HASHES, the abi-encoded EXPECTED_L1_TABLE / EXPECTED_L2_TABLE
 # blobs ("0x" = hash-only checks, field-level comparison off), EXPECTED_L1_STEPS
 # (recorded fold steps for the calldata verifier; "0x" = content-match only),
+# EXPECTED_L1_STATIC_TABLE (top-level static entries the L1 batch must carry,
+# matched from the posted calldata; "0x" = none),
 # EVENTLESS_L2_HASHES (loaded entries whose enclosing frame's revert unwinds their
 # EntryExecuted event) and ABSENT_L2_HASHES; prints the field-level ON/OFF notes
 # and the scenario's EXPECTED SUMMARY block if present.
@@ -640,6 +747,11 @@ extract_expected_outputs() {
     EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
     EXPECTED_L1_STEPS=$(extract "$out" "EXPECTED_L1_STEPS")
     EXPECTED_L1_STEPS="${EXPECTED_L1_STEPS:-0x}"
+    EXPECTED_L1_STATIC_TABLE=$(extract "$out" "EXPECTED_L1_STATIC_TABLE")
+    EXPECTED_L1_STATIC_TABLE="${EXPECTED_L1_STATIC_TABLE:-0x}"
+    if [[ "$EXPECTED_L1_STATIC_TABLE" != "0x" ]]; then
+        echo "L1 expected static table: $((${#EXPECTED_L1_STATIC_TABLE} / 2 - 1)) bytes (posted static entries matched from calldata)"
+    fi
     if [[ "$EXPECTED_L1_TABLE" != "0x" ]]; then
         echo "L1 expected table: $((${#EXPECTED_L1_TABLE} / 2 - 1)) bytes (field-level checks ON)"
     else
@@ -661,7 +773,7 @@ extract_expected_outputs() {
 
     ABSENT_L2_HASHES=$(extract "$out" "ABSENT_L2_HASHES")
     if [[ -n "$ABSENT_L2_HASHES" && "$ABSENT_L2_HASHES" != "[]" ]]; then
-        echo "L2 absent (must NOT appear): $ABSENT_L2_HASHES"
+        echo "L2 absent keys (must leave NO trace on L2 - lookup): $ABSENT_L2_HASHES"
     fi
 
     # Print summary (lines between === EXPECTED SUMMARY === and the next blank line)

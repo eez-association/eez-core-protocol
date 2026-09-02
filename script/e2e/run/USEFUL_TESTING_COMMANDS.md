@@ -96,28 +96,41 @@ A run is bound to the network it was prepared on: the resolved endpoints are
 saved in `<run-dir>/devnet.env` and `--resume` / `--verify-only` reload them, so
 `DEVNET_ENV` is only needed on the initial command.
 
-Defaults: `PREPARE_PARALLEL=40`, `SEND_WORKERS=80` (`--workers`), `VERIFY_PARALLEL=4`,
-`POLL_INTERVAL=10`, `MINE_TIMEOUT=600`; funding flags/env are the same as
-`network-parallel.sh` (both source `orchestrator-lib.sh`). `counter-multi-tx` jobs
-can FAIL with a "composer split the triggers across blocks" NOTE when their
-triggers mine in different blocks — the known single-batch verifier limitation,
-not a protocol failure.
+Defaults: `PREPARE_PARALLEL=40`, `PREPARE_JOB_TIMEOUT=300` (a prepare launch past
+it is killed and its job dropped, the run continues), `SEND_WORKERS=80`
+(`--workers`), `VERIFY_PARALLEL=8`, `POLL_INTERVAL=10`, `MINE_TIMEOUT=600`,
+`DEPLOY_POLL_INTERVAL=3`, `DEPLOY_MINE_TIMEOUT=300`; funding flags/env are the same as
+`network-parallel.sh` (both source `orchestrator-lib.sh`; the two chains are
+funded concurrently, every `fundUpTo` chunk fired at once and mined with one
+receipt pass). `counter-multi-tx` jobs can FAIL with a "composer split the
+triggers across blocks" NOTE when their triggers mine in different blocks — the
+known single-batch verifier limitation, not a protocol failure.
 
-Prepare runs in **wave mode** by default: each job's k-th Deploy contract is
-dry-run and its planned txs re-signed with `cast mktx` (per-job
-`FOUNDRY_BROADCAST` keeps the dry-run JSONs private), then the whole wave is
-fired by the curl workers and mined ONCE before wave k+1 — so deploy mining
-blocks the run a handful of times instead of once per job. A batched
-`eth_getCode` pass asserts every predicted address holds code before the
-read-only finish step (trigger presign + ComputeExpected). `PREPARE_MODE=classic`
-restores per-job forge deploys; `DEPLOY_MINE_TIMEOUT` (default 300 s) bounds each
-wave's mine wait.
+Prepare runs in **plan mode** by default: after one batched nonce barrier
+(public RPC caught up with the fronts for every wallet) the orchestrator reads
+every wallet's nonce and the current block once per chain, and every job gets
+ONE forge run (`script/e2e/shared/PrepareJob.s.sol`) that drives all of the
+scenario's Deploy* contracts in-process against forge's own forks of both
+chains, pinned at that block with the wallet nonce injected — a later Deploy
+contract sees what earlier ones deployed, CREATE addresses come out as the real
+chain will produce them, and nothing waits for a block. Deploy outputs travel
+in-process (`output()` in `E2EHelpers.sol` prints the usual `NAME=value` line
+and sets it as an env var). The planned txs of both chains are re-signed from
+the multi-chain dry-run JSON (`cast mktx`), ALL deploy txs are fired at once by
+the curl workers, mined with ONE wait, a batched `eth_getCode` pass asserts
+every created address holds code, and the read-only finish step pre-signs the
+trigger(s) and runs ComputeExpected; triggers go out in the send phase.
+`PREPARE_MODE=waves` is the per-Deploy-contract dry-run scheme against the real
+RPCs (one mine wait per Deploy contract, then the same finish step);
+`PREPARE_MODE=classic` is per-job forge deploys.
 
-Stopping and continuing is first-class: `--resume <run-dir>` first re-runs the
-read-only finish step (trigger presign + ComputeExpected) for every job whose
-deploys all mined but that never got a manifest — nothing is redeployed — then
-fires whatever is prepared and unsent (a multi-tx job whose send stopped
-part-way continues from the next raw tx); `--verify-only <run-dir>` re-syncs
+Stopping and continuing is first-class: `--resume <run-dir>` first fires and
+mines the pre-signed deploys of jobs that never reached `.deploys-done`
+(continuing after any hash already recorded), then re-runs the read-only finish
+step (trigger presign + ComputeExpected) for every job whose deploys all mined
+but that never got a manifest — nothing is redeployed — then fires
+whatever is prepared and unsent (a multi-tx job whose send stopped part-way
+continues from the next raw tx); `--verify-only <run-dir>` re-syncs
 receipts (one batched re-poll) and (re)runs verification — `SKIP_VERIFIED=1`
 skips jobs whose verify.log already passed. Jobs the prepare phase dropped keep a
 `.prepare-failed` marker so they stay in the fail count even on a truncated run. Verification shares a per-run settlement-calldata

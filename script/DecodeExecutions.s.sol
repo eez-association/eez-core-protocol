@@ -202,7 +202,7 @@ contract DecodeExecutions is Script {
     }
 
     function _printImmediateSkipped(bytes32[] memory topics, bytes memory data, string memory p) internal pure {
-        // L2TxSkipped(uint256 indexed transientIdx, bytes revertData)
+        // L2TxSkipped(uint256 indexed entryIndex, bytes revertData)
         uint256 idx = uint256(topics[1]);
         bytes memory revertData = abi.decode(data, (bytes));
         console.log(

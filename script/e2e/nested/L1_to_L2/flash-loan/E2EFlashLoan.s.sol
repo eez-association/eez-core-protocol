@@ -21,6 +21,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {_deployBridge} from "../../../../DeployBridge.s.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -327,9 +328,9 @@ contract Deploy is Script {
         address bridge = _deployBridge(salt);
         Bridge(bridge).initialize(rollupsAddr, MAINNET_ROLLUP_ID, msg.sender);
 
-        console.log("TOKEN=%s", address(token));
-        console.log("BRIDGE=%s", bridge);
-        console.log("BRIDGE_SALT=%s", vm.toString(salt));
+        output("TOKEN", address(token));
+        output("BRIDGE", bridge);
+        output("BRIDGE_SALT", salt);
         vm.stopBroadcast();
     }
 }
@@ -367,9 +368,9 @@ contract DeployL2 is Script, FlashLoanActions {
 
         FlashLoanersNFT nft = new FlashLoanersNFT(wrappedTokenL2);
 
-        console.log("EXECUTOR_L2=%s", address(executorL2));
-        console.log("PREDICTED_WRAPPED_TOKEN_L2=%s", wrappedTokenL2);
-        console.log("FLASH_LOANERS_NFT=%s", address(nft));
+        output("EXECUTOR_L2", address(executorL2));
+        output("PREDICTED_WRAPPED_TOKEN_L2", wrappedTokenL2);
+        output("FLASH_LOANERS_NFT", address(nft));
         vm.stopBroadcast();
     }
 }
@@ -404,8 +405,8 @@ contract Deploy2 is Script, FlashLoanActions {
             tokenAddr
         );
 
-        console.log("FLASH_LOAN_POOL=%s", address(pool));
-        console.log("EXECUTOR_L1=%s", address(executorL1));
+        output("FLASH_LOAN_POOL", address(pool));
+        output("EXECUTOR_L1", address(executorL1));
         vm.stopBroadcast();
     }
 }
