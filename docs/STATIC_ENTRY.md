@@ -21,6 +21,18 @@ plain-success reentrant calls. Field names below are L1's (`src/interfaces/IEEZ.
 `incomingCalls`, `expectedOutgoingCalls`, cursor `_lastOutgoingCallConsumed`) and drops the
 L1-only fields (`destinationRollupId`, `expectedRoots`).
 
+Seen from the frame that carries them:
+
+- **Top-level mutable frame** (an `ExecutionEntry`). Callbacks to L1 go in `l2ToL1Calls`. Any
+  reentrant call back into a rollup the entry proves, static included, goes in
+  `expectedL1ToL2Calls` as a row — that is why the row struct has
+  `revertedOrStaticRollingHash`: the expected sub-call hash for STATIC and REVERTED rows. The
+  frame is an execution environment, so it can carry expected results for its nested reads.
+- **Top-level static frame** (a `StaticExecutionEntry`). Callbacks to L1 go in `l2ToL1Calls`,
+  run with STATICCALL. Reentrant reads cannot be carried inside because a static frame cannot
+  mark itself as an execution (`_insideExecution()` stays false), so each becomes another
+  top-level `StaticExecutionEntry` in the pool, matched independently (§4.2).
+
 This document complements `EXECUTION_ENTRY_SPEC.md` (how `ExecutionEntry`s are built) and
 `CORE_PROTOCOL_SPEC.md` §E (rolling hash; §E.2 for the untagged static schema).
 
