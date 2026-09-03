@@ -98,6 +98,14 @@ bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:1
 # Send-only now, assess later at a gentle pace
 DEVNET_ENV=chain.env2 bash script/e2e/run/network-staged.sh --no-verify counter:1000
 VERIFY_PARALLEL=4 bash script/e2e/run/network-staged.sh --verify-only tmp/e2e-staged-net/<ts>
+
+# Big runs: pace the trigger sends (rate = workers / SEND_PAUSE tx/s). A burst of
+# ~280 triggers at once was accepted and then dropped by the fronts on 2026-09-03.
+SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 counter:10 counterL2:10 ...   # 10 tx/s
+
+# Re-fire the triggers of a run the fronts dropped (accepted, never mined; nonces
+# still free): same pre-signed raw txs, old hashes archived as *.attempt<N>
+SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 --resend tmp/e2e-staged-net/<ts>
 ```
 
 A run is bound to the network it was prepared on: the resolved endpoints are

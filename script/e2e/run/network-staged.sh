@@ -49,6 +49,12 @@
 #                    every job that already has a manifest but no sent txs, then
 #                    monitor/verify that subset (unprepared jobs are reported,
 #                    not counted as failures)
+#   --resend <run-dir>       like --resume, but ALSO re-fires the jobs whose
+#                    triggers were sent and never mined (a front accepted and
+#                    then dropped them; their nonces are still free): the old
+#                    hashes are archived (txs.txt.attempt<N>, sent.csv.attempt<N>)
+#                    and the same pre-signed raw txs go out again — usually with
+#                    SEND_PAUSE / --workers to avoid the burst that lost them
 #
 # Env knobs:
 #   PREPARE_MODE      plan (default) | waves | classic — see phase 2 above
@@ -60,6 +66,10 @@
 #   SEND_WORKERS      send workers (default 80; --workers overrides)
 #   SEND_RETRIES      attempts per raw-tx send when the RPC gives no answer at
 #                     all (default 3; JSON-RPC errors are never retried)
+#   SEND_PAUSE        seconds each send worker sleeps after every trigger it
+#                     fires (default 0 = burst); the effective rate is
+#                     SEND_WORKERS / SEND_PAUSE tx/s, e.g. --workers 5 with
+#                     SEND_PAUSE=0.5 → 10 tx/s
 #   VERIFY_PARALLEL   concurrent verify jobs (default 8)
 #   POLL_INTERVAL     fixed trigger receipt polling compatibility override
 #   POLL_FAST_INTERVAL / POLL_FAST_WINDOW / POLL_MEDIUM_INTERVAL /
@@ -127,6 +137,8 @@ FRESH=false
 NO_VERIFY=false
 VERIFY_ONLY=""
 RESUME=""
+RESEND=false
+SEND_PAUSE="${SEND_PAUSE:-0}"
 RESUME_TRUNCATED=false
 
 while [[ $# -gt 0 && "$1" == --* ]]; do
@@ -139,6 +151,7 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
         --no-verify)   NO_VERIFY=true; shift ;;
         --verify-only) VERIFY_ONLY="${2:?--verify-only needs a run dir}"; shift 2 ;;
         --resume)      RESUME="${2:?--resume needs a run dir}"; shift 2 ;;
+        --resend)      RESUME="${2:?--resend needs a run dir}"; RESEND=true; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -727,10 +740,21 @@ _timing_init "$RUN_DIR"; _phase_begin total
 declare -A _PK_OF
 while IFS=, read -r _j _a _k; do [[ "$_j" == "job" ]] || _PK_OF[$_j]="$_k"; done < "$RUN_DIR/wallets.csv"
 JOB_NAMES=(); JOB_SOLS=(); WALLET_PKS=()
-_SKIPPED_SENT=0
+_SKIPPED_SENT=0; _RESENT=0
 while IFS=, read -r _name _sol; do
     [[ "$_name" == "job" ]] && continue
     _jd="$RUN_DIR/jobs/$_name"
+    # --resend: a job whose sent triggers NEVER mined (every hash still pending, none
+    # in mined.csv) is put back on the send list — its raw txs are unchanged and their
+    # nonces unused. The old hashes are archived per attempt; their rows leave
+    # sent.csv so the monitor does not wait on them again.
+    if $RESEND && [[ -s "$_jd/txs.txt" ]] && ! grep -qFf "$_jd/txs.txt" "$RUN_DIR/mined.csv" 2>/dev/null; then
+        mv "$_jd/txs.txt" "$_jd/txs.txt.attempt$ATTEMPT"
+        [[ -f "$RUN_DIR/sent.csv.attempt$ATTEMPT" ]] || cp "$RUN_DIR/sent.csv" "$RUN_DIR/sent.csv.attempt$ATTEMPT"
+        grep -v "^$_name," "$RUN_DIR/sent.csv" > "$RUN_DIR/sent.csv.tmp" || true
+        mv "$RUN_DIR/sent.csv.tmp" "$RUN_DIR/sent.csv"
+        _RESENT=$((_RESENT+1))
+    fi
     # fully sent = one hash per pre-signed tx; a partial multi-tx send is resumed from where it stopped
     if [[ -s "$_jd/txs.txt" ]] && (( $(wc -l < "$_jd/txs.txt") >= $(wc -l < "$_jd/rawtxs.txt" 2>/dev/null || echo 0) )); then
         _SKIPPED_SENT=$((_SKIPPED_SENT+1)); continue
@@ -769,7 +793,7 @@ done
 JOB_NAMES=("${_N[@]}"); JOB_SOLS=("${_S[@]}"); WALLET_PKS=("${_P[@]}")
 NJOBS=${#JOB_NAMES[@]}
 (( NJOBS > 0 )) || { echo "Nothing prepared-but-unsent in $RUN_DIR"; exit 1; }
-echo "== RESUME $RUN_DIR: firing $NJOBS prepared job(s) ($_SKIPPED_SENT already sent, skipped)"
+echo "== RESUME $RUN_DIR: firing $NJOBS prepared job(s) ($_SKIPPED_SENT already sent, skipped; $_RESENT re-fired after never mining)$([[ "$SEND_PAUSE" != 0 ]] && echo " - paced: $SEND_WORKERS worker(s), ${SEND_PAUSE}s between sends")"
 
 else
 # ── Fresh run: expand, fund, prepare ──
@@ -953,6 +977,7 @@ send_worker() {  # $1=worker index — handles jobs $1, $1+W, $1+2W, ... (round-
             fi
             echo "$hash" >> "$dir/txs.txt"
             echo "$name,$chain,$hash" >> "$RUN_DIR/sent.csv"   # single-line O_APPEND: atomic
+            [[ "$SEND_PAUSE" == 0 ]] || sleep "$SEND_PAUSE"   # pace the burst (per worker)
         done < <(tail -n +$((done_n + 1)) "$dir/rawtxs.txt")
     done
 }
