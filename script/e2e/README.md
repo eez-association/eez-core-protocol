@@ -132,7 +132,8 @@ Caveats:
 - **Sibling batches** (L2-starting scenarios): a parallel job of the same scenario
   can settle an event-identical entry first. The runner tries every candidate
   settlement tx the range scan emitted (`L1_BATCH_TX_CANDIDATE`) and re-scans until
-  `L1_CALLDATA_TIMEOUT` (default 180s) before failing the posted-calldata check.
+  `L1_CALLDATA_TIMEOUT` (default 180 s for L2 triggers; 60 s for L1 triggers, whose
+  candidate set is known up front) before failing the posted-calldata check.
 
 ### Manual single scenario
 
@@ -143,8 +144,15 @@ bash script/e2e/run/network.sh script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.
   --pk $PK --rollups $ROLLUPS --manager-l2 $MANAGER_L2
 ```
 
-Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420),
-`L1_SETTLE_TIMEOUT` 300, `L2_SETTLE_TIMEOUT` 180, `L1_VERIFY_TIMEOUT` 90.
+Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420).
+Verification fails fast where the protocol allows it: an L1 trigger's batch can only be
+in the trigger's own block (entries are consumable while `lastVerifiedBlock ==
+block.number`), so its block is retried for `L1_VERIFY_TIMEOUT` 30 and a range scan
+to the head for `L1_LATE_SETTLE_TIMEOUT` 30 only absorb RPC lag; an L2 trigger's
+settlement is genuinely asynchronous — `L1_SETTLE_TIMEOUT` 120. The L1→L2 delivery
+block is known from the settlement (correlation RPC): once the L2 head is past it the
+scan decides within `L2_KNOWN_BLOCK_TIMEOUT` 15; without correlation
+`L2_SETTLE_TIMEOUT` 180 bounds the scan.
 
 ## Operational notes
 
@@ -181,7 +189,8 @@ chains by block number. The link is **content**, in three layers:
 3. **Time windows** — block-number snapshots taken right before publishing the
    trigger bound every scan range (call hashes are not unique across runs — an
    earlier run of the same scenario emits identical ones), and deadlines
-   (`L1_SETTLE_TIMEOUT`, `L2_SETTLE_TIMEOUT`, `L1_VERIFY_TIMEOUT`) bound the wait.
+   (`L1_SETTLE_TIMEOUT`, `L2_SETTLE_TIMEOUT`, `L1_VERIFY_TIMEOUT`, `L1_LATE_SETTLE_TIMEOUT`,
+   `L2_KNOWN_BLOCK_TIMEOUT`, see "Manual single scenario") bound the wait.
 
 Concretely: the settlement block is discovered by scanning `[snapshot..latest]` —
 by expected call hashes on L1 proxy-consumed entries (`VerifyL1BatchInRange`), by

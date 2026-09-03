@@ -69,15 +69,23 @@ bash script/e2e/run/network-parallel.sh --direct counter:10
 
 `network-staged.sh` splits a run into phases so the local machine never holds more
 than a capped number of forge processes, however many txs are in flight:
-fund → **prepare** (deploy + pre-sign triggers + ComputeExpected, capped at
-`PREPARE_PARALLEL`) → one block snapshot → **send** (`SEND_WORKERS` curl-only
+fund → **prepare** (one forge plan run per job: simulated deploys + trigger
+presign + ComputeExpected, capped at `PREPARE_PARALLEL`; then all deploys fired
+and mined at once) → one block snapshot → **send** (`SEND_WORKERS` curl-only
 workers fire the pre-signed raw txs and record hashes) → **monitor** (one batched
-receipt poll per chain every `POLL_INTERVAL` s until mined or `MINE_TIMEOUT`) →
+receipt poll per chain, adaptive interval, until mined or `MINE_TIMEOUT`) →
 **verify** (capped at `VERIFY_PARALLEL`, deferrable). Every artifact lives in
 `tmp/e2e-staged-net/<ts>/` — per-job manifests + raw txs, `sent.csv`, `mined.csv`,
-`pending.csv` (what never mined) — so verification can run later, slowly, or again.
+`pending.csv` (what never mined), `timings.csv` — so verification can run later,
+slowly, or again.
 
 ```bash
+# The whole suite once (28 scenarios; ~2 min end to end, 28/28 on 2026-09-03)
+bash script/e2e/run/network-staged.sh all:1
+
+# One scenario, or a few
+bash script/e2e/run/network-staged.sh counter:1 revertCounter:1
+
 # Smoke test
 bash script/e2e/run/network-staged.sh counter:2
 
@@ -98,8 +106,9 @@ saved in `<run-dir>/devnet.env` and `--resume` / `--verify-only` reload them, so
 
 Defaults: `PREPARE_PARALLEL=40`, `PREPARE_JOB_TIMEOUT=300` (a prepare launch past
 it is killed and its job dropped, the run continues), `SEND_WORKERS=80`
-(`--workers`), `VERIFY_PARALLEL=8`, `POLL_INTERVAL=10`, `MINE_TIMEOUT=600`,
-`DEPLOY_POLL_INTERVAL=3`, `DEPLOY_MINE_TIMEOUT=300`; funding flags/env are the same as
+(`--workers`), `VERIFY_PARALLEL=8`, adaptive receipt polling (see below;
+`POLL_INTERVAL` / `DEPLOY_POLL_INTERVAL` fix it), `MINE_TIMEOUT=600`,
+`DEPLOY_MINE_TIMEOUT=300`; funding flags/env are the same as
 `network-parallel.sh` (both source `orchestrator-lib.sh`; the two chains are
 funded concurrently, every `fundUpTo` chunk fired at once and mined with one
 receipt pass). `counter-multi-tx` jobs can FAIL with a "composer split the
@@ -115,27 +124,53 @@ chains, pinned at that block with the wallet nonce injected — a later Deploy
 contract sees what earlier ones deployed, CREATE addresses come out as the real
 chain will produce them, and nothing waits for a block. Deploy outputs travel
 in-process (`output()` in `E2EHelpers.sol` prints the usual `NAME=value` line
-and sets it as an env var). The planned txs of both chains are re-signed from
-the multi-chain dry-run JSON (`cast mktx`), ALL deploy txs are fired at once by
-the curl workers, mined with ONE wait, a batched `eth_getCode` pass asserts
-every created address holds code, and the read-only finish step pre-signs the
-trigger(s) and runs ComputeExpected; triggers go out in the send phase.
-`PREPARE_MODE=waves` is the per-Deploy-contract dry-run scheme against the real
-RPCs (one mine wait per Deploy contract, then the same finish step);
+and sets it as an env var). The SAME forge process then runs the trigger oracle
+(`ExecuteNetwork*`) and `ComputeExpected` on the simulated post-deploy state —
+both are pure functions of the deploy outputs — so the plan step also
+pre-signs the trigger(s) (nonce = the wallet's plan-time nonce + its planned
+deploy txs on that chain, checked contiguous) and writes the job's manifest
+(`E2E_MANIFEST_VERSION=2`) before anything is mined. The planned deploy txs of
+both chains are re-signed from the multi-chain dry-run JSON (`cast mktx`), ALL
+deploy txs are fired at once by the curl workers, mined with ONE wait, and a
+batched `eth_getCode` pass asserts every created address holds code; there is
+no finish step. A v2 manifest alone does not make a job sendable: it must also
+hold `.deploys-done` and no `.prepare-failed` marker (`_job_prepared`), so a job
+whose deploys never mined is dropped, not fired. `PREPARE_MODE=waves` is the
+per-Deploy-contract dry-run scheme against the real RPCs (one mine wait per
+Deploy contract, then the finish step that writes a v1 manifest);
 `PREPARE_MODE=classic` is per-job forge deploys.
 
 Stopping and continuing is first-class: `--resume <run-dir>` first fires and
 mines the pre-signed deploys of jobs that never reached `.deploys-done`
-(continuing after any hash already recorded), then re-runs the read-only finish
-step (trigger presign + ComputeExpected) for every job whose deploys all mined
-but that never got a manifest — nothing is redeployed — then fires
-whatever is prepared and unsent (a multi-tx job whose send stopped part-way
-continues from the next raw tx); `--verify-only <run-dir>` re-syncs
-receipts (one batched re-poll) and (re)runs verification — `SKIP_VERIFIED=1`
-skips jobs whose verify.log already passed. Jobs the prepare phase dropped keep a
-`.prepare-failed` marker so they stay in the fail count even on a truncated run. Verification shares a per-run settlement-calldata
-cache and prefilters candidate txs by the job's own contract addresses, so
-hundreds of parallel sibling settlements don't grind the calldata matcher.
+(continuing after any hash already recorded), re-runs the finish step only for
+v1 jobs whose deploys all mined but that never got a manifest — nothing is
+redeployed, a v2 manifest is trusted as written — then fires whatever is
+prepared and unsent (a multi-tx job whose send stopped part-way continues from
+the next raw tx); `--verify-only <run-dir>` re-syncs receipts (one batched
+re-poll) and (re)runs verification — `SKIP_VERIFIED=1` skips jobs whose
+verify.log already passed. Jobs the prepare phase dropped keep a
+`.prepare-failed` marker so they stay in the fail count even on a truncated run.
+Verification shares a per-run settlement-calldata cache and prefilters
+candidate txs by the job's own contract addresses, so hundreds of parallel
+sibling settlements don't grind the calldata matcher. A multi-tx job whose
+triggers mined in different blocks is settled by several batches: the calldata
+matcher then accepts partial matches per settlement tx and requires the union
+over the trigger blocks' settlement txs to cover the expected table exactly
+once.
+
+Receipt polling is adaptive by default (1 s for 15 s, 3 s until 45 s, then
+10 s — `POLL_FAST_INTERVAL` / `POLL_FAST_WINDOW` / `POLL_MEDIUM_INTERVAL` /
+`POLL_MEDIUM_WINDOW` / `POLL_SLOW_INTERVAL`); an explicit `POLL_INTERVAL` or
+`DEPLOY_POLL_INTERVAL` fixes the trigger / deploy interval instead.
+
+Every run records phase timings: `<run-dir>/timings.csv` (run phases: build,
+fund, nonce-barrier, plan-inputs, plan, deploy-send, deploy-mine,
+deploy-liveness, finish, send, monitor, verify, total — one attempt number per
+fresh run / `--resume` / `--verify-only`) and `<run-dir>/job-timings.csv`
+(per-job plan / finish / verify durations), summarised at the end with the five
+slowest jobs. `E2E_TIMING_BASELINE=<timings.csv of a reference run>` reports
+every phase more than `TIMING_REGRESSION_PCT` (default 20) % slower than the
+baseline's last attempt.
 
 ## Settlement correlation RPC (`eez_getSettlementByL2Block` & co.)
 

@@ -9,6 +9,103 @@
 # expand_jobs "<target>[:count]" ...   → JOB_NAMES[] JOB_SOLS[] NJOBS
 # fund_workers                         → WALLET_ADDRS[] WALLET_PKS[] (one per job),
 #                                        wallets.csv in RUN_DIR, pool + faucet updated
+# Also pure helpers used by network-staged.sh: phase timing, the adaptive poll
+# delay, manifest version detection and the prepared-job gate.
+
+# ══ Phase timing ══
+# Run-scope rows go to $RUN_DIR/timings.csv; job-scope rows to
+# $RUN_DIR/jobs/<job>/timings.csv (one writer per file — parallel jobs never
+# append to a shared file) and are consolidated into $RUN_DIR/job-timings.csv
+# by the parent at the end. Schema (both files):
+#   attempt,scope,name,start_ms,end_ms,duration_ms,status
+# ATTEMPT is 1 for a fresh run and +1 for every --resume / --verify-only on the
+# same run dir (rows are appended, never overwritten). status: pass | fail |
+# timeout | skipped. Timestamps come from bash's EPOCHREALTIME (no subprocess).
+_TIMING_HEADER="attempt,scope,name,start_ms,end_ms,duration_ms,status"
+declare -A _PHASE_T0=() _PHASE_DONE=()
+# EPOCHREALTIME prints the fraction with the locale's decimal separator ("." or ",").
+_now_ms() { local t="${EPOCHREALTIME//[.,]/}"; echo "${t:0:${#t}-3}"; }
+_timing_init() {  # $1=run dir → ATTEMPT; creates timings.csv on a fresh run
+    local f="$1/timings.csv"
+    if [[ -s "$f" ]]; then
+        ATTEMPT=$(( $(awk -F, 'NR > 1 && $1 + 0 > m {m = $1 + 0} END {print m + 0}' "$f") + 1 ))
+    else
+        echo "$_TIMING_HEADER" > "$f"; ATTEMPT=1
+    fi
+}
+_phase_begin() { _PHASE_T0[$1]=$(_now_ms); unset '_PHASE_DONE[$1]'; }
+_phase_end() {  # $1=phase name $2=status (default pass)
+    local t0="${_PHASE_T0[$1]:-}" t1
+    t1=$(_now_ms); [[ -n "$t0" ]] || t0="$t1"
+    echo "$ATTEMPT,run,$1,$t0,$t1,$((t1 - t0)),${2:-pass}" >> "$RUN_DIR/timings.csv"
+    _PHASE_DONE[$1]=1
+}
+_phases_close_open() {  # $1=status — end every phase still open (exit paths, aborts)
+    local p
+    for p in "${!_PHASE_T0[@]}"; do [[ -n "${_PHASE_DONE[$p]:-}" ]] || _phase_end "$p" "$1"; done
+}
+_timed_job() {  # $1=job name $2=phase, rest = command: runs it, appends the job row, returns its rc
+    local name="$1" phase="$2" t0 t1 rc=0 st
+    shift 2
+    t0=$(_now_ms); "$@" || rc=$?; t1=$(_now_ms)
+    case $rc in 0) st=pass ;; 124) st=timeout ;; *) st=fail ;; esac
+    echo "$ATTEMPT,job,$name:$phase,$t0,$t1,$((t1 - t0)),$st" >> "$RUN_DIR/jobs/$name/timings.csv"
+    return $rc
+}
+_timing_summary() {  # consolidate job rows; print this attempt's phases (slowest first) + 5 slowest jobs
+    local jf="$RUN_DIR/job-timings.csv"
+    { echo "$_TIMING_HEADER"; cat "$RUN_DIR"/jobs/*/timings.csv 2>/dev/null; } > "$jf"
+    echo ""
+    echo "  Timings (attempt $ATTEMPT, $RUN_DIR/timings.csv):"
+    awk -F, -v a="$ATTEMPT" '$1 == a && $2 == "run"' "$RUN_DIR/timings.csv" | sort -t, -k6,6nr \
+        | LC_NUMERIC=C awk -F, '{printf "    %-24s %7.1f s  %s\n", $3, $6 / 1000, $7}'
+    echo "  Slowest jobs (attempt $ATTEMPT, $jf):"
+    awk -F, -v a="$ATTEMPT" 'NR > 1 && $1 == a' "$jf" | sort -t, -k6,6nr | head -5 \
+        | LC_NUMERIC=C awk -F, '{printf "    %-40s %7.1f s  %s\n", $3, $6 / 1000, $7}'
+    _timing_baseline_check
+}
+# E2E_TIMING_BASELINE=<timings.csv of a reference run>: every passed run-scope
+# phase of this attempt is compared with the same phase of the baseline's last
+# attempt; more than TIMING_REGRESSION_PCT (default 20) % slower is reported.
+_timing_baseline_check() {
+    local b="${E2E_TIMING_BASELINE:-}" pct="${TIMING_REGRESSION_PCT:-20}" ba name cur ref n=0
+    [[ -n "$b" && -s "$b" ]] || return 0
+    ba=$(awk -F, 'NR > 1 && $1 + 0 > m {m = $1 + 0} END {print m + 0}' "$b")
+    while IFS=, read -r name cur; do
+        ref=$(awk -F, -v a="$ba" -v n="$name" '$1 == a && $2 == "run" && $3 == n && $7 == "pass" {print $6}' "$b" | tail -1)
+        [[ -n "$ref" && "$ref" -gt 0 ]] || continue
+        if (( cur * 100 > ref * (100 + pct) )); then
+            echo "  REGRESSION: $name $(( cur / 1000 )) s vs baseline $(( ref / 1000 )) s (more than ${pct}% slower)"
+            n=$((n + 1))
+        fi
+    done < <(awk -F, -v a="$ATTEMPT" '$1 == a && $2 == "run" && $7 == "pass" {print $3 "," $6}' "$RUN_DIR/timings.csv")
+    (( n == 0 )) && echo "  baseline $b: no phase more than ${pct}% slower"
+    return 0
+}
+
+# ══ Adaptive receipt-poll delay ══
+# Short intervals right after a send (most txs mine within a block or two),
+# backing off so a long wait stays cheap. $1 = seconds elapsed since the send.
+_poll_delay() {
+    if (( $1 < POLL_FAST_WINDOW )); then echo "$POLL_FAST_INTERVAL"
+    elif (( $1 < POLL_MEDIUM_WINDOW )); then echo "$POLL_MEDIUM_INTERVAL"
+    else echo "$POLL_SLOW_INTERVAL"; fi
+}
+
+# ══ Manifest version ══
+# v1: written by the finish step after the deploys mined (waves / classic /
+# older runs). v2: written by the plan step BEFORE the deploys are fired, so
+# "manifest present" alone no longer means "prepared" — the job must also hold
+# .deploys-done and no .prepare-failed marker.
+_manifest_version() {  # $1=manifest.env → 1 | 2
+    local v
+    v=$(sed -n 's/^declare -- E2E_MANIFEST_VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null)
+    echo "${v:-1}"
+}
+_job_prepared() {  # $1=job dir → 0 when the job may be sent / verified
+    [[ -f "$1/manifest.env" && ! -f "$1/.prepare-failed" ]] || return 1
+    [[ "$(_manifest_version "$1/manifest.env")" == 1 || -f "$1/.deploys-done" ]]
+}
 
 # ── Expand args into a flat job list ──
 # Each arg is <target>[:count]; target = scenario name, category/direction dir

@@ -580,11 +580,17 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         return type(uint256).max;
     }
 
+    /// @dev `allowPartial`: the composer may have split one job's entries over several
+    ///      batches (a multi-tx trigger whose txs mined in different blocks). Then an
+    ///      expected entry missing from THIS batch is not a failure — the runner unions
+    ///      the L1_CALLDATA_MATCHED indices over the candidate settlement txs and needs
+    ///      every index exactly once; at least one match is still required here.
     function _verifyL1PostedEntries(
         ExecutionEntry[] memory posted,
         address rollupsAddr,
         bytes memory expectedTable,
-        bytes memory expectedSteps
+        bytes memory expectedSteps,
+        bool allowPartial
     )
         internal
         view
@@ -593,6 +599,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
         ExecutionEntry[] memory matched = new ExecutionEntry[](expected.length);
         uint256 nMatched;
+        string memory matchedIdx = "";
         // Recorded fold steps (index-aligned with `expected`) let us rebuild each
         // entry's EXACT rolling hash from the POSTED seed roots — the only part
         // ComputeExpected cannot predict — closing the per-call-result gap the
@@ -615,12 +622,17 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         for (uint256 i = 0; i < expected.length; i++) {
             uint256 j = _findPostedTwin(posted, used, expected[i]);
             if (j == type(uint256).max) {
-                console.log("FAIL: expected entry %s not in posted batch (no identity or content match)", i);
-                ok = false;
+                if (allowPartial) {
+                    console.log("NOTE: expected entry %s not in this batch (partial match allowed)", i);
+                } else {
+                    console.log("FAIL: expected entry %s not in posted batch (no identity or content match)", i);
+                    ok = false;
+                }
                 continue;
             }
             used[j] = true;
             matched[nMatched++] = posted[j];
+            matchedIdx = nMatched == 1 ? vm.toString(i) : string.concat(matchedIdx, ",", vm.toString(i));
             if (!_comparePostedEntry(posted[j], expected[i], i)) ok = false;
             if (steps.length > 0) {
                 bytes32 seed = RollingHashBuilder.entryBegin(posted[j].rollupUpdates, posted[j].proxyEntryHash);
@@ -634,6 +646,14 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
         assembly {
             mstore(matched, nMatched)
+        }
+        if (allowPartial) {
+            console.log("L1_CALLDATA_EXPECTED=%s", expected.length);
+            console.log("L1_CALLDATA_MATCHED=[%s]", matchedIdx);
+            if (nMatched == 0) {
+                console.log("FAIL: none of the %s expected entries is in this batch", expected.length);
+                return false;
+            }
         }
         // Contiguity across OUR matched entries only — a live devnet batch also carries other
         // actors' entries (and possibly stacked alternatives, see docs/CAVEATS.md) whose
@@ -649,7 +669,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         if (!_checkLiveRoots(rollupsAddr, posted, matched)) ok = false;
         if (ok) {
             console.log(
-                "PASS: posted batch calldata matches expected table (%s entries, field-by-field)", expected.length
+                "PASS: posted batch calldata matches expected table (%s of %s entries, field-by-field)",
+                nMatched,
+                expected.length
             );
             if (steps.length > 0) {
                 console.log("PASS: posted rolling hashes reproduced from posted roots (%s entries)", expected.length);
@@ -1604,7 +1626,8 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
         address rollups,
         bytes calldata expectedTable,
         bytes calldata expectedSteps,
-        bytes calldata expectedStaticTable
+        bytes calldata expectedStaticTable,
+        bool allowPartial
     )
         external
         view
@@ -1642,7 +1665,10 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
             );
             revert("Posted-batch calldata verification failed");
         }
-        if (expectedTable.length > 0 && !_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps)) {
+        if (
+            expectedTable.length > 0
+                && !_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps, allowPartial)
+        ) {
             revert("Posted-batch calldata verification failed");
         }
         if (expectedStaticTable.length > 0 && !_verifyL1PostedStaticEntries(b.staticEntries, expectedStaticTable)) {

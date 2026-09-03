@@ -12,12 +12,13 @@
 #                 run per job (capped at PREPARE_PARALLEL) that drives all of the
 #                 scenario's Deploy* contracts against in-process forks of both
 #                 chains with the wallet nonces injected and pre-signs the planned
-#                 deploy txs (network.sh E2E_STAGE=prepare, E2E_PREPARE_STEP=plan)
-#                 — nothing waits for a block. ALL deploy txs are then fired at
+#                 deploy txs, trigger txs, and expected verification data
+#                 (network.sh E2E_STAGE=prepare, E2E_PREPARE_STEP=plan) — nothing waits
+#                 for a block. ALL deploy txs are then fired at
 #                 once by the curl workers, mined with ONE wait, a batched
 #                 eth_getCode pass asserts every predicted address holds code, and
-#                 the finish step pre-signs the triggers + runs ComputeExpected
-#                 (E2E_PREPARE_STEP=finish).
+#                 version-2 manifests are already complete. The finish step is
+#                 retained only for waves mode and version-1/incomplete resumes.
 #                 PREPARE_MODE=waves = per Deploy-contract dry-run waves against the
 #                 real RPCs, mined one wave at a time (E2E_PREPARE_STEP=deploy:<k>,
 #                 then finish); PREPARE_MODE=classic = per-job forge deploys.
@@ -52,20 +53,29 @@
 # Env knobs:
 #   PREPARE_MODE      plan (default) | waves | classic — see phase 2 above
 #   DEPLOY_MINE_TIMEOUT  seconds to wait for the deploy txs to mine (default 300)
-#   DEPLOY_POLL_INTERVAL seconds between deploy receipt polls (default 3)
+#   DEPLOY_POLL_INTERVAL fixed deploy receipt polling override
 #   PREPARE_PARALLEL  concurrent prepare jobs (default 40)
 #   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / wave / finish /
 #                     classic) may run before its job is dropped (default 300)
 #   SEND_WORKERS      send workers (default 80; --workers overrides)
+#   SEND_RETRIES      attempts per raw-tx send when the RPC gives no answer at
+#                     all (default 3; JSON-RPC errors are never retried)
 #   VERIFY_PARALLEL   concurrent verify jobs (default 8)
-#   POLL_INTERVAL     seconds between trigger receipt polls (default 10)
+#   POLL_INTERVAL     fixed trigger receipt polling compatibility override
+#   POLL_FAST_INTERVAL / POLL_FAST_WINDOW / POLL_MEDIUM_INTERVAL /
+#                     POLL_MEDIUM_WINDOW / POLL_SLOW_INTERVAL configure the
+#                     adaptive default (1s through 15s, 3s through 45s, then 10s)
 #   MINE_TIMEOUT      seconds to wait for all trigger receipts (default 600)
 #   E2E_TRIGGER_GAS   trigger gas limit, passed through to network.sh (default
 #                     1000000; a scenario's GAS output takes precedence)
+#   E2E_TIMING_BASELINE  timings.csv of a reference run: run phases more than
+#                     TIMING_REGRESSION_PCT (default 20) % slower are reported
 #   FUND_ETH / FLOOR_ETH / SOURCE_PK / MULTISEND_BATCH / DEVNET_ENV  as in
 #   network-parallel.sh.
 #
 # Run dir: tmp/e2e-staged-net/<ts>/ — jobs.csv, wallets.csv, snapshot.env,
+# timings.csv (run phases per attempt) / job-timings.csv (per-job plan / finish
+# / verify durations; schema in orchestrator-lib.sh),
 # deploy-sent.csv / deploy-mined.csv, sent.csv, mined.csv, pending.csv (what
 # never mined), send-notes.log (duplicate sends recovered on resume),
 # jobs/<job>/{prepare.log, deploy-env.env, deploy-addrs.txt, deploytxs.txt,
@@ -100,10 +110,18 @@ PREPARE_PARALLEL="${PREPARE_PARALLEL:-40}"
 PREPARE_JOB_TIMEOUT="${PREPARE_JOB_TIMEOUT:-300}"
 SEND_WORKERS="${SEND_WORKERS:-80}"
 VERIFY_PARALLEL="${VERIFY_PARALLEL:-8}"
+
+POLL_INTERVAL_SET=${POLL_INTERVAL+x}
+DEPLOY_POLL_INTERVAL_SET=${DEPLOY_POLL_INTERVAL+x}
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 MINE_TIMEOUT="${MINE_TIMEOUT:-600}"
 DEPLOY_MINE_TIMEOUT="${DEPLOY_MINE_TIMEOUT:-300}"
 DEPLOY_POLL_INTERVAL="${DEPLOY_POLL_INTERVAL:-3}"
+POLL_FAST_INTERVAL="${POLL_FAST_INTERVAL:-1}"
+POLL_FAST_WINDOW="${POLL_FAST_WINDOW:-15}"
+POLL_MEDIUM_INTERVAL="${POLL_MEDIUM_INTERVAL:-3}"
+POLL_MEDIUM_WINDOW="${POLL_MEDIUM_WINDOW:-45}"
+POLL_SLOW_INTERVAL="${POLL_SLOW_INTERVAL:-10}"
 DIRECT=false
 FRESH=false
 NO_VERIFY=false
@@ -157,20 +175,43 @@ _bind_run_network() {  # $1=run dir
 _FORGE_CACHE_JSON="cache/solidity-files-cache.json"
 _warm_forge_cache() {
     echo "== forge build (warming artifacts; a cold via-IR build takes ~3 min)"
+    _phase_begin build
     forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
     cp "$_FORGE_CACHE_JSON" "$RUN_DIR/.forge-cache.json"
+    _phase_end build
 }
 _restore_forge_cache() {
     [[ -n "${RUN_DIR:-}" && -f "$RUN_DIR/.forge-cache.json" ]] && cp "$RUN_DIR/.forge-cache.json" "$_FORGE_CACHE_JSON"
     return 0
 }
-trap _restore_forge_cache EXIT
+# Exit: put the forge cache back, close every phase still open (an abort mid-phase
+# still leaves a row), record the total and print the timing summary.
+_on_exit() {
+    local rc=$?
+    _restore_forge_cache
+    if [[ -n "${ATTEMPT:-}" ]]; then
+        _phases_close_open "$([[ $rc -eq 0 ]] && echo pass || echo fail)"
+        _timing_summary
+    fi
+}
+trap _on_exit EXIT
 
 # ── Lightweight JSON-RPC helpers (the whole send/monitor path uses only these) ──
 _rpc_send_raw() {  # $1=rpc $2=raw signed tx → accepted hash on stdout
-    local out hash err
-    out=$(curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
-        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendRawTransaction\",\"params\":[\"$2\"]}") || return 1
+    local out="" hash err attempt
+    # Transport failures (no HTTP answer at all: timeout, reset, empty body) are
+    # retried SEND_RETRIES times: a resend is idempotent — a node that did take
+    # the tx answers "already known" (or a nonce-taken error, resolved below by
+    # hash lookup). JSON-RPC errors are never retried.
+    for ((attempt = 1; attempt <= ${SEND_RETRIES:-3}; attempt++)); do
+        out=$(curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendRawTransaction\",\"params\":[\"$2\"]}") \
+            && [[ -n "$out" ]] && break
+        out=""
+        echo "NOTE: no answer from $1 on send attempt $attempt/${SEND_RETRIES:-3}" >> "$RUN_DIR/send-notes.log"
+        sleep 1
+    done
+    [[ -n "$out" ]] || { echo "send: no answer from $1 after ${SEND_RETRIES:-3} attempts" >&2; return 1; }
     hash=$(jq -r '.result // empty' <<< "$out" 2>/dev/null)
     if [[ -z "$hash" ]]; then
         # A tx the node already holds (a resume re-sending what a crash between
@@ -259,19 +300,22 @@ _poll_pending_once() {
 
 # ── Monitor a sent-csv until everything is mined or a deadline passes ──
 # $1=sent.csv $2=mined.csv $3=pending.csv $4=timeout $5=rpc mode
-# $6=poll interval (default POLL_INTERVAL). Returns 1 on timeout, leaving the
-# unmined rows in $3.
+# $6=fixed poll interval (empty = adaptive, see _poll_delay in orchestrator-lib.sh).
+# Returns 1 on timeout, leaving the unmined rows in $3.
 _monitor_files() {
     cp "$1" "$3"; : > "$2"
-    local start deadline total left interval="${6:-$POLL_INTERVAL}"
+    local start deadline total left interval="${6:-}" now elapsed delay remaining
     start=$(date +%s); deadline=$(( start + $4 )); total=$(wc -l < "$1")
     while true; do
         _poll_pending_once "$3" "$2" "$5"
         left=$(wc -l < "$3")
-        echo "  mined $(( total - left ))/$total ($(( $(date +%s) - start ))s elapsed)"
+        now=$(date +%s); elapsed=$((now - start))
+        echo "  mined $(( total - left ))/$total (${elapsed}s elapsed)"
         (( left == 0 )) && return 0
-        (( $(date +%s) >= deadline )) && { echo "MONITOR TIMEOUT: $left tx(s) never mined (see $3)"; return 1; }
-        sleep "$interval"
+        (( now >= deadline )) && { echo "MONITOR TIMEOUT: $left tx(s) never mined (see $3)"; return 1; }
+        if [[ -n "$interval" ]]; then delay="$interval"; else delay=$(_poll_delay "$elapsed"); fi
+        remaining=$((deadline - now)); (( delay > remaining )) && delay=$remaining
+        (( delay > 0 )) && sleep "$delay"
     done
 }
 
@@ -329,8 +373,10 @@ _fire_deploy_txs() {  # $1=sfx
 _mine_deploy_txs() {  # $1=sfx
     local sfx="$1" name chain hash blk status
     [[ -s "$RUN_DIR/deploy-sent$sfx.csv" ]] || return 0
+    local deploy_interval=""
+    [[ -n "$DEPLOY_POLL_INTERVAL_SET" ]] && deploy_interval="$DEPLOY_POLL_INTERVAL"
     _monitor_files "$RUN_DIR/deploy-sent$sfx.csv" "$RUN_DIR/deploy-mined$sfx.csv" \
-        "$RUN_DIR/deploy-pending$sfx.csv" "$DEPLOY_MINE_TIMEOUT" direct "$DEPLOY_POLL_INTERVAL" || true
+        "$RUN_DIR/deploy-pending$sfx.csv" "$DEPLOY_MINE_TIMEOUT" direct "$deploy_interval" || true
     while IFS=, read -r name chain hash; do
         _prep_failed "$name" "deploy tx $hash never mined"
     done < "$RUN_DIR/deploy-pending$sfx.csv"
@@ -462,6 +508,15 @@ _read_plan_inputs() {
 # ══════════════════════════════════════════════
 #  Verify phase (also the whole of --verify-only)
 # ══════════════════════════════════════════════
+_verify_launch() {  # $1=job name $2=sol $3=pk — one job's network.sh verify stage, log in its dir
+    E2E_STAGE=verify E2E_JOB_DIR="$RUN_DIR/jobs/$1" E2E_SNAPSHOT="$RUN_DIR/snapshot.env" \
+        E2E_L1TX_CACHE="$RUN_DIR/l1tx-cache" \
+        bash script/e2e/run/network.sh "$2" \
+        --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
+        --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
+        --pk "$3" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \
+        > "$RUN_DIR/jobs/$1/verify.log" 2>&1 < /dev/null
+}
 verify_phase() {
     [[ -f "$RUN_DIR/jobs.csv" && -f "$RUN_DIR/wallets.csv" ]] || {
         echo "Not a staged run dir: $RUN_DIR (missing jobs.csv/wallets.csv)"; exit 1; }
@@ -506,6 +561,9 @@ verify_phase() {
             if [[ ! -f "$dir/.prepare-failed" ]] && $RESUME_TRUNCATED; then NOT_PREPARED=$((NOT_PREPARED+1)); else
                 PRE_FAILED+=("$name (prepare failed - $dir/prepare.log)"); fi
             continue
+        elif ! _job_prepared "$dir"; then
+            # v2 manifest (written at plan time) whose deploys never mined / held no code
+            PRE_FAILED+=("$name (planned but deploys not confirmed - $dir/prepare.log)"); continue
         elif [[ ! -s "$dir/txs.txt" ]]; then
             PRE_FAILED+=("$name (nothing sent)"); continue
         elif (( sent_n < ${want_n:-1} )); then   # a send failure mid-job is an orchestration failure, not a protocol one
@@ -516,14 +574,8 @@ verify_phase() {
             SKIPPED_OK=$((SKIPPED_OK+1)); continue   # already passed in an earlier verify pass
         fi
         while (( $(jobs -rp | wc -l) >= VERIFY_PARALLEL )); do sleep 2; done
-        echo "VERIFY $name"
-        E2E_STAGE=verify E2E_JOB_DIR="$dir" E2E_SNAPSHOT="$RUN_DIR/snapshot.env" \
-            E2E_L1TX_CACHE="$RUN_DIR/l1tx-cache" \
-            bash script/e2e/run/network.sh "$sol" \
-            --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
-            --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
-            --pk "${JOB_PK[$name]}" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \
-            > "$dir/verify.log" 2>&1 < /dev/null &
+        echo "VERIFY $name (manifest v$(_manifest_version "$dir/manifest.env"))"
+        ( _timed_job "$name" verify _verify_launch "$name" "$sol" "${JOB_PK[$name]}" ) &
         V_NAMES+=("$name"); V_PIDS+=($!)
     done
 
@@ -577,9 +629,12 @@ _print_block_summary() {
 if [[ -n "$VERIFY_ONLY" ]]; then
     RUN_DIR="${VERIFY_ONLY%/}"
     _bind_run_network "$RUN_DIR"
+    _timing_init "$RUN_DIR"; _phase_begin total
     _warm_forge_cache
-    verify_phase
-    exit $?
+    _phase_begin verify
+    verify_phase; _RC=$?
+    _phase_end verify "$([[ $_RC -eq 0 ]] && echo pass || echo fail)"
+    exit $_RC
 fi
 
 PREP_FAIL=0
@@ -614,9 +669,14 @@ _prep_launch_failed() {  # $1=job name $2=step label $3=rc of the prepare launch
     fi
 }
 _mark_deploys_done() {  # every live job's deploys are mined and hold code
-    local i
+    local i d
     for ((i = 0; i < NJOBS; i++)); do
-        [[ "$DEAD" == *",${JOB_NAMES[$i]},"* ]] || touch "$RUN_DIR/jobs/${JOB_NAMES[$i]}/.deploys-done"
+        [[ "$DEAD" == *",${JOB_NAMES[$i]},"* ]] && continue
+        d="$RUN_DIR/jobs/${JOB_NAMES[$i]}"
+        touch "$d/.deploys-done"
+        # A v2 manifest is complete once its deploys hold code: a marker left by an
+        # earlier attempt whose deploys had not mined yet is stale now.
+        [[ -f "$d/manifest.env" && "$(_manifest_version "$d/manifest.env")" == 2 ]] && rm -f "$d/.prepare-failed"
     done
 }
 # ── Finish step: trigger presign + ComputeExpected (read-only, fast) for every
@@ -636,7 +696,7 @@ _finish_prepare() {
     for i in "${todo[@]}"; do
         while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
         echo "PREPARE ${JOB_NAMES[$i]}"
-        _job_launch_prepare "$i" finish &
+        ( _timed_job "${JOB_NAMES[$i]}" finish _job_launch_prepare "$i" finish ) &
         pids+=($!); idx+=("$i")
     done
     local rc
@@ -663,6 +723,7 @@ RUN_DIR="${RESUME%/}"
 [[ -f "$RUN_DIR/jobs.csv" && -f "$RUN_DIR/wallets.csv" ]] || {
     echo "Not a staged run dir: $RUN_DIR (missing jobs.csv/wallets.csv)"; exit 1; }
 _bind_run_network "$RUN_DIR"
+_timing_init "$RUN_DIR"; _phase_begin total
 declare -A _PK_OF
 while IFS=, read -r _j _a _k; do [[ "$_j" == "job" ]] || _PK_OF[$_j]="$_k"; done < "$RUN_DIR/wallets.csv"
 JOB_NAMES=(); JOB_SOLS=(); WALLET_PKS=()
@@ -692,16 +753,17 @@ for ((i = 0; i < NJOBS; i++)); do
 done
 if (( _DEPLOYS_PENDING > 0 )); then
     echo "== RESUME $RUN_DIR: firing + mining the deploys of $_DEPLOYS_PENDING job(s)"
-    _fire_deploy_txs ""
-    _mine_deploy_txs ""
-    _check_deploy_liveness
+    _phase_begin deploy-send; _fire_deploy_txs ""; _phase_end deploy-send
+    _phase_begin deploy-mine; _mine_deploy_txs ""
+    _phase_end deploy-mine "$([[ -s "$RUN_DIR/deploy-pending.csv" ]] && echo timeout || echo pass)"
+    _phase_begin deploy-liveness; _check_deploy_liveness; _phase_end deploy-liveness
     _mark_deploys_done
 fi
-_finish_prepare
-# keep only jobs that now hold a manifest (deploy and finish failures drop out here)
+_phase_begin finish; _finish_prepare; _phase_end finish
+# keep only jobs that are prepared (deploy and finish failures drop out here)
 _N=(); _S=(); _P=()
 for ((i = 0; i < NJOBS; i++)); do
-    [[ -f "$RUN_DIR/jobs/${JOB_NAMES[$i]}/manifest.env" ]] || continue
+    _job_prepared "$RUN_DIR/jobs/${JOB_NAMES[$i]}" || continue
     _N+=("${JOB_NAMES[$i]}"); _S+=("${JOB_SOLS[$i]}"); _P+=("${WALLET_PKS[$i]}")
 done
 JOB_NAMES=("${_N[@]}"); JOB_SOLS=("${_S[@]}"); WALLET_PKS=("${_P[@]}")
@@ -718,6 +780,7 @@ expand_jobs "$@"
 RUN_DIR="tmp/e2e-staged-net/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 _save_run_network "$RUN_DIR"
+_timing_init "$RUN_DIR"; _phase_begin total
 echo "== $NJOBS job(s) — prepare x$PREPARE_PARALLEL, send x$SEND_WORKERS, verify x$VERIFY_PARALLEL — run dir $RUN_DIR"
 
 echo "job,sol" > "$RUN_DIR/jobs.csv"
@@ -729,17 +792,22 @@ done
 _warm_forge_cache
 
 # ══ Phase 1: fund ══
+_phase_begin fund
 fund_workers
+_phase_end fund
 
 # ══ Phase 2: prepare ══
 # plan (default): one batched nonce barrier, then ONE forge run per job
 #   (PrepareJob.s.sol) that drives all of its Deploy* contracts against
-#   in-process forks of both chains with the wallet nonces injected and
-#   pre-signs the planned deploy txs — nothing waits for a block. ALL deploy txs
-#   are then fired at once, mined with ONE wait and checked for code, and the
-#   finish step pre-signs the triggers + runs ComputeExpected. Triggers are
-#   fired only after the deploys mined (phase 4): a front's acceptance of a
-#   trigger whose nonce is ahead of chain state is unverified.
+#   in-process forks of both chains with the wallet nonces injected, then — in
+#   the same process, on the simulated post-deploy state — the trigger oracle
+#   and ComputeExpected; the plan step pre-signs the deploy AND trigger txs and
+#   writes a v2 manifest, so nothing waits for a block and no finish step is
+#   needed. ALL deploy txs are then fired at once, mined with ONE wait and
+#   checked for code; a job whose deploys fail keeps its manifest but is dropped
+#   (_job_prepared). Triggers are fired only after the deploys mined (phase 4):
+#   a front's acceptance of a trigger whose nonce is ahead of chain state is
+#   unverified.
 # waves: dry-run + pre-sign each job's k-th Deploy contract against the real
 #   RPCs, fire the whole wave, mine ONCE, then wave k+1 — the run blocks on
 #   deploy mining once per Deploy contract. Wave ordering keeps the dry-run
@@ -751,47 +819,53 @@ if [[ "$PREPARE_MODE" == "classic" ]]; then
     # ── classic single-pass prepare ──
     echo ""
     echo "== Prepare phase ($PREPARE_PARALLEL parallel, classic)"
+    _phase_begin prepare-classic
     _restore_forge_cache
     P_PIDS=()
     for ((i = 0; i < NJOBS; i++)); do
         while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 2; done
         mkdir -p "$RUN_DIR/jobs/${JOB_NAMES[$i]}"
         echo "PREPARE ${JOB_NAMES[$i]}"
-        _job_launch_prepare "$i" "" &
+        ( _timed_job "${JOB_NAMES[$i]}" prepare _job_launch_prepare "$i" "" ) &
         P_PIDS+=($!)
     done
     for ((i = 0; i < ${#P_PIDS[@]}; i++)); do
         rc=0; wait "${P_PIDS[$i]}" || rc=$?
         (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[$i]}" classic "$rc"
     done
+    _phase_end prepare-classic
 else
     if [[ "$PREPARE_MODE" == "plan" ]]; then
-        _nonce_barrier
-        _read_plan_inputs
+        _phase_begin nonce-barrier; _nonce_barrier; _phase_end nonce-barrier
+        _phase_begin plan-inputs; _read_plan_inputs; _phase_end plan-inputs
         echo ""
         echo "== Prepare (plan mode): one forge run per job, $NJOBS job(s) ($PREPARE_PARALLEL parallel)"
+        _phase_begin plan
         _restore_forge_cache
         P_PIDS=(); P_IDX=()
         for ((i = 0; i < NJOBS; i++)); do
             while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
             mkdir -p "$RUN_DIR/jobs/${JOB_NAMES[$i]}"
             echo "PREPARE ${JOB_NAMES[$i]}"
-            _job_launch_prepare "$i" plan &
+            ( _timed_job "${JOB_NAMES[$i]}" plan _job_launch_prepare "$i" plan ) &
             P_PIDS+=($!); P_IDX+=($i)
         done
         for k in "${!P_PIDS[@]}"; do
             rc=0; wait "${P_PIDS[$k]}" || rc=$?
             (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[${P_IDX[$k]}]}" plan "$rc"
         done
+        _phase_end plan
 
         # ── fire every job's deploys at once, mine with one wait ──
         echo ""
         echo "== Deploy: firing all pre-signed deploy txs"
-        _fire_deploy_txs ""
-        _mine_deploy_txs ""
-        _check_deploy_liveness
+        _phase_begin deploy-send; _fire_deploy_txs ""; _phase_end deploy-send
+        _phase_begin deploy-mine; _mine_deploy_txs ""
+        _phase_end deploy-mine "$([[ -s "$RUN_DIR/deploy-pending.csv" ]] && echo timeout || echo pass)"
+        _phase_begin deploy-liveness; _check_deploy_liveness; _phase_end deploy-liveness
         _mark_deploys_done
     elif [[ "$PREPARE_MODE" == "waves" ]]; then
+        _phase_begin prepare-waves
         for ((wave = 1; ; wave++)); do
             # ── dry-run + presign every live job's <wave>-th Deploy contract ──
             W_PIDS=(); W_IDX=()
@@ -802,7 +876,7 @@ else
                 [[ -f "$RUN_DIR/jobs/$name/.deploys-done" ]] && continue
                 while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
                 mkdir -p "$RUN_DIR/jobs/$name"
-                _job_launch_prepare "$i" "deploy:$wave" &
+                ( _timed_job "$name" "wave$wave" _job_launch_prepare "$i" "deploy:$wave" ) &
                 W_PIDS+=($!); W_IDX+=($i)
             done
             (( ${#W_PIDS[@]} > 0 )) || break   # every job is done deploying (or dead)
@@ -827,10 +901,12 @@ else
             _mine_deploy_txs "-wave$wave"
         done
         _check_deploy_liveness
+        _phase_end prepare-waves
     else
         echo "Unknown PREPARE_MODE: $PREPARE_MODE (plan | waves | classic)"; exit 1
     fi
-    _finish_prepare
+    # v2 manifests (plan mode) already exist — _finish_prepare only picks up jobs without one
+    _phase_begin finish; _finish_prepare; _phase_end finish
 fi
 echo "prepared $((NJOBS - PREP_FAIL))/$NJOBS job(s)"
 (( NJOBS - PREP_FAIL > 0 )) || { echo "Nothing prepared - aborting"; exit 1; }
@@ -854,13 +930,14 @@ echo "== Snapshot: $(tr '\n' ' ' < "$RUN_DIR/snapshot.env")"
 
 # ══ Phase 4: send (curl only — nothing heavier runs until the monitor is done) ══
 echo "== Send phase ($SEND_WORKERS workers)"
+_phase_begin send
 # touch, not truncate — a resumed run appends to the earlier records
 touch "$RUN_DIR/sent.csv" "$RUN_DIR/send-failed.log"
 send_worker() {  # $1=worker index — handles jobs $1, $1+W, $1+2W, ... (round-robin shard)
     local j name dir chain rpc raw hash done_n
     for ((j = $1; j < NJOBS; j += SEND_WORKERS)); do
         name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"
-        [[ -f "$dir/manifest.env" ]] || continue   # prepare failed
+        _job_prepared "$dir" || continue   # prepare failed, or a v2 manifest whose deploys never mined
         chain=$(sed -n 's/^declare -- _TRIGGER_CHAIN="\(.*\)"$/\1/p' "$dir/manifest.env")
         rpc=$(_front_rpc "$chain")
         # A resumed partial multi-tx send continues after the hashes already recorded.
@@ -887,6 +964,7 @@ done
 for pid in "${S_PIDS[@]}"; do wait "$pid"; done
 N_SENT=$(wc -l < "$RUN_DIR/sent.csv")
 echo "fired $N_SENT tx(s)$([[ -s "$RUN_DIR/send-failed.log" ]] && echo " — SEND FAILURES in $RUN_DIR/send-failed.log")"
+_phase_end send "$([[ -s "$RUN_DIR/send-failed.log" ]] && echo fail || echo pass)"
 (( N_SENT > 0 )) || { echo "Nothing sent - aborting"; exit 1; }
 
 # ══ Phase 5: monitor ══
@@ -896,24 +974,15 @@ echo "fired $N_SENT tx(s)$([[ -s "$RUN_DIR/send-failed.log" ]] && echo " — SEN
 # "sent but not mined" is a real (and eventually failing) state: MINE_TIMEOUT
 # bounds the wait and leftovers stay in pending.csv.
 echo ""
-echo "== Monitor phase (every ${POLL_INTERVAL}s, timeout ${MINE_TIMEOUT}s)"
-cp "$RUN_DIR/sent.csv" "$RUN_DIR/pending.csv"
-: > "$RUN_DIR/mined.csv"
-MON_START=$(date +%s)
-MON_DEADLINE=$(( MON_START + MINE_TIMEOUT ))
-while true; do
-    _poll_pending_once
-    N_MINED=$(wc -l < "$RUN_DIR/mined.csv")
-    N_LEFT=$(wc -l < "$RUN_DIR/pending.csv")
-    echo "  mined $N_MINED/$N_SENT ($(( $(date +%s) - MON_START ))s elapsed)"
-    (( N_LEFT == 0 )) && break
-    if (( $(date +%s) >= MON_DEADLINE )); then
-        echo "MONITOR TIMEOUT: $N_LEFT tx(s) never mined (see $RUN_DIR/pending.csv):"
-        sed 's/^/  UNMINED: /' "$RUN_DIR/pending.csv"
-        break
-    fi
-    sleep "$POLL_INTERVAL"
-done
+_phase_begin monitor
+if [[ -n "$POLL_INTERVAL_SET" ]]; then
+    echo "== Monitor phase (fixed ${POLL_INTERVAL}s, timeout ${MINE_TIMEOUT}s)"
+    _monitor_files "$RUN_DIR/sent.csv" "$RUN_DIR/mined.csv" "$RUN_DIR/pending.csv" "$MINE_TIMEOUT" front "$POLL_INTERVAL" || true
+else
+    echo "== Monitor phase (adaptive ${POLL_FAST_INTERVAL}/${POLL_MEDIUM_INTERVAL}/${POLL_SLOW_INTERVAL}s, timeout ${MINE_TIMEOUT}s)"
+    _monitor_files "$RUN_DIR/sent.csv" "$RUN_DIR/mined.csv" "$RUN_DIR/pending.csv" "$MINE_TIMEOUT" front "" || true
+fi
+_phase_end monitor "$([[ -s "$RUN_DIR/pending.csv" ]] && echo timeout || echo pass)"
 N_REVERTED=$(awk -F, '$5 != "0x1"' "$RUN_DIR/mined.csv" | wc -l)
 (( N_REVERTED > 0 )) && { echo "WARNING: $N_REVERTED mined tx(s) REVERTED (status != 0x1):"; awk -F, '$5 != "0x1" {print "  " $0}' "$RUN_DIR/mined.csv"; }
 
@@ -926,4 +995,7 @@ if $NO_VERIFY; then
 fi
 
 # ══ Phase 6: verify ══
-verify_phase
+_phase_begin verify
+verify_phase; _RC=$?
+_phase_end verify "$([[ $_RC -eq 0 ]] && echo pass || echo fail)"
+exit $_RC

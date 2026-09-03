@@ -244,6 +244,21 @@ _resign_planned_txs() {
     echo "$n"
 }
 
+# ── Planned-nonce check: INITIAL, then every planned nonce must be INITIAL, INITIAL+1, ... ──
+# Usage: _check_contiguous_nonces INITIAL [NONCE ...] → 0 when contiguous (an empty list is)
+# The trigger nonce is derived as INITIAL + count, which is only right when the
+# wallet's planned deploy txs fill the nonces in between with no gap or repeat.
+_check_contiguous_nonces() {
+    local initial="$1" i=0 n
+    shift
+    for n in "$@"; do
+        n=$(printf '%d' "$n" 2>/dev/null) || return 1
+        (( n == initial + i )) || return 1
+        i=$((i + 1))
+    done
+    return 0
+}
+
 # ── Plan every Deploy* contract of SOL in ONE forge run and pre-sign the txs (staged plan prepare) ──
 # Usage: plan_job_deploys SOL L1_RPC L2_RPC PK OUT_DIR
 # Env in: E2E_L1_NONCE E2E_L2_NONCE E2E_L1_BLOCK E2E_L2_BLOCK (network-staged.sh).
@@ -252,25 +267,46 @@ _resign_planned_txs() {
 # txs the real chain will accept without anything being mined. Forge writes one
 # multi-chain dry-run JSON (private per job via FOUNDRY_BROADCAST); each chain's
 # txs are re-signed in nonce order into OUT_DIR/deploytxs.txt as "<L1|L2> <rawtx>"
-# and the NAME=value outputs go to OUT_DIR/deploy-env.env for the finish step.
+# and the NAME=value outputs go to OUT_DIR/deploy-env.env. The same process also
+# describes and signs the trigger, computes expectations, and writes a v2 manifest.
 plan_job_deploys() {
     local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4" out_dir="$5"
-    local contracts l1_chain l2_chain
+    local contracts l1_chain l2_chain trigger_contract has_compute sender
     contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | paste -sd,)
     [[ -n "$contracts" ]] || { echo "No Deploy* contracts found"; return 1; }
+    if grep -qE '^contract ExecuteNetworkL2\b' "$sol"; then trigger_contract=ExecuteNetworkL2; else trigger_contract=ExecuteNetwork; fi
+    if grep -qE '^contract ComputeExpected\b' "$sol"; then
+        has_compute=true
+    else
+        has_compute=false
+        grep -qE '^contract VerifyNetwork(L2)?\b' "$sol" \
+            || { echo "scenario has neither ComputeExpected nor VerifyNetwork*"; return 1; }
+    fi
+    sender=$(cast wallet address --private-key "$pk") || return 1
     l1_chain=$(cast chain-id --rpc-url "$l1_rpc") && l2_chain=$(cast chain-id --rpc-url "$l2_rpc") \
         || { echo "RPCs unreachable ($l1_rpc / $l2_rpc)"; return 1; }
-    rm -rf "$out_dir/broadcast"
-    local out rc=0
-    out=$(E2E_SCENARIO_FILE="$(basename "$sol")" E2E_DEPLOY_CONTRACTS="$contracts" \
-        E2E_WALLET="$(cast wallet address --private-key "$pk")" L1_RPC="$l1_rpc" L2_RPC="$l2_rpc" \
-        FOUNDRY_BROADCAST="$out_dir/broadcast" \
-        forge script script/e2e/shared/PrepareJob.s.sol:PrepareJob --private-key "$pk" 2>&1) || rc=$?
-    if [[ $rc -ne 0 ]]; then
+    # The forge run is a dry run (nothing is sent), so a failure that is only the
+    # RPC dropping the connection is retried (PLAN_RETRIES attempts, default 2).
+    local out rc attempt
+    for ((attempt = 1; attempt <= ${PLAN_RETRIES:-2}; attempt++)); do
+        rm -rf "$out_dir/broadcast"
+        rc=0
+        out=$(E2E_SCENARIO_FILE="$(basename "$sol")" E2E_DEPLOY_CONTRACTS="$contracts" \
+            E2E_TRIGGER_CONTRACT="$trigger_contract" E2E_HAS_COMPUTE="$has_compute" \
+            E2E_WALLET="$sender" L1_RPC="$l1_rpc" L2_RPC="$l2_rpc" \
+            FOUNDRY_BROADCAST="$out_dir/broadcast" \
+            forge script script/e2e/shared/PrepareJob.s.sol:PrepareJob --private-key "$pk" 2>&1) || rc=$?
+        [[ $rc -ne 0 ]] || break
+        if grep -qiE 'error sending request|connection (reset|error|refused)|timed out|SendRequest' <<< "$out" \
+            && (( attempt < ${PLAN_RETRIES:-2} )); then
+            echo "plan attempt $attempt: RPC transport error - retrying"
+            sleep 2
+            continue
+        fi
         echo "PLAN FAILED — forge output tail:"
         echo "$out" | tail -25
         return 1
-    fi
+    done
     local vars
     vars=$(echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true)
     [[ -n "$vars" ]] && { echo "$vars"; echo "$vars" >> "$out_dir/deploy-env.env"; }
@@ -278,15 +314,61 @@ plan_job_deploys() {
     local json="$out_dir/broadcast/multi/dry-run/PrepareJob.s.sol-latest/run.json"
     [[ -f "$json" ]] || { echo "planned-tx JSON missing: $json"; find "$out_dir/broadcast" -name '*.json' 2>/dev/null; return 1; }
     : > "$out_dir/deploytxs.txt"
-    local label chain rpc n
+    local label chain rpc n initial_nonce planned_n trigger_nonce="" i
     for label in L1 L2; do
         if [[ "$label" == "L1" ]]; then chain="$l1_chain"; rpc="$l1_rpc"; else chain="$l2_chain"; rpc="$l2_rpc"; fi
         jq --arg c "$chain" '{transactions: [.deployments[] | select((.chain | tostring) == $c) | .transactions[]]}' \
             "$json" > "$out_dir/plan-$label.json"
         [[ "$(jq '.transactions | length' "$out_dir/plan-$label.json")" -gt 0 ]] || { echo "no $label txs planned"; continue; }
+        [[ "$label" == "L1" ]] && initial_nonce="$E2E_L1_NONCE" || initial_nonce="$E2E_L2_NONCE"
+        local planned_nonces=()
+        mapfile -t planned_nonces < <(jq -r --arg s "${sender,,}" \
+            '.transactions[] | select(((.transaction.from // "") | ascii_downcase) == $s) | .transaction.nonce' \
+            "$out_dir/plan-$label.json")
+        planned_n=${#planned_nonces[@]}
+        _check_contiguous_nonces "$initial_nonce" "${planned_nonces[@]}" \
+            || { echo "non-contiguous planned $label nonces (${planned_nonces[*]} from $initial_nonce)"; return 1; }
+        [[ "$trigger_contract" == *L2 && "$label" == L2 || "$trigger_contract" != *L2 && "$label" == L1 ]] \
+            && trigger_nonce=$((initial_nonce + planned_n))
         n=$(_resign_planned_txs "$out_dir/plan-$label.json" "$rpc" "$pk" "$label" "$out_dir/deploytxs.txt") || return 1
         echo "presigned $n $label tx(s) → deploytxs.txt"
     done
+
+    local target value calldata gas
+    target=$(extract "$out" TARGET); value=$(extract "$out" VALUE); calldata=$(extract "$out" CALLDATA)
+    _TX_COUNT=$(extract "$out" NUM_TXS); _TX_COUNT="${_TX_COUNT:-1}"
+    gas=$(extract "$out" GAS); _TRIGGER_GAS="${gas:-${E2E_TRIGGER_GAS:-1000000}}"
+    [[ "$target" =~ ^0x[0-9a-fA-F]{40}$ && "$target" != 0x0000000000000000000000000000000000000000 ]] \
+        || { echo "invalid trigger TARGET: $target"; return 1; }
+    [[ "$value" =~ ^[0-9]+$ ]] || { echo "invalid trigger VALUE: $value"; return 1; }
+    [[ "$calldata" =~ ^0x([0-9a-fA-F]{2})*$ ]] || { echo "invalid trigger CALLDATA"; return 1; }
+    [[ "$_TX_COUNT" =~ ^[1-9][0-9]*$ ]] || { echo "invalid trigger NUM_TXS: $_TX_COUNT"; return 1; }
+    [[ "$_TRIGGER_GAS" =~ ^[1-9][0-9]*$ ]] || { echo "invalid trigger GAS: $_TRIGGER_GAS"; return 1; }
+    [[ -n "$trigger_nonce" ]] || { echo "could not determine trigger nonce"; return 1; }
+
+    _TRIGGER_CHAIN=$([[ "$trigger_contract" == *L2 ]] && echo L2 || echo L1)
+    _HAS_COMPUTE="$has_compute"; _SENDER="$sender"
+    local trigger_rpc="$l1_rpc"; [[ "$_TRIGGER_CHAIN" == L2 ]] && trigger_rpc="$l2_rpc"
+    : > "$out_dir/rawtxs.txt"
+    local raw
+    for ((i=0; i<_TX_COUNT; i++)); do
+        raw=$(cast mktx "$target" "$calldata" --value "${value}wei" --gas-limit "$_TRIGGER_GAS" \
+            --nonce "$((trigger_nonce + i))" --private-key "$pk" --rpc-url "$trigger_rpc") || return 1
+        printf '%s\n' "$raw" >> "$out_dir/rawtxs.txt"
+    done
+    printf '%s\n' "$out" > "$out_dir/compute.out"
+    if $has_compute; then
+        extract_expected_outputs "$out"
+    else
+        EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"; EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
+        EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"
+        EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
+    fi
+    E2E_MANIFEST_VERSION=2
+    declare -p E2E_MANIFEST_VERSION _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
+        EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE \
+        EVENTLESS_L2_HASHES ABSENT_L2_HASHES > "$out_dir/manifest.env"
 }
 
 # ── Strip forge execution traces ──
@@ -335,8 +417,8 @@ verify_l1_calldata() {
         input=$(cast tx "$tx" input --rpc-url "$rpc" 2>/dev/null) || continue
         rc=0
         VERIFY_OUT=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata --rpc-url "$rpc" \
-            --fork-block-number "$block" --sig "run(bytes,address,bytes,bytes,bytes)" \
-            "$input" "$rollups" "$table" "$steps" "$static_table" 2>&1) || rc=$?
+            --fork-block-number "$block" --sig "run(bytes,address,bytes,bytes,bytes,bool)" \
+            "$input" "$rollups" "$table" "$steps" "$static_table" false 2>&1) || rc=$?
         if [[ $rc -eq 0 ]]; then
             VERIFY_OUT="NOTE: matched settlement tx $tx"$'\n'"$VERIFY_OUT"
             return 0
