@@ -115,17 +115,21 @@ contract ECDSAProofSystemIntegrationTest is Base {
         return keccak256(abi.encodePacked(sharedPublicInput, acc));
     }
 
-    function _makeECDSARollup(bytes32 initialState, bytes32 vk) internal returns (RollupHandle memory) {
+    function _makeECDSARollup(bytes32 initialRoot, bytes32 vk) internal returns (RollupHandle memory) {
         address[] memory psList = new address[](1);
         psList[0] = address(verifier);
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = vk;
-        return _makeRollupCustom(initialState, psList, vks, 1, defaultOwner);
+        return _makeRollupCustom(initialRoot, psList, vks, 1, defaultOwner);
     }
 
     /// @notice Single-batch wrapper over `Base._raw` swapping the default `ps` for the ECDSA
     ///         `verifier` and its signed `proof`; the one entry is immediate.
-    function _buildECDSABatch(RollupHandle memory r, ExecutionEntry[] memory entries, bytes memory proof)
+    function _buildECDSABatch(
+        RollupHandle memory r,
+        ExecutionEntry[] memory entries,
+        bytes memory proof
+    )
         internal
         view
         returns (ProofSystemBatchPerVerificationEntries memory batch)
@@ -138,32 +142,32 @@ contract ECDSAProofSystemIntegrationTest is Base {
     }
 
     function test_PostAndVerifyBatch_WithECDSAVerifier() public {
-        bytes32 initialState = keccak256("initial");
-        bytes32 newState = keccak256("new");
+        bytes32 initialRoot = keccak256("initial");
+        bytes32 newRoot = keccak256("new");
         bytes32 vk = keccak256("vk");
 
-        RollupHandle memory r = _makeECDSARollup(initialState, vk);
+        RollupHandle memory r = _makeECDSARollup(initialRoot, vk);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(r.id, initialState, newState);
+        entries[0] = _immediateEntry(r.id, initialRoot, newRoot);
 
         bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(SIGNER_PK, publicInputsHash);
 
         rollups.postAndVerifyBatch(_buildECDSABatch(r, entries, proof));
 
-        assertEq(_getRollupState(r.id), newState);
+        assertEq(_getRollupState(r.id), newRoot);
     }
 
     function test_PostAndVerifyBatch_WrongSignerReverts() public {
-        bytes32 initialState = keccak256("initial");
-        bytes32 newState = keccak256("new");
+        bytes32 initialRoot = keccak256("initial");
+        bytes32 newRoot = keccak256("new");
         bytes32 vk = keccak256("vk");
 
-        RollupHandle memory r = _makeECDSARollup(initialState, vk);
+        RollupHandle memory r = _makeECDSARollup(initialRoot, vk);
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-        entries[0] = _immediateEntry(r.id, initialState, newState);
+        entries[0] = _immediateEntry(r.id, initialRoot, newRoot);
 
         bytes32 publicInputsHash = _computePublicInputsHash(entries, _emptyStaticEntries(), r.id, vk);
         bytes memory proof = _sign(0xBAD, publicInputsHash);

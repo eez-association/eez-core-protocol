@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IntegrationBase} from "./IntegrationBase.t.sol";
-import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -95,26 +95,25 @@ contract IntegrationTest is IntegrationBase {
             false, address(counterAndProxy), MAINNET_ROLLUP_ID, address(counterL2), L2_ROLLUP_ID, 0, incrementCallData
         );
 
-        bytes32 newState = keccak256("l2-state-after-scenario1");
+        bytes32 newRoot = keccak256("l2-state-after-scenario1");
 
         // L1 deferred entry: no calls, just returnData
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] = StateUpdate({
-                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
-            });
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 0});
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0] = ExecutionEntry({
-                stateUpdates: stateUpdates,
+                rollupUpdates: rollupUpdates,
                 proxyEntryHash: crossChainCallHash,
                 destinationRollupId: L2_ROLLUP_ID,
                 l2ToL1Calls: calls,
                 expectedL1ToL2Calls: nestedActions,
-                rollingHash: _hEntryBegin(stateUpdates, crossChainCallHash),
+                rollingHash: _hEntryBegin(rollupUpdates, crossChainCallHash),
                 success: true,
                 returnData: abi.encode(uint256(1))
             });
@@ -129,7 +128,7 @@ contract IntegrationTest is IntegrationBase {
         // ── Final assertions ──
         assertEq(counterAndProxy.counter(), 1, "A.counter should be 1");
         assertEq(counterAndProxy.targetCounter(), 1, "A.targetCounter should be 1");
-        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newRoot, "L2 rollup state should be updated");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -214,25 +213,24 @@ contract IntegrationTest is IntegrationBase {
             false, address(counterAndProxy), MAINNET_ROLLUP_ID, address(counterL2), L2_ROLLUP_ID, 0, incrementCallData
         );
 
-        bytes32 newState = keccak256("l2-state-after-scenario3");
+        bytes32 newRoot = keccak256("l2-state-after-scenario3");
 
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] = StateUpdate({
-                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
-            });
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 0});
 
             L2ToL1Call[] memory calls = new L2ToL1Call[](0);
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0] = ExecutionEntry({
-                stateUpdates: stateUpdates,
+                rollupUpdates: rollupUpdates,
                 proxyEntryHash: l1ActionHash,
                 destinationRollupId: L2_ROLLUP_ID,
                 l2ToL1Calls: calls,
                 expectedL1ToL2Calls: nestedActions,
-                rollingHash: _hEntryBegin(stateUpdates, l1ActionHash),
+                rollingHash: _hEntryBegin(rollupUpdates, l1ActionHash),
                 success: true,
                 returnData: abi.encode(uint256(1))
             });
@@ -300,7 +298,7 @@ contract IntegrationTest is IntegrationBase {
         // ── Final assertions ──
         assertEq(counterAndProxy.counter(), 1, "A.counter should be 1");
         assertEq(counterAndProxy.targetCounter(), 1, "A.targetCounter should be 1");
-        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 state should be updated via L1 entry");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newRoot, "L2 state should be updated via L1 entry");
         assertEq(rollups.entryQueueIndex(L2_ROLLUP_ID), 1, "L1 execution entry should be consumed");
         assertEq(managerL2.entryIndex(), 1, "L2 execution entry should be consumed");
     }
@@ -365,9 +363,9 @@ contract IntegrationTest is IntegrationBase {
         bytes32 s1 = keccak256("l2-state-s4-step1");
 
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] =
-                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: s1, etherDelta: 0});
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: s1, etherDelta: 0});
 
             ExpectedL1ToL2Call[] memory nestedActions = new ExpectedL1ToL2Call[](0);
 
@@ -388,12 +386,12 @@ contract IntegrationTest is IntegrationBase {
             bytes32 callHash = _ccHash(
                 false, alice, L2_ROLLUP_ID, address(counterAndProxyL2), MAINNET_ROLLUP_ID, 0, incrementProxyCallData
             );
-            bytes32 rollingHash = _hCallBegin(_hEntryBegin(stateUpdates, l1ActionHash), callHash);
+            bytes32 rollingHash = _hCallBegin(_hEntryBegin(rollupUpdates, l1ActionHash), callHash);
             rollingHash = _hCallEnd(rollingHash, true, "");
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
             entries[0] = ExecutionEntry({
-                stateUpdates: stateUpdates,
+                rollupUpdates: rollupUpdates,
                 proxyEntryHash: l1ActionHash,
                 destinationRollupId: L2_ROLLUP_ID,
                 l2ToL1Calls: calls,

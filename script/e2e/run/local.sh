@@ -11,7 +11,9 @@
 #   Execute            → L1 execution (postAndVerifyBatch + user action, same-block)
 source "$(dirname "$0")/../shared/E2EBase.sh"
 
-SOL="$1"; shift || { echo "Usage: local.sh <E2E.s.sol>"; exit 1; }
+[[ $# -ge 1 ]] || { echo "Usage: local.sh <E2E.s.sol>"; exit 1; }
+SOL="$1"
+shift
 [[ -f "$SOL" ]] || { echo "File not found: $SOL"; exit 1; }
 
 L1_PORT="${L1_PORT:-8545}"
@@ -146,12 +148,28 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo "====== Verify L1 (SKIP: no L1 block or no EXPECTED_L1_[CALL_]HASHES printed) ======"
     fi
 
+    # ── Content-addressed L1 check for entries without a usable event ──
+    # A success=false entry unwinds its events with its revert and a top-level static
+    # entry never emits one: match the posted postAndVerifyBatch calldata instead
+    # (the same verifier network mode uses). Entries already matched by events above
+    # are not re-compared; the static table always goes through here.
+    _L1_EVENTLESS=true
+    [[ -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]] && _L1_EVENTLESS=false
+    [[ -n "$EXPECTED_L1_HASHES" && "$EXPECTED_L1_HASHES" != "[]" ]] && _L1_EVENTLESS=false
+    _CD_TABLE="0x"; $_L1_EVENTLESS && _CD_TABLE="$EXPECTED_L1_TABLE"
+    if [[ -n "$L1_BLOCK" && ( "$_CD_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ) ]]; then
+        echo ""
+        echo "====== Verify L1 Posted Batch Calldata (block $L1_BLOCK) ======"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        run_verify_step "L1 CALLDATA" inline verify_l1_calldata "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$_CD_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE"
+    fi
+
     # ── Verify L2 ExecutionTableLoaded entries ──
     if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L2 TABLE" inline verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
+        run_verify_step "L2 TABLE" inline verify_l2_table "$L2_RPC" "[$L2_BLOCK]" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" "$EVENTLESS_L2_HASHES"
     else
         echo ""
         echo "====== Verify L2 Table (SKIP: no L2 block or no EXPECTED_L2_HASHES printed) ======"
@@ -166,6 +184,18 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     else
         echo ""
         echo "====== Verify L2 Calls (SKIP: no L2 block or no EXPECTED_L2_CALL_HASHES printed) ======"
+    fi
+
+    # ── Verify L2 absence (lookups) ──
+    # ABSENT_L2_HASHES are call keys that must have left NO trace on L2 (a call that
+    # reverts on L2, a top-level static read: never delivered). The local L2 anvil is
+    # fresh per run, so the whole chain is the range.
+    if [[ -n "${ABSENT_L2_HASHES:-}" && "$ABSENT_L2_HASHES" != "[]" ]]; then
+        _L2_TIP=$(cast block-number --rpc-url "$L2_RPC")
+        echo ""
+        echo "====== Verify L2 Absent (keys must not appear in blocks 0..$_L2_TIP) ======"
+        VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
+        run_verify_step "L2 ABSENT" inline verify_l2_absent "$L2_RPC" 0 "$_L2_TIP" "$MANAGER_L2" "$ABSENT_L2_HASHES"
     fi
 
     # A ComputeExpected that drives zero verifiers means the run asserted nothing on-chain.

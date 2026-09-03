@@ -23,8 +23,8 @@ const stateDeltaTuple = {
   type: "tuple" as const,
   components: [
     { name: "rollupId", type: "uint256" },
-    { name: "currentState", type: "bytes32" },
-    { name: "newState", type: "bytes32" },
+    { name: "currentRoot", type: "bytes32" },
+    { name: "newRoot", type: "bytes32" },
     { name: "etherDelta", type: "int256" },
   ],
 } as const;
@@ -82,7 +82,7 @@ export const rollupsAbi = [
     inputs: [
       { name: "rollupId", type: "uint256", indexed: true },
       { name: "rollupContract", type: "address", indexed: true },
-      { name: "initialState", type: "bytes32", indexed: false },
+      { name: "initialRoot", type: "bytes32", indexed: false },
     ],
   },
   {
@@ -193,7 +193,7 @@ export const rollupsAbi = [
     stateMutability: "nonpayable",
     inputs: [
       { name: "rollupContract", type: "address" },
-      { name: "initialState", type: "bytes32" },
+      { name: "initialRoot", type: "bytes32" },
     ],
     outputs: [{ name: "rollupId", type: "uint256" }],
   },
@@ -260,7 +260,7 @@ export const rollupsAbi = [
     inputs: [{ name: "rollupId", type: "uint256" }],
     outputs: [
       { name: "rollupContract", type: "address" },
-      { name: "stateRoot", type: "bytes32" },
+      { name: "root", type: "bytes32" },
       { name: "etherBalance", type: "uint256" },
     ],
   },

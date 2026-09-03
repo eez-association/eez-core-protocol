@@ -10,7 +10,7 @@ There are **two homes**, split by execution context:
 |---|---|---|---|
 | REENTRANT static read, fired `_insideExecution()` | STATIC-kind `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
 | REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-kind `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
-| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedStateRoots` pin live (full scan); L2: `proxyEntryHash` alone, same-block only (`lastLoadBlock == block.number`) |
+| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedRoots` pin live (full scan); L2: `proxyEntryHash` alone, same-block only (`lastLoadBlock == block.number`) |
 | TOP-LEVEL state-changing call that reverts | normal `ExecutionEntry` with `success == false` | entry queue | see `EXECUTION_ENTRY_SPEC.md` — out of scope here |
 
 There is no separate lookup struct and no separate lookup key space: reentrant reads and
@@ -19,7 +19,19 @@ on L1, `ExpectedOutgoingCrossChainCall` on L2), content-addressed by the same po
 plain-success reentrant calls. Field names below are L1's (`src/interfaces/IEEZ.sol`); L2
 (`src/interfaces/IEEZL2.sol`) mirrors with self-relative names (`expectedOutgoingHash`,
 `incomingCalls`, `expectedOutgoingCalls`, cursor `_lastOutgoingCallConsumed`) and drops the
-L1-only fields (`destinationRollupId`, `expectedStateRoots`).
+L1-only fields (`destinationRollupId`, `expectedRoots`).
+
+Seen from the frame that carries them:
+
+- **Top-level mutable frame** (an `ExecutionEntry`). Callbacks to L1 go in `l2ToL1Calls`. Any
+  reentrant call back into a rollup the entry proves, static included, goes in
+  `expectedL1ToL2Calls` as a row — that is why the row struct has
+  `revertedOrStaticRollingHash`: the expected sub-call hash for STATIC and REVERTED rows. The
+  frame is an execution environment, so it can carry expected results for its nested reads.
+- **Top-level static frame** (a `StaticExecutionEntry`). Callbacks to L1 go in `l2ToL1Calls`,
+  run with STATICCALL. Reentrant reads cannot be carried inside because a static frame cannot
+  mark itself as an execution (`_insideExecution()` stays false), so each becomes another
+  top-level `StaticExecutionEntry` in the pool, matched independently (§4.2).
 
 This document complements `EXECUTION_ENTRY_SPEC.md` (how `ExecutionEntry`s are built) and
 `CORE_PROTOCOL_SPEC.md` §E (rolling hash; §E.2 for the untagged static schema).
@@ -57,14 +69,14 @@ source = the proxy's caller on this chain's rollup ID, target = the proxy's
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, expectedRollingHash)
     L2ToL1Call[] l2ToL1Calls;            // this frame's OWN sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED
+    bytes32 revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED; must be 0 for SUCCESS
     bool success;                        // whether resolution returns or reverts
     bytes returnData;                    // returned on success / reverted-with when !success
 }
 
 /// TOP-LEVEL static entry — lives in the pool; resolvable only outside an execution.
 struct StaticExecutionEntry {
-    ExpectedStateRootPerRollup[] expectedStateRoots; // state-root pins — part of the MATCH — see §6
+    ExpectedRootPerRollup[] expectedRoots; // root pins — part of the MATCH — see §6
     bytes32 proxyEntryHash;      // the inbound call's crossChainCallHash (isStatic = true folded in)
     L2ToL1Call[] l2ToL1Calls;    // read-only sub-calls run via STATICCALL during resolution
     bytes32 rollingHash;         // expected untagged hash of the sub-calls — see §5
@@ -132,7 +144,7 @@ success row omits its NESTED frame and diverges the entry hash.
 **Static read** — `staticCrossChainCall`, in-execution branch:
 
 1. (L1 only) proxy protection: the read's target rollup must be in the executing entry's
-   allowed set (`_isRollupAllowed`, from its `stateUpdates`) — else
+   allowed set (`_containsVerifiedRollup`, from its `rollupUpdates`) — else
    `ReentrantDestinationNotVerified`.
 2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
@@ -174,12 +186,12 @@ Match predicate (full scan — a non-matching candidate is skipped, never an err
 ```
 staticEntry.proxyEntryHash == crossChainCallHash
 && staticEntry.destinationRollupId == destRid
-&& _stateRootsMatch(staticEntry)        // every pin equals the live root — §6
+&& _rootsMatch(staticEntry)        // every pin equals the live root — §6
 ```
 
 There is **no block gate** on the top-level static path (unlike entry consumption's
 `lastVerifiedBlock == block.number`): a static entry does not go stale with the block — as
-long as its state-root pins match the live roots, it resolves. Lifetime is bounded instead by
+long as its root pins match the live roots, it resolves. Lifetime is bounded instead by
 the queue reset: every batch that verifies a rollup wipes that rollup's `staticEntryQueue`
 along with its entry queue.
 
@@ -187,6 +199,11 @@ On L2 the pool is the single `staticEntries` table (replaced wholesale by every
 `loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone —
 but unlike L1, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
 is what bounds staleness.
+
+A top-level static read is a *lookup*: it resolves from the pool and never produces a
+destination-side delivery. The same treatment applies to an L1→L2 call that reverts on L2 and
+to one whose L1 frame is reverted afterwards — a signed prediction (return or revert data),
+nothing applied on L2, root unchanged (`CORE_PROTOCOL_SPEC.md` §C, L2 prover constraints).
 
 ### 4.3 `_resolveStaticEntry` / `_processNStaticCalls` (shared body)
 
@@ -215,7 +232,7 @@ return returnData
 - Every sub-call must be marked `isStatic` with `value == 0` — dispatch is read-only whatever
   the fields say, and the untagged hash folds neither, so a mismatch reverts (`NonStaticSubCall`
   / `StaticCallWithValue`) instead of silently executing a proven state-changing call read-only.
-- No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert.
+- No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert; `== 0` on static sub-calls is a prover constraint.
 
 A naturally-reverting *sub-call* is not special: the STATICCALL returns `(false, retData)` and
 the untagged hash captures it. The entry-level `success == false` is for the *whole read*
@@ -238,11 +255,11 @@ processes the whole array it was handed).
 
 ---
 
-## 6. State-root pins (top-level, L1 only)
+## 6. Root pins (top-level, L1 only)
 
-`expectedStateRoots[]` content-addresses a top-level static entry to a point on each pinned
+`expectedRoots[]` content-addresses a top-level static entry to a point on each pinned
 rollup's trajectory: a candidate only **matches** when every pin equals the live
-`rollups[rollupId].stateRoot` (`_stateRootsMatch`, full-scan semantics — a mismatching
+`rollups[rollupId].root` (`_rootsMatch`, full-scan semantics — a mismatching
 candidate is skipped and the scan continues; no dedicated error). The pins are:
 
 - **The freshness predicate** — with no block gate on the static path, the pins are what
@@ -251,10 +268,10 @@ candidate is skipped and the scan continues; no dedicated error). The pins are:
   target an intermediate mid-batch state.
 - **The validation-time proven set.** `_validateBatchStructure` enforces, per static entry:
   pins strictly increasing by `rollupId` (rejects duplicates and, bounding above
-  `MAINNET_ROLLUP_ID`, a mainnet pin — `ExpectedStateRootsNotStrictlyIncreasing`); every
+  `MAINNET_ROLLUP_ID`, a mainnet pin — `ExpectedRootsNotStrictlyIncreasing`); every
   pinned rollup in the batch (`RollupNotInBatch`); `destinationRollupId` among the pins
   (`StaticEntryDestinationNotPinned` — the routing target must be pinned to proven state,
-  mirroring the entry `destination ∈ stateUpdates` rule); and every sub-call's
+  mirroring the entry `destination ∈ rollupUpdates` rule); and every sub-call's
   `sourceRollupId` among the pins (`CallSourceNotVerified`).
 
 The prover decides which rollups to pin, but the set can never be empty on L1:
@@ -268,12 +285,22 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
 `immediateEntryCount`); the remainder past it is published to the per-rollup
 `staticEntryQueue`s regardless of whether the meta hook fired.
 
+The static prefix is a companion of the batch's META-HOOK entries, not of the immediate
+prefix as a whole: it is loaded only when the meta hook fires, i.e. when the immediate prefix
+contains at least one non-L2Tx entry. If no hook fires (empty immediate prefix, or one that
+is pure L2Txs), a non-zero `immediateStaticEntryCount` would silently drop the leading
+static entries — never loaded transiently, never published to the queues
+(`_saveRemainderEntries` starts past them) — so the contract rejects the post
+(`ImmediateStaticEntriesWithoutImmediateEntries`, checked after the immediate L2Tx run).
+Composers whose immediate prefix is pure L2Txs set `immediateStaticEntryCount = 0` so the
+static entries flow to the persistent `staticEntryQueue`s (which are not block-gated).
+
 ---
 
 ## 7. L1 / L2 differences
 
-- **Structs**: L2's `StaticExecutionEntry` drops `expectedStateRoots` and
-  `destinationRollupId` (single rollup, no state roots); its reentrant row is
+- **Structs**: L2's `StaticExecutionEntry` drops `expectedRoots` and
+  `destinationRollupId` (single rollup, no roots); its reentrant row is
   `ExpectedOutgoingCrossChainCall` with `expectedOutgoingHash` / `incomingCalls` (same layout,
   self-relative names). The key helper (`_computeExpectedL1toL2Hash`) and the untagged
   accumulator (`_rollingHashStaticResult`) are shared in `EEZBase`.
@@ -284,8 +311,8 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
   (see CORE_PROTOCOL_SPEC §C.2/§C.3).
-- **Proxy protection**: L1's reentrant static branch checks `_isRollupAllowed(destRid)`
-  against the executing entry's `stateUpdates`; L2 has no allowed-rollups set.
+- **Proxy protection**: L1's reentrant static branch checks `_containsVerifiedRollup(destRid)`
+  against the executing entry's `rollupUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
   immediate-L2Tx table, the transient entry at `_currentEntryIndex`, or the persistent queue
   entry of `_currentEntryRollupId`; an empty parked table with `_currentEntryRollupId == 0`
@@ -319,6 +346,7 @@ can't be swapped after proving. `immediateStaticEntryCount` — the leading pref
   wipes its `staticEntryQueue`.
 - Validation (L1): pins strictly increasing and in-batch; `destinationRollupId` ∈ pins;
   every sub-call source ∈ pins; whole static entries folded into `publicInputsHash`;
-  `immediateStaticEntryCount ≤ staticEntries.length`, and a non-zero count requires a
-  non-zero `immediateEntryCount` (the transient static pool is only reachable while
-  transient entries are mid-flight).
+  `immediateStaticEntryCount ≤ staticEntries.length`, and a non-zero count requires the
+  meta hook to actually fire (≥1 non-L2Tx immediate entry) — enforced after the immediate
+  L2Tx run (`ImmediateStaticEntriesWithoutImmediateEntries`), since the transient static
+  pool is only reachable through the hook — see §6.

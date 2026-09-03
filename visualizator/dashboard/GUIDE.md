@@ -37,7 +37,7 @@ Open http://localhost:5173 and click **Connect**. You should see 11 events strea
 - Entry states: cyan glow = just added, red border + strikethrough = just consumed, dimmed = old consumed
 
 ### Contract State
-- Rollup 1 state root changes from initial to post-increment state
+- Rollup 1 root changes from initial to post-increment state
 
 ### Step Timeline (right sidebar)
 - 11 steps total, each with step number, chain badge (L1/L2), event name, and description

@@ -4,13 +4,14 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {ExecutionEntry as L2ExecutionEntry} from "../../../../../src/interfaces/IEEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
 import {CallTwice} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     getOrCreateProxy,
@@ -65,7 +66,10 @@ abstract contract MultiCallTwiceL2Actions {
     /// @dev Two L2 source entries — same proxyEntryHash, sequential consumption, cached returns
     ///      1 then 2 (mirror of the L1 entries in multi-call-twice). Both carry the seed-only
     ///      rolling hash, so they share one (proxyEntryHash, rollingHash) identity.
-    function _l2Entries(address counterL1, address callTwiceL2)
+    function _l2Entries(
+        address counterL1,
+        address callTwiceL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -113,11 +117,11 @@ abstract contract MultiCallTwiceL2Actions {
         });
         calls[1] = calls[0];
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-multi-call-twiceL2"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-multi-call-twiceL2"),
             etherDelta: 0
         });
 
@@ -130,7 +134,7 @@ abstract contract MultiCallTwiceL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -152,7 +156,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -169,8 +173,8 @@ contract DeployL2 is Script {
         address counterProxy = getOrCreateProxy(IEEZ(managerAddr), counterL1Addr, MAINNET_ROLLUP_ID);
         CallTwice callTwiceL2 = new CallTwice();
 
-        console.log("COUNTER_PROXY_L2=%s", counterProxy);
-        console.log("CALL_TWICE_L2=%s", address(callTwiceL2));
+        output("COUNTER_PROXY_L2", counterProxy);
+        output("CALL_TWICE_L2", address(callTwiceL2));
         vm.stopBroadcast();
     }
 }

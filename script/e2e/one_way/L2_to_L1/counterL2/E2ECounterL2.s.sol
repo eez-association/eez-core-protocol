@@ -3,8 +3,9 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -14,6 +15,8 @@ import {
 import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
+    getOrCreateProxy,
     crossChainCallHash,
     crossChainCallHashL2Out,
     noStaticEntries,
@@ -71,7 +74,10 @@ abstract contract CounterL2Actions {
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`
     /// (CAP L2 -> Counter L1 proxy); it carries no incoming calls and returns precomputed `uint256(1)`,
     /// so the rolling hash is just the entry-begin seed.
-    function _l2Entries(address counterL1, address counterAndProxyL2)
+    function _l2Entries(
+        address counterL1,
+        address counterAndProxyL2
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -95,7 +101,10 @@ abstract contract CounterL2Actions {
     /// immediate L2Tx during `postAndVerifyBatch`. `l2ToL1Calls[0]` is the inbound call delivered through the source proxy for
     /// CAP-on-L2 (lazily created during processing); it executes ON L1, so CALL_BEGIN folds the call
     /// hash with targetRollupId = MAINNET.
-    function _l1Entries(address counterL1, address counterAndProxyL2)
+    function _l1Entries(
+        address counterL1,
+        address counterAndProxyL2
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -112,11 +121,11 @@ abstract contract CounterL2Actions {
             data: _incrementCallData()
         });
 
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-counter"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-counter"),
             etherDelta: 0
         });
 
@@ -127,14 +136,14 @@ abstract contract CounterL2Actions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
             success: true,
-            returnData: abi.encode(uint256(1))
+            returnData: "" // L2Tx entries must be canonical: success == true, empty returnData
         });
     }
 }
@@ -149,7 +158,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -165,17 +174,12 @@ contract DeployL2 is Script {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
 
-        address counterProxy;
-        try manager.createCrossChainProxy(counterL1Addr, MAINNET_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = manager.computeCrossChainProxyAddress(counterL1Addr, MAINNET_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(manager)), counterL1Addr, MAINNET_ROLLUP_ID);
 
         CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
 
-        console.log("COUNTER_PROXY_L2=%s", counterProxy);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(cap));
+        output("COUNTER_PROXY_L2", counterProxy);
+        output("COUNTER_AND_PROXY_L2", address(cap));
         vm.stopBroadcast();
     }
 }

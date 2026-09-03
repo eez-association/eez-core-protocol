@@ -3,8 +3,9 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
+import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
-import {StateUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -15,6 +16,8 @@ import {Counter} from "../../../../../test/mocks/CounterContracts.sol";
 import {CallTwice} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
+    getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
     noNestedActions,
@@ -55,19 +58,19 @@ abstract contract MultiCallActions {
     function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, caller);
 
-        StateUpdate[] memory deltasA = new StateUpdate[](1);
-        deltasA[0] = StateUpdate({
+        RollupUpdate[] memory deltasA = new RollupUpdate[](1);
+        deltasA[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-twice-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-twice-1"),
             etherDelta: 0
         });
 
-        StateUpdate[] memory deltasB = new StateUpdate[](1);
-        deltasB[0] = StateUpdate({
+        RollupUpdate[] memory deltasB = new RollupUpdate[](1);
+        deltasB[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-state-after-twice-1"),
-            newState: keccak256("l2-state-after-twice-2"),
+            currentRoot: keccak256("l2-state-after-twice-1"),
+            newRoot: keccak256("l2-state-after-twice-2"),
             etherDelta: 0
         });
 
@@ -75,7 +78,7 @@ abstract contract MultiCallActions {
         // entry's rolling hash is exactly its entry-begin seed (state deltas + proxyEntryHash).
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltasA,
+            rollupUpdates: deltasA,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -85,7 +88,7 @@ abstract contract MultiCallActions {
             returnData: abi.encode(uint256(1))
         });
         entries[1] = ExecutionEntry({
-            stateUpdates: deltasB,
+            rollupUpdates: deltasB,
             proxyEntryHash: ah,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -108,7 +111,11 @@ abstract contract MultiCallActions {
     }
 
     /// @dev 1-entry table for the n-th executeIncomingCrossChainCall tx.
-    function _l2TableForCall(address counterL2, address caller, uint256 n)
+    function _l2TableForCall(
+        address counterL2,
+        address caller,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory table)
@@ -117,7 +124,11 @@ abstract contract MultiCallActions {
         table[0] = _buildL2Entry(counterL2, caller, abi.encode(n));
     }
 
-    function _buildL2Entry(address counterL2, address caller, bytes memory retData)
+    function _buildL2Entry(
+        address counterL2,
+        address caller,
+        bytes memory retData
+    )
         private
         pure
         returns (L2ExecutionEntry memory)
@@ -155,7 +166,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         Counter counter = new Counter();
-        console.log("COUNTER_L2=%s", address(counter));
+        output("COUNTER_L2", address(counter));
         vm.stopBroadcast();
     }
 }
@@ -168,16 +179,11 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address counterProxy;
-        try rollups.createCrossChainProxy(counterL2Addr, L2_ROLLUP_ID) returns (address p) {
-            counterProxy = p;
-        } catch {
-            counterProxy = rollups.computeCrossChainProxyAddress(counterL2Addr, L2_ROLLUP_ID);
-        }
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
 
         CallTwice caller = new CallTwice();
-        console.log("COUNTER_PROXY=%s", counterProxy);
-        console.log("CALL_TWICE=%s", address(caller));
+        output("COUNTER_PROXY", counterProxy);
+        output("CALL_TWICE", address(caller));
         vm.stopBroadcast();
     }
 }
@@ -195,13 +201,7 @@ contract ExecuteL2 is Script, MultiCallActions {
         for (uint256 n = 1; n <= 2; n++) {
             EEZL2(managerAddr)
                 .executeIncomingCrossChainCall(
-                    counterL2Addr,
-                    0,
-                    _incrementCallData(),
-                    callerAddr,
-                    MAINNET_ROLLUP_ID,
-                    _l2TableForCall(counterL2Addr, callerAddr, n),
-                    new L2StaticExecutionEntry[](0)
+                    _l2TableForCall(counterL2Addr, callerAddr, n), new L2StaticExecutionEntry[](0)
                 );
         }
 

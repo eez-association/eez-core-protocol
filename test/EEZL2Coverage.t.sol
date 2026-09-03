@@ -136,49 +136,36 @@ contract EEZL2CoverageTest is BaseL2 {
     function test_IncomingCrossChainCall_EmptyEntries() public {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EmptyEntries.selector);
-        manager.executeIncomingCrossChainCall(
-            address(target),
-            0,
-            "",
-            address(this),
-            REMOTE_ROLLUP_ID,
-            new ExecutionEntry[](0),
-            new StaticExecutionEntry[](0)
-        );
+        manager.executeIncomingCrossChainCall(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
     }
 
-    function test_IncomingCrossChainCall_ValueMismatch() public {
+    function test_IncomingCrossChainCall_EmptyIncomingCalls() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0].proxyEntryHash = bytes32(uint256(1));
-        vm.deal(SYSTEM_ADDRESS, 10);
         vm.prank(SYSTEM_ADDRESS);
-        vm.expectRevert(EEZL2.ValueMismatch.selector);
-        manager.executeIncomingCrossChainCall{
-            value: 1
-        }(address(target), 5, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0));
+        vm.expectRevert(EEZL2.EmptyIncomingCalls.selector);
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
     }
 
     function test_IncomingCrossChainCall_NotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         vm.expectRevert(EEZL2.Unauthorized.selector);
-        manager.executeIncomingCrossChainCall(
-            address(target), 0, "", address(this), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0)
-        );
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
     }
 
     function test_IncomingCrossChainCall_EntryHashMismatch() public {
-        // destination/value/data hash won't equal entries[0].proxyEntryHash.
+        // incomingCalls[0]'s hash won't equal entries[0].proxyEntryHash.
         bytes memory data = abi.encodeCall(ViewTargetL2.setValue, (7));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0].proxyEntryHash = bytes32(uint256(0xBAD));
-        entries[0].incomingCalls = new CrossChainCall[](0);
+        CrossChainCall[] memory calls = new CrossChainCall[](1);
+        calls[0] = _cc(address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID);
+        entries[0].incomingCalls = calls;
         entries[0].expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
 
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EntryHashMismatch.selector);
-        manager.executeIncomingCrossChainCall(
-            address(target), 0, data, address(0xABCD), REMOTE_ROLLUP_ID, entries, new StaticExecutionEntry[](0)
-        );
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
     }
 
     function test_IncomingCrossChainCall_Success() public {
@@ -209,9 +196,7 @@ contract EEZL2CoverageTest is BaseL2 {
         emit EEZL2.ExecutionConsumed(inboundHash, 0);
 
         vm.prank(SYSTEM_ADDRESS);
-        bytes memory ret = manager.executeIncomingCrossChainCall{
-            value: value
-        }(address(target), value, data, sourceAddr, sourceRollup, entries, new StaticExecutionEntry[](0));
+        bytes memory ret = manager.executeIncomingCrossChainCall{value: value}(entries, new StaticExecutionEntry[](0));
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
@@ -482,6 +467,36 @@ contract EEZL2CoverageTest is BaseL2 {
         manager.staticCrossChainCall(address(this), cd);
     }
 
+    /// A static sub-call carrying a `revertNextNCalls` span reverts StaticCallWithRevertSpan —
+    /// static resolution has no state to roll back.
+    function test_StaticLookup_SubCallWithRevertSpanReverts() public {
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
+        bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
+
+        CrossChainCall[] memory subCalls = new CrossChainCall[](1);
+        subCalls[0] = CrossChainCall({
+            gas: 0,
+            revertNextNCalls: 1,
+            isStatic: true,
+            sourceAddress: address(target),
+            sourceRollupId: REMOTE_ROLLUP_ID,
+            targetAddress: address(target),
+            value: 0,
+            data: cd
+        });
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        lookups[0].proxyEntryHash = h;
+        lookups[0].success = true;
+        lookups[0].incomingCalls = subCalls;
+        _loadEntries(new ExecutionEntry[](0), lookups);
+
+        vm.prank(proxy);
+        vm.expectRevert(EEZBase.StaticCallWithRevertSpan.selector);
+        manager.staticCrossChainCall(address(this), cd);
+    }
+
     // ──────────────────────────────────────────────
     //  staticCrossChainCall — nested inside execution
     // ──────────────────────────────────────────────
@@ -749,5 +764,4 @@ contract EEZL2CoverageTest is BaseL2 {
 
 contract RejectEther {
     // No payable receive/fallback → any value transfer reverts.
-
-    }
+}

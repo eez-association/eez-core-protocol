@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 import {IRollupContract} from "../interfaces/IRollup.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -8,7 +8,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)
 ///         to keep `Rollup.sol` decoupled from the cross-chain execution model.
 interface IEEZRegistry {
-    function setStateRoot(uint64 rollupId, bytes32 newStateRoot) external;
+    function setRoot(uint64 rollupId, bytes32 newRoot) external;
 }
 
 /// @title Rollup
@@ -18,7 +18,7 @@ interface IEEZRegistry {
 ///         behalf.
 /// @dev The rollupId is provided by the registry via the `rollupContractRegistered` callback
 ///      (only callable by `ROLLUPS`). Stored internally and passed back when this contract
-///      calls into the registry (`setStateRoot(rid, root)`), so the registry doesn't need a
+///      calls into the registry (`setRoot(rid, root)`), so the registry doesn't need a
 ///      reverse lookup from contract address to rollupId.
 contract Rollup is IRollupContract, Ownable {
     /// @notice The central EEZ registry this rollup is registered with
@@ -41,7 +41,7 @@ contract Rollup is IRollupContract, Ownable {
     event ProofSystemRemoved(address indexed proofSystem);
     event VerificationKeyUpdated(address indexed proofSystem, bytes32 newVerificationKey);
     event ThresholdChanged(uint256 newThreshold);
-    event StateRootEscape(bytes32 newStateRoot);
+    event RootEscape(bytes32 newRoot);
 
     error NotEEZRegistry();
     error InvalidConfig();
@@ -169,7 +169,7 @@ contract Rollup is IRollupContract, Ownable {
     //   1. During a `postAndVerifyBatch` meta hook — the registry already snapshotted this rollup's
     //      verificationKeysPerRollup in step 2 of postAndVerifyBatch (before the hook fires in step 6), so any
     //      mutation here doesn't affect the in-flight verification.
-    //   2. The setStateRoot escape hatch — the only path that mutates central state — is
+    //   2. The setRoot escape hatch — the only path that mutates central state — is
     //      itself gated by the registry's `RollupBatchActiveThisBlock` check.
     // So owner ops are free to run anytime; the registry handles its own lockout where it
     // matters.
@@ -208,15 +208,15 @@ contract Rollup is IRollupContract, Ownable {
         emit ThresholdChanged(newThreshold);
     }
 
-    /// @notice Owner escape hatch — directly sets the rollup's state root via the central
+    /// @notice Owner escape hatch — directly sets the rollup's root via the central
     ///         registry. Single state-mutating call from this contract back into EEZ.
     /// @dev Passes `rollupId` explicitly so the registry doesn't need a reverse lookup. The
     ///      registry validates `msg.sender == rollups[rollupId].rollupContract` and reverts
     ///      `RollupBatchActiveThisBlock` if `lastVerifiedBlock(rid) == block.number` (i.e.,
     ///      a postAndVerifyBatch has touched this rollup in the current block) — the escape hatch
     ///      is locked out for the rest of the block once a verified state transition lands.
-    function setStateRoot(bytes32 newStateRoot) external onlyOwner {
-        IEEZRegistry(ROLLUPS).setStateRoot(rollupId, newStateRoot);
-        emit StateRootEscape(newStateRoot);
+    function setRoot(bytes32 newRoot) external onlyOwner {
+        IEEZRegistry(ROLLUPS).setRoot(rollupId, newRoot);
+        emit RootEscape(newRoot);
     }
 }

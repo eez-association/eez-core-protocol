@@ -11,22 +11,22 @@ for the exact scripts in the test file.
 | Symbol | Meaning |
 |---|---|
 | `A`, `B` | rollup ids of L2_A (= 1) and L2_B (= 2); L1 is rollup id 0 |
-| `G_A` | L2_A's pre-tx state root (`keccak("blobfw-genesis", A)` on a fresh harness) |
-| `S1_A` | L2_A's post-tx state root |
+| `G_A` | L2_A's pre-tx root (`keccak("blobfw-genesis", A)` on a fresh harness) |
+| `S1_A` | L2_A's post-tx root |
 | `driver_X` | the tx's origin driver actor on chain X (fires the root calls) |
 | `target_X` | the call-target actor on chain X |
 | `cch(...)` | `computeCrossChainCallHash(isStatic, src, srcRid, dst, dstRid, value, 0, data)` — the destination-kind hash (`callGas = 0`); every hash in the L1 batch uses it |
 | `H(...)` | `keccak256(abi.encodePacked(...))` — one fold of the accumulator |
-| `h0 … hN` | the rolling hash after each fold, written as an explicit chain: `h0` is the seed — `H(0, rid, currentState)` per state pin, closed with `H(pins, proxyEntryHash)`; `f_` marks a reverted frame's discarded branch, `s_` the untagged static accumulator |
+| `h0 … hN` | the rolling hash after each fold, written as an explicit chain: `h0` is the seed — `H(0, rid, currentRoot)` per state pin, closed with `H(pins, proxyEntryHash)`; `f_` marks a reverted frame's discarded branch, `s_` the untagged static accumulator |
 | tag bytes | `1` = CALL_BEGIN · `2` = CALL_END · `3` = NESTED_BEGIN · `4` = NESTED_END (· `5` = CALL_NOT_FOUND) |
 
 Wrapper fields identical in every batch the harness posts (omitted below):
 
 ```
-expectedStateRootPerRollup = []           // no composer assertions
+expectedRootPerRollup = []           // no composer assertions
 proofSystems               = [mockPS]     // single proof system
 proofs                     = ["proof"]
-rollupIdsWithProofSystems  = every rollup the entries' stateUpdates / statics' pins touch
+rollupIdsWithProofSystems  = every rollup the entries' rollupUpdates / statics' pins touch
 blobIndices                = []
 callData                   = ""
 blockNumber                = 0            // no block binding
@@ -45,7 +45,7 @@ Two recurring entry roles:
   queue; the L1 driver's proxy call consumes it right after the batch, in the
   same block.
 
-State-root note: **every** rollup a tx touches appears in `stateUpdates` with an
+Root note: **every** rollup a tx touches appears in `rollupUpdates` with an
 advanced root — even when the delivery on that rollup is reverted or rolled
 back (cases 12/13/15). The root models the L2 block that processed (and rolled
 back) the call; only *committed effects* are undone, not the block itself.
@@ -59,7 +59,7 @@ An L2_A transaction with no cross-chain calls (raw messages:
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // pure L2 tx — the L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [],                     // nothing lands on L1
@@ -82,7 +82,7 @@ natively; L1 only advances the root.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = cch(false, driver_L1, 0, target_A, A, 0, callData),
     destinationRollupId = A,
     l2ToL1Calls         = [],                     // the call executes on L2_A, not L1
@@ -97,7 +97,7 @@ immediateEntryCount = 0        // deferred origin entry
 ```
 
 The driver's proxy call (`executeCrossChainCall`) scans A's queue, matches
-`proxyEntryHash` + the live `currentState` pin, applies the delta, and returns
+`proxyEntryHash` + the live `currentRoot` pin, applies the delta, and returns
 the pre-computed `returnData` — the actual execution already happened on L2_A
 and was proven.
 
@@ -107,7 +107,7 @@ and was proven.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [{
@@ -139,7 +139,7 @@ committed to exactly this call and result.
 ```
 entries       = []                                // nothing state-changing on L1
 staticEntries = [{
-    expectedStateRoots  = [{ rollupId: A, stateRoot: G_A }],  // pin, part of the match
+    expectedRoots  = [{ rollupId: A, root: G_A }],  // pin, part of the match
     proxyEntryHash      = cch(true, driver_L1, 0, target_A, A, 0, callData),  // isStatic folded
     destinationRollupId = A,
     l2ToL1Calls         = [],
@@ -161,7 +161,7 @@ block gate: they stay valid while the pins hold) and returns the cached result.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the read REALLY runs on L1
@@ -197,7 +197,7 @@ suffices.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = cch(false, driver_L1, 0, target_A, A, 0, rootData),
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the callback REALLY runs on L1
@@ -226,7 +226,7 @@ in its own `l2ToL1Calls` — consuming the entry executes it live on L1.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the root call A→L1
@@ -266,7 +266,7 @@ point. The frame opens `NESTED_BEGIN`, runs its (empty) sub-array, commits with
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = cch(false, driver_L1, 0, target_A, A, 0, rootData),
     destinationRollupId = A,
     l2ToL1Calls         = [{
@@ -298,7 +298,7 @@ only its state effects are impossible by construction.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the root call A→L1
@@ -340,7 +340,7 @@ verified by the untagged static rolling hash.
 ```
 entries       = []
 staticEntries = [{
-    expectedStateRoots  = [{ rollupId: A, stateRoot: G_A }],
+    expectedRoots  = [{ rollupId: A, root: G_A }],
     proxyEntryHash      = cch(true, driver_L1, 0, target_A, A, 0, readData),
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the sub-read of L1, re-run live
@@ -361,7 +361,7 @@ then `_resolveStaticEntry` STATICCALLs the sub-read **for real on L1**
 (through the source's proxy via `executeOnBehalf`) and requires the untagged
 fold of the observed result to equal `rollingHash` — that is exactly why the
 static rolling hash exists. Only then is the cached outer result returned.
-The outer read's own execution on L2_A is covered by the state-root pin.
+The outer read's own execution on L2_A is covered by the root pin.
 
 ## 11. L2 static_call L1 static_call L2
 
@@ -373,7 +373,7 @@ sub-read of A resolves as a STATIC row in the host's reentrant table.
 
 ```
 entries = [{
-    stateUpdates        = [{ rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 }],
+    rollupUpdates        = [{ rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 }],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
     l2ToL1Calls         = [{                      // the outer read, run live on L1
@@ -413,9 +413,9 @@ the read that lands on it.
 
 ```
 entries = [{
-    stateUpdates = [
-        { rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 },
-        { rollupId: B, currentState: G_B, newState: S1_B, etherDelta: 0 },  // B advances too!
+    rollupUpdates = [
+        { rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 },
+        { rollupId: B, currentRoot: G_B, newRoot: S1_B, etherDelta: 0 },  // B advances too!
     ],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
@@ -449,7 +449,7 @@ The `success = false` row runs as a mini-entry: fold `NESTED_BEGIN`, run the
 then revert with `returnData`. The revert rolls the host's hash and cursor
 back to the fire point, so the final `rollingHash` looks as if the frame never
 happened — the row itself is the only proof it did. Note B still appears in
-`stateUpdates` with an advanced root: its L2 block processed (and reverted)
+`rollupUpdates` with an advanced root: its L2 block processed (and reverted)
 the delivery.
 
 ## 13. L2a call L1 ×3, revert the last two
@@ -460,9 +460,9 @@ including the nested B hop — to roll back after executing.)
 
 ```
 entries = [{
-    stateUpdates = [
-        { rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 },
-        { rollupId: B, currentState: G_B, newState: S1_B, etherDelta: 0 },
+    rollupUpdates = [
+        { rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 },
+        { rollupId: B, currentRoot: G_B, newRoot: S1_B, etherDelta: 0 },
     ],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,
@@ -521,9 +521,9 @@ leaving committed state.
 
 ```
 entries = [{
-    stateUpdates = [
-        { rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 },
-        { rollupId: B, currentState: G_B, newState: S1_B, etherDelta: 0 },
+    rollupUpdates = [
+        { rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 },
+        { rollupId: B, currentRoot: G_B, newRoot: S1_B, etherDelta: 0 },
     ],
     proxyEntryHash      = cch(false, driver_L1, 0, target_A, A, 0, rootData),  // origin entry
     destinationRollupId = A,
@@ -572,9 +572,9 @@ the span back. The minimal `revertNextNCalls` shape: span = 1.)
 
 ```
 entries = [{
-    stateUpdates = [
-        { rollupId: A, currentState: G_A, newState: S1_A, etherDelta: 0 },
-        { rollupId: B, currentState: G_B, newState: S1_B, etherDelta: 0 },
+    rollupUpdates = [
+        { rollupId: A, currentRoot: G_A, newRoot: S1_A, etherDelta: 0 },
+        { rollupId: B, currentRoot: G_B, newRoot: S1_B, etherDelta: 0 },
     ],
     proxyEntryHash      = 0x0,                    // L2Tx host
     destinationRollupId = A,

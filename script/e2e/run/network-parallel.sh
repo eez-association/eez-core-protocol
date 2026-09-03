@@ -3,9 +3,22 @@
 # constraint that forces network-sequential.sh to be sequential.
 #
 # Wallet hierarchy:
-#   source key (anvil #2 or SOURCE_PK)       — bootstrap faucet, tops up ↓ (or funds workers directly with --direct)
-#   faucet.txt (this dir, created on demand)   — OUR faucet account, funds ↓
-#   one ephemeral wallet per job             — runs the scenario, nonce-isolated
+#   source key (anvil #2 or SOURCE_PK)       — funds the run faucet ↓ (or workers directly with --direct)
+#   run faucet (fresh wallet, in the run dir)  — funds ↓ via MultiSend (one batched tx per chain)
+#   one pooled wallet per job                — runs the scenario, nonce-isolated
+#
+# Worker funding goes through a MultiSend contract (script/e2e/shared/MultiSend.sol,
+# address cached per chain-id in multisend.txt): one `fundUpTo(address[],uint256,uint256)`
+# tx per chain tops every worker below FLOOR_ETH up to FUND_ETH (workers at or above
+# the floor keep their balance — no dust transfers) and refunds the remainder, instead
+# of one tx per worker — devnet txpools cap pending txs per account (~20), which capped the
+# old per-worker funding at ~20 jobs.
+#
+# Worker wallets persist in wallet-pool.csv (address,private_key — gitignored) and are
+# reused across runs: leftover balances count toward the next run's top-up, so nothing
+# is stranded. The pool grows on demand when a run needs more wallets than it holds.
+# Because runs share the pool from index 0, do NOT run two orchestrator instances
+# concurrently — they would hand the same wallets to different jobs and race nonces.
 #
 # Usage:
 #   bash script/e2e/run/network-parallel.sh [flags] <target>[:count] ...
@@ -19,20 +32,29 @@
 #   network-parallel.sh --fund 0.05 counter:10      # 0.05 ETH per worker per chain
 #
 # Flags:
-#   --direct         skip the faucet.txt account: fund workers directly from the
-#                    source key (anvil #2, or SOURCE_PK if set). No faucet file,
-#                    no top-up step.
+#   --direct         skip the run faucet: fund workers directly from the
+#                    source key (anvil #2, or SOURCE_PK if set).
 #   --fund <eth>     ETH given to each worker per chain (same as FUND_ETH env)
+#   --floor <eth>    skip topping up workers already holding this much (same as
+#                    FLOOR_ETH env; default FUND_ETH / 2). Must cover the most
+#                    expensive scenario's per-chain spend, or floor-admitted
+#                    workers can run dry mid-scenario.
+#   --fresh          mint brand-new worker wallets instead of reusing the pool
+#                    (still appended to the pool, so their leftovers are reused later)
 #
 # Env knobs:
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
 #   FUND_ETH         ETH given to each worker per chain (default 0.1)
+#   FLOOR_ETH        top-up trigger threshold (default FUND_ETH / 2)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
+#   MULTISEND_BATCH  workers funded per MultiSend tx (default 100 — block-gas headroom)
 #   RECEIPT_TIMEOUT  passed through to network.sh (default 420)
 #   DEVNET_ENV       env file with endpoints/addresses (default chain.env)
 #
-# Worker wallets are throwaway; keys are recorded in the run dir's wallets.csv
-# so leftover funds are recoverable. Logs: tmp/e2e-parallel-net/<ts>/<job>.log
+# Worker wallets are throwaway and recorded in the run dir. The run faucet is
+# persistent (`script/e2e/run/faucet.txt`) so unused top-ups are reused instead
+# of being stranded in a fresh account on every invocation.
+# Logs: tmp/e2e-parallel-net/<ts>/<job>.log
 #
 # Known benign race: N parallel runs of the SAME scenario share
 # broadcast/<Sol>/<chainId>/run-latest.json. Nothing reads it (no --resume;
@@ -63,126 +85,39 @@ MAX_PARALLEL="${MAX_PARALLEL:-$DEFAULT_MAX_PARALLEL}"
 FUND_ETH="${FUND_ETH:-$DEFAULT_FUND_ETH}"
 SOURCE_PK="${SOURCE_PK:-$DEFAULT_SOURCE_PK}"
 DIRECT=false
+FRESH=false
 
 while [[ $# -gt 0 && "$1" == --* ]]; do
     case "$1" in
         --direct) DIRECT=true; shift ;;
+        --fresh)  FRESH=true; shift ;;
         --fund)   FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
+        --floor)  FLOOR_ETH="${2:?--floor needs an amount}"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fund <eth>] <scenario>[:count] ..."; exit 1; }
+# Default floor = half the target; resolved after flag parsing so --fund moves it.
+FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
 
-# ── Expand args into a flat job list ──
-# Each arg is <target>[:count]; target = scenario name, category/direction dir
-# (e.g. one_way, multi_call/L2_to_L1), or "all".
-JOB_NAMES=(); JOB_SOLS=()
-add_jobs() {  # $1=sol $2=count
-    local name; name=$(basename "$(dirname "$1")")
-    for ((i = 1; i <= $2; i++)); do
-        JOB_NAMES+=("$name-$i"); JOB_SOLS+=("$1")
-    done
-}
-for arg in "$@"; do
-    scen="${arg%%:*}"
-    count=1; [[ "$arg" == *:* ]] && count="${arg##*:}"
-    [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 ]] || { echo "Bad count in '$arg'"; exit 1; }
-    if [[ "$scen" == "all" ]]; then
-        while IFS= read -r sol; do add_jobs "$sol" "$count"; done \
-            < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
-    elif [[ -d "script/e2e/$scen" ]]; then
-        while IFS= read -r sol; do add_jobs "$sol" "$count"; done \
-            < <(find "script/e2e/$scen" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
-    else
-        sol=$(find script/e2e -mindepth 3 -path "*/$scen/E2E*.s.sol" -not -path '*/shared/*' | head -1)
-        [[ -n "$sol" ]] || { echo "No scenario matches '$scen'"; exit 1; }
-        add_jobs "$sol" "$count"
-    fi
-done
-NJOBS=${#JOB_NAMES[@]}
+[[ $# -gt 0 ]] || { echo "Usage: network-parallel.sh [--direct] [--fresh] [--fund <eth>] [--floor <eth>] <scenario>[:count] ..."; exit 1; }
+
+# Job expansion + wallet funding are shared with network-staged.sh.
+source "$SCRIPT_DIR/orchestrator-lib.sh"
+expand_jobs "$@"
 
 RUN_DIR="tmp/e2e-parallel-net/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN_DIR"
 echo "== $NJOBS job(s), max $MAX_PARALLEL parallel, ${FUND_ETH} ETH/worker/chain — logs in $RUN_DIR"
 
-# Steps 1–3 hold an exclusive lock: concurrent orchestrator instances share the
-# funding key, and racing its nonce yields "replacement transaction underpriced".
-exec 9>"$SCRIPT_DIR/.faucet.lock"
-flock 9
-
-if $DIRECT; then
-    # ── Direct mode: fund workers straight from the source key ──
-    FAUCET_PK="$SOURCE_PK"
-    FAUCET_ADDR=$(cast wallet address --private-key "$FAUCET_PK")
-    echo "Direct mode: funding workers from $FAUCET_ADDR (no faucet account)"
-else
-    # ── Step 1: our faucet account (create once, reuse forever) ──
-    FAUCET_FILE="$SCRIPT_DIR/faucet.txt"
-    if [[ ! -f "$FAUCET_FILE" ]]; then
-        new=$(cast wallet new)
-        faucet_addr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-        faucet_pk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-        printf 'address: %s\npvtKey:  %s\n' "$faucet_addr" "$faucet_pk" > "$FAUCET_FILE"
-        chmod 600 "$FAUCET_FILE"
-        echo "Created new faucet account $faucet_addr → $FAUCET_FILE"
-    fi
-    FAUCET_ADDR=$(grep -oE '0x[0-9a-fA-F]{40}' "$FAUCET_FILE" | head -1)
-    FAUCET_PK=$(grep -oE '0x[0-9a-fA-F]{64}' "$FAUCET_FILE" | head -1)
-
-    # ── Step 2: top up the faucet from the source key if it can't cover this run ──
-    # bc, not $(( )) — FUND_ETH may be fractional (e.g. 0.2)
-    NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + 0.5" | bc)")
-    for chain in L1 L2; do
-        rpc_var="${chain}_RPC"; rpc="${!rpc_var}"
-        bal=$(cast balance "$FAUCET_ADDR" --rpc-url "$rpc")
-        if (( $(echo "$bal < $NEED_WEI" | bc) )); then
-            top=$(cast from-wei "$(echo "$NEED_WEI - $bal" | bc)")
-            echo "Faucet top-up on $chain: ${top} ETH from source key"
-            cast send "$FAUCET_ADDR" --value "${top}ether" \
-                --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
-                echo "Faucet top-up FAILED on $chain"; exit 1; }
-        fi
-    done
-fi
-
-# ── Step 3: one ephemeral wallet per job, funded in PARALLEL from our faucet ──
-# One faucet key + many txs in flight → assign nonces explicitly and submit
-# --async (no receipt wait), then wait once for the faucet nonce to advance.
-WALLET_PKS=()
-echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
-chmod 600 "$RUN_DIR/wallets.csv"
-# pending, not latest — an in-flight faucet tx would make us reuse its nonce
-L1_BASE_NONCE=$(cast nonce "$FAUCET_ADDR" --block pending --rpc-url "$L1_RPC")
-L2_BASE_NONCE=$(cast nonce "$FAUCET_ADDR" --block pending --rpc-url "$L2_RPC")
-for ((i = 0; i < NJOBS; i++)); do
-    new=$(cast wallet new)
-    waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-    wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-    WALLET_PKS+=("$wpk")
-    echo "${JOB_NAMES[$i]},$waddr,$wpk" >> "$RUN_DIR/wallets.csv"
-    cast send "$waddr" --value "${FUND_ETH}ether" --async --nonce $((L1_BASE_NONCE + i)) \
-        --private-key "$FAUCET_PK" --rpc-url "$L1_RPC" > /dev/null || {
-        echo "Worker funding submit FAILED on L1 (${JOB_NAMES[$i]})"; exit 1; }
-    cast send "$waddr" --value "${FUND_ETH}ether" --async --nonce $((L2_BASE_NONCE + i)) \
-        --private-key "$FAUCET_PK" --rpc-url "$L2_RPC" > /dev/null || {
-        echo "Worker funding submit FAILED on L2 (${JOB_NAMES[$i]})"; exit 1; }
-    echo "  funding submitted ${JOB_NAMES[$i]} → $waddr"
-done
-echo "Waiting for $((NJOBS * 2)) funding txs to mine..."
-FUND_DEADLINE=$((SECONDS + 120))
-until (( $(cast nonce "$FAUCET_ADDR" --rpc-url "$L1_RPC") >= L1_BASE_NONCE + NJOBS )) \
-   && (( $(cast nonce "$FAUCET_ADDR" --rpc-url "$L2_RPC") >= L2_BASE_NONCE + NJOBS )); do
-    (( SECONDS < FUND_DEADLINE )) || { echo "Funding txs not mined after 120s"; exit 1; }
-    sleep 2
-done
-echo "All workers funded."
-flock -u 9   # faucet no longer touched — let concurrent runs proceed
-
-# ── Step 4: build once so parallel forge invocations don't race the cache ──
+# ── Step 0: build once — MultiSend deployment below and the parallel forge
+# invocations later both need warm artifacts (parallel builds race the cache).
 forge build > /dev/null 2>&1 || { echo "forge build failed"; exit 1; }
 
-# ── Step 5: launch with a concurrency cap ──
+# ── Steps 1–3: faucet + wallet pool + MultiSend top-up (orchestrator-lib.sh) ──
+fund_workers
+
+# ── Step 4: launch with a concurrency cap ──
 run_job() {  # $1=sol $2=worker_pk $3=logfile
     RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/run/network.sh "$1" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
@@ -199,7 +134,7 @@ for ((i = 0; i < NJOBS; i++)); do
     PIDS+=($!)
 done
 
-# ── Step 6: collect results ──
+# ── Step 5: collect results ──
 PASS=0; FAIL=0; FAILED_LIST=()
 for ((i = 0; i < NJOBS; i++)); do
     if wait "${PIDS[$i]}"; then

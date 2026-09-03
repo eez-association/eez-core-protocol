@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 import {IEEZ} from "../interfaces/IEEZ.sol";
 
@@ -19,7 +19,8 @@ contract CrossChainProxy {
 
     /// @dev Gas for the `staticCheck` probe self-call. In a static context the tstore is an
     ///      exceptional halt that consumes everything forwarded, so the probe must be capped;
-    ///      the mutable path uses ~300 gas.
+    ///      1,000 safely covers the current mutable path (~300 gas).
+    ///      Major EVM gas repricing could make proxies unusable.
     uint256 private constant STATIC_CHECK_GAS = 1_000;
 
     /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)

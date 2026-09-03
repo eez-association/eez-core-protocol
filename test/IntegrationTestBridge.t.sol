@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IntegrationBase} from "./IntegrationBase.t.sol";
-import {ExecutionEntry, StateUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
+import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -22,14 +22,14 @@ contract TestToken is ERC20 {
 /// @notice End-to-end tests of L1 <-> L2 bridging flows for ETH and ERC20 tokens
 ///
 /// Execution model (flat calls + rolling hash):
-///   - L1 ExecutionEntry has: stateUpdates, proxyEntryHash, destinationRollupId, l2ToL1Calls[],
+///   - L1 ExecutionEntry has: rollupUpdates, proxyEntryHash, destinationRollupId, l2ToL1Calls[],
 ///     expectedL1ToL2Calls[], rollingHash, success, returnData
 ///   - L2 ExecutionEntry (IEEZL2.sol) has: proxyEntryHash, incomingCalls[], expectedOutgoingCalls[],
 ///     rollingHash, success, returnData
 ///   - crossChainCallHash = keccak256(abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress,
 ///     targetRollupId, value, callGas, data)); callGas is 0 here (`useGasLeft = false`); the target
 ///     rollup of an executed call is the chain it runs ON (MAINNET on L1, ROLLUP_ID on L2)
-///   - Rolling hash seeds at the entry's (rollupId, currentState) deltas + proxyEntryHash (L1) or just
+///   - Rolling hash seeds at the entry's (rollupId, currentRoot) deltas + proxyEntryHash (L1) or just
 ///     proxyEntryHash (L2), then folds tagged events: CALL_BEGIN(1), CALL_END(2), NESTED_BEGIN(3), NESTED_END(4)
 ///   - `success` selects whether an entry returns `returnData` (true) or runs, verifies, then reverts (false)
 ///   - Entries consumed via proxy calls
@@ -116,22 +116,22 @@ contract IntegrationTestBridge is IntegrationBase {
         bytes32 l1ActionHash =
             _crossChainCallHash(L2_ROLLUP_ID, alice, 1 ether, "", address(bridgeL1), MAINNET_ROLLUP_ID);
 
-        bytes32 newState = keccak256("l2-state-after-ether-bridge");
+        bytes32 newRoot = keccak256("l2-state-after-ether-bridge");
 
         // L1 deferred entry: no calls (seed-only rolling hash), returnData = ""
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] = StateUpdate({
-                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 1 ether
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] = RollupUpdate({
+                rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 1 ether
             });
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].stateUpdates = stateUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = l1ActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(stateUpdates, l1ActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, l1ActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -144,7 +144,7 @@ contract IntegrationTestBridge is IntegrationBase {
         bridgeL1.bridgeEther{value: 1 ether}(L2_ROLLUP_ID, alice);
 
         assertEq(alice.balance, aliceL1BalanceBefore - 1 ether, "Alice L1 balance should decrease by 1 ether");
-        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newRoot, "L2 rollup state should be updated");
 
         // ════════════════════════════════════════════
         //  Phase 2: L2 — Deliver 1 ether to alice
@@ -246,22 +246,21 @@ contract IntegrationTestBridge is IntegrationBase {
             L2_ROLLUP_ID, address(bridgeL1), 0, receiveTokensCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
         );
 
-        bytes32 newState = keccak256("l2-state-after-token-bridge");
+        bytes32 newRoot = keccak256("l2-state-after-token-bridge");
 
         // L1 deferred entry: no calls, seed-only rolling hash
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] = StateUpdate({
-                rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: newState, etherDelta: 0
-            });
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: newRoot, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].stateUpdates = stateUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = l1ActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(stateUpdates, l1ActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, l1ActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -277,7 +276,7 @@ contract IntegrationTestBridge is IntegrationBase {
 
         assertEq(token.balanceOf(address(bridgeL1)), 100e18, "Bridge should hold 100e18 locked tokens");
         assertEq(token.balanceOf(alice), 900e18, "Alice should have 900e18 tokens remaining");
-        assertEq(_getRollupState(L2_ROLLUP_ID), newState, "L2 rollup state should be updated");
+        assertEq(_getRollupState(L2_ROLLUP_ID), newRoot, "L2 rollup state should be updated");
 
         // ════════════════════════════════════════════
         //  Phase 2: L2 — Deliver wrapped tokens to alice
@@ -377,17 +376,17 @@ contract IntegrationTestBridge is IntegrationBase {
         bytes32 s1 = keccak256("l2-state-after-roundtrip-fwd");
 
         {
-            StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-            stateUpdates[0] =
-                StateUpdate({rollupId: L2_ROLLUP_ID, currentState: L2_GENESIS_STATE, newState: s1, etherDelta: 0});
+            RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+            rollupUpdates[0] =
+                RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: L2_GENESIS_STATE, newRoot: s1, etherDelta: 0});
 
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].stateUpdates = stateUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = fwdActionHash;
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = new L2ToL1Call[](0);
             entries[0].expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
-            entries[0].rollingHash = _hEntryBegin(stateUpdates, fwdActionHash);
+            entries[0].rollingHash = _hEntryBegin(rollupUpdates, fwdActionHash);
             entries[0].success = true;
             entries[0].returnData = "";
 
@@ -521,19 +520,19 @@ contract IntegrationTestBridge is IntegrationBase {
             data: retCalldata
         });
 
-        StateUpdate[] memory stateUpdates = new StateUpdate[](1);
-        stateUpdates[0] = StateUpdate({rollupId: L2_ROLLUP_ID, currentState: s1, newState: s2, etherDelta: 0});
+        RollupUpdate[] memory rollupUpdates = new RollupUpdate[](1);
+        rollupUpdates[0] = RollupUpdate({rollupId: L2_ROLLUP_ID, currentRoot: s1, newRoot: s2, etherDelta: 0});
 
         // Rolling hash: receiveTokens returns void → success=true, retData="". Target runs on L1 (MAINNET).
         bytes32 retCch =
             _ccHash(false, address(bridgeL2), L2_ROLLUP_ID, address(bridgeL1), MAINNET_ROLLUP_ID, 0, retCalldata);
-        bytes32 retRollingHash = _hEntryBegin(stateUpdates, bytes32(0));
+        bytes32 retRollingHash = _hEntryBegin(rollupUpdates, bytes32(0));
         retRollingHash = _hCallBegin(retRollingHash, retCch);
         retRollingHash = _hCallEnd(retRollingHash, true, "");
 
         {
             ExecutionEntry[] memory entries = new ExecutionEntry[](1);
-            entries[0].stateUpdates = stateUpdates;
+            entries[0].rollupUpdates = rollupUpdates;
             entries[0].proxyEntryHash = bytes32(0); // immediate / L2Tx
             entries[0].destinationRollupId = L2_ROLLUP_ID;
             entries[0].l2ToL1Calls = retL1Calls;

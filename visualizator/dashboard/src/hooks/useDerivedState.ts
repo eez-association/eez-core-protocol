@@ -158,8 +158,8 @@ export function useDerivedState() {
       }
 
       // State updates
-      const stateUpdates = extractRollupState(event);
-      for (const { key, value } of stateUpdates) {
+      const rootUpdates = extractRollupState(event);
+      for (const { key, value } of rootUpdates) {
         replayState[key] = value;
       }
     }

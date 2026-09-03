@@ -4,6 +4,9 @@ Cross-chain scenarios under `script/e2e/<category>/<direction>/<scenario>/`.
 Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`; directions:
 `L1_to_L2`, `L2_to_L1`.
 
+This doc covers **running** the suite. For the authoritative, self-contained guide
+to writing and auditing scenarios, see [BUILD_AND_REVIEW_E2E_TESTS.md](BUILD_AND_REVIEW_E2E_TESTS.md).
+
 Two modes:
 
 - **Local** — everything on anvil; the test itself plays sequencer and posts batches.
@@ -11,9 +14,12 @@ Two modes:
   posts the batch on L1 and loads the table on L2, and the runner verifies the
   on-chain result against locally computed expectations.
 
-**Encoding rule (both modes):** each top-level cross-chain call is one entry on the
-source chain and one system delivery on the destination; calls made *inside* an
-entry's execution belong to that entry.
+**Encoding rule (both modes):** frame lifetime determines grouping. A completed
+top-level L1→L2 call has one L1 source entry and one L2 system delivery. One L2 user
+transaction has one zero-hash L1 L2Tx entry containing all its ordered L2→L1 calls,
+even though its L2 table has one source entry per proxy consumption. Calls made while
+a cross-chain frame remains open stay in that frame's nested tables/sub-arrays and
+never become later system deliveries.
 
 ## Prerequisites
 
@@ -65,7 +71,7 @@ cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L2_RPC
 
 ```bash
 source chain.env
-bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
+bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
 ```
 
 ### 4. Check the deployment is alive
@@ -126,7 +132,8 @@ Caveats:
 - **Sibling batches** (L2-starting scenarios): a parallel job of the same scenario
   can settle an event-identical entry first. The runner tries every candidate
   settlement tx the range scan emitted (`L1_BATCH_TX_CANDIDATE`) and re-scans until
-  `L1_CALLDATA_TIMEOUT` (default 180s) before failing the posted-calldata check.
+  `L1_CALLDATA_TIMEOUT` (default 180 s for L2 triggers; 60 s for L1 triggers, whose
+  candidate set is known up front) before failing the posted-calldata check.
 
 ### Manual single scenario
 
@@ -137,8 +144,15 @@ bash script/e2e/run/network.sh script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.
   --pk $PK --rollups $ROLLUPS --manager-l2 $MANAGER_L2
 ```
 
-Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420),
-`L1_SETTLE_TIMEOUT` 300, `L2_SETTLE_TIMEOUT` 180, `L1_VERIFY_TIMEOUT` 90.
+Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420).
+Verification fails fast where the protocol allows it: an L1 trigger's batch can only be
+in the trigger's own block (entries are consumable while `lastVerifiedBlock ==
+block.number`), so its block is retried for `L1_VERIFY_TIMEOUT` 30 and a range scan
+to the head for `L1_LATE_SETTLE_TIMEOUT` 30 only absorb RPC lag; an L2 trigger's
+settlement is genuinely asynchronous — `L1_SETTLE_TIMEOUT` 120. The L1→L2 delivery
+block is known from the settlement (correlation RPC): once the L2 head is past it the
+scan decides within `L2_KNOWN_BLOCK_TIMEOUT` 15; without correlation
+`L2_SETTLE_TIMEOUT` 180 bounds the scan.
 
 ## Operational notes
 
@@ -168,19 +182,21 @@ chains by block number. The link is **content**, in three layers:
    folds every call result (`returnData` included) and every nesting boundary, so
    the source side's cached returns are cryptographically bound to the destination
    side's actual execution — any divergence changes the hash and fails the run.
-   On L1 this identity is only computable where the seed's state roots are known
+   On L1 this identity is only computable where the seed's roots are known
    (L2 tables, local mode); a live devnet settles real roots, so zero-hash L1
    entries are instead pinned by posted-calldata **content** with roots neutralized
    (the chain itself already verified the posted rolling hash against execution).
 3. **Time windows** — block-number snapshots taken right before publishing the
    trigger bound every scan range (call hashes are not unique across runs — an
    earlier run of the same scenario emits identical ones), and deadlines
-   (`L1_SETTLE_TIMEOUT`, `L2_SETTLE_TIMEOUT`, `L1_VERIFY_TIMEOUT`) bound the wait.
+   (`L1_SETTLE_TIMEOUT`, `L2_SETTLE_TIMEOUT`, `L1_VERIFY_TIMEOUT`, `L1_LATE_SETTLE_TIMEOUT`,
+   `L2_KNOWN_BLOCK_TIMEOUT`, see "Manual single scenario") bound the wait.
 
 Concretely: the settlement block is discovered by scanning `[snapshot..latest]` —
 by expected call hashes on L1 proxy-consumed entries (`VerifyL1BatchInRange`), by
-listing `EntryExecuted` txs + calldata content-match for L1 zero-hash entries
-(`VerifyL1SettlementTxsInRange`), by call hashes on L2 (`VerifyL2CallsInRange`) —
+listing persistent `BatchPosted` txs + calldata content-match for L1 zero-hash or
+eventless reverted entries (`VerifyL1SettlementTxsInRange`), by call hashes on L2
+(`VerifyL2CallsInRange`) —
 and the receipt block of the trigger tx is
 only ever a *candidate* — the composer may bundle the actual consumption in a
 later block on either chain.
@@ -201,7 +217,7 @@ later block on either chain.
   the scenario's recorded fold steps over the seed rebuilt from the POSTED state
   roots — exact per-call verification (return data included) without predicting
   roots. Without steps the comparison is content-only (a NOTE says so).
-- **Live state roots**: the registry root must have settled to (or beyond) each
+- **Live roots**: the registry root must have settled to (or beyond) each
   touched rollup's posted update.
 - **L2 table**: every expected entry must have a byte-identical loaded twin
   (subset match — extra entries from other actors are ignored), plus structural

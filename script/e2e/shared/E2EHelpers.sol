@@ -3,12 +3,12 @@ pragma solidity ^0.8.28;
 
 import {
     ProofSystemBatchPerVerificationEntries,
-    ExpectedStateRootPerRollup,
+    ExpectedRootPerRollup,
     RollupIdWithProofSystems
 } from "../../../src/EEZ.sol";
 import {
     IEEZ,
-    StateUpdate,
+    RollupUpdate,
     ExecutionEntry,
     StaticExecutionEntry,
     L2ToL1Call,
@@ -19,6 +19,8 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {console} from "forge-std/console.sol";
 
 // ══════════════════════════════════════════════════════════════════════
 //  Rolling hash tag constants (must match EEZBase.sol)
@@ -30,6 +32,28 @@ uint8 constant NESTED_END = 4;
 uint8 constant CALL_NOT_FOUND = 5;
 
 uint64 constant MAINNET_ROLLUP_ID = 0;
+
+// ══════════════════════════════════════════════════════════════════════
+//  Deploy* outputs
+// ══════════════════════════════════════════════════════════════════════
+Vm constant CHEATS = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+/// @notice Publishes a Deploy* output: printed as "NAME=value" for the shell runners and set as
+///         an env var so later contracts in the same forge process (PrepareJob) can vm.env* it.
+function output(string memory name, address value) {
+    console.log("%s=%s", name, value);
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
+
+function output(string memory name, bytes32 value) {
+    console.log("%s=%s", name, CHEATS.toString(value));
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
+
+function output(string memory name, bytes memory value) {
+    console.log("%s=%s", name, CHEATS.toString(value));
+    CHEATS.setEnv(name, CHEATS.toString(value));
+}
 
 // ══════════════════════════════════════════════════════════════════════
 //  Idempotent proxy creation helper
@@ -71,8 +95,28 @@ function crossChainCallHash(
     pure
     returns (bytes32)
 {
+    return crossChainCallHashWithGas(
+        isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, 0, data
+    );
+}
+
+/// @notice Full hash builder for observed events, where the emitted callGas must
+///         remain part of the preimage even if the current devnet normally uses zero.
+function crossChainCallHashWithGas(
+    bool isStatic,
+    address sourceAddress,
+    uint256 sourceRollupId,
+    address targetAddress,
+    uint256 targetRollupId,
+    uint256 value,
+    uint256 callGas,
+    bytes memory data
+)
+    pure
+    returns (bytes32)
+{
     return keccak256(
-        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, uint256(0), data)
+        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
     );
 }
 
@@ -115,14 +159,14 @@ function crossChainCallHashStatic(
 // ══════════════════════════════════════════════════════════════════════
 
 library RollingHashBuilder {
-    /// @notice Entry-begin seed (L1): folds the ordered `(rollupId, currentState)` state context,
+    /// @notice Entry-begin seed (L1): folds the ordered `(rollupId, currentRoot)` state context,
     ///         then closes with the entry identity (`proxyEntryHash`).
-    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function entryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
+    function entryBegin(RollupUpdate[] memory deltas, bytes32 proxyEntryHash) internal pure returns (bytes32) {
         bytes32 statesHash;
         for (uint256 i = 0; i < deltas.length; i++) {
-            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentState));
+            statesHash = keccak256(abi.encodePacked(statesHash, deltas[i].rollupId, deltas[i].currentRoot));
         }
         return keccak256(abi.encodePacked(statesHash, proxyEntryHash));
     }
@@ -167,7 +211,7 @@ library RollingHashBuilder {
     // ── Recorded steps ──────────────────────────────────────────────────
     // A HashStep is one fold with the seed factored out, so the chain can be
     // replayed over a DIFFERENT seed. ComputeExpected can only guess placeholder
-    // state roots, but the on-chain seed folds the real ones — exporting the
+    // roots, but the on-chain seed folds the real ones — exporting the
     // steps (EXPECTED_L1_STEPS) lets the network verifier rebuild the exact
     // rolling hash from the POSTED roots and compare it to the posted entry's.
 
@@ -253,7 +297,7 @@ function immediateSingleRollupBatch(
     RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
     rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
     batch = ProofSystemBatchPerVerificationEntries({
-        expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+        expectedRootPerRollup: new ExpectedRootPerRollup[](0),
         entries: entries,
         staticEntries: staticEntries,
         immediateEntryCount: ic,

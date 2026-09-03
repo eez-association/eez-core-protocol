@@ -6,7 +6,7 @@ import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {
-    StateUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -22,6 +22,7 @@ import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContrac
 import {CallTwiceNestedAndOnce} from "../../../../../test/mocks/MultiCallContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -107,7 +108,12 @@ abstract contract MCNActions {
 
     // ── L1 entries (3) ──
 
-    function _l1Entries(address counterL1, address cap2L2, address counterL2, address app)
+    function _l1Entries(
+        address counterL1,
+        address cap2L2,
+        address counterL2,
+        address app
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
@@ -129,25 +135,25 @@ abstract contract MCNActions {
         L2ToL1Call[] memory calls1 = new L2ToL1Call[](1);
         calls1[0] = cap2CallsCounterL1;
 
-        StateUpdate[] memory d0 = new StateUpdate[](1);
-        d0[0] = StateUpdate({
+        RollupUpdate[] memory d0 = new RollupUpdate[](1);
+        d0[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-mcn-step-1"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-mcn-step-1"),
             etherDelta: 0
         });
-        StateUpdate[] memory d1 = new StateUpdate[](1);
-        d1[0] = StateUpdate({
+        RollupUpdate[] memory d1 = new RollupUpdate[](1);
+        d1[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-mcn-step-1"),
-            newState: keccak256("l2-mcn-step-2"),
+            currentRoot: keccak256("l2-mcn-step-1"),
+            newRoot: keccak256("l2-mcn-step-2"),
             etherDelta: 0
         });
-        StateUpdate[] memory d2 = new StateUpdate[](1);
-        d2[0] = StateUpdate({
+        RollupUpdate[] memory d2 = new RollupUpdate[](1);
+        d2[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-mcn-step-2"),
-            newState: keccak256("l2-mcn-step-3"),
+            currentRoot: keccak256("l2-mcn-step-2"),
+            newRoot: keccak256("l2-mcn-step-3"),
             etherDelta: 0
         });
 
@@ -162,7 +168,7 @@ abstract contract MCNActions {
         rh0 = RollingHashBuilder.appendCallBegin(rh0, topCallCch);
         rh0 = RollingHashBuilder.appendCallEnd(rh0, true, abi.encode(uint256(1)));
         entries[0] = ExecutionEntry({
-            stateUpdates: d0,
+            rollupUpdates: d0,
             proxyEntryHash: outerCAP2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls0,
@@ -176,7 +182,7 @@ abstract contract MCNActions {
         rh1 = RollingHashBuilder.appendCallBegin(rh1, topCallCch);
         rh1 = RollingHashBuilder.appendCallEnd(rh1, true, abi.encode(uint256(2)));
         entries[1] = ExecutionEntry({
-            stateUpdates: d1,
+            rollupUpdates: d1,
             proxyEntryHash: outerCAP2, // same hash, sequential consumption
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls1,
@@ -188,7 +194,7 @@ abstract contract MCNActions {
 
         // [2]: no L1-side execution (CounterL2 is L2-local); rolling hash is just the entry seed.
         entries[2] = ExecutionEntry({
-            stateUpdates: d2,
+            rollupUpdates: d2,
             proxyEntryHash: outerCounterL2,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -201,7 +207,12 @@ abstract contract MCNActions {
 
     // ── L2 entries (3) ──
 
-    function _l2Entries(address counterL1, address cap2L2, address counterL2, address app)
+    function _l2Entries(
+        address counterL1,
+        address cap2L2,
+        address counterL2,
+        address app
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -213,7 +224,12 @@ abstract contract MCNActions {
     }
 
     /// @dev 1-entry table for the n-th CAP2 delivery (executeIncomingCrossChainCall tx).
-    function _l2TableForCap2(address counterL1, address cap2L2, address app, uint256 n)
+    function _l2TableForCap2(
+        address counterL1,
+        address cap2L2,
+        address app,
+        uint256 n
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory table)
@@ -235,7 +251,12 @@ abstract contract MCNActions {
     /// @dev CAP2 delivery entry: top-level app→CAP2 call (inbound key = the L1-side hash,
     ///      folded again by CALL_BEGIN) wrapping one nested (outgoing) reentry to CounterL1
     ///      on MAINNET whose cached result is abi.encode(n).
-    function _l2Cap2Entry(address counterL1, address cap2L2, address app, uint256 n)
+    function _l2Cap2Entry(
+        address counterL1,
+        address cap2L2,
+        address app,
+        uint256 n
+    )
         private
         pure
         returns (L2ExecutionEntry memory)
@@ -320,8 +341,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
         CallTwiceNestedAndOnce app = new CallTwiceNestedAndOnce();
-        console.log("COUNTER_L1=%s", address(counterL1));
-        console.log("CALL_TWICE_NESTED=%s", address(app));
+        output("COUNTER_L1", address(counterL1));
+        output("CALL_TWICE_NESTED", address(app));
         vm.stopBroadcast();
     }
 }
@@ -345,9 +366,9 @@ contract DeployL2 is Script {
         // CounterL2: plain counter on L2.
         Counter counterL2 = new Counter();
 
-        console.log("COUNTER_L1_PROXY_L2=%s", counterL1ProxyL2);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(cap2));
-        console.log("COUNTER_L2=%s", address(counterL2));
+        output("COUNTER_L1_PROXY_L2", counterL1ProxyL2);
+        output("COUNTER_AND_PROXY_L2", address(cap2));
+        output("COUNTER_L2", address(counterL2));
         vm.stopBroadcast();
     }
 }
@@ -365,8 +386,8 @@ contract Deploy2 is Script {
         address cap2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), cap2, L2_ROLLUP_ID);
         address counterL2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), counterL2, L2_ROLLUP_ID);
 
-        console.log("CAP2_PROXY_L1=%s", cap2ProxyL1);
-        console.log("COUNTER_L2_PROXY_L1=%s", counterL2ProxyL1);
+        output("CAP2_PROXY_L1", cap2ProxyL1);
+        output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
         vm.stopBroadcast();
     }
 }
@@ -421,25 +442,9 @@ contract ExecuteL2 is Script, MCNActions {
         vm.startBroadcast();
         EEZL2 manager = EEZL2(managerAddr);
         for (uint256 n = 1; n <= 2; n++) {
-            manager.executeIncomingCrossChainCall(
-                cap2,
-                0,
-                _incrementProxyData(),
-                app,
-                MAINNET_ROLLUP_ID,
-                _l2TableForCap2(counterL1, cap2, app, n),
-                noL2StaticEntries()
-            );
+            manager.executeIncomingCrossChainCall(_l2TableForCap2(counterL1, cap2, app, n), noL2StaticEntries());
         }
-        manager.executeIncomingCrossChainCall(
-            counterL2,
-            0,
-            _incrementData(),
-            app,
-            MAINNET_ROLLUP_ID,
-            _l2TableForCounter(counterL2, app),
-            noL2StaticEntries()
-        );
+        manager.executeIncomingCrossChainCall(_l2TableForCounter(counterL2, app), noL2StaticEntries());
 
         console.log("done");
         console.log("cap2.counter=%s (expected 2)", CounterAndProxy(cap2).counter());

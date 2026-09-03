@@ -46,7 +46,7 @@ export const BundleDetail: React.FC<Props> = ({ bundle, onClose }) => {
 
   // Per-step table + state
   const currentTable: StepTableState | undefined = arch.tableStates[activeStep];
-  const currentState: StepContractState | undefined = arch.contractStates[activeStep];
+  const currentRoot: StepContractState | undefined = arch.contractStates[activeStep];
 
   const currentStep = steps[activeStep];
 
@@ -205,7 +205,7 @@ export const BundleDetail: React.FC<Props> = ({ bundle, onClose }) => {
             </div>
 
             {/* Contract State */}
-            {currentState && currentState.entries.length > 0 && (
+            {currentRoot && currentRoot.entries.length > 0 && (
               <div
                 style={{
                   marginTop: 8,
@@ -217,7 +217,7 @@ export const BundleDetail: React.FC<Props> = ({ bundle, onClose }) => {
               >
                 <SectionHeader>Contract State</SectionHeader>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px", fontSize: "0.5rem" }}>
-                  {currentState.entries.map((e) => (
+                  {currentRoot.entries.map((e) => (
                     <div key={e.key} style={{ display: "flex", gap: 6 }}>
                       <span style={{ color: COLORS.dim }}>{e.key}</span>
                       <span style={{ color: e.changed ? COLORS.ok : COLORS.tx, fontWeight: e.changed ? 700 : 400 }}>

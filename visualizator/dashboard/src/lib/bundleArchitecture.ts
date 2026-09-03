@@ -465,7 +465,7 @@ function computeContractStates(events: EventRecord[]): StepContractState[] {
         const rid = String(event.args.rollupId);
         const k1 = `Rollup ${rid} state`;
         const k2 = `Rollup ${rid} contract`;
-        stateMap.set(k1, truncateHash(event.args.initialState as string));
+        stateMap.set(k1, truncateHash(event.args.initialRoot as string));
         stateMap.set(k2, truncateAddress(event.args.rollupContract as string));
         changedKeys.add(k1);
         changedKeys.add(k2);

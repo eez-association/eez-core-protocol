@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {
-    StateUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -58,6 +58,14 @@ abstract contract ComputeExpectedBase is Script {
         _printTableLine("EXPECTED_L2_TABLE=%s", blob);
     }
 
+    /// @dev Top-level static entries the L1 batch must carry (`batch.staticEntries`). They
+    ///      resolve through the view path and leave no event, so the posted calldata is
+    ///      their only on-chain trace: VerifyL1BatchCalldata matches them with the root pin
+    ///      VALUES neutralized (the composer pins live roots, the scenario placeholders).
+    function _printL1StaticTable(StaticExecutionEntry[] memory entries) internal pure {
+        _printTableLine("EXPECTED_L1_STATIC_TABLE=%s", abi.encode(entries));
+    }
+
     /// @dev Separate frame for the hex conversion + log — keeps the via-ir stack of
     ///      callers that print both tables under the limit.
     function _printTableLine(string memory label, bytes memory blob) private pure {
@@ -73,7 +81,7 @@ abstract contract ComputeExpectedBase is Script {
     function _printL1Steps(ExecutionEntry[] memory entries, HashStep[][] memory steps) internal pure {
         require(steps.length == entries.length, "steps/entries length mismatch");
         for (uint256 i = 0; i < entries.length; i++) {
-            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].stateUpdates, entries[i].proxyEntryHash);
+            bytes32 seed = RollingHashBuilder.entryBegin(entries[i].rollupUpdates, entries[i].proxyEntryHash);
             require(RollingHashBuilder.foldSteps(seed, steps[i]) == entries[i].rollingHash, "steps drift from table");
         }
         _printTableLine("EXPECTED_L1_STEPS=%s", abi.encode(steps));
@@ -208,13 +216,13 @@ abstract contract ComputeExpectedBase is Script {
             e.expectedL1ToL2Calls.length
         );
 
-        for (uint256 d = 0; d < e.stateUpdates.length; d++) {
-            StateUpdate memory sd = e.stateUpdates[d];
+        for (uint256 d = 0; d < e.rollupUpdates.length; d++) {
+            RollupUpdate memory sd = e.rollupUpdates[d];
             string memory etherStr =
                 sd.etherDelta == 0 ? "" : string.concat("  ether: ", _fmtEtherSigned(sd.etherDelta));
             console.log(
                 string.concat(
-                    "      state: rollup ", vm.toString(sd.rollupId), " -> ", _shortHash(sd.newState), etherStr
+                    "      state: rollup ", vm.toString(sd.rollupId), " -> ", _shortHash(sd.newRoot), etherStr
                 )
             );
         }
@@ -257,7 +265,7 @@ abstract contract ComputeExpectedBase is Script {
         console.log(
             "      success=%s  rootPins=%s  subCalls=%s",
             sc.success ? "true" : "false",
-            vm.toString(sc.expectedStateRoots.length),
+            vm.toString(sc.expectedRoots.length),
             vm.toString(sc.l2ToL1Calls.length)
         );
         if (sc.returnData.length > 0) {

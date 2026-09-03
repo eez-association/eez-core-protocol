@@ -123,7 +123,10 @@ library BlobCodec {
 
     /// @notice Decodes and validates the full logical stream. Reverts (typed) on any
     ///         §5 violation visible at this layer; returns the message list otherwise.
-    function decode(bytes memory blobPortion, bytes memory callDataTail)
+    function decode(
+        bytes memory blobPortion,
+        bytes memory callDataTail
+    )
         internal
         pure
         returns (BlobMessage[] memory msgs)

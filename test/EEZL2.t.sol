@@ -11,7 +11,7 @@ import {
     ExpectedOutgoingCrossChainCall,
     StaticExecutionEntry
 } from "../src/interfaces/IEEZL2.sol";
-import {Counter, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
+import {Counter, CounterAndProxy, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
 import {BaseL2} from "./BaseL2.t.sol";
 
 contract L2TestTarget {
@@ -293,6 +293,50 @@ contract EEZL2Test is BaseL2 {
         assertEq(scap.counter(), 1, "outer call must run");
         assertTrue(scap.lastCallFailed(), "inner call must revert via the outgoing reentrant table");
         assertEq(scap.targetCounter(), 0, "inner call must not have executed");
+    }
+
+    /// @notice Defensive check: a SUCCESS outgoing row carrying a non-zero
+    ///         `revertedOrStaticRollingHash` is rejected at resolution
+    ///         (`SuccessRowWithRevertedOrStaticHash`). The caller bubbles the revert, so the outer call
+    ///         closes CALL_END(false, <selector>) — folding the exact revert data into the entry's
+    ///         rolling hash pins which error fired (any other failure diverges the hash).
+    function test_NestedSuccessLookup_RevertedOrStaticHashNonZero_Reverts() public {
+        address counterL1 = address(0xC0117E1);
+        address counterProxy = manager.createCrossChainProxy(counterL1, MAINNET);
+        CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
+
+        address outerProxy = manager.createCrossChainProxy(address(cap), REMOTE_ROLLUP_ID);
+        bytes memory outerCd = abi.encodeCall(CounterAndProxy.incrementProxy, ());
+        bytes memory innerCd = abi.encodeCall(Counter.increment, ());
+
+        uint64 outerGas = _probeOutgoing(address(this), outerProxy, 0, outerCd, OUTER_CALL_GAS);
+        uint64 innerGas = _probeOutgoing(address(cap), counterProxy, 0, innerCd);
+        bytes32 outerHash = _outgoingCallHash(address(this), address(cap), REMOTE_ROLLUP_ID, 0, outerGas, outerCd);
+        bytes32 innerHash = _outgoingCallHash(address(cap), counterL1, MAINNET, 0, innerGas, innerCd);
+
+        CrossChainCall memory cc = _cc(address(cap), 0, outerCd, address(this), REMOTE_ROLLUP_ID);
+
+        bytes32 rhAtFire = _hCallBegin(_hEntryBeginL2(outerHash), _incomingCallHash(cc));
+        bytes memory errData = abi.encodeWithSelector(EEZBase.SuccessRowWithRevertedOrStaticHash.selector);
+        bytes32 outerRolling = _hCallEnd(rhAtFire, false, errData);
+
+        ExecutionEntry memory entry = _buildSimpleEntry(outerHash, cc, "", outerRolling);
+
+        ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
+        outgoing[0] = ExpectedOutgoingCrossChainCall({
+            expectedOutgoingHash: _expectedOutgoingHash(innerHash, rhAtFire),
+            incomingCalls: new CrossChainCall[](0),
+            revertedOrStaticRollingHash: keccak256("junk"), // non-zero on a SUCCESS row — rejected
+            success: true,
+            returnData: ""
+        });
+        entry.expectedOutgoingCalls = outgoing;
+        _loadSingle(entry);
+
+        (bool ok,) = outerProxy.call{gas: OUTER_CALL_GAS}(outerCd);
+        assertTrue(ok, "entry commits only if the exact selector was folded");
+        assertEq(cap.counter(), 0, "outer call must have reverted");
+        assertEq(cap.targetCounter(), 0, "inner call must not have executed");
     }
 
     /// @notice A consumed entry surfaces its cached result to the caller: the proxy call returns the

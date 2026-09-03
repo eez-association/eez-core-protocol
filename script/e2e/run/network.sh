@@ -81,6 +81,78 @@ for var in RPC PK ROLLUPS L2_RPC MANAGER_L2; do
     fi
 done
 
+# ── Stage split (driven by network-staged.sh) ──
+#   E2E_STAGE=prepare → steps 1–3 only: deploy, pre-sign the trigger tx(s), run
+#     ComputeExpected, persist everything in E2E_JOB_DIR, exit without sending.
+#   E2E_STAGE=verify  → reload that manifest plus the mined trigger receipts
+#     (E2E_JOB_DIR/txs.txt, written by the staged sender) and run only the
+#     verification steps (5+).
+#   E2E_STAGE=full (default) → the classic single-run behavior.
+E2E_STAGE="${E2E_STAGE:-full}"
+
+if [[ "$E2E_STAGE" == "verify" ]]; then
+# ══════════════════════════════════════════════
+#  Verify stage: rebuild the state steps 1–4 would have produced.
+# ══════════════════════════════════════════════
+[[ -n "${E2E_JOB_DIR:-}" && -f "$E2E_JOB_DIR/manifest.env" ]] || {
+    echo "E2E_STAGE=verify needs E2E_JOB_DIR containing manifest.env"; exit 1; }
+# shellcheck disable=SC1091
+source "$E2E_JOB_DIR/manifest.env"
+EXPECTED_L1_STATIC_TABLE="${EXPECTED_L1_STATIC_TABLE:-0x}"   # manifests written before the static table existed
+COMPUTE_OUT=$(cat "$E2E_JOB_DIR/compute.out")
+# Deploy* outputs (COUNTER_PROXY, READER_L1, ...) — the VerifyNetwork* self-checks
+# read them from the environment, same as in a full run.
+if [[ -f "$E2E_JOB_DIR/deploy-env.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$E2E_JOB_DIR/deploy-env.env"
+    set +a
+fi
+# Pre-send block snapshot, recorded ONCE by the orchestrator right before its
+# send phase — it bounds every job's scan ranges (the per-run analogue of the
+# per-job *_BLOCK_BEFORE snapshots the full run takes).
+# shellcheck disable=SC1090
+source "${E2E_SNAPSHOT:-$E2E_JOB_DIR/../../snapshot.env}"
+
+mapfile -t TX_HASHES < "$E2E_JOB_DIR/txs.txt"
+[[ ${#TX_HASHES[@]} -gt 0 ]] || { echo "ERROR: no sent txs in $E2E_JOB_DIR/txs.txt"; exit 1; }
+# Every pre-signed trigger must have gone out — a partial multi-tx send is an
+# orchestration failure, not something the protocol checks below should judge.
+[[ ${#TX_HASHES[@]} -eq "${_TX_COUNT:-1}" ]] || {
+    echo "ERROR: ${#TX_HASHES[@]} sent tx(s) but the manifest expects ${_TX_COUNT:-1} - partial send (see the run's send-failed.log)"; exit 1; }
+if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+    _RECEIPT_RPC="${L2_FRONT:-$L2_RPC}"
+else
+    _RECEIPT_RPC="${L1_FRONT:-$RPC}"
+fi
+TX_BLOCK_NUMBERS=()
+for _h in "${TX_HASHES[@]}"; do
+    _b=$(cast receipt "$_h" blockNumber --rpc-url "$_RECEIPT_RPC" 2>/dev/null) || _b=""
+    [[ -n "$_b" ]] || { echo "ERROR: no receipt for sent tx $_h - it was never mined (monitor stage should have caught this)"; exit 1; }
+    TX_BLOCK_NUMBERS+=("$_b")
+done
+TX_HASH="${TX_HASHES[0]}"
+TX_BLOCK_NUMBER="${TX_BLOCK_NUMBERS[0]}"
+for _b in "${TX_BLOCK_NUMBERS[@]}"; do
+    [[ "$_b" -lt "$TX_BLOCK_NUMBER" ]] && TX_BLOCK_NUMBER="$_b"
+done
+if [[ "${_TX_COUNT:-1}" -gt 1 ]]; then
+    _UNIQ_BLOCKS=$(printf "%s\n" "${TX_BLOCK_NUMBERS[@]}" | sort -un | paste -sd, -)
+    echo "trigger blocks: $_UNIQ_BLOCKS"
+    [[ "$_UNIQ_BLOCKS" == *,* ]] && echo "NOTE: composer split the triggers across blocks - single-batch verification below may fail; use the tx hashes above with decode-block.sh"
+fi
+
+L1_BATCH_TX=""
+if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+    L2_BLOCK="$TX_BLOCK_NUMBER"; L1_BLOCK=""
+else
+    L1_BLOCK="$TX_BLOCK_NUMBER"; L2_BLOCK=""
+fi
+echo "reloaded $E2E_JOB_DIR: ${#TX_HASHES[@]} trigger tx(s), first block $TX_BLOCK_NUMBER ($_TRIGGER_CHAIN trigger)"
+
+else
+# ══ full + prepare stages: steps 1–4 (the `fi` closing this block sits after step 4) ══
+
 # ══════════════════════════════════════════════
 #  1. Deploy app contracts
 #     Auto-discovers Deploy* contracts in file order.
@@ -89,8 +161,10 @@ done
 # L1 read-consistency barrier: the load-balanced public RPC can lag behind txs
 # we just mined (previous runs' deploys). A stale nonce at forge's simulation
 # step computes an already-occupied CREATE address → CreateCollision. Wait until
-# the public RPC reports at least the front's (fresh node's) nonce.
-if [[ -n "${L1_FRONT:-}" ]]; then
+# the public RPC reports at least the front's (fresh node's) nonce. Skipped in
+# the staged plan prepare: the orchestrator ran one batched barrier for every
+# wallet.
+if [[ -n "${L1_FRONT:-}" && "${E2E_PREPARE_STEP:-}" != "plan" ]]; then
     _SENDER_ADDR=$(cast wallet address --private-key "$PK")
     _FRONT_N=$(cast nonce "$_SENDER_ADDR" --rpc-url "$L1_FRONT" 2>/dev/null || echo 0)
     for _i in $(seq 1 60); do
@@ -101,8 +175,43 @@ if [[ -n "${L1_FRONT:-}" ]]; then
     done
 fi
 
+# Staged prepare steps (E2E_PREPARE_STEP, set by network-staged.sh):
+#   plan       → run every Deploy* contract in one forge process against
+#                in-process forks of both chains with the wallet nonces
+#                injected, pre-sign the planned deploy txs, then exit (0 = txs
+#                written, 1 = failure); the orchestrator fires and mines them.
+#   deploy:<k> → dry-run + pre-sign ONLY the k-th Deploy* contract, then exit
+#                (0 = txs written, 2 = no such contract, 1 = failure); the
+#                orchestrator sends and mines each wave before the next.
+#   finish     → deploys are already mined; reload their exported addresses and
+#                continue with trigger signing + ComputeExpected below.
+# Unset → classic one-pass prepare/full behavior.
+if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
+    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_PREPARE_STEP=plan needs E2E_JOB_DIR"; exit 1; }
+    mkdir -p "$E2E_JOB_DIR"
+    _RC=0
+    plan_job_deploys "$SOL" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
+    exit "$_RC"
+fi
+if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == deploy:* ]]; then
+    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_PREPARE_STEP=deploy needs E2E_JOB_DIR"; exit 1; }
+    mkdir -p "$E2E_JOB_DIR"
+    _RC=0
+    presign_deploy_contract "$SOL" "${E2E_PREPARE_STEP#deploy:}" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
+    exit "$_RC"
+fi
+
 echo "====== Deploy ======"
-deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "finish" ]]; then
+    [[ -f "${E2E_JOB_DIR:-}/deploy-env.env" ]] || { echo "E2E_PREPARE_STEP=finish needs E2E_JOB_DIR/deploy-env.env"; exit 1; }
+    set -a
+    # shellcheck disable=SC1091
+    source "$E2E_JOB_DIR/deploy-env.env"
+    set +a
+    echo "reloaded deploy outputs from deploy-env.env (deploys mined by the orchestrator)"
+else
+    deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+fi
 
 # ══════════════════════════════════════════════
 #  2. Create signed raw transaction
@@ -121,14 +230,49 @@ build_trigger_txs "$SOL" network
 #  3. Compute expected entries
 #     Runs ComputeExpected (read-only) to get the
 #     action hashes we expect in the batch and L2 table.
-#     Reads RLP_ENCODED_TX from env for action hashing.
+#     A pure function of the deploy outputs in env (no chain reads, no
+#     dependence on the pre-signed trigger) — which is what lets the staged
+#     plan step run it in the same forge process as the deploy simulation.
 # ══════════════════════════════════════════════
 echo ""
 echo "====== Compute Expected Entries ======"
 _SENDER=$(cast wallet address --private-key "$PK")
-COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
+if grep -qE '^contract ComputeExpected\b' "$SOL"; then
+    _HAS_COMPUTE=true
+    COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
+    extract_expected_outputs "$COMPUTE_OUT"
+else
+    # Self-verifying scenario: a pure view-path flow (e.g. a top-level static
+    # read) resolves without emitting events, so there are no expected entries
+    # to match — the proof is the trigger tx plus the scenario's VerifyNetwork*
+    # asserts (step 8b), which are mandatory here.
+    _HAS_COMPUTE=false
+    COMPUTE_OUT=""
+    EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"
+    EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
+    EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"
+    EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
+    if ! grep -qE '^contract VerifyNetwork(L2)? ' "$SOL"; then
+        echo "ERROR: scenario has neither ComputeExpected nor a VerifyNetwork/VerifyNetworkL2 contract - nothing would be verified"
+        exit 1
+    fi
+    echo "no ComputeExpected - event verification off; VerifyNetwork* asserts are the proof"
+fi
 
-extract_expected_outputs "$COMPUTE_OUT"
+if [[ "$E2E_STAGE" == "prepare" ]]; then
+    # Persist everything the staged send + verify phases need, broadcast nothing.
+    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_STAGE=prepare needs E2E_JOB_DIR"; exit 1; }
+    mkdir -p "$E2E_JOB_DIR"
+    printf '%s\n' "${RLP_ENCODED_TXS[@]}" > "$E2E_JOB_DIR/rawtxs.txt"
+    echo "$COMPUTE_OUT" > "$E2E_JOB_DIR/compute.out"
+    declare -p _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
+        EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
+        > "$E2E_JOB_DIR/manifest.env"
+    echo ""
+    echo "====== Prepared ($_TX_COUNT pre-signed tx, $_TRIGGER_CHAIN trigger) → $E2E_JOB_DIR ======"
+    exit 0
+fi
 
 # ══════════════════════════════════════════════
 #  4. Send the pre-signed user tx
@@ -175,6 +319,8 @@ else
     L1_BLOCK="$TX_BLOCK_NUMBER"  # batch lands with the (first) user tx; later blocks via range scan
 fi
 
+fi  # ── end of the full/prepare-stage block (steps 1–4); verification below is stage-shared ──
+
 # ══════════════════════════════════════════════
 #  5. Find & verify L1 batch (BatchPosted event)
 #     L1 trigger: batch is in the same block as the user tx.
@@ -185,12 +331,40 @@ FAILED=false
 L1_OK=true
 L2_OK=true
 L2_CALL_OK=true
+RETRY_OUT=""
+
+# Settlement correlation RPC (see E2EBase.sh): when the L2 node exposes it, an
+# L2 trigger's settlement is one lookup instead of an L1 range scan, and an L1
+# trigger's L2 delivery scan starts at the settled range. _CORR_TX pins the
+# settlement tx for step 5b when the lookup succeeded.
+_CORR_TX=""; _CORR_BLOCK=""
+eez_correlation_detect "$L2_RPC"
+
+# One range wrapper serves both trigger directions. The settlement lister has
+# no expected arguments; content-addressed verification takes the expected
+# hashes/table. Keeping this in one place also makes calldata re-scans behave
+# identically for L1- and L2-triggered eventless entries.
+_l1_scan() {  # $1=fromBlock $2=toBlock
+    if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
+        forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+            --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
+            "$1" "$2" "$ROLLUPS" 2>&1
+    else
+        forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
+            --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
+            "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
+    fi
+}
 
 # ── Verify L1 batch entries ──
 # L1 trigger: the batch is in the SAME block as the user tx — verify that block.
 # L2 trigger: the settlement block is unknown a priori (batches no longer encode
 # L2 block references), so scan the recorded L1 range for ExecutionConsumed events.
-if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
+if ! $_HAS_COMPUTE; then
+    echo ""
+    echo "====== Verify L1 Batch ======"
+    echo "SKIP: no ComputeExpected - no expected entries/events to match (self-verifying scenario)"
+elif [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     # Two settlement signals, depending on the scenario's L1 entry shape:
     #  - proxy-consumed entries (proxyEntryHash != 0): ExecutionConsumed carries the
     #    call hash → VerifyL1BatchInRange with EXPECTED_L1_CALL_HASHES.
@@ -201,38 +375,47 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
         _L1_CONTRACT="VerifyL1BatchInRange"
         _L1_EXPECTED="$EXPECTED_L1_CALL_HASHES"
     else
-        # Zero-hash entries: EXPECTED_L1_HASHES fold placeholder state roots, but the
+        # Zero-hash entries: EXPECTED_L1_HASHES fold placeholder roots, but the
         # on-chain rolling-hash seed folds the REAL roots the composer settles — the
         # event-level hash match can never fire on a live devnet. Discover settlement
         # txs root-agnostically; the posted-calldata comparison (roots neutralized)
         # is what pins our entries, so the expected table is mandatory here.
-        if [[ "$EXPECTED_L1_TABLE" == "0x" ]]; then
+        if [[ "$EXPECTED_L1_TABLE" == "0x" && "$EXPECTED_L1_STATIC_TABLE" == "0x" ]]; then
             echo "ERROR: zero-hash L1 entries need EXPECTED_L1_TABLE for network verification - add _printL1Table to ComputeExpected"
             FAILED=true
         fi
         _L1_CONTRACT="VerifyL1SettlementTxsInRange"
         _L1_EXPECTED="$EXPECTED_L1_HASHES"
     fi
-    # Range scan for the selected verifier; the lister takes no expected args.
-    _l1_scan() {  # $1=fromBlock $2=toBlock
-        if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
-            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address)" \
-                "$1" "$2" "$ROLLUPS" 2>&1
-        else
-            forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
-                --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
-        fi
-    }
     echo ""
-    echo "====== Verify L1 Batch ($_L1_CONTRACT, range $L1_BLOCK_BEFORE.., deadline ${L1_SETTLE_TIMEOUT:-300}s) ======"
+    echo "====== Verify L1 Batch ($_L1_CONTRACT, range $L1_BLOCK_BEFORE.., deadline ${L1_SETTLE_TIMEOUT:-120}s) ======"
     # Settlement (batch post + entry consumption) can take a while — retry the
     # range scan against a growing [before..latest] window until the deadline.
     _l1_scan_latest() { _l1_scan "$L1_BLOCK_BEFORE" "$(cast block-number --rpc-url "$RPC")"; }
+    _L1_SCAN_DEADLINE="${L1_SETTLE_TIMEOUT:-120}"
+    if [[ -n "$EEZ_CORR_RPC" && "${FAILED:-false}" != true ]]; then
+        # Ask the node which L1 tx settled our L2 block; poll while it is still
+        # unsettled (null). A recognised answer narrows the scan to that one
+        # block and pins the tx; anything else falls back to the range scan.
+        echo "settlement lookup: eez_getSettlementByL2Block($L2_BLOCK)"
+        _corr_deadline=$(( $(date +%s) + ${L1_SETTLE_TIMEOUT:-120} ))
+        while true; do
+            _corr_rc=0; _corr_out=$(eez_settlement_by_l2_block "$EEZ_CORR_RPC" "$L2_BLOCK") || _corr_rc=$?
+            [[ $_corr_rc -eq 0 ]] && { read -r _CORR_BLOCK _ _ _CORR_TX <<< "$_corr_out"; break; }
+            [[ $_corr_rc -eq 2 && $(date +%s) -lt $_corr_deadline ]] || break
+            sleep 10
+        done
+        if [[ -n "$_CORR_TX" ]]; then
+            echo "L2 block $L2_BLOCK settled by L1 tx $_CORR_TX (L1 block $_CORR_BLOCK)"
+            _l1_scan_latest() { _l1_scan "$_CORR_BLOCK" "$_CORR_BLOCK"; }
+            _L1_SCAN_DEADLINE="${L1_VERIFY_TIMEOUT:-90}"   # the block is known; only RPC lag to absorb
+        else
+            echo "NOTE: correlation lookup gave no settlement (rc $_corr_rc) - falling back to the range scan"
+        fi
+    fi
     L1_OK=false
     if [[ "${FAILED:-false}" != true ]]; then
-        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_scan_latest; then
+        if retry_until_deadline "$_L1_SCAN_DEADLINE" 10 _l1_scan_latest; then
             L1_OK=true
         fi
         L1_VERIFY="$RETRY_OUT"
@@ -245,38 +428,58 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
         [[ -n "$L1_BLOCK" ]] && echo "Batch found at L1 block $L1_BLOCK"
     else
         FAILED=true
-        echo "L1 VERIFICATION FAILED (no settlement in $L1_BLOCK_BEFORE..$(cast block-number --rpc-url "$RPC") within ${L1_SETTLE_TIMEOUT:-300}s)"
+        echo "L1 VERIFICATION FAILED (no settlement in $L1_BLOCK_BEFORE..$(cast block-number --rpc-url "$RPC") within ${L1_SETTLE_TIMEOUT:-120}s)"
     fi
 else
     echo ""
     echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
     # Retry with a deadline: a load-balanced public RPC can briefly serve nodes
     # that don't have the just-mined block yet (eth_getLogs comes back empty).
-    _l1_verify_block() {
-        forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-            --rpc-url "$RPC" \
-            --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-            "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
-    }
+    # Eventless L1 entries (a success=false entry, whose consumption unwinds
+    # ExecutionConsumed with its revert; a top-level static entry, which never emits)
+    # leave no call hash to match — list the settlement txs root-agnostically via
+    # VerifyL1SettlementTxsInRange and let the posted-calldata stage below pin the
+    # exact entries; an expected (static) table is mandatory there.
+    if [[ -z "$EXPECTED_L1_CALL_HASHES" || "$EXPECTED_L1_CALL_HASHES" == "[]" ]]; then
+        _L1_CONTRACT="VerifyL1SettlementTxsInRange"
+        _L1_EXPECTED="$EXPECTED_L1_HASHES"
+        if [[ "$EXPECTED_L1_TABLE" == "0x" && "$EXPECTED_L1_STATIC_TABLE" == "0x" ]]; then
+            echo "ERROR: eventless L1 entries need EXPECTED_L1_TABLE or EXPECTED_L1_STATIC_TABLE for network verification - add _printL1Table / _printL1StaticTable to ComputeExpected"
+            FAILED=true
+        fi
+        _l1_verify_block() {
+            _l1_scan "$L1_BLOCK" "$L1_BLOCK"
+        }
+        _l1_range_scan_latest() {
+            _l1_scan "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")"
+        }
+    else
+        _L1_CONTRACT="VerifyL1BatchInRange"
+        _L1_EXPECTED="$EXPECTED_L1_CALL_HASHES"
+        _l1_verify_block() {
+            _l1_scan "$L1_BLOCK" "$L1_BLOCK"
+        }
+        _l1_range_scan_latest() {
+            _l1_scan "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")"
+        }
+    fi
     L1_OK=false
-    if retry_until_deadline "${L1_VERIFY_TIMEOUT:-90}" 10 _l1_verify_block; then
+    # The batch is in the trigger's own block (block gate); the retry only absorbs an RPC
+    # that has not served that block's logs yet.
+    if [[ "${FAILED:-false}" != true ]] && retry_until_deadline "${L1_VERIFY_TIMEOUT:-30}" 5 _l1_verify_block; then
         L1_OK=true
     fi
     L1_VERIFY="$RETRY_OUT"
 
-    # Fallback: the composer may post the settlement batch in a LATER L1 block than
-    # the trigger tx (the front holds the trigger; batching is asynchronous), so a
-    # single-block miss is not yet a failure. The correlation is CONTENT, not block
-    # numbers — range-scan [receipt block..latest] for the same expected hashes.
+    # Fallback for RPC lag: a load-balanced public RPC can serve a node that does
+    # not have the trigger block's logs yet, so a single-block miss is not yet a
+    # failure — range-scan [receipt block..latest] for the same expected hashes.
+    # (Protocol-wise the batch IS in the trigger's block: entries are consumable
+    # only while lastVerifiedBlock == block.number, so a mined, successful trigger
+    # was settled in its own block.)
     if ! $L1_OK; then
-        echo "batch not in the trigger block — scanning [$L1_BLOCK..latest] (deadline ${L1_SETTLE_TIMEOUT:-300}s)"
-        _l1_range_scan_latest() {
-            forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchInRange \
-                --rpc-url "$RPC" \
-                --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-                "$L1_BLOCK" "$(cast block-number --rpc-url "$RPC")" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
-        }
-        if retry_until_deadline "${L1_SETTLE_TIMEOUT:-300}" 10 _l1_range_scan_latest; then
+        echo "batch not in the trigger block — scanning [$L1_BLOCK..latest] (RPC-lag deadline ${L1_LATE_SETTLE_TIMEOUT:-30}s)"
+        if [[ "${FAILED:-false}" != true ]] && retry_until_deadline "${L1_LATE_SETTLE_TIMEOUT:-30}" 10 _l1_range_scan_latest; then
             L1_OK=true
         fi
         L1_VERIFY="$RETRY_OUT"
@@ -296,10 +499,11 @@ else
 fi
 
 # ══════════════════════════════════════════════
-#  5b. Compare the POSTED batch against the expected L1 table.
+#  5b. Compare the POSTED batch against the expected L1 table(s).
 #      L1 events never carry the entries, but the settlement tx's
 #      postAndVerifyBatch calldata does: decode it and field-match every
-#      expected entry (the L1 analogue of the L2 table comparison).
+#      expected entry (the L1 analogue of the L2 table comparison) and every
+#      expected top-level static entry (whose only on-chain trace this is).
 #
 #      Call hashes are not unique across runs — parallel or repeated jobs of
 #      the same scenario can emit identical rolling hashes — so the pinned
@@ -307,57 +511,175 @@ fi
 #      range scan emitted, and (L2 trigger) re-scan the growing range for
 #      late settlements until the deadline.
 # ══════════════════════════════════════════════
-if [[ "${FAILED:-false}" != true && -z "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE" != "0x" ]]; then
+_L1_TABLES_PRESENT=false
+[[ "$EXPECTED_L1_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ]] && _L1_TABLES_PRESENT=true
+if [[ "${FAILED:-false}" != true && -z "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRESENT; then
     echo ""
     echo "NOTE: no settlement tx identified (no BatchPosted in the scanned logs) - skipping posted-batch calldata comparison"
 fi
-if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" && "$EXPECTED_L1_TABLE" != "0x" ]]; then
+if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRESENT; then
     # `|| true`: no CANDIDATE lines (e.g. L1-trigger verifiers don't emit them) must
     # not kill the script under set -e — the fallback below pins the single tx.
     _CANDIDATES=$(echo "${L1_VERIFY:-}" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
     [[ -z "$_CANDIDATES" ]] && _CANDIDATES="$L1_BATCH_TX"
+    [[ -n "$_CORR_TX" ]] && _CANDIDATES="$_CORR_TX"   # the node named the settlement tx: decode only that one
+
+    # Candidate calldata/metadata, cached per run when the orchestrator provides
+    # E2E_L1TX_CACHE: parallel verify jobs sift the SAME settlement txs, so each
+    # input/receipt should hit the RPC once per run, not once per job.
+    _cand_input() {  # $1=txhash → calldata on stdout
+        local cf="${E2E_L1TX_CACHE:-}/$1.input" inp
+        [[ -n "${E2E_L1TX_CACHE:-}" && -s "$cf" ]] && { cat "$cf"; return 0; }
+        inp=$(cast tx "$1" input --rpc-url "$RPC" 2>/dev/null) || return 1
+        if [[ -n "${E2E_L1TX_CACHE:-}" ]]; then
+            mkdir -p "$E2E_L1TX_CACHE"
+            printf '%s' "$inp" > "$cf.$$" && mv "$cf.$$" "$cf"   # tmp+mv: concurrent jobs write the same file
+        fi
+        printf '%s' "$inp"
+    }
+    _cand_meta() {  # $1=txhash → "to blockNumber" on stdout
+        local cf="${E2E_L1TX_CACHE:-}/$1.meta" to blk
+        [[ -n "${E2E_L1TX_CACHE:-}" && -s "$cf" ]] && { cat "$cf"; return 0; }
+        to=$(cast tx "$1" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        blk=$(cast receipt "$1" blockNumber --rpc-url "$RPC" 2>/dev/null)
+        [[ -n "$to" && -n "$blk" ]] || return 1
+        if [[ -n "${E2E_L1TX_CACHE:-}" ]]; then
+            mkdir -p "$E2E_L1TX_CACHE"
+            printf '%s %s' "$to" "$blk" > "$cf.$$" && mv "$cf.$$" "$cf"
+        fi
+        printf '%s %s' "$to" "$blk"
+    }
+
+    # Prefilter: the expected table's 32-byte words shaped like ABI-encoded
+    # addresses are job-distinctive (every job deploys its own app contracts) and
+    # appear verbatim in the posted calldata (addresses are never neutralized).
+    # A candidate containing none of them cannot hold our entries — skip it
+    # without a forge decode. Words below 2^48 (52+ leading zero chars) are
+    # excluded: ABI offsets/lengths/ids match the address shape but are small
+    # numbers, and one of those in the filter would match every batch. Real
+    # addresses keep high bytes non-zero (a zero top-12-hex-digit address is a
+    # 2^-48 event). No qualifying words → filter off, try all candidates. Both
+    # blobs are whole ABI words, so their concatenation stays word-aligned.
+    _ADDR_FILTER=$(echo "${EXPECTED_L1_TABLE#0x}${EXPECTED_L1_STATIC_TABLE#0x}" | fold -w64 \
+        | grep -iE '^0{24}[0-9a-f]{40}$' | grep -vE '^0{52}' | sort -u | paste -sd'|' - || true)
+
     echo ""
-    echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx) ======"
-    _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-180} ))
+    echo "====== Verify L1 Posted Batch Calldata ($(echo "$_CANDIDATES" | wc -l) candidate tx$([[ -n "$_ADDR_FILTER" ]] && echo ", address prefilter on")) ======"
+    # L1 trigger: the candidate set is known up front (no late settlement) — 60 s covers
+    # the decodes; L2 trigger: the range keeps growing while the composer settles.
+    _CD_DEFAULT_TIMEOUT=60; [[ "$_TRIGGER_CHAIN" == "L2" ]] && _CD_DEFAULT_TIMEOUT=180
+    _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-$_CD_DEFAULT_TIMEOUT} ))
     _CALLDATA_OK=false
     _LAST_FAIL=""
     _REJECTED=""   # memo of non-registry candidates: skip silently on re-scan iterations
+    # Multi-tx triggers mined in different blocks are settled by different batches:
+    # accept PARTIAL matches per candidate and require the union of matched
+    # expected-entry indices over the trigger blocks' settlement txs to cover the
+    # table exactly once. Candidates then come from every trigger block, not just
+    # the first.
+    _CD_PARTIAL=false; _CD_MATCHED=","; _CD_EXPECTED=""; _L1_FIRST_BLOCK=""; _CD_EXTENDED=false
+    if [[ "${_TX_COUNT:-1}" -gt 1 && "${_UNIQ_BLOCKS:-}" == *,* ]]; then
+        _CD_PARTIAL=true
+        _CD_MIN="$TX_BLOCK_NUMBER"; _CD_MAX="$TX_BLOCK_NUMBER"
+        for _b in "${TX_BLOCK_NUMBERS[@]}"; do (( _b > _CD_MAX )) && _CD_MAX="$_b"; done
+        echo "triggers span blocks $_CD_MIN..$_CD_MAX - matching the expected table across their settlement txs"
+        _MULTI=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange --rpc-url "$RPC" \
+            --sig "run(uint256,uint256,address)" "$_CD_MIN" "$_CD_MAX" "$ROLLUPS" 2>&1) || true
+        _NEW=$(echo "$_MULTI" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
+        [[ -n "$_NEW" ]] && _CANDIDATES="$_NEW"
+    fi
     while true; do
         for _TX in $_CANDIDATES; do
+            # Deadline inside the pass too: with the prefilter off (address-less
+            # tables) a big range means hundreds of forge decodes — candidates
+            # come in block order, so the true batch is early and a timeout here
+            # is a genuine miss, not impatience.
+            [[ $(date +%s) -ge $_CD_DEADLINE ]] && break
             [[ ",$_REJECTED," == *",$_TX,"* ]] && continue
-            _BATCH_TO=$(cast tx "$_TX" to --rpc-url "$RPC" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-            _BATCH_INPUT=$(cast tx "$_TX" input --rpc-url "$RPC" 2>/dev/null)
+            _BATCH_INPUT=$(_cand_input "$_TX") || continue
+            [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
+            if [[ -n "$_ADDR_FILTER" ]] && ! grep -qiE "$_ADDR_FILTER" <<< "$_BATCH_INPUT"; then
+                _REJECTED="$_REJECTED,$_TX"   # holds none of our app addresses → not our batch
+                continue
+            fi
+            _BATCH_TO=""; _BATCH_BLOCK=""
+            read -r _BATCH_TO _BATCH_BLOCK < <(_cand_meta "$_TX") || true
+            [[ -z "$_BATCH_BLOCK" ]] && continue
             if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
                 # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
                 echo "NOTE: candidate $_TX targets ${_BATCH_TO:-<unknown>} (not the registry) - skipped"
                 _REJECTED="$_REJECTED,$_TX"
                 continue
             fi
-            [[ -z "$_BATCH_INPUT" || "$_BATCH_INPUT" == "0x" ]] && continue
             if BATCH_VERIFY=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" \
-                --sig "run(bytes,address,bytes,bytes)" \
-                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" 2>&1); then
+                --fork-block-number "$((_BATCH_BLOCK))" \
+                --sig "run(bytes,address,bytes,bytes,bytes,bool)" \
+                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" \
+                "$_CD_PARTIAL" 2>&1); then
                 echo "Matched settlement tx $_TX"
                 echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
+                if $_CD_PARTIAL; then
+                    # union the matched indices; an index seen twice means two batches
+                    # both claim the same entry — not a valid split
+                    _CD_EXPECTED=$(extract "$BATCH_VERIFY" "L1_CALLDATA_EXPECTED")
+                    for _ix in $(extract "$BATCH_VERIFY" "L1_CALLDATA_MATCHED" | tr -d '[]' | tr ',' ' '); do
+                        if [[ "$_CD_MATCHED" == *",$_ix,"* ]]; then
+                            echo "FAIL: expected entry $_ix matched by two settlement txs"
+                            _LAST_FAIL="$BATCH_VERIFY"; _CD_MATCHED=","; break 3
+                        fi
+                        _CD_MATCHED="$_CD_MATCHED$_ix,"
+                    done
+                    # step 6 starts its L2 scan from the EARLIEST matched settlement
+                    if [[ -z "$_L1_FIRST_BLOCK" || "$_BATCH_BLOCK" -lt "$_L1_FIRST_BLOCK" ]]; then
+                        L1_BATCH_TX="$_TX"; _L1_FIRST_BLOCK="$_BATCH_BLOCK"
+                    fi
+                    _n_matched=$(( $(tr -cd ',' <<< "$_CD_MATCHED" | wc -c) - 1 ))
+                    echo "matched $_n_matched of ${_CD_EXPECTED:-?} expected entries so far"
+                    if [[ -n "$_CD_EXPECTED" && "$_n_matched" -ge "$_CD_EXPECTED" ]]; then
+                        _CALLDATA_OK=true
+                        break 2
+                    fi
+                    continue
+                fi
                 L1_BATCH_TX="$_TX"   # step 6 decodes L2 blocks from this tx
                 _CALLDATA_OK=true
                 break 2
             fi
             _LAST_FAIL="$BATCH_VERIFY"
         done
+        # Split multi-tx job still incomplete: a settlement can only sit in its
+        # trigger's own block (block gate), but look once past the last trigger
+        # block up to the head anyway before giving up.
+        if $_CD_PARTIAL && ! $_CD_EXTENDED && [[ $(date +%s) -lt $_CD_DEADLINE ]]; then
+            _CD_EXTENDED=true
+            _L1_CUR=$(cast block-number --rpc-url "$RPC")
+            _MULTI=$(forge script script/e2e/shared/Verify.s.sol:VerifyL1SettlementTxsInRange --rpc-url "$RPC" \
+                --sig "run(uint256,uint256,address)" "$((_CD_MAX + 1))" "$_L1_CUR" "$ROLLUPS" 2>&1) || true
+            _NEW=$(echo "$_MULTI" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
+            if [[ -n "$_NEW" ]]; then
+                echo "expected table still incomplete - also trying settlement txs in $((_CD_MAX + 1))..$_L1_CUR"
+                _CANDIDATES="$_NEW"
+                continue
+            fi
+        fi
         # No candidate contained our entries. For L2 triggers our entry may
         # simply not have settled yet — re-scan the growing range for new
         # settlement txs until the deadline.
-        [[ $(date +%s) -ge $_CD_DEADLINE || "$_TRIGGER_CHAIN" != "L2" ]] && break
+        [[ $(date +%s) -ge $_CD_DEADLINE || "$_L1_CONTRACT" != "VerifyL1SettlementTxsInRange" || -n "$_CORR_TX" ]] && break
         sleep 10
         _L1_CUR=$(cast block-number --rpc-url "$RPC")
-        L1_RESCAN=$(_l1_scan "$L1_BLOCK_BEFORE" "$_L1_CUR") || continue
+        _L1_SCAN_FROM="${L1_BLOCK_BEFORE:-$L1_BLOCK}"
+        L1_RESCAN=$(_l1_scan "$_L1_SCAN_FROM" "$_L1_CUR") || continue
         _NEW=$(echo "$L1_RESCAN" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u || true)
         [[ -n "$_NEW" ]] && _CANDIDATES="$_NEW"
     done
     if ! $_CALLDATA_OK; then
-        if [[ "${_L1_CONTRACT:-}" == "VerifyL1SettlementTxsInRange" ]]; then
+        if $_CD_PARTIAL; then
+            FAILED=true
+            [[ -n "$_LAST_FAIL" ]] && echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
+            echo "L1 BATCH CALLDATA VERIFICATION FAILED (matched $(( $(tr -cd ',' <<< "$_CD_MATCHED" | wc -c) - 1 )) of ${_CD_EXPECTED:-?} expected entries across the trigger blocks' settlement txs)"
+        elif [[ "${_L1_CONTRACT:-}" == "VerifyL1SettlementTxsInRange" ]]; then
             # Root-agnostic path: the calldata content match is the ONLY check that
             # pins our entries to a settlement — not finding one is a failure.
             FAILED=true
@@ -407,8 +729,22 @@ fi
 #   L2 trigger: scan from the receipt block (consumption can land blocks later).
 if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]; then
     _SCAN_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
-    echo ""
-    echo "====== Search L2 Blocks for Calls (from $_SCAN_FROM, deadline ${L2_SETTLE_TIMEOUT:-180}s) ======"
+    _L2_DELIVERY_BLOCK=""
+    # L1 trigger + correlation RPC: the settlement tx proves an L2 range, and
+    # the composer places every cross-chain system tx of a batch in the LAST
+    # block of that range — so the scan starts right there instead of at the
+    # pre-trigger snapshot (far behind on big runs), and once the L2 head is
+    # past that block a miss is a failure, not something to wait out.
+    if [[ -n "$EEZ_CORR_RPC" && "$_TRIGGER_CHAIN" != "L2" && -n "${L1_BATCH_TX:-}" ]]; then
+        _corr_ranges=$(eez_l2_ranges_by_l1_block "$EEZ_CORR_RPC" "${_BATCH_BLOCK:-$L1_BLOCK}") || _corr_ranges=""
+        while read -r _ _rf _rt _rtx; do
+            [[ "$_rtx" == "$L1_BATCH_TX" ]] || continue
+            echo "settlement tx $L1_BATCH_TX proved L2 blocks $_rf..$_rt - cross-chain txs land in $_rt (eez_getSettledL2RangesByL1Block)"
+            (( _rt > _SCAN_FROM )) && _SCAN_FROM="$_rt"
+            _L2_DELIVERY_BLOCK="$_rt"
+            break
+        done <<< "$_corr_ranges"
+    fi
     _l2_calls_scan_latest() {
         forge script script/e2e/shared/Verify.s.sol:VerifyL2CallsInRange \
             --rpc-url "$L2_RPC" \
@@ -416,8 +752,23 @@ if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]
             "$_SCAN_FROM" "$(cast block-number --rpc-url "$L2_RPC")" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES"
     }
     FOUND_L2_BLOCK=""
-    if retry_until_deadline "${L2_SETTLE_TIMEOUT:-180}" 5 _l2_calls_scan_latest; then
-        FOUND_L2_BLOCK=$(extract "$RETRY_OUT" "L2_MATCH_BLOCK")
+    echo ""
+    if [[ -n "$_L2_DELIVERY_BLOCK" ]]; then
+        # Known delivery block: wait for the L2 head to pass it (two blocks of margin),
+        # then decide with a couple of scans — RPC lag is all that is left to absorb.
+        echo "====== Search L2 Blocks for Calls (from $_SCAN_FROM; delivery block $_L2_DELIVERY_BLOCK known) ======"
+        _l2_head_deadline=$(( $(date +%s) + ${L2_SETTLE_TIMEOUT:-180} ))
+        while (( $(cast block-number --rpc-url "$L2_RPC") < _L2_DELIVERY_BLOCK + 2 && $(date +%s) < _l2_head_deadline )); do
+            sleep 2
+        done
+        if retry_until_deadline "${L2_KNOWN_BLOCK_TIMEOUT:-15}" 5 _l2_calls_scan_latest; then
+            FOUND_L2_BLOCK=$(extract "$RETRY_OUT" "L2_MATCH_BLOCK")
+        fi
+    else
+        echo "====== Search L2 Blocks for Calls (from $_SCAN_FROM, deadline ${L2_SETTLE_TIMEOUT:-180}s) ======"
+        if retry_until_deadline "${L2_SETTLE_TIMEOUT:-180}" 5 _l2_calls_scan_latest; then
+            FOUND_L2_BLOCK=$(extract "$RETRY_OUT" "L2_MATCH_BLOCK")
+        fi
     fi
     _L2_OUT="$RETRY_OUT"
 
@@ -434,7 +785,11 @@ if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != "[]" ]]
         fi
         echo "L2 blocks to verify: $L2_BLOCKS"
     elif [[ "$L2_BLOCKS" == "[]" ]]; then
-        echo "ERROR: no L2 sync block with the expected calls in $_SCAN_FROM..$(cast block-number --rpc-url "$L2_RPC") within ${L2_SETTLE_TIMEOUT:-180}s"
+        if [[ -n "$_L2_DELIVERY_BLOCK" ]]; then
+            echo "ERROR: no L2 delivery with the expected calls in $_SCAN_FROM..$(cast block-number --rpc-url "$L2_RPC") (the settlement proved delivery block $_L2_DELIVERY_BLOCK, which the L2 head has passed)"
+        else
+            echo "ERROR: no L2 sync block with the expected calls in $_SCAN_FROM..$(cast block-number --rpc-url "$L2_RPC") within ${L2_SETTLE_TIMEOUT:-180}s"
+        fi
     else
         echo "WARNING: expected calls not found by scan; falling back to receipt block $L2_BLOCKS"
     fi
@@ -453,19 +808,42 @@ if [[ -z "${EXPECTED_L2_HASHES:-}" ]]; then
     FAILED=true
     L2_OK=false
 elif [[ "$EXPECTED_L2_HASHES" == "[]" ]]; then
-    echo "No L2 entries expected (terminal revert)"
-    # If ABSENT_L2_HASHES provided, actively verify they're NOT on L2
+    echo "No L2 entry events expected (lookup, terminal revert, or an eventless static pool)"
+    # ABSENT_L2_HASHES: call keys that must have left NO trace on L2 — the active proof
+    # that a lookup (a call that reverts on L2, a top-level static read) was never
+    # delivered. Scan the manager's logs from the pre-trigger snapshot to latest, once
+    # L2 has produced the block a delivery would have landed in: the last block of the
+    # L2 range the settlement tx proved (correlation RPC — the composer places a
+    # batch's cross-chain system txs there), else after an L2_ABSENT_GRACE wait
+    # (default 60 s) so a late delivery is not missed.
     if [[ -n "${ABSENT_L2_HASHES:-}" && "$ABSENT_L2_HASHES" != "[]" ]]; then
-        if [[ "$L2_BLOCKS" == "[]" ]]; then
-            echo "PASS: no L2 blocks found (no L2 activity, as expected)"
-            L2_OK=true
-        else
-            # (failure = entries that should NOT be on L2 were found)
-            run_verify_step "L2 ABSENT" full verify_l2_absent "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$ABSENT_L2_HASHES"
-            L2_OK=$VERIFY_STEP_OK
+        _ABS_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
+        _ABS_TO=""
+        if [[ -n "$EEZ_CORR_RPC" && -n "${L1_BATCH_TX:-}" ]]; then
+            _corr_ranges=$(eez_l2_ranges_by_l1_block "$EEZ_CORR_RPC" "${_BATCH_BLOCK:-$L1_BLOCK}") || _corr_ranges=""
+            while read -r _ _rf _rt _rtx; do
+                [[ "$_rtx" == "$L1_BATCH_TX" ]] || continue
+                _ABS_TO="$_rt"
+                break
+            done <<< "$_corr_ranges"
         fi
+        if [[ -n "$_ABS_TO" ]]; then
+            echo "settlement tx $L1_BATCH_TX proved L2 blocks up to $_ABS_TO - a delivery would have landed there"
+            for _i in $(seq 1 30); do
+                (( $(cast block-number --rpc-url "$L2_RPC") >= _ABS_TO )) && break
+                sleep 2
+            done
+        else
+            echo "no settlement correlation - waiting ${L2_ABSENT_GRACE:-60}s for any late delivery before scanning"
+            sleep "${L2_ABSENT_GRACE:-60}"
+        fi
+        _ABS_TO=$(cast block-number --rpc-url "$L2_RPC")
+        echo ""
+        echo "====== Verify L2 Absent (keys must not appear in blocks $_ABS_FROM..$_ABS_TO) ======"
+        run_verify_step "L2 ABSENT" full verify_l2_absent "$L2_RPC" "$_ABS_FROM" "$_ABS_TO" "$MANAGER_L2" "$ABSENT_L2_HASHES"
+        L2_OK=$VERIFY_STEP_OK
     else
-        echo "SKIP: no absent hashes to verify"
+        echo "SKIP: no absent keys to verify"
         L2_OK=true
     fi
 elif [[ "$L2_BLOCKS" == "[]" ]]; then
@@ -473,7 +851,7 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
     FAILED=true
     L2_OK=false
 else
-    run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE"
+    run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" "$EVENTLESS_L2_HASHES"
     L2_OK=$VERIFY_STEP_OK
 fi
 
@@ -495,6 +873,35 @@ else
     run_verify_step "L2 CALL" defer verify_l2_calls "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_CALL_HASHES" "$EXPECTED_L2_TABLE"
     L2_CALL_OK=$VERIFY_STEP_OK
 fi
+
+# ══════════════════════════════════════════════
+#  8b. Scenario self-verification (optional)
+#      If the scenario defines VerifyNetwork (checked on L1) and/or
+#      VerifyNetworkL2 (checked on L2), run them read-only after the trigger.
+#      They assert PERSISTED on-chain state (reader counters, cached read
+#      values) read at latest, with a retry for RPC lag. They must not re-issue
+#      a pool lookup (a static entry's root pin is only live until the next tx
+#      that moves the root, possibly in the same block) — a posted static entry
+#      is matched from the batch calldata in 5b instead.
+# ══════════════════════════════════════════════
+_run_verify_network() {  # $1=contract $2=rpc $3=chain label
+    local _VN_NAME="$1" _VN_RPC="$2" _VN_LABEL="$3"
+    grep -qE "^contract $_VN_NAME " "$SOL" || return 0
+    echo ""
+    echo "====== Scenario Self-Verification ($_VN_NAME, $_VN_LABEL) ======"
+    if retry_until_deadline "${VERIFY_NETWORK_TIMEOUT:-60}" 5 \
+        forge script "$SOL:$_VN_NAME" --rpc-url "$_VN_RPC" --sender "$_SENDER"; then
+        echo "$RETRY_OUT" | grep -E "VERIFY_PASS|PASS" || echo "PASS: $_VN_NAME asserts held"
+    else
+        FAILED=true
+        echo ""
+        echo "--- $_VN_NAME DIAGNOSTICS ---"
+        echo "$RETRY_OUT" | strip_traces
+        echo "$_VN_NAME FAILED"
+    fi
+}
+_run_verify_network VerifyNetwork "$RPC" L1
+_run_verify_network VerifyNetworkL2 "$L2_RPC" L2
 
 # ══════════════════════════════════════════════
 #  9. On failure: show diagnostics

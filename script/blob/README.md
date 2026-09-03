@@ -29,7 +29,7 @@ A scenario is written as a blob message list — nothing else. `runScenario` the
   tables ──▶ postAndVerifyBatch / loadExecutionTable / executeIncomingCrossChainCall
          ──▶ scripted actors make the real proxy calls
          ──▶ every return value, revert payload, rollback, ether delta and final
-             state root asserted
+             root asserted
 ```
 
 ## Files
@@ -75,12 +75,12 @@ no store/generator/stitcher orchestration at the call site:
 | `blobsToData(blobs)` | EIP-4844 blobs → logical byte stream (§4 unpack; padding included, the codec skips it) |
 | `dataToBlobs(blobData)` | byte stream (blob portion) → full-size blobs (§4 pack) |
 | `dataToTables(blobData, callDataTail)` | byte stream → `Tables` (decode → parse → generate) |
-| `tablesToData(tables)` | `Tables` → byte stream + callData tail (stitch → emit → encode; byte-identical to the source stream) |
-| `blobsToTables` / `tablesToBlobs` | the two composed end to end |
-| `messagesToTables` / `tablesToMessages` | same directions at the `BlobMessage[]` level |
+| `dataFromTables(tables)` | `Tables` → byte stream + callData tail (stitch → emit → encode; byte-identical to the source stream) |
+| `blobsToTables` / `blobsFromTables` | the two composed end to end |
+| `messagesToTables` / `messagesFromTables` | same directions at the `BlobMessage[]` level |
 
 `Tables` bundles the L1 batch artifacts, every L2 chain's units in execution order, and
-the sidecar — so `dataToTables` output feeds `tablesToData` directly and round-trips to
+the sidecar — so `dataToTables` output feeds `dataFromTables` directly and round-trips to
 the exact input bytes. Tables are derived with a zero callGas oracle (correct while
 deployments run `useGasLeft = false`; the observed-gas mode needs the harness's probe
 phase instead). Round-trip tests: `test/blob/BlobTranslator.t.sol`.
@@ -133,7 +133,7 @@ Rules the harness enforces:
 Covered message shapes: nested calls across L1/L2A/L2B in every direction, callbacks into
 the origin (reentrant tables on both sides), sibling repeats, `ReturnFail` at top level
 (entry runs → verifies → reverts) and nested (caught, `success = false` row),
-`StaticCall` reentrant (STATIC row) and top-level (pool entry with state-root pins,
+`StaticCall` reentrant (STATIC row) and top-level (pool entry with root pins,
 optionally carrying its own live-verified sub-reads),
 `Snapshot`/`Revert` (destination-side `revertNextNCalls`, protocol-level rollback observed
 via `execCount`), value transfer (L1 ether-delta invariant + L2 mint), `ChainOperation`s
@@ -186,7 +186,7 @@ assertions.
 
 DSL limits (beyond the v1 shape restrictions below): no
 `ChainOperation`s, and one `runDsl` per test (a second run would diverge from a
-fresh generator's genesis-derived state roots). Scenarios live in
+fresh generator's genesis-derived roots). Scenarios live in
 `test/blob/DslScenarios.t.sol`; parser rejection tests in
 `test/blob/DslParser.t.sol`.
 

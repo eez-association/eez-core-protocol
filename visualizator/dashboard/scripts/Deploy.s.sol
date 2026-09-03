@@ -202,7 +202,7 @@ contract Scenario1_L1 is Script {
             0 // sourceRollupId (MAINNET)
         );
 
-        bytes32 newState = keccak256("l2-state-after-increment");
+        bytes32 newRoot = keccak256("l2-state-after-increment");
 
         vm.startBroadcast();
 
@@ -210,7 +210,7 @@ contract Scenario1_L1 is Script {
         {
             StateDelta[] memory stateDeltas = new StateDelta[](1);
             stateDeltas[0] = StateDelta({
-                rollupId: 1, currentState: keccak256("l2-initial-state"), newState: newState, etherDelta: 0
+                rollupId: 1, currentRoot: keccak256("l2-initial-state"), newRoot: newRoot, etherDelta: 0
             });
 
             CrossChainCall[] memory calls = new CrossChainCall[](0);

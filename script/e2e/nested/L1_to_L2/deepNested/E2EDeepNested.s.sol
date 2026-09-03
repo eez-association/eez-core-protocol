@@ -6,7 +6,7 @@ import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {
-    StateUpdate,
+    RollupUpdate,
     L2ToL1Call,
     ExpectedL1ToL2Call,
     ExecutionEntry,
@@ -21,6 +21,7 @@ import {
 import {Counter, CounterAndProxy, NestedCaller} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -97,16 +98,21 @@ abstract contract DeepNestedActions {
         return crossChainCallHashL2Out(ncL2, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
-    function _l1Entries(address counterL2, address capL1, address ncL2, address alice)
+    function _l1Entries(
+        address counterL2,
+        address capL1,
+        address ncL2,
+        address alice
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-deep-nested"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-deep-nested"),
             etherDelta: 0
         });
 
@@ -145,7 +151,7 @@ abstract contract DeepNestedActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -156,7 +162,12 @@ abstract contract DeepNestedActions {
         });
     }
 
-    function _l2Entries(address counterL2, address capL1, address ncL2, address alice)
+    function _l2Entries(
+        address counterL2,
+        address capL1,
+        address ncL2,
+        address alice
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -235,7 +246,7 @@ contract DeployL2 is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL2 = new Counter();
-        console.log("COUNTER_L2=%s", address(counterL2));
+        output("COUNTER_L2", address(counterL2));
         vm.stopBroadcast();
     }
 }
@@ -250,8 +261,8 @@ contract Deploy is Script {
         vm.startBroadcast();
         address counterL2ProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, L2_ROLLUP_ID);
         CounterAndProxy cap = new CounterAndProxy(Counter(counterL2ProxyL1));
-        console.log("COUNTER_L2_PROXY_L1=%s", counterL2ProxyL1);
-        console.log("CAP_L1=%s", address(cap));
+        output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
+        output("CAP_L1", address(cap));
         vm.stopBroadcast();
     }
 }
@@ -266,8 +277,8 @@ contract DeployL2Nested is Script {
         vm.startBroadcast();
         address capProxyL2 = getOrCreateProxy(IEEZ(managerAddr), capL1Addr, MAINNET_ROLLUP_ID);
         NestedCaller nc = new NestedCaller(CounterAndProxy(capProxyL2));
-        console.log("CAP_PROXY_L2=%s", capProxyL2);
-        console.log("NESTED_CALLER_L2=%s", address(nc));
+        output("CAP_PROXY_L2", capProxyL2);
+        output("NESTED_CALLER_L2", address(nc));
         vm.stopBroadcast();
     }
 }
@@ -281,7 +292,7 @@ contract Deploy2 is Script {
 
         vm.startBroadcast();
         address ncProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), ncL2Addr, L2_ROLLUP_ID);
-        console.log("NC_PROXY_L1=%s", ncProxyL1);
+        output("NC_PROXY_L1", ncProxyL1);
         vm.stopBroadcast();
     }
 }
@@ -304,15 +315,7 @@ contract ExecuteL2 is Script, DeepNestedActions {
         vm.startBroadcast();
         address alice = msg.sender;
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                ncL2Addr,
-                0,
-                _callNestedData(),
-                alice,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL2Addr, capL1Addr, ncL2Addr, alice),
-                noL2StaticEntries()
-            );
+            .executeIncomingCrossChainCall(_l2Entries(counterL2Addr, capL1Addr, ncL2Addr, alice), noL2StaticEntries());
 
         console.log("done");
         console.log("counterL2=%s (expected 1)", Counter(counterL2Addr).counter());

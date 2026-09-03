@@ -18,8 +18,8 @@ export type NestedAction = {
 
 export type StateDelta = {
   rollupId: bigint;
-  currentState: `0x${string}`;
-  newState: `0x${string}`;
+  currentRoot: `0x${string}`;
+  newRoot: `0x${string}`;
   etherDelta: bigint;
 };
 

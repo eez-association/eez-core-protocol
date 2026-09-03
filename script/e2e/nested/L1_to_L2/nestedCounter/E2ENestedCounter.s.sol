@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntry as L2StaticExecutionEntry,
@@ -15,6 +15,7 @@ import {
 import {Counter, CounterAndProxy} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -91,16 +92,20 @@ abstract contract NestedActions {
         );
     }
 
-    function _l1Entries(address counterL1, address capL2, address alice)
+    function _l1Entries(
+        address counterL1,
+        address capL2,
+        address alice
+    )
         internal
         pure
         returns (ExecutionEntry[] memory entries)
     {
-        StateUpdate[] memory deltas = new StateUpdate[](1);
-        deltas[0] = StateUpdate({
+        RollupUpdate[] memory deltas = new RollupUpdate[](1);
+        deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: keccak256("l2-state-after-nested"),
+            currentRoot: keccak256("l2-initial-state"),
+            newRoot: keccak256("l2-state-after-nested"),
             etherDelta: 0
         });
 
@@ -125,7 +130,7 @@ abstract contract NestedActions {
 
         entries = new ExecutionEntry[](1);
         entries[0] = ExecutionEntry({
-            stateUpdates: deltas,
+            rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: calls,
@@ -140,7 +145,11 @@ abstract contract NestedActions {
     // executeIncomingCrossChainCall through the source proxy (alice on MAINNET, on L2) — bound
     // against the explicit params (callGas = 0); only the nested outgoing reentry can key on
     // observed gas (devnet runs `useGasLeft = false`).
-    function _l2Entries(address counterL1, address capL2, address alice)
+    function _l2Entries(
+        address counterL1,
+        address capL2,
+        address alice
+    )
         internal
         pure
         returns (L2ExecutionEntry[] memory entries)
@@ -204,7 +213,7 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
         Counter counterL1 = new Counter();
-        console.log("COUNTER_L1=%s", address(counterL1));
+        output("COUNTER_L1", address(counterL1));
         vm.stopBroadcast();
     }
 }
@@ -227,8 +236,8 @@ contract DeployL2 is Script {
         // capL2.incrementProxy() reentrant-calls counterL1 via the proxy.
         CounterAndProxy capL2 = new CounterAndProxy(Counter(counterL1ProxyL2));
 
-        console.log("COUNTER_L1_PROXY_L2=%s", counterL1ProxyL2);
-        console.log("COUNTER_AND_PROXY_L2=%s", address(capL2));
+        output("COUNTER_L1_PROXY_L2", counterL1ProxyL2);
+        output("COUNTER_AND_PROXY_L2", address(capL2));
         vm.stopBroadcast();
     }
 }
@@ -242,7 +251,7 @@ contract Deploy2 is Script {
 
         vm.startBroadcast();
         address capL2Proxy = getOrCreateProxy(IEEZ(rollupsAddr), capL2Addr, L2_ROLLUP_ID);
-        console.log("CAP_L2_PROXY=%s", capL2Proxy);
+        output("CAP_L2_PROXY", capL2Proxy);
         vm.stopBroadcast();
     }
 }
@@ -267,15 +276,7 @@ contract ExecuteL2 is Script, NestedActions {
         console.log("ExecuteL2: alice=%s capL2=%s counterL1=%s", alice, capL2Addr, counterL1Addr);
 
         EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                capL2Addr,
-                0,
-                abi.encodeWithSelector(CounterAndProxy.incrementProxy.selector),
-                alice,
-                MAINNET_ROLLUP_ID,
-                _l2Entries(counterL1Addr, capL2Addr, alice),
-                noL2StaticEntries()
-            );
+            .executeIncomingCrossChainCall(_l2Entries(counterL1Addr, capL2Addr, alice), noL2StaticEntries());
 
         console.log("done");
         console.log("capL2.counter=%s", CounterAndProxy(capL2Addr).counter());

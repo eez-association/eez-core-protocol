@@ -8,7 +8,7 @@ The `index.html` visualizer is a step-by-step execution replay with:
 - Scenario tabs (L1→L2, L2→L1, L2→L1→L2, L1→L2→L1)
 - A persistent **architecture SVG diagram** with L1/L2 lanes, nodes (contracts, proxies, EOAs, system), edges with arrows, and **active highlighting + glow** per step
 - **Side-by-side execution tables** (L1 / L2) showing entries being added (cyan glow) and consumed (red strikethrough)
-- **Contract state panels** tracking counter values and state root transitions
+- **Contract state panels** tracking counter values and root transitions
 - A **call flow strip** showing the chain of calls with arrow diagrams
 - **Expandable entry details**: full Action struct fields, next action, state deltas
 - Step-by-step playback with prev/next/play controls and keyboard nav

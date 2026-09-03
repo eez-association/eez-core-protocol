@@ -30,7 +30,7 @@ contract BlobTranslatorTest is Test {
     }
 
     /// @dev Runs the full 4-leg chain on `msgs` and returns the derived tables:
-    ///      encode → pack → unpack → dataToTables → tablesToData (byte-identical)
+    ///      encode → pack → unpack → dataToTables → dataFromTables (byte-identical)
     ///      → pack (blob-identical).
     function _roundTrip(BlobMessage[] memory msgs) internal returns (BlobTranslator.Tables memory t) {
         (bytes memory blobData, bytes memory tail) = BlobCodec.encode(msgs);
@@ -47,13 +47,13 @@ contract BlobTranslatorTest is Test {
         t = tr.dataToTables(unpacked, tail);
 
         // tables → data: byte-identical to the original unpadded stream.
-        (bytes memory blobData2, bytes memory tail2) = tr.tablesToData(t);
+        (bytes memory blobData2, bytes memory tail2) = tr.dataFromTables(t);
         assertEq(blobData2, blobData, "table round trip: blob bytes");
         assertEq(tail2, tail, "table round trip: callData bytes");
 
         // data → blob: identical blobs.
-        (bytes32[][] memory blobs2, bytes memory tail3) = tr.tablesToBlobs(t);
-        assertEq(tail3, tail, "tablesToBlobs tail");
+        (bytes32[][] memory blobs2, bytes memory tail3) = tr.blobsFromTables(t);
+        assertEq(tail3, tail, "blobsFromTables tail");
         assertEq(keccak256(abi.encode(blobs2)), keccak256(abi.encode(blobs)), "repacked blobs mismatch");
     }
 

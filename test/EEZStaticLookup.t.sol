@@ -4,11 +4,11 @@ pragma solidity ^0.8.28;
 import {Base} from "./Base.t.sol";
 import {
     ExecutionEntry,
-    StateUpdate,
+    RollupUpdate,
     ExpectedL1ToL2Call,
     L2ToL1Call,
     StaticExecutionEntry,
-    ExpectedStateRootPerRollup
+    ExpectedRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 
@@ -61,8 +61,13 @@ contract EEZStaticLookupTest is Base {
 
     /// @notice Minimal top-level static lookup pinned to `rid`'s live root.
     /// @dev Match key: `proxyEntryHash` (the static cch) + `destinationRollupId` + every
-    ///      `expectedStateRoots` pin live. `success == false` resolves by reverting with `ret`.
-    function _staticEntry(uint256 rid, bytes32 hash, bool success, bytes memory ret)
+    ///      `expectedRoots` pin live. `success == false` resolves by reverting with `ret`.
+    function _staticEntry(
+        uint256 rid,
+        bytes32 hash,
+        bool success,
+        bytes memory ret
+    )
         internal
         view
         returns (StaticExecutionEntry memory lc)
@@ -73,9 +78,9 @@ contract EEZStaticLookupTest is Base {
         lc.success = success;
         lc.l2ToL1Calls = _emptyCalls();
         lc.rollingHash = bytes32(0);
-        ExpectedStateRootPerRollup[] memory pins = new ExpectedStateRootPerRollup[](1);
-        pins[0] = ExpectedStateRootPerRollup({rollupId: uint64(rid), stateRoot: _getRollupState(rid)});
-        lc.expectedStateRoots = pins;
+        ExpectedRootPerRollup[] memory pins = new ExpectedRootPerRollup[](1);
+        pins[0] = ExpectedRootPerRollup({rollupId: uint64(rid), root: _getRollupState(rid)});
+        lc.expectedRoots = pins;
     }
 
     // ──────────────────────────────────────────────
@@ -239,6 +244,28 @@ contract EEZStaticLookupTest is Base {
         rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
+    /// @notice A static sub-call carrying a `revertNextNCalls` span reverts `StaticCallWithRevertSpan`
+    ///         — static resolution has no state to roll back.
+    function test_StaticLookup_SubCallWithRevertSpanReverts() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
+
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry memory lc = _staticEntry(r.id, h, true, "");
+        L2ToL1Call memory sub = _staticCall(address(target), uint64(r.id), address(target), cd);
+        sub.revertNextNCalls = 1;
+        lc.l2ToL1Calls = _oneCall(sub);
+        lookups[0] = lc;
+        _stdBatchPost(r, lookups);
+
+        vm.prank(proxyAddr);
+        vm.expectRevert(EEZBase.StaticCallWithRevertSpan.selector);
+        rollups.staticCrossChainCall(sourceAddr, cd);
+    }
+
     // ──────────────────────────────────────────────
     //  Reentrant static read (inside execution)
     // ──────────────────────────────────────────────
@@ -262,7 +289,7 @@ contract EEZStaticLookupTest is Base {
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
         bytes memory outerData = abi.encodeCall(StaticReader.readUint, (innerProxy, innerData));
 
-        StateUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
+        RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
 
         // Rolling hash: entry seed → CALL_BEGIN(outer call) → [static read pinned here, hash unchanged]
         //   → CALL_END(true, abi.encode(77)). `hAtFire` is `_rollingHash` when the static read fires.

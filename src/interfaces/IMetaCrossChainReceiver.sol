@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 /// @title IMetaCrossChainReceiver
 /// @notice Callback invoked on postAndVerifyBatch's msg.sender (when it has code) after the leading

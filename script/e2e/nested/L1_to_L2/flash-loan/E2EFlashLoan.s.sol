@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
-import {StateUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
+import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -21,6 +21,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {_deployBridge} from "../../../../DeployBridge.s.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
+    output,
     crossChainCallHash,
     crossChainCallHashL2Out,
     expectedL1toL2Hash,
@@ -102,7 +103,16 @@ abstract contract FlashLoanActions {
     function _fwdReceiveData(FlashLoanAddrs memory a) internal pure returns (bytes memory) {
         return abi.encodeCall(
             Bridge.receiveTokens,
-            (a.token, MAINNET_ROLLUP_ID, a.executorL2, AMOUNT, TOKEN_NAME, TOKEN_SYMBOL, TOKEN_DECIMALS, MAINNET_ROLLUP_ID)
+            (
+                a.token,
+                MAINNET_ROLLUP_ID,
+                a.executorL2,
+                AMOUNT,
+                TOKEN_NAME,
+                TOKEN_SYMBOL,
+                TOKEN_DECIMALS,
+                MAINNET_ROLLUP_ID
+            )
         );
     }
 
@@ -126,31 +136,23 @@ abstract contract FlashLoanActions {
 
     /// Entry-0 key on both sides: bridgeL1 → bridgeL2 (same address) forward receiveTokens.
     function _fwdHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.bridge, MAINNET_ROLLUP_ID, a.bridge, L2_ROLLUP_ID, 0, _fwdReceiveData(a)
-        );
+        return crossChainCallHash(false, a.bridge, MAINNET_ROLLUP_ID, a.bridge, L2_ROLLUP_ID, 0, _fwdReceiveData(a));
     }
 
     /// Entry-1 key on both sides: executorL1 → executorL2 claimAndBridgeBack.
     function _claimHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, L2_ROLLUP_ID, 0, _claimData(a)
-        );
+        return crossChainCallHash(false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, L2_ROLLUP_ID, 0, _claimData(a));
     }
 
     /// Return leg as folded on L1 (entry 1's top-level l2ToL1Call): bridgeL2 → bridgeL1.
     function _retHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(
-            false, a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a)
-        );
+        return crossChainCallHash(false, a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     /// Return leg as folded on L2 (the call LEAVES the L2, so it keys with the
     /// L2-outgoing hash; same digest under useGasLeft = false).
     function _retHashL2Out(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(
-            a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a)
-        );
+        return crossChainCallHashL2Out(a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     // ── Tables ──
@@ -159,20 +161,17 @@ abstract contract FlashLoanActions {
         bytes32 rootAfterFwd = keccak256("l2-state-after-flash-loan-fwd");
 
         // Entry 0: forward bridge leg — no L1-side calls, seed-only rolling hash.
-        StateUpdate[] memory fwdDeltas = new StateUpdate[](1);
-        fwdDeltas[0] = StateUpdate({
-            rollupId: L2_ROLLUP_ID,
-            currentState: keccak256("l2-initial-state"),
-            newState: rootAfterFwd,
-            etherDelta: 0
+        RollupUpdate[] memory fwdDeltas = new RollupUpdate[](1);
+        fwdDeltas[0] = RollupUpdate({
+            rollupId: L2_ROLLUP_ID, currentRoot: keccak256("l2-initial-state"), newRoot: rootAfterFwd, etherDelta: 0
         });
 
         // Entry 1: claim leg — one top-level l2ToL1Call: the return bridge leg runs on L1.
-        StateUpdate[] memory claimDeltas = new StateUpdate[](1);
-        claimDeltas[0] = StateUpdate({
+        RollupUpdate[] memory claimDeltas = new RollupUpdate[](1);
+        claimDeltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
-            currentState: rootAfterFwd,
-            newState: keccak256("l2-state-after-flash-loan-claim"),
+            currentRoot: rootAfterFwd,
+            newRoot: keccak256("l2-state-after-flash-loan-claim"),
             etherDelta: 0
         });
 
@@ -194,7 +193,7 @@ abstract contract FlashLoanActions {
 
         entries = new ExecutionEntry[](2);
         entries[0] = ExecutionEntry({
-            stateUpdates: fwdDeltas,
+            rollupUpdates: fwdDeltas,
             proxyEntryHash: _fwdHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: noCalls(),
@@ -204,7 +203,7 @@ abstract contract FlashLoanActions {
             returnData: ""
         });
         entries[1] = ExecutionEntry({
-            stateUpdates: claimDeltas,
+            rollupUpdates: claimDeltas,
             proxyEntryHash: _claimHash(a),
             destinationRollupId: L2_ROLLUP_ID,
             l2ToL1Calls: claimCalls,
@@ -300,7 +299,7 @@ abstract contract FlashLoanEnv is Script {
             token: vm.envAddress("TOKEN"),
             executorL1: vm.envAddress("EXECUTOR_L1"),
             executorL2: vm.envAddress("EXECUTOR_L2"),
-            wrappedTokenL2: vm.envAddress("WRAPPED_TOKEN_L2"),
+            wrappedTokenL2: vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2"),
             nftL2: vm.envAddress("FLASH_LOANERS_NFT")
         });
     }
@@ -329,15 +328,15 @@ contract Deploy is Script {
         address bridge = _deployBridge(salt);
         Bridge(bridge).initialize(rollupsAddr, MAINNET_ROLLUP_ID, msg.sender);
 
-        console.log("TOKEN=%s", address(token));
-        console.log("BRIDGE=%s", bridge);
-        console.log("BRIDGE_SALT=%s", vm.toString(salt));
+        output("TOKEN", address(token));
+        output("BRIDGE", bridge);
+        output("BRIDGE_SALT", salt);
         vm.stopBroadcast();
     }
 }
 
 /// Env: MANAGER_L2, TOKEN, BRIDGE, BRIDGE_SALT
-/// Outputs: EXECUTOR_L2, WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
+/// Outputs: EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2 (no code until the forward leg), FLASH_LOANERS_NFT
 contract DeployL2 is Script, FlashLoanActions {
     function run() external {
         address managerAddr = vm.envAddress("MANAGER_L2");
@@ -369,14 +368,14 @@ contract DeployL2 is Script, FlashLoanActions {
 
         FlashLoanersNFT nft = new FlashLoanersNFT(wrappedTokenL2);
 
-        console.log("EXECUTOR_L2=%s", address(executorL2));
-        console.log("WRAPPED_TOKEN_L2=%s", wrappedTokenL2);
-        console.log("FLASH_LOANERS_NFT=%s", address(nft));
+        output("EXECUTOR_L2", address(executorL2));
+        output("PREDICTED_WRAPPED_TOKEN_L2", wrappedTokenL2);
+        output("FLASH_LOANERS_NFT", address(nft));
         vm.stopBroadcast();
     }
 }
 
-/// Env: ROLLUPS, TOKEN, BRIDGE, EXECUTOR_L2, WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
+/// Env: ROLLUPS, TOKEN, BRIDGE, EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
 /// Outputs: FLASH_LOAN_POOL, EXECUTOR_L1
 contract Deploy2 is Script, FlashLoanActions {
     function run() external {
@@ -384,7 +383,7 @@ contract Deploy2 is Script, FlashLoanActions {
         address tokenAddr = vm.envAddress("TOKEN");
         address bridgeAddr = vm.envAddress("BRIDGE");
         address executorL2Addr = vm.envAddress("EXECUTOR_L2");
-        address wrappedTokenL2 = vm.envAddress("WRAPPED_TOKEN_L2");
+        address wrappedTokenL2 = vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2");
         address nftAddr = vm.envAddress("FLASH_LOANERS_NFT");
 
         vm.startBroadcast();
@@ -406,8 +405,8 @@ contract Deploy2 is Script, FlashLoanActions {
             tokenAddr
         );
 
-        console.log("FLASH_LOAN_POOL=%s", address(pool));
-        console.log("EXECUTOR_L1=%s", address(executorL1));
+        output("FLASH_LOAN_POOL", address(pool));
+        output("EXECUTOR_L1", address(executorL1));
         vm.stopBroadcast();
     }
 }
@@ -431,18 +430,12 @@ contract ExecuteL2 is FlashLoanEnv, FlashLoanActions {
 
         // Delivery 1: forward receiveTokens — deploys WrappedToken, mints 10k to executorL2.
         single[0] = entries[0];
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                a.bridge, 0, _fwdReceiveData(a), a.bridge, MAINNET_ROLLUP_ID, single, noL2StaticEntries()
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(single, noL2StaticEntries());
 
         // Delivery 2: claimAndBridgeBack — claims the NFT, burns the wrapped 10k, and its
         // outgoing return leg is matched against expectedOutgoingCalls[0].
         single[0] = entries[1];
-        EEZL2(managerAddr)
-            .executeIncomingCrossChainCall(
-                a.executorL2, 0, _claimData(a), a.executorL1, MAINNET_ROLLUP_ID, single, noL2StaticEntries()
-            );
+        EEZL2(managerAddr).executeIncomingCrossChainCall(single, noL2StaticEntries());
 
         console.log("done");
         console.log("nft claimed by executorL2=%s", FlashLoanersNFT(a.nftL2).hasClaimed(a.executorL2));
@@ -495,7 +488,7 @@ contract ComputeExpected is ComputeExpectedBase, FlashLoanEnv, FlashLoanActions 
         if (addr == vm.envAddress("TOKEN")) return "TestToken";
         if (addr == vm.envAddress("EXECUTOR_L1")) return "ExecutorL1";
         if (addr == vm.envAddress("EXECUTOR_L2")) return "ExecutorL2";
-        if (addr == vm.envAddress("WRAPPED_TOKEN_L2")) return "WrappedToken(L2)";
+        if (addr == vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2")) return "WrappedToken(L2)";
         if (addr == vm.envAddress("FLASH_LOANERS_NFT")) return "FlashLoanersNFT";
         return _shortAddr(addr);
     }

@@ -23,8 +23,8 @@ const stateDeltaTuple = {
   type: "tuple" as const,
   components: [
     { name: "rollupId", type: "uint256" },
-    { name: "currentState", type: "bytes32" },
-    { name: "newState", type: "bytes32" },
+    { name: "currentRoot", type: "bytes32" },
+    { name: "newRoot", type: "bytes32" },
     { name: "etherDelta", type: "int256" },
   ],
 } as const;

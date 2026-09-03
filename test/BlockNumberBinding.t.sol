@@ -45,7 +45,10 @@ contract BlockNumberBindingTest is Base {
     /// @notice Mirrors `_verifyProofSystemBatch`'s two-stage publicInputsHash for the
     ///         single-PS / single-rollup shape built by `_batchWithBlockNumber`. `customData`
     ///         is the blob `Rollup.getCustomData` returns for the bound block.
-    function _expectedPublicInputsHash(ProofSystemBatchPerVerificationEntries memory batch, bytes memory customData)
+    function _expectedPublicInputsHash(
+        ProofSystemBatchPerVerificationEntries memory batch,
+        bytes memory customData
+    )
         internal
         view
         returns (bytes32)

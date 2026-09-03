@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  IEEZL2 — L2 (EEZL2) execution structs.
+//  IEEZL2 — L2 (EEZL2) execution structs. The `IEEZ` interface itself (implemented
+//  by both EEZ contracts) and the L1 counterpart structs live in `IEEZ.sol`.
 //
 //  L2 uses SELF-RELATIVE directional names, mirroring L1's directional style
 //  (L1: `l2ToL1Calls` / `expectedL1ToL2Calls`). An L2's cross-chain counterparty
@@ -16,9 +17,9 @@ pragma solidity ^0.8.28;
 //      reentrant cross-chain call fired FROM this L2 toward a remote rollup
 //      during execution (forward-scanned by the `_lastOutgoingCallConsumed` cursor).
 //
-//  Deliberately LEANER than L1's structs: L2 has a single rollup, no state deltas,
+//  Deliberately LEANER than L1's structs: L2 has a single rollup, no rollup updates,
 //  and no per-rollup queue interleaving, so the L1-only fields are dropped entirely
-//  (no `StateUpdate`, `destinationRollupId`, or `ExpectedStateRootPerRollup`). L2
+//  (no `RollupUpdate`, `destinationRollupId`, or `ExpectedRootPerRollup`). L2
 //  never hashes a whole entry/static entry, so its layout is free to diverge from L1's.
 //
 //  Casing: types/events/errors are PascalCase (`CrossChainCall`,
@@ -29,7 +30,7 @@ pragma solidity ^0.8.28;
 /// @notice A cross-chain call executed on this L2 (sourced from a remote rollup).
 /// @dev Field layout is identical to L1's `L2ToL1Call`.
 struct CrossChainCall {
-    uint16 revertNextNCalls; // number of consecutive calls (this one included) to force-revert; 0 = none
+    uint16 revertNextNCalls; // number of consecutive calls (this one included) to revert after being executed; 0 = none. Used when the revert is triggered on the other chain (the calls ran, but were rolled back on the source's network)
     bool isStatic; // whether to execute via STATICCALL (read-only, no value)
     uint64 gas; // gas limit for the target call; 0 = forward all remaining gas
     address sourceAddress; // originating address on the source rollup
@@ -39,45 +40,43 @@ struct CrossChainCall {
     bytes data; // calldata to execute on the target
 }
 
-/// @notice Pre-computed result for a reentrant cross-chain call (outgoing, leaving this L2) fired
-///         during execution. One unified `expectedOutgoingCalls[]` table holds every kind —
-///         plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`!success`) — each
-///         content-addressed by a single `expectedOutgoingHash == keccak256(crossChainCallHash,
-///         expectedRollingHash)`. `crossChainCallHash` folds `isStatic` (a static read keys
-///         distinctly from a state-changing call) plus the routed rollup, so neither needs its own
-///         field; `expectedRollingHash` is `_rollingHash` at the instant the call fires, which
-///         uniquely pins the execution point (the hash folds every prior call / nesting boundary).
-/// @dev Every kind carries its OWN `incomingCalls[]` sub-array, run to completion (no shared
-///      partition / `callCount`). Resolution:
-///        - SUCCESS  (call key, `success`): `_resolveNestedReentrant` runs the sub-array as a
-///          COMMITTING sub-execution, folding into the host's continuous hash between NESTED_BEGIN/END.
-///        - STATIC   (static key): `staticCrossChainCall` runs the sub-array via STATICCALL (untagged
-///          hash vs `revertedOrStaticRollingHash`) and returns `returnData` (reverts with it if `!success`).
-///        - REVERTED (call key, `!success`): `_resolveNestedReentrant` runs the sub-array as a
-///          mini-entry (tagged hash vs `revertedOrStaticRollingHash`) then reverts.
-/// @dev A reverted sub-execution reuses the host table for its own reentrant calls (Solidity forbids
-///      recursive structs); the live `_rollingHash` folded into each key keeps the contexts distinct.
+/// @notice The pre-computed result of a reentrant cross-chain call fired from this L2 toward another
+///         rollup during execution — resolved locally against the current execution entry.
+///         `expectedOutgoingHash` is `keccak256(crossChainCallHash, _rollingHash)`: the call hash
+///         folds the whole call's params (`isStatic`, target rollup, ...), and the `_rollingHash`
+///         at the fire point pins the exact execution position.
+/// @dev Resolving a match runs its `incomingCalls[]` sub-calls:
+///        - successful call: the sub-calls fold into the entry's rolling hash, wrapped in
+///          NESTED_BEGIN / NESTED_END, and `returnData` is returned;
+///        - static read: the sub-calls run via STATICCALL and are checked against
+///          `revertedOrStaticRollingHash`, then `returnData` is returned (or reverted with, if `!success`);
+///        - reverted call: the sub-calls run, are checked against `revertedOrStaticRollingHash`,
+///          then everything reverts with `returnData`, rolling their state back.
 struct ExpectedOutgoingCrossChainCall {
     bytes32 expectedOutgoingHash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
     CrossChainCall[] incomingCalls; // the reentrant frame's own sub-calls, run to completion
-    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls; checked only for STATIC / REVERTED kinds
+    bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls for static reads / reverted calls; must be bytes32(0) for a successful call (checked on-chain)
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
 }
 
 /// @notice A pre-computed TOP-LEVEL execution entry. When `success` is true the top-level call returns
 ///         `returnData` (`executeCrossChainCall`); when false the entry is run, verified, then reverted with
-///         `returnData` so all of its state effects roll back (the caller may try/catch). Reverting REENTRANT
-///         calls are `success == false` `ExpectedOutgoingCrossChainCall`s and a top-level reverting read is a
-///         `StaticExecutionEntry`. A `bytes32(0)` `proxyEntryHash` is unreachable on L2 — there is no zero-hash
-///         consumption path (`executeL2Txs` is L1-only).
+///         `returnData` so all of its state effects roll back (the caller may try/catch). A top-level
+///         STATICCALL is a `StaticExecutionEntry` instead. A `bytes32(0)` `proxyEntryHash` is unreachable
+///         on L2 — there is no zero-hash consumption path (`executeL2Txs` is L1-only).
+/// @dev `expectedOutgoingCalls[]` is the entry's SINGLE reentrant table: every reentrant call fired
+///      anywhere during the entry resolves against it — including one fired by a sub-call inside a
+///      reentrant frame, since an `ExpectedOutgoingCrossChainCall` cannot carry a child table of
+///      its own (Solidity forbids recursive structs). Calls from different nesting levels cannot collide:
+///      each call's key folds the `_rollingHash` at its fire point, which is unique to that execution position.
 struct ExecutionEntry {
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); never bytes32(0) on L2
     CrossChainCall[] incomingCalls; // incoming calls to be executed, run in order; reentrant frames (nested outgoing calls) carry their own sub-arrays
-    ExpectedOutgoingCrossChainCall[] expectedOutgoingCalls; // expected outgoing calls, each of those opens a reentrant frame
+    ExpectedOutgoingCrossChainCall[] expectedOutgoingCalls; // pre-computed results for reentrant outgoing calls (successful, static, and reverted — one table)
     bytes32 rollingHash; // expected rolling hash, which contains all calls, their return/revert values and reentrant frames
     bool success; // indicates whether the entry returns or reverts
-    bytes returnData; // pre-computed top-level return value (revert payload when !success)
+    bytes returnData; // return data of the whole execution (revert payload when !success)
 }
 
 /// @notice A pre-computed TOP-LEVEL static entry: a read-only cross-chain call resolved via

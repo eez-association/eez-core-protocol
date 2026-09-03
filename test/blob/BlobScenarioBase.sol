@@ -6,7 +6,7 @@ import {
     EEZ,
     ProofSystemBatchPerVerificationEntries,
     RollupIdWithProofSystems,
-    ExpectedStateRootPerRollup
+    ExpectedRootPerRollup
 } from "../../src/EEZ.sol";
 import {EEZL2} from "../../src/L2/EEZL2.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
@@ -49,7 +49,7 @@ import {
 //    5. EXECUTION the derived tables actually run on the real EEZ / EEZL2
 //                 managers: batch posted and consumed on L1, tables loaded and
 //                 driven on every L2, every return value asserted in-flight by
-//                 the scripted actors, final state roots checked
+//                 the scripted actors, final roots checked
 //
 //  Setup contract: `_setUpChains(n)` registers L2 chains with ids 1..n (chain
 //  id 0 is L1); scenario addresses must be `newActor(chainId)` instances, and a
@@ -263,7 +263,7 @@ abstract contract BlobScenarioBase is Test {
 
         for (uint256 i = 0; i < rids.length; i++) {
             (, bytes32 liveRoot,) = rollups.rollups(rids[i]);
-            assertEq(liveRoot, gen.finalRoot(rids[i]), "final L1 state root");
+            assertEq(liveRoot, gen.finalRoot(rids[i]), "final L1 root");
         }
     }
 
@@ -342,7 +342,12 @@ abstract contract BlobScenarioBase is Test {
 
     /// @notice Translates a sibling run into actor steps: one proxy call per child,
     ///         Snapshot regions as reverting sub-context wrappers.
-    function _buildSteps(ScenarioStore store, uint256[] memory siblings, uint64 execChain, uint256 depth)
+    function _buildSteps(
+        ScenarioStore store,
+        uint256[] memory siblings,
+        uint64 execChain,
+        uint256 depth
+    )
         internal
         view
         returns (ScriptedActor.Step[] memory steps)
@@ -387,7 +392,11 @@ abstract contract BlobScenarioBase is Test {
 
     /// @dev Static sub-read steps for a read's live evaluation: one static proxy read
     ///      per child, performed on the chain the parent read executes on.
-    function _buildStaticSteps(ScenarioStore store, uint256[] memory children, uint64 execChain)
+    function _buildStaticSteps(
+        ScenarioStore store,
+        uint256[] memory children,
+        uint64 execChain
+    )
         internal
         view
         returns (ScriptedActor.Step[] memory steps)
@@ -446,13 +455,13 @@ abstract contract BlobScenarioBase is Test {
         uint64[] memory rids = new uint64[](l2ChainCount);
         uint256 nR = 0;
         for (uint256 i = 0; i < entries.length; i++) {
-            for (uint256 d = 0; d < entries[i].stateUpdates.length; d++) {
-                nR = _addRid(rids, nR, entries[i].stateUpdates[d].rollupId);
+            for (uint256 d = 0; d < entries[i].rollupUpdates.length; d++) {
+                nR = _addRid(rids, nR, entries[i].rollupUpdates[d].rollupId);
             }
         }
         for (uint256 i = 0; i < statics.length; i++) {
-            for (uint256 p = 0; p < statics[i].expectedStateRoots.length; p++) {
-                nR = _addRid(rids, nR, statics[i].expectedStateRoots[p].rollupId);
+            for (uint256 p = 0; p < statics[i].expectedRoots.length; p++) {
+                nR = _addRid(rids, nR, statics[i].expectedRoots[p].rollupId);
             }
         }
 
@@ -469,7 +478,7 @@ abstract contract BlobScenarioBase is Test {
 
         rollups.postAndVerifyBatch(
             ProofSystemBatchPerVerificationEntries({
-                expectedStateRootPerRollup: new ExpectedStateRootPerRollup[](0),
+                expectedRootPerRollup: new ExpectedRootPerRollup[](0),
                 entries: entries,
                 staticEntries: statics,
                 immediateEntryCount: (nE > 0 && entries[0].proxyEntryHash == bytes32(0)) ? 1 : 0,
@@ -537,9 +546,7 @@ abstract contract BlobScenarioBase is Test {
             // Inbound delivery: the system atomically loads + drives entries[0].
             CallNode memory n = store.getNode(tag.inboundNodeId);
             vm.prank(SYSTEM_ADDRESS);
-            try manager.executeIncomingCrossChainCall{
-                value: n.value
-            }(n.toAddress, n.value, n.data, n.fromAddress, n.fromChain, entries, statics) returns (bytes memory ret) {
+            try manager.executeIncomingCrossChainCall{value: n.value}(entries, statics) returns (bytes memory ret) {
                 assertTrue(n.success, "inbound call should have reverted");
                 assertEq(ret, n.returnData, "inbound return data");
             } catch (bytes memory err) {
@@ -631,7 +638,12 @@ abstract contract BlobScenarioBase is Test {
         }
     }
 
-    function _fillDepths(ScenarioStore store, uint256[] memory siblings, uint256 d, uint256[] memory depths)
+    function _fillDepths(
+        ScenarioStore store,
+        uint256[] memory siblings,
+        uint256 d,
+        uint256[] memory depths
+    )
         internal
         view
     {

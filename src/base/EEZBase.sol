@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.34;
 
-import {IEEZ, ProxyInfo, StateUpdate} from "../interfaces/IEEZ.sol";
+import {IEEZ, ProxyInfo, RollupUpdate} from "../interfaces/IEEZ.sol";
 import {CrossChainProxy} from "./CrossChainProxy.sol";
 
 /// @title EEZBase
@@ -53,6 +53,16 @@ abstract contract EEZBase is IEEZ {
     uint64 internal constant ZERO_CALL_GAS = 0;
 
     // ──────────────────────────────────────────────
+    //  Immutables
+    // ──────────────────────────────────────────────
+
+    /// @notice Hash of the CrossChainProxy creation code (constructor arg included) used in the
+    ///         CREATE2 address derivation. Both operands are fixed at deployment, so it is
+    ///         computed once in the constructor instead of re-hashing the ~1.4 KB creation code
+    ///         per derivation.
+    bytes32 internal immutable PROXY_INIT_CODE_HASH;
+
+    // ──────────────────────────────────────────────
     //  Storage shared with children
     // ──────────────────────────────────────────────
 
@@ -71,9 +81,6 @@ abstract contract EEZBase is IEEZ {
     ///      `verificationByRollup[_currentEntryRollupId].entryQueue`. L2 always indexes `entries`.
     ///      Both meanings are consistent — the child decides where the cursor points.
     uint256 transient _currentEntryIndex;
-
-    // Sub-frame pointers are NOT shared here: L1 no longer needs them (it passes
-    // the active call array to `_processNCalls` by `memory`), so they live in `EEZL2` only.
 
     // ──────────────────────────────────────────────
     //  Events
@@ -100,7 +107,7 @@ abstract contract EEZBase is IEEZ {
     ///         L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
     error NotSelf();
 
-    /// @notice Error when no matching execution entry exists for the action hash
+    /// @notice Error when no matching execution entry exists for the call hash
     error ExecutionNotFound();
 
     /// @notice Error when the computed rolling hash doesn't match the entry's `rollingHash`
@@ -134,12 +141,31 @@ abstract contract EEZBase is IEEZ {
     ///      state-changing call execute read-only undetected.
     error NonStaticSubCall();
 
+    /// @notice Error when a static-resolution sub-call carries a `revertNextNCalls` span — there is
+    ///         no state to roll back. Defensive check of a prover constraint.
+    error StaticCallWithRevertSpan();
+
+    /// @notice Error when a SUCCESS row of the unified reentrant table carries a non-zero
+    ///         `revertedOrStaticRollingHash` — the field is only read on the STATIC / REVERTED
+    ///         paths. Defensive check of a prover constraint.
+    error SuccessRowWithRevertedOrStaticHash();
+
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own
     ///      `ROLLUP_ID`. Enforced in `_createCrossChainProxyInternal`, so it also blocks the
     ///      auto-creation path during execution, not just the external entry point.
     error SameNetworkProxy(uint64 rollupId);
+
+    // ──────────────────────────────────────────────
+    //  Constructor
+    // ──────────────────────────────────────────────
+
+    constructor() {
+        // Every proxy is deployed with the same creation code
+        PROXY_INIT_CODE_HASH =
+            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
+    }
 
     // ──────────────────────────────────────────────
     //  Proxy creation
@@ -158,7 +184,10 @@ abstract contract EEZBase is IEEZ {
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
-    function _createCrossChainProxyInternal(address originalAddress, uint64 originalRollupId)
+    function _createCrossChainProxyInternal(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         internal
         returns (address proxy)
     {
@@ -173,15 +202,19 @@ abstract contract EEZBase is IEEZ {
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
-    function computeCrossChainProxyAddress(address originalAddress, uint64 originalRollupId)
+    function computeCrossChainProxyAddress(
+        address originalAddress,
+        uint64 originalRollupId
+    )
         public
         view
         returns (address)
     {
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        bytes32 bytecodeHash =
-            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
-        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
+        return
+            address(
+                uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, PROXY_INIT_CODE_HASH))))
+            );
     }
 
     // ──────────────────────────────────────────────
@@ -243,7 +276,10 @@ abstract contract EEZBase is IEEZ {
     ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the
     ///         live `_rollingHash` at the instant it fires. One comparison replaces the old
     ///         (hash, rollingHash, isStatic) triple.
-    function _computeExpectedL1toL2Hash(bytes32 crossChainCallHash, bytes32 rollingHash)
+    function _computeExpectedL1toL2Hash(
+        bytes32 crossChainCallHash,
+        bytes32 rollingHash
+    )
         internal
         pure
         returns (bytes32)
@@ -256,12 +292,11 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
     //
     // The entry-level `_rollingHash` accumulator is updated at five event points during
-    // entry execution: at the start and end of each top-level call, at the start and end of
+    // entry execution: at the start and end of each executed call, at the start and end of
     // each reentrant frame, and when a reentrant call finds no matching row. Each event is
     // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
     // so the same set of inputs can't collide across event types. The final value is checked
-    // against `entry.rollingHash` at the end of execution. See `docs/CORE_PROTOCOL_SPEC.md`
-    // §E for the full specification.
+    // against `entry.rollingHash` at the end of execution.
     //
     // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
     // prior value), so order, count, and nesting are already bound by the chain + the tags. An
@@ -271,31 +306,31 @@ abstract contract EEZBase is IEEZ {
     //
     // Static-call sub-hashes (`_rollingHashStaticResult`) use a simpler, untagged formula
     // because they're verified against `StaticExecutionEntry.rollingHash`, a separate accumulator
-    // whose surrounding static-entry key already pins the entry/call/nesting context. See spec §E.2.
+    // whose surrounding static-entry key already pins the entry/call/nesting context.
     //
     // These tags are protocol constants — a call executed on either chain MUST hash the same
     // way for the proof, so the "nested" wording here is the neutral rolling-hash frame
     // concept, NOT a direction (the directional naming lives in the per-side children).
 
     /// @notice Initializes `_rollingHash` to an entry's BEGIN seed — the ordered
-    ///         `(rollupId, currentState)` state context closed with the entry's identity
+    ///         `(rollupId, currentRoot)` state context closed with the entry's identity
     ///         (`proxyEntryHash` == its crossChainCallHash) — so the hash binds the entry's STARTING
     ///         STATE + identity, not just call results (nested frames inherit it transitively).
-    /// @dev The one rolling-hash helper that names a per-side struct (L1 `StateUpdate`); L2 has no
-    ///      state deltas, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
-    ///      an empty delta prefix. Deltas are strictly-increasing-by-rollupId, so the fold is
+    /// @dev The one rolling-hash helper that names a per-side struct (L1 `RollupUpdate`); L2 has no
+    ///      rollup updates, so it seeds with its own `EEZL2._seedRollingHash` — the same formula with
+    ///      an empty update prefix. Updates are strictly-increasing-by-rollupId, so the fold is
     ///      deterministic.
-    ///   seed         = keccak(…keccak(0, rollupId_1, currentState_1)…, rollupId_n, currentState_n)
+    ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
-    function _rollingHashEntryBegin(StateUpdate[] memory deltas, bytes32 proxyEntryHash) internal {
+    function _rollingHashEntryBegin(RollupUpdate[] memory rollupUpdates, bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
 
-        bytes32 _rollupStatesHash;
-        for (uint256 i = 0; i < deltas.length; i++) {
-            _rollupStatesHash =
-                keccak256(abi.encodePacked(_rollupStatesHash, deltas[i].rollupId, deltas[i].currentState));
+        bytes32 _rollupRootsHash;
+        for (uint256 i = 0; i < rollupUpdates.length; i++) {
+            _rollupRootsHash =
+                keccak256(abi.encodePacked(_rollupRootsHash, rollupUpdates[i].rollupId, rollupUpdates[i].currentRoot));
         }
-        _rollingHash = keccak256(abi.encodePacked(_rollupStatesHash, proxyEntryHash));
+        _rollingHash = keccak256(abi.encodePacked(_rollupRootsHash, proxyEntryHash));
     }
 
     /// @notice Folds a CALL_BEGIN event into `_rollingHash`, binding the call's IDENTITY
@@ -335,7 +370,8 @@ abstract contract EEZBase is IEEZ {
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
     ///         `_rollingHash` because static sub-calls are verified against
     ///         `StaticExecutionEntry.rollingHash`, a separate per-static-entry accumulator.
-    ///          Is much less constrained since static calls do not have state race conditions
+    /// @dev The schema is untagged — the surrounding static-entry key already pins the
+    ///      entry/call context that the tagged events disambiguate at entry level.
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal
         pure
