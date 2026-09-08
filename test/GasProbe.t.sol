@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {EEZBase} from "../src/base/EEZBase.sol";
 import {BaseL2} from "./BaseL2.t.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {CrossChainCall, ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZL2.sol";
@@ -66,14 +65,61 @@ contract GasProbeTest is BaseL2 {
         _loadEntries(new ExecutionEntry[](0), rows);
     }
 
+    /// @dev Static twin of `_probeOutgoing`: a top-level static miss reverts
+    ///      `EntryNotFound(hash, callGas)` too, so the same two-probe recipe recovers the gas a
+    ///      later identical STATICCALL will fold.
+    function _probeStatic(bytes memory data) internal returns (bytes32 hash, uint64 g) {
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        for (uint256 i = 0; i < 2; i++) {
+            vm.prank(caller);
+            (bool ok, bytes memory err) = proxyAddr.staticcall{gas: CALL_GAS}(data);
+            require(!ok && bytes4(err) == EEZL2.EntryNotFound.selector, "probe: expected EntryNotFound");
+            assembly {
+                hash := mload(add(err, 0x24))
+                g := mload(add(err, 0x44))
+            }
+        }
+    }
+
     function test_StaticObservedGasRejectsZeroGasKey() public {
         bytes memory data = hex"12345678";
-        bytes32 hash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);
-        _loadStatic(hash, "zero-gas-key", true);
+        bytes32 zeroGasHash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);
+        _loadStatic(zeroGasHash, "zero-gas-key", true);
         vm.prank(caller);
         (bool ok, bytes memory ret) = proxyAddr.staticcall{gas: CALL_GAS}(data);
         assertFalse(ok);
-        assertEq(ret, abi.encodeWithSelector(EEZBase.ExecutionNotFound.selector));
+        assertEq(bytes4(ret), EEZL2.EntryNotFound.selector);
+        (bytes32 missedHash, uint64 g) = abi.decode(_slice(ret, 4), (bytes32, uint64));
+        assertTrue(g != 0, "observed gas is folded");
+        assertTrue(missedHash != zeroGasHash, "static key under USE_GAS_LEFT differs from the zero-gas key");
+    }
+
+    function test_StaticProbeReproducesCallGasExactly() public {
+        bytes memory data = hex"12345678";
+        (bytes32 h1, uint64 g1) = _probeStatic(data);
+        (bytes32 h2, uint64 g2) = _probeStatic(data);
+        assertEq(g1, g2, "warm static probes are stable");
+        assertEq(h1, h2);
+        assertEq(
+            h2,
+            manager.computeCrossChainCallHash(
+                true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, g2, data
+            ),
+            "reported hash is the static key built from the reported gas"
+        );
+
+        _loadStatic(h2, "static-probed-ok", true);
+        vm.prank(caller);
+        (bool ok, bytes memory ret) = proxyAddr.staticcall{gas: CALL_GAS}(data);
+        assertTrue(ok, "real static read matches the probed hash");
+        assertEq(ret, "static-probed-ok");
+    }
+
+    function _slice(bytes memory b, uint256 from) internal pure returns (bytes memory out) {
+        out = new bytes(b.length - from);
+        for (uint256 i = 0; i < out.length; i++) {
+            out[i] = b[from + i];
+        }
     }
 
     function test_StaticGasDisabledKeepsZeroGasKey() public {

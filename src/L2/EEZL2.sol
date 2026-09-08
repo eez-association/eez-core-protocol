@@ -87,8 +87,11 @@ contract EEZL2 is EEZBase {
     /// @notice Entry 0's `proxyEntryHash` doesn't match the hash of its own `incomingCalls[0]`
     error EntryHashMismatch();
 
-    /// @notice No entry matched a top-level outgoing call. Carries the computed L2-outgoing hash and
-    ///         the observed `callGas` so the entry-builder can reproduce the key.
+    /// @notice No entry matched an outgoing call: a top-level mutable miss, or a static miss in
+    ///         either branch. Carries the computed L2-outgoing hash and the observed `callGas` so
+    ///         the entry-builder can reproduce the key.
+    /// @dev Observability aid: unlike L1's bare `ExecutionNotFound`, the payload exposes the key
+    ///      the manager searched for, which under `USE_GAS_LEFT` is difficult to be computed off-chain.
     error EntryNotFound(bytes32 crossChainCallHash, uint64 callGas);
 
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
@@ -635,7 +638,7 @@ contract EEZL2 is EEZBase {
                     );
                 }
             }
-            revert ExecutionNotFound();
+            revert EntryNotFound(crossChainCallHash, callGas);
         }
 
         // Top-level: same-block pool, matched by hash alone (no pins on L2 — the block gate bounds staleness).
@@ -649,7 +652,7 @@ contract EEZL2 is EEZBase {
             }
         }
 
-        revert ExecutionNotFound();
+        revert EntryNotFound(crossChainCallHash, callGas);
     }
 
     /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always

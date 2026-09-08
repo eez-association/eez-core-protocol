@@ -20,6 +20,7 @@
       storage-layout change. Benchmark deep nesting (copying is quadratic today), gas and bytecode.
       Do after the item above.
 
+## BenchMark 
 - [ ] **Benchmark queue replacement cleanup (L1/L2).** Each new batch pays to `delete` the previous
       table's nested arrays and bytes. Measure large-old/small-new batches first (net refunds and
       peak gas — refunds do not replenish gas mid-execution), then compare direct overwrite,
@@ -41,7 +42,7 @@
 
 ## Bytecode
 
-EEZ runtime 23,838 B of the 24,576 B EIP-170 limit (738 B headroom, 2026-09-08); EEZL2 13,606 B.
+EEZ runtime 23,825 B of the 24,576 B EIP-170 limit (751 B headroom, 2026-09-08); EEZL2 13,594 B.
 Initcode is not a concern (25.3 KB of 49 KB). The compiler is already fully tuned for size
 (`optimizer_runs = 1`, via-IR), so savings need config or source changes.
 

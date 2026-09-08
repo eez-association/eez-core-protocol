@@ -12,25 +12,25 @@
 
 ## Delivery and execution semantics
 
-- **Optional alternatives and best-effort execution:** Forward scanning intentionally skips earlier entries when a later candidate matches. Posting does not guarantee delivery of every entry; composers must account for omitted alternatives and work.
+- **The `gas` field on a call is a cap, not a guarantee:** `_processNCalls` forwards it with `call{gas: callGas}`, and the EVM gives the callee min(callGas, gas available minus 1/64). If the transaction is running low, the destination gets less than the entry committed to, may fail for that reason alone, and the entry then reverts (or is skipped, for an immediate L2Tx) even though the table was correct. Guaranteeing at least `callGas` would require the manager to check `gasleft()` before every proxy call and revert early; that check is not implemented today, so posters must supply enough gas for the whole batch.
 
-- **L2 retries reuse the first matching result:** A failed entry restores the cursor, so retrying the same call hash hits the same row; a later row for that hash is only reachable after another successful consumption. This is why the system should load a fresh table for every transaction, or at least whenever the environment those results depend on changes.
+- **Posting does not guarantee delivery of every entry:** consumption forward-scans and skips non-matching entries for good, so composers must account for alternatives and work that are never executed.
 
-- **Meta hooks cannot reuse other batches' same-block verifications or queues:** All rollups and entries needed for cross-chain calls in the hook must be verified and supplied in the current batch. Calls resolve only against its transient tables or the executing entry's nested-call table. This isolation is intentional; other batches' queues can be used after `postAndVerifyBatch` finishes, subject to normal validity checks.
+- **Cross-rollup calls inside the meta hook only work between rollups verified in the same batch:** a rollup verified by an earlier batch this block is unreachable from the hook (`ExecutionNotFound`); interact with it after `postAndVerifyBatch` returns, or verify both rollups together.
 
 - **Immediate dispatch is not proven:** `immediateEntryCount`, `immediateStaticEntryCount` and `expectedRootPerRollup` are outside the public input, so the poster picks them within the on-chain constraints (counts in range, no L2Tx stranded at the boundary, static prefix only when a meta hook fires). Consuming immediate entries is therefore a collaboration between composer, poster and users: a poster can receive the meta hook in a contract that consumes nothing and let those entries be discarded, so a valid proof alone does not guarantee they execute. When some entries must be processed a certain way, set `bindMsgSenderInPublicInput` so only the intended poster can post the batch, and enforce the policy in that poster's hook.
 
+- **L2 retries reuse the first matching result:** A failed entry restores the cursor, so retrying the same call hash hits the same row; a later row for that hash is only reachable after another successful consumption. This is why the system should load a fresh table for every transaction, or at least whenever the environment those results depend on changes.
+
 ## Static-result validity
 
-Static results are reusable while the state they were computed from is still the live state: L1 top-level static entries stay matchable across blocks as long as every root pin holds, L2 ones only in the block they were loaded, and nested reads are pinned to their host entry's position. None of that covers dependencies outside committed state. A read whose result depends on a timestamp, block number or other uncommitted context can still be served from an unchanged root. Capturing such dependencies is up to the rollup's validity rules, or to refreshing the table; EEZ imposes no expiry of its own.
+- **Root pins do not cover uncommitted context:** a static result whose value depends on a timestamp, block number or other context outside the committed state can still be served while the roots are unchanged. EEZ imposes no expiry of its own; capturing such dependencies is up to the rollup's validity rules or to refreshing the table.
 
 ## Deployment and trust assumptions
 
 - **Accepted proofs replace queues before deferred root checks:** Every accepted batch replaces the participating rollups' execution/static queues and updates `lastVerifiedBlock`. An old proof that still verifies can therefore replace useful queued work or activate the same-block `setRoot` lock even if its deferred entries cannot execute against the current roots. Root advancement prevents stale state transitions; it does not prevent these posting-side effects. Queue replacement is a liveness policy, and rollup-defined verification context can enforce freshness where needed.
 
 - **Proof domains are a deployment responsibility:** Each rollup is verified on its designated L1. Public inputs do not explicitly bind `block.chainid`, the registry address, or a protocol version; independent deployments must use distinct verification domains. Reusing identical rollup/proof configurations across them is outside the intended model.
-
-- **The L2 system address is chain-defined and trusted:** Zero is permitted for chains that support that system-caller convention. The configured address must be node-controlled and unavailable to adversarial or reentrant calls, including during ETH transfers to it. Table replacement relies on this assumption; no additional execution guard is imposed.
 
 ## Edge cases
 
