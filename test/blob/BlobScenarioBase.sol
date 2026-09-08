@@ -84,7 +84,9 @@ abstract contract BlobScenarioBase is Test {
             // Named owner (not address(this)): no blob test exercises the owner path,
             // and forge script forbids address(this) in script contracts (BlobTools).
             Rollup manager = new Rollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
-            uint64 rid = rollups.registerRollup(address(manager), _genesisRoot(i));
+            bytes32 genesisRoot = _genesisRoot(i);
+            vm.prank(makeAddr("rollup-owner"));
+            uint64 rid = rollups.registerRollup(address(manager), genesisRoot);
             require(rid == i, "chain id / rollup id mismatch");
             rollupManagers[i] = manager;
             managers[i] = new EEZL2(i, SYSTEM_ADDRESS, false);

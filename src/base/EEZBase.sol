@@ -48,8 +48,12 @@ abstract contract EEZBase is IEEZ {
     /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on static (read-only) paths.
     bool internal constant IS_STATIC = true;
 
-    /// @notice Readable `callGas` argument for `computeCrossChainCallHash` on paths that don't key
-    ///         on observed gas — every site except calls leaving an L2 with `USE_GAS_LEFT`.
+    /// @notice `callGas` argument for `computeCrossChainCallHash` when the hash must not depend on gas.
+    ///         L1 always passes this constant, so every L1 hash is gas-independent.
+    ///         L2 passes it when hashing the incoming calls it executes from the table (the `CALL_BEGIN`
+    ///         folds), and in two places passes a real gas value instead: a call leaving the L2 folds
+    ///         `gasleft()` when `USE_GAS_LEFT` is set (this constant otherwise), and
+    ///         `executeIncomingCrossChainCall` verifies the inbound call with that call's own `gas` field.
     uint64 internal constant ZERO_CALL_GAS = 0;
 
     // ──────────────────────────────────────────────
@@ -121,7 +125,7 @@ abstract contract EEZBase is IEEZ {
     /// @dev Direction-neutral transport. A no-match folds CALL_NOT_FOUND into `_rollingHash`, which
     ///      is carried in the first field, so the isolated frame's not-found survives the revert with
     ///      no separate flag.
-    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed);
+    error ContextResult(bytes32 rollingHash, uint256 reentrantConsumed);
 
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
@@ -153,8 +157,8 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when a proxy is requested for an address on THIS manager's own network.
     /// @dev A CrossChainProxy stands in for a REMOTE address; a same-network proxy is meaningless
     ///      and unsafe. L1 (EEZ) forbids `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) forbids its own
-    ///      `ROLLUP_ID`. Enforced in `_createCrossChainProxyInternal`, so it also blocks the
-    ///      auto-creation path during execution, not just the external entry point.
+    ///      `ROLLUP_ID`. Enforced in `_createCrossChainProxyInternal`, so every creation path
+    ///      (`createCrossChainProxy`, `getOrCreateCrossChainProxy`, execution) is covered.
     error SameNetworkProxy(uint64 rollupId);
 
     // ──────────────────────────────────────────────
@@ -181,6 +185,25 @@ abstract contract EEZBase is IEEZ {
     /// @return proxy The deployed proxy address
     function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy) {
         return _createCrossChainProxyInternal(originalAddress, originalRollupId);
+    }
+
+    /// @notice Returns the authorized proxy for a remote address, deploying it if needed.
+    /// @dev A same-network proxy can never be authorized, so that case always reaches the
+    ///      deploy helper and reverts `SameNetworkProxy` there.
+    /// @param originalAddress The address this proxy represents on the source rollup
+    /// @param originalRollupId The source rollup ID
+    /// @return proxy The existing or newly deployed proxy address
+    function getOrCreateCrossChainProxy(
+        address originalAddress,
+        uint64 originalRollupId
+    )
+        public
+        returns (address proxy)
+    {
+        proxy = computeCrossChainProxyAddress(originalAddress, originalRollupId);
+        if (!authorizedProxies[proxy].isProxy) {
+            proxy = _createCrossChainProxyInternal(originalAddress, originalRollupId);
+        }
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
@@ -226,8 +249,8 @@ abstract contract EEZBase is IEEZ {
     /// @dev Ordered isStatic → FROM (source pair) → TO (target pair) → value → callGas → data;
     ///      reordering would break every on-chain hash check and every off-chain tool that
     ///      pre-computes the hash. `isStatic` makes a read-only call hash distinctly from an
-    ///      otherwise-identical state-changing one. `callGas` is 0 except calls leaving an L2
-    ///      with `USE_GAS_LEFT`, where it is the `gasleft()` observed at manager entry.
+    ///      otherwise-identical state-changing one. `callGas` is 0 except for calls leaving an L2
+    ///      with `USE_GAS_LEFT`, where it is the gas left when the L2 manager computes this hash.
     function computeCrossChainCallHash(
         bool isStatic,
         address sourceAddress,
@@ -252,22 +275,21 @@ abstract contract EEZBase is IEEZ {
     // ──────────────────────────────────────────────
 
     /// @notice Decodes a `ContextResult` revert payload returned by `executeInContextAndRevert`.
-    /// @dev Validates selector AND length (4 + 3*32 = 100) before the raw mloads — defense
+    /// @dev Validates selector AND length (4 + 2*32 = 68) before the raw mloads — defense
     ///      against a truncated revert that happens to share the selector.
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
-        returns (bytes32 rollingHash, uint256 reentrantConsumed, uint256 callsProcessed)
+        returns (bytes32 rollingHash, uint256 reentrantConsumed)
     {
         if (bytes4(revertData) != ContextResult.selector) {
             revert UnexpectedContextRevert(revertData);
         }
-        if (revertData.length < 100) revert UnexpectedContextRevert(revertData);
+        if (revertData.length < 68) revert UnexpectedContextRevert(revertData);
         assembly {
             let ptr := add(revertData, 36)
             rollingHash := mload(ptr)
             reentrantConsumed := mload(add(ptr, 32))
-            callsProcessed := mload(add(ptr, 64))
         }
     }
 
@@ -359,7 +381,7 @@ abstract contract EEZBase is IEEZ {
     /// @notice Folds a CALL_NOT_FOUND event into `_rollingHash` when a reentrant call has no
     ///         matching expected entry. The dedicated tag is distinct from CALL_END(true, ""), so a
     ///         no-match can never be forged as a normal empty-bytes return; the divergence reverts the
-    ///         entry at its rolling-hash check (surviving any intermediate try/catch). It rides the
+    ///         entry at its rolling-hash check. An ordinary enclosing revert rolls it back. It rides the
     ///         `_rollingHash` already carried across the `ContextResult` boundary, so no side flag is
     ///         needed. A prover that deliberately pre-hashes this tag commits to a not-found at this
     ///         exact position — a faithful outcome, not an attack.

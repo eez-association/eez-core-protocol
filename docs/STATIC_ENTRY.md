@@ -309,15 +309,16 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
   table by hash alone, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
   is its staleness bound — the pool is only resolvable in the block it was loaded.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
-  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
-  (see CORE_PROTOCOL_SPEC §C.2/§C.3).
+  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0`, and `callGas = 0` on L1;
+  on L2 `callGas` follows the outgoing policy — `gasleft()` sampled after proxy validation when
+  `USE_GAS_LEFT`, else `0` (see CORE_PROTOCOL_SPEC §C.2/§C.3).
 - **Proxy protection**: L1's reentrant static branch checks `_containsVerifiedRollup(destRid)`
   against the executing entry's `rollupUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
   immediate-L2Tx table, the transient entry at `_currentEntryIndex`, or the persistent queue
   entry of `_currentEntryRollupId`; an empty parked table with `_currentEntryRollupId == 0`
-  reverts `NoExpectedL1ToL2CallFound`); L2's `_getExpectedOutgoingCalls()` always indexes the
-  single `entries` table.
+  yields an empty table, so a static read misses with `ExecutionNotFound` and a CALL folds
+  `CALL_NOT_FOUND`); L2's `_getExpectedOutgoingCalls()` always indexes the single `entries` table.
 
 ---
 

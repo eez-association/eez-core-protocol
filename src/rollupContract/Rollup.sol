@@ -13,8 +13,8 @@ interface IEEZRegistry {
 
 /// @title Rollup
 /// @notice Reference per-rollup management contract. Holds proof system membership, vkeys,
-///         threshold, and ownership for a single rollup. Anyone can deploy this and register
-///         it via `EEZ.registerRollup` — the central registry never deploys it on the user's
+///         threshold, and ownership for a single rollup. Anyone can deploy this; its current
+///         owner registers it via `EEZ.registerRollup` — the registry never deploys it on the user's
 ///         behalf.
 /// @dev The rollupId is provided by the registry via the `rollupContractRegistered` callback
 ///      (only callable by `ROLLUPS`). Stored internally and passed back when this contract
@@ -46,6 +46,7 @@ contract Rollup is IRollupContract, Ownable {
     error NotEEZRegistry();
     error InvalidConfig();
     error AlreadyRegistered();
+    error UnauthorizedRegistrantAccount(address registrant);
     error ProofSystemAlreadyAllowed(address proofSystem);
     error ProofSystemNotAllowed(address proofSystem);
     /// @notice A management op (`removeProofSystem` / `updateVerificationKey`) targeted a
@@ -155,9 +156,12 @@ contract Rollup is IRollupContract, Ownable {
 
     /// @notice One-shot registration callback fired by the central registry.
     /// @dev `rollupId == 0` is the unset sentinel (registry assigns ids starting at 1).
-    function rollupContractRegistered(uint64 _rollupId) external {
+    /// @param _rollupId Id the registry assigned to this rollup; stored for later `setRoot` calls.
+    /// @param registrant Original caller of `EEZ.registerRollup`, forwarded by the registry.
+    function rollupContractRegistered(uint64 _rollupId, address registrant) external {
         if (msg.sender != ROLLUPS) revert NotEEZRegistry();
         if (rollupId != 0) revert AlreadyRegistered();
+        if (registrant != owner()) revert UnauthorizedRegistrantAccount(registrant);
         rollupId = _rollupId;
     }
 

@@ -40,7 +40,7 @@ The L2 structs are deliberately **leaner**: L2 has a single rollup, no state del
 
 #### RollupUpdate (L1 only)
 
-Describes one rollup's state transition caused by executing one entry. The pre-state binding lives on the entry: `currentRoot` is checked at consumption time against `rollups[delta.rollupId].root`; mismatch reverts `RootMismatch`. This makes entries content-addressed against the trajectory the proof committed to and is the soundness backstop that lets the per-rollup queue model interleave consumption across rollups safely.
+Describes one rollup's state transition caused by executing one entry. The pre-state binding lives on the entry: `currentRoot` is checked at consumption time against `rollups[delta.rollupId].root`; a mismatch skips a queued candidate (`ExecutionNotFound` if none matches), while direct immediate execution reverts `RootMismatch`. This makes entries content-addressed against the trajectory the proof committed to and is the soundness backstop that lets the per-rollup queue model interleave consumption across rollups safely.
 
 Every entry must carry **at least one** `RollupUpdate`, and the deltas must be **strictly increasing by `rollupId`** — both enforced **on-chain** at batch validation (`EntryHasNoRollupUpdates`, `RollupUpdatesNotStrictlyIncreasing`; the ≥1 check is re-asserted in `_executeEntry`). An empty `rollupUpdates[]` would leave the entry unpinned from any rollup trajectory (nothing for the `RootMismatch` backstop to check); strict ordering rejects duplicate rollups and (starting above `MAINNET_ROLLUP_ID`) a mainnet delta. The prover remains responsible for `rollupUpdates` being the entry's *true* state transition.
 
@@ -148,6 +148,7 @@ L2:
 
 Both sides:
 - SUCCESS rows of the unified reentrant table carry `revertedOrStaticRollingHash == bytes32(0)` — the field is only read on the STATIC / REVERTED paths. *(Defensive check at resolution: `SuccessRowWithRevertedOrStaticHash`.)*
+- **One static row per key.** A nested static read changes neither `_rollingHash` nor the cursor, so two identical reads with no recorded call between them share one key and both resolve to the first matching row. The prover therefore emits one static row per key, and identical reads in the same position must expect the same result, callbacks included. If the target changes local state between two such reads (so their callback results differ), the second read cannot be expressed: the builder separates them with a recorded call or splits them across entries. *Circuit / builder rule.*
 - Static sub-calls carry `revertNextNCalls == 0` — static resolution has no state to roll back. *(Defensive check in `_processNStaticCalls`: `StaticCallWithRevertSpan`.)*
 - Tables contain exactly the rows/entries the simulated trace resolves; anything beyond is inert padding. *Circuit-only.*
 
@@ -262,7 +263,7 @@ There is **no transient flat-call cursor**: the position inside a flat call arra
 
 `MAINNET_ROLLUP_ID = 0` is a constant (uint64). The five rolling-hash tag constants `CALL_BEGIN=1, CALL_END=2, NESTED_BEGIN=3, NESTED_END=4, CALL_NOT_FOUND=5` plus the readability constants `NOT_STATIC_CALL = false` / `IS_STATIC = true` are internal constants on `EEZBase`. There is no `_inPostBatch` flag — `postAndVerifyBatch` reentry is detected via `_insideExecution() || _transientEntries.length != 0`.
 
-`_transientEntries` / `_transientStaticEntries` / `_verifiedRollupInCurrentExecutingEntry` are declared as regular storage arrays (not Solidity `transient`) because the `transient` data location does not yet support reference types with nested dynamic arrays; they are cleared at the end of every `postAndVerifyBatch` via `delete`, recovering most of the gas cost via SSTORE-to-zero refunds. The immediate-L2Tx reentrant table is the exception: it lives in a hand-serialized EIP-1153 transient region (`src/base/ExpectedL1ToL2CallTransient.sol`), so it never touches storage and rolls back with reverts automatically.
+`_transientEntries` / `_transientStaticEntries` are declared as regular storage arrays (not Solidity `transient`) because the `transient` data location does not yet support reference types with nested dynamic arrays; they are cleared at the end of every `postAndVerifyBatch` via `delete`, potentially earning storage refunds, capped at 20% of transaction gas under Ethereum rules and applied only after execution. The verified-rollup set and immediate-L2Tx reentrant table instead use EIP-1153 transient storage. The latter lives in a hand-serialized EIP-1153 transient region (`src/base/ExpectedL1ToL2CallTransient.sol`), so it never touches storage and rolls back with reverts automatically.
 
 #### EEZL2.sol (L2) — inherits `EEZBase`
 
@@ -300,7 +301,7 @@ function registerRollup(address rollupContract, bytes32 initialRoot)
     external returns (uint64 rollupId)
 ```
 
-Permissionless. `rollupId = ++rollupCounter` (a `uint64` counter; first assigned id is 1; 0 is `MAINNET_ROLLUP_ID`); `rollups[rollupId] = RollupConfig(rollupContract, initialRoot, 0)`. Reverts `InvalidRollupContract` if `rollupContract` is `address(0)` or the registry itself. Fires `IRollupContract(rollupContract).rollupContractRegistered(rollupId)` so the manager learns its id (one-shot init callback; the reference manager latches and reverts `AlreadyRegistered` on reuse). The caller is expected to deploy their `IRollupContract`-conforming manager (with desired proofSystems / vkeys / threshold / ownership baked in) before calling `registerRollup`.
+No registry-wide admission allowlist; each manager authorizes its own registrant. EEZ forwards its original `msg.sender` as `registrant`, and the reference Rollup requires that address to equal its current owner (otherwise `UnauthorizedRegistrantAccount(registrant)`). A rejected callback rolls back the counter and initial state. `rollupId = ++rollupCounter` (a `uint64` counter; first assigned id is 1; 0 is `MAINNET_ROLLUP_ID`); `rollups[rollupId] = RollupConfig(rollupContract, initialRoot, 0)`. Reverts `InvalidRollupContract` if `rollupContract` is `address(0)` or the registry itself. Fires `IRollupContract(rollupContract).rollupContractRegistered(rollupId, registrant)` so the manager learns its id (one-shot init callback; the reference manager latches and reverts `AlreadyRegistered` on reuse). The caller is expected to deploy their `IRollupContract`-conforming manager (with desired proofSystems / vkeys / threshold / ownership baked in) before calling `registerRollup`.
 
 Emits `RollupCreated(rollupId, rollupContract, initialRoot)`.
 
@@ -384,7 +385,7 @@ Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proof
 2. **Composer pins + structural validation** (`_validateBatchStructure(batch)`, no external calls).
 3. **Fetch + verify**: `_getVerificationKeysPerRollup(batch)` calls each rollup's manager via `IRollupContract.checkProofSystemsAndGetVkeys(subset)` (a `view` call; the manager enforces threshold + per-PS membership internally and must return exactly one vkey per subset entry, else `InvalidProofSystemConfig`). Then `_verifyProofSystemBatch(batch, vkMatrix)` computes the public inputs and calls `IProofSystem.verify(...)` for each PS.
 4. **Mark verified-this-block** (`_markVerifiedBlockAndDeletePreviousEntries(rid)` for each rollup): sets `verificationByRollup[rid].lastVerifiedBlock = block.number` AND **wipes the rollup's `entryQueue` / `staticEntryQueue` / `entryQueueIndex` on EVERY verify** — a same-block re-verify REPLACES (does not append to) the prior batch's entries for that rollup. Done before any non-view external CALL so (a) `executeCrossChainCall` / `executeL2Txs(rid)` work during the meta hook, and (b) `setRoot` is locked out until the next block.
-5. **Drain the leading run of immediate L2Txs straight from calldata**: while `i < immediateEntryCount` and `batch.entries[i].proxyEntryHash == bytes32(0)`, self-call `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }` and advance — a skip is not a hard error, but if at least one L2Tx was attempted and NONE succeeded, revert `AllImmediateL2TxsFailed` (a fully-failed immediate prefix unwinds the whole post). These entries are never SSTOREd whole; only each entry's reentrant table is parked in the `ExpectedL1ToL2CallTransient` transient region for the duration of that entry.
+5. **Drain the leading run of immediate L2Txs straight from calldata**: while `i < immediateEntryCount` and `batch.entries[i].proxyEntryHash == bytes32(0)`, self-call `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }` and advance — a skip is not a hard error, but if at least one L2Tx was attempted and NONE succeeded, revert `AllImmediateL2TxsFailed` (a fully-failed immediate prefix unwinds the whole post). Empty revert data from the self-call is treated as out-of-gas and aborts the post with `ImmediateL2TxOutOfGas(i)` instead of skipping. These entries are never SSTOREd whole; only each entry's reentrant table is parked in the `ExpectedL1ToL2CallTransient` transient region for the duration of that entry.
 6. **Meta hook**: if entries remain in the immediate prefix past the leading L2Tx run (`i < immediateEntryCount`), `msg.sender` must have code to receive the hook (revert `MetaEntriesWithoutReceiver` otherwise — the never-persisted prefix would be silently dropped): push `entries[i..immediateEntryCount)` into `_transientEntries` and `staticEntries[0..immediateStaticEntryCount)` into `_transientStaticEntries`, then call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2Txs(rid)` to consume the transient stream. The static prefix is a companion of the META-HOOK entries, not of the immediate prefix as a whole: it loads only when the hook fires. If no hook fires (empty immediate prefix, or one that is pure L2Txs) a non-zero `immediateStaticEntryCount` would drop the leading static entries (never loaded transiently, never queued), so the post reverts `ImmediateStaticEntriesWithoutImmediateEntries` — composers set it to 0 in that shape (see `STATIC_ENTRY.md` §6).
 7. **Publish the remainder** (`_saveRemainderEntries(batch)`): push `entries[immediateEntryCount..]` into `verificationByRollup[entry.destinationRollupId].entryQueue` and `staticEntries[immediateStaticEntryCount..]` into the matching `staticEntryQueue`, **unconditionally** (even if the meta hook left transient entries unconsumed — there is no drain-cleanly gate). Soundness backstop: each entry's `RollupUpdate.currentRoot` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers.
 8. **Cleanup transient tables**: `delete _transientEntries; delete _transientStaticEntries; _transientEntryIndex = 0` (emptying `_transientEntries` also closes the reentry window). Finally, `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
@@ -469,7 +470,7 @@ bytes32 crossChainCallHash = computeCrossChainCallHash(
     proxyInfo.originalAddress,
     destRid,
     0,                            // value = 0 in static context
-    ZERO_CALL_GAS,                // callGas — a static read never keys on gas
+    ZERO_CALL_GAS,                // callGas — L1 static reads never key on gas
     callData
 );
 
@@ -517,7 +518,7 @@ function computeCrossChainProxyAddress(address originalAddress, uint64 originalR
     public view returns (address);
 ```
 
-Both permissionless.
+Both permissionless. `createCrossChainProxy` reverts if the proxy already exists. The separate public `getOrCreateCrossChainProxy` returns an existing authorized proxy or creates it; internal mutable execution uses this idempotent helper. Returning an existing proxy emits no creation event.
 
 ```solidity
 salt         = keccak256(abi.encodePacked(originalRollupId, originalAddress))
@@ -533,7 +534,7 @@ address      = address(uint160(uint256(keccak256(abi.encodePacked(
                )))))
 ```
 
-The salt is exactly `(originalRollupId, originalAddress)` — no `domain` or `block.chainid` term is mixed in. `createCrossChainProxy` and `computeCrossChainProxyAddress` are defined on `EEZBase` and inherited by both `EEZ` and `EEZL2`. A proxy stands in for a REMOTE address, never one on the manager's own network: `_createCrossChainProxyInternal` reverts `SameNetworkProxy(rollupId)` when `originalRollupId` equals the manager's own network id (`MAINNET_ROLLUP_ID` on L1, `ROLLUP_ID` on L2) — this also blocks the auto-creation path during execution.
+The salt is exactly `(originalRollupId, originalAddress)` — no `domain` or `block.chainid` term is mixed in. `createCrossChainProxy` and `computeCrossChainProxyAddress` are defined on `EEZBase` and inherited by both `EEZ` and `EEZL2`. A proxy stands in for a REMOTE address, never one on the manager's own network: `_createCrossChainProxyInternal` reverts `SameNetworkProxy(rollupId)` when `originalRollupId` equals the manager's own network id (`MAINNET_ROLLUP_ID` on L1, `ROLLUP_ID` on L2), so `createCrossChainProxy`, `getOrCreateCrossChainProxy` and the auto-creation path during execution are all covered by the one check.
 
 Nothing verifies that `originalAddress` actually holds a contract on rollup `originalRollupId` — proxy creation is permissionless and the manager cannot see other chains. A proxy minted over an address with no code at the destination forwards calls that "succeed" against an empty account (flat entries, empty return data). Always mint proxies over the real remote contract, never over a local twin's address.
 
@@ -598,7 +599,7 @@ return entry.returnData
 - `entry.destinationRollupId == destRid` (routing — load-bearing in the transient branch, whose cursor is global across rollups; holds by construction in the persistent branch),
 - every `entry.rollupUpdates[i].currentRoot` equals the live `rollups[rid].root` (state preconditions — a stale entry is a *non-match*, skipped rather than reverted on).
 
-Skipping intervening non-matches is what lets a top-level call reach past already-attempted `success == false` entries (whose reverts left the cursor where it was) and past stale-state entries. A skipped entry simply never executes — anything depending on it later fails its own `currentRoot` check.
+Skipping intervening non-matches lets a top-level call pass stale-state entries or failed entries whose hashes no longer match. A failed entry that still matches is retried, because its revert restored the cursor. A skipped entry simply never executes — anything depending on it later fails its own `currentRoot` check.
 
 Inside an active `postAndVerifyBatch`, `_transientEntries.length != 0` routes **all** consumption through the transient stream with the global `_transientEntryIndex`. Per-rollup queues are populated only at step 7 of `postAndVerifyBatch`.
 
@@ -608,7 +609,7 @@ The reentrant table of the entry currently being processed — the live source a
 
 1. **Immediate L2Tx run** — the `ExpectedL1ToL2CallTransient` transient region when non-empty (the entry never lands in storage; only its table is parked there).
 2. **Meta-hook** — `_transientEntries[_currentEntryIndex].expectedL1ToL2Calls` while a batch is mid-flight.
-3. **Normal proxy consumption** — `verificationByRollup[_currentEntryRollupId].entryQueue[_currentEntryIndex].expectedL1ToL2Calls`. An immediate L2Tx whose parked table is empty yet still makes a reentrant call reaches here with `_currentEntryRollupId == 0`; that call could not have matched, so it reverts `NoExpectedL1ToL2CallFound` gracefully instead of OOB-panicking.
+3. **Normal proxy consumption** — `verificationByRollup[_currentEntryRollupId].entryQueue[_currentEntryIndex].expectedL1ToL2Calls`. An immediate L2Tx whose parked table is empty yet still makes a reentrant call reaches here with `_currentEntryRollupId == 0`; the accessor returns an empty table instead of indexing the nonexistent queue. CALL then records `CALL_NOT_FOUND` and returns empty bytes; STATICCALL reverts `ExecutionNotFound`, matching the empty-table behavior of queued and meta-hook entries.
 
 ##### `_consumeNestedCall(uint64 destRid, bytes32 crossChainCallHash) → bytes`
 
@@ -706,16 +707,16 @@ Processes the WHOLE `calls` array — the entry's top-level calls, a reentrant f
 ```
 require(msg.sender == address(this))       // NotSelf
 _processNCalls(calls)
-revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed, 0)
+revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed)
 ```
 
-The span slice crosses the self-call boundary by `memory` (ABI-encoded), since a `storage` ref cannot. The third `ContextResult` field is always 0 on both chains; it exists for the shared decoder. (L2 passes `_lastOutgoingCallConsumed` as the second field.)
+The span slice crosses the self-call boundary by `memory` (ABI-encoded), since a `storage` ref cannot. (L2 passes `_lastOutgoingCallConsumed` as the second field.)
 
 The unconditional revert rolls back all storage and transient writes inside the self-call, but the `ContextResult` payload escapes via the revert data — the caller decodes it and re-applies the rolling hash and reentrant cursor. A reentrant no-match inside the span is already folded into that rolling hash (`CALL_NOT_FOUND`), so it rides out with no separate flag.
 
-##### `_decodeContextResult(bytes memory revertData) → (bytes32, uint256, uint256)`
+##### `_decodeContextResult(bytes memory revertData) → (bytes32, uint256)`
 
-Defined on `EEZBase` with direction-neutral names. Verifies `bytes4(revertData) == ContextResult.selector` AND `revertData.length >= 100` (4 + 3×32) else `UnexpectedContextRevert(revertData)`; then assembly-loads three words at offsets 36, 68, 100 (`rollingHash`, `reentrantConsumed`, `callsProcessed`).
+Defined on `EEZBase` with direction-neutral names. Verifies `bytes4(revertData) == ContextResult.selector` AND `revertData.length >= 68` (4 + 2×32) else `UnexpectedContextRevert(revertData)`; then assembly-loads two words at offsets 36 and 68 (`rollingHash`, `reentrantConsumed`).
 
 ##### `_applyRollupUpdates(RollupUpdate[] memory deltas) → int256 totalEtherDelta`
 
@@ -771,12 +772,12 @@ function computeCrossChainCallHash(
 
 Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
 
-`callGas` is `0` (`ZERO_CALL_GAS`) at every site EXCEPT calls **leaving an L2** (`EEZL2.executeCrossChainCall` — top-level entry matching and the nested `expectedOutgoingHash` alike), where the folded value depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
+Apart from L2 inbound binding, which uses `incomingCalls[0].gas`, `callGas` is `0` (`ZERO_CALL_GAS`) except calls **leaving an L2** (`EEZL2.executeCrossChainCall` and `staticCrossChainCall` — top-level and nested matching), where the folded value depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
 
-- `useGasLeft = true` (intended production mode, pending node support): `uint64(gasleft())` observed when `executeCrossChainCall` starts — the gas the caller forwarded with the outgoing call. Because it keys both top-level entry matching (`proxyEntryHash`) and the nested `expectedOutgoingHash`, the prover must commit to the exact forwarded gas (deterministic when replaying the block).
-- `useGasLeft = false` (current deployments and the test fixtures): `callGas` is fixed at `0`, so outgoing hashes are gas-independent and can be pre-computed without observing the forwarded gas — identical to the value every other site folds.
+- `useGasLeft = true` (intended production mode, pending node support): `uint64(gasleft())` read when the manager computes the hash, i.e. after proxy authorization and storage reads, plus the block check and ETH transfer for mutable calls. Because it keys both top-level entry matching (`proxyEntryHash`) and the nested `expectedOutgoingHash`, the prover must commit to that exact gas value (deterministic when replaying the block).
+- `useGasLeft = false` (current deployments and the test fixtures): `callGas` is fixed at `0`, so outgoing hashes are gas-independent and can be pre-computed without observing the forwarded gas. L2 inbound binding still uses the incoming call's own `gas` field.
 
-Either way the folded value is emitted in L2's `CrossChainCallExecuted` event (the six-field overload — different topic0 from L1's five-field form), and returned in `EntryNotFound(crossChainCallHash, callGas)` on a top-level miss.
+For mutable calls, the folded value is emitted in L2's `CrossChainCallExecuted` event (the six-field overload — different topic0 from L1's five-field form), and returned in `EntryNotFound(crossChainCallHash, callGas)` on a top-level miss.
 
 Which `callGas` value keys what:
 
@@ -784,13 +785,13 @@ Which `callGas` value keys what:
 |---|---|
 | Everything on L1 | `0` |
 | L2 inbound binding (`executeIncomingCrossChainCall` vs `entries[0].proxyEntryHash`) | `incomingCalls[0].gas` (the inbound call's own field) |
-| L2 static matching (`staticCrossChainCall`) | `0` |
+| L2 static matching (`staticCrossChainCall`) | `gasleft()` when `USE_GAS_LEFT`, else `0` |
 | Calls LEAVING an L2 (`executeCrossChainCall`, top-level + nested) | `gasleft()` when `USE_GAS_LEFT`, else `0` |
 
 `callGas` and the `gas` field on `L2ToL1Call` / `CrossChainCall` are the SAME quantity seen from the two ends of a call: the field is the gas limit the destination manager puts on the target call (`0` = all remaining), and how it is filled depends on which side sourced the call:
 
 - **L1-sourced** call (delivered on an L2): L1 observes nothing — its hash folds `callGas = 0` and the outgoing side carries no gas at all. The delivered `CrossChainCall.gas` is decided entirely on the L2 side by its table builder (a fixed per-L2 amount, e.g. 500k; currently `0` = all remaining).
-- **L2-sourced** call (delivered on L1 or another L2): the source L2 observes `callGas = gasleft()` at `executeCrossChainCall` (when `USE_GAS_LEFT`; `0` otherwise) and binds it into the call's identity hash. The observed amount is what gets FORWARDED into the delivered call's `gas` field (e.g. `L2ToL1Call.gas`), so the destination executes with the gas the original caller forwarded — but an L2 may opt out of forwarding and put `0` (all remaining) in the delivered field, which is what we do for now.
+- **L2-sourced** call (delivered on L1 or another L2): the source L2 observes `callGas = gasleft()` at `executeCrossChainCall` (when `USE_GAS_LEFT`; `0` otherwise) and binds it into the call's identity hash. The observed amount is what gets FORWARDED into the delivered call's `gas` field (e.g. `L2ToL1Call.gas`), so the destination requests the gas the source had left when it hashed the call — but an L2 may opt out of forwarding and put `0` (all remaining) in the delivered field, which is what we do for now.
 
 ##### `entryHashes` for the public-inputs preimage
 
@@ -855,7 +856,7 @@ System-only top-level delivery path for an inbound cross-chain call from another
 
 Same shape as L1, with these differences:
 
-1. **Hash formula**: this is the ONE site that can fold a non-zero `callGas` — observed `gasleft()` when `USE_GAS_LEFT`, else `0` (every other site folds `0` unconditionally). It keys both the top-level `proxyEntryHash` match and the nested `expectedOutgoingHash`. See §C.2.
+1. **Hash formula**: outgoing mutable and static L2 calls can fold a non-zero `callGas` — observed `gasleft()` when `USE_GAS_LEFT`, else `0`. It keys both the top-level `proxyEntryHash` match and the nested `expectedOutgoingHash`. See §C.2.
 2. **`sourceRollupId`** in the call hash is `ROLLUP_ID` (this L2's ID), not `MAINNET_ROLLUP_ID`; `targetRollupId` is `proxyInfo.originalRollupId` (the proxied counterparty — L1 or another L2).
 3. **ETH burn**: if `msg.value > 0`, the manager forwards it to `SYSTEM_ADDRESS` immediately (before hashing). Failure reverts `EtherTransferFailed`. There is no `_entryEtherDelta` accounting on L2.
 4. Block gate is the single `lastLoadBlock != block.number → ExecutionNotInCurrentBlock` check (no per-rollup routing).
@@ -892,22 +893,26 @@ constructor(address _eez)
 
 One immutable: `EEZ` (`src/base/CrossChainProxy.sol`), holding the manager address (L1 `EEZ` or L2 `EEZL2`). The `(originalAddress, originalRollupId)` pair lives in the CREATE2 salt and the manager's `authorizedProxies` mapping. The proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
 
-The constructor sweeps any ether predeployed at the proxy address (otherwise stuck) to `IEEZ(_eez).RECOVERY_ADDRESS()`, best-effort — a failed transfer never blocks creation. `RECOVERY_ADDRESS()` is on the shared `IEEZ` interface: an immutable on L1 (non-zero, else `InvalidRecoveryAddress`), `SYSTEM_ADDRESS` on L2.
+The constructor sweeps any ether predeployed at the proxy address (otherwise stuck) to `IEEZ(_eez).RECOVERY_ADDRESS()`, best-effort: the transfer result is ignored and failed recovery leaves ETH in the proxy. The sweep is capped at `RECOVERY_ETHER_GAS = 100_000` (the EVM forwards min(cap, available)), so a gas-burning recipient cannot starve the rest of the constructor. `RECOVERY_ADDRESS()` is on the shared `IEEZ` interface: an immutable on L1 (non-zero, else `InvalidRecoveryAddress`), `SYSTEM_ADDRESS` on L2.
 
-#### `executeOnBehalf(address destination, uint64 callGas, bytes calldata data) external payable`
+#### `executeOnBehalf(address destination, uint64 callGas, bytes calldata data)` (payable ABI through `ICrossChainProxy`)
+
+The payable fallback checks the selector and manager identity before decoding arguments. Non-manager calldata is forwarded unchanged, even when it collides with this selector but is invalid for its ABI.
 
 If `msg.sender == EEZ`: call `destination.call{value: msg.value}(data)` when `callGas == 0` (forward all remaining gas), else `destination.call{value: msg.value, gas: callGas}(data)`. Return/revert raw bytes via assembly. `callGas` is the executing call's `L2ToL1Call.gas` / `CrossChainCall.gas` field, passed straight through by `_processNCalls`; it caps the destination call only and is not folded into any identity hash (§C.5).
 
 Else: route through `_fallback()` — the transparent-proxy pattern: the manager admin (when the manager itself calls `executeOnBehalf`) gets direct forwarding; any other caller hitting `executeOnBehalf` enters the cross-chain path.
 
-#### `staticCheck() external`
+#### `staticCheck()` (private selector used by the payable fallback)
 
-Self-only function used to detect STATICCALL context. If `msg.sender == address(this)`: attempt `_staticDetector = 0` (a `tstore`). In static context this reverts; in normal context it succeeds. Else: route through `_fallback()`.
+The payable fallback handles this selector locally only if `msg.sender == address(this)`: attempt `_staticDetector = 0` (a `tstore`), then return. In static context this halts; in normal context it succeeds with empty return data. Other callers route through `_fallback()` with their original calldata and value. `STATIC_CHECK_SELECTOR` is a private constant; `staticCheck` is not declared in the public ABI. `src/interfaces/ICrossChainProxy.sol` exposes only `executeOnBehalf`.
+
+Because the check is on `msg.sender`, a destination that makes the proxy call itself with this selector via `executeOnBehalf` also reaches the detector rather than a forwarded cross-chain call. The prover must reproduce that outcome.
 
 #### `fallback() external payable` and `_fallback()` internal
 
 ```
-(detectSuccess, _) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeCall(staticCheck, ()))
+(detectSuccess, _) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeWithSelector(STATIC_CHECK_SELECTOR))
 if (!detectSuccess):
     // STATICCALL context — look up cached result
     (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCrossChainCall, (msg.sender, msg.data)))
@@ -942,10 +947,10 @@ The sites differ only in the `callGas` value they fold:
 | Everything on L1 (entry points, flat calls, reentrant rows, static) | `0` (`ZERO_CALL_GAS`) |
 | L2 inbound binding (`executeIncomingCrossChainCall` vs `entries[0].proxyEntryHash`) | `incomingCalls[0].gas` |
 | L2 flat-call `CALL_BEGIN` folds (§C.5) | `0` (`ZERO_CALL_GAS`) |
-| L2 static matching (`staticCrossChainCall`, both branches) | `0` (`ZERO_CALL_GAS`) |
+| L2 static matching (`staticCrossChainCall`, both branches) | `uint64(gasleft())` when the hash is computed if `USE_GAS_LEFT`, else `0` |
 | Calls LEAVING an L2 (`EEZL2.executeCrossChainCall` — top-level `proxyEntryHash` match AND the nested `expectedOutgoingHash` key) | **`uint64(gasleft())` when `USE_GAS_LEFT`, else `0`** |
 
-Under `useGasLeft = false` (current deployments and all test fixtures) every site folds `0`, so all keys for the same seven fields coincide. See §B.1 for the rationale and the `callGas` ⇄ `CrossChainCall.gas` relationship.
+Under `useGasLeft = false`, outgoing hashes fold `0`; inbound binding still uses `incomingCalls[0].gas`. See §B.1 for the rationale and the `callGas` ⇄ `CrossChainCall.gas` relationship.
 
 Off-chain tooling (`script/e2e/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
 
@@ -964,19 +969,19 @@ Off-chain tooling (`script/e2e/shared/E2EHelpers.sol`): `crossChainCallHash` / `
 
 ### C.2 Hash from `executeCrossChainCall` (L2)
 
-**This is the one site that can fold a non-zero `callGas`.** Fields as in C.1, except:
+**Outgoing mutable and static L2 calls share this gas-keying policy.** Fields as in C.1, except:
 
 | Field | Value |
 |---|---|
 | `sourceRollupId` | this L2's `ROLLUP_ID` |
 | `targetRollupId` | `proxyInfo.originalRollupId` (the proxied counterparty — L1 or another L2) |
-| `callGas` | `uint64(gasleft())` at manager entry when `USE_GAS_LEFT`, else `0` |
+| `callGas` | `uint64(gasleft())` when the hash is computed if `USE_GAS_LEFT`, else `0` |
 
 The folded value is echoed in L2's `CrossChainCallExecuted` event, and on a top-level miss in `EntryNotFound(crossChainCallHash, callGas)`, so a builder can recover the exact key.
 
 ### C.3 Hash from `staticCrossChainCall`
 
-`isStatic = true` (`IS_STATIC`), `value = 0` (STATICCALL cannot carry ETH), and `callGas = 0` (a static read never keys on gas, even on an L2 with `USE_GAS_LEFT`); source/target pairs as in the corresponding `executeCrossChainCall`. Because `isStatic` is folded into the hash, a static read keys distinctly from an otherwise-identical state-changing call — this is what routes static rows vs call rows inside the unified reentrant table without a mode field.
+`isStatic = true` (`IS_STATIC`), `value = 0` (STATICCALL cannot carry ETH), and `callGas = 0` on L1; on L2, `uint64(gasleft())` sampled after proxy authorization/storage reads when `USE_GAS_LEFT`, otherwise `0`; source/target pairs as in the corresponding `executeCrossChainCall`. Because `isStatic` is folded into the hash, a static read keys distinctly from an otherwise-identical state-changing call — this is what routes static rows vs call rows inside the unified reentrant table without a mode field.
 
 ### C.4 Hash for reentrant calls
 
@@ -1026,7 +1031,7 @@ When the destination contract called by `_processNCalls` calls back into a proxy
    - `success == true`: fold `NESTED_BEGIN(crossChainCallHash)`, run the row's own `l2ToL1Calls[]` to completion (folding into the host's continuous hash), fold `NESTED_END`, return `row.returnData` to the destination.
    - `success == false`: fold `NESTED_BEGIN(crossChainCallHash)`, run the row's own sub-array, check `_rollingHash == row.revertedOrStaticRollingHash` (else `RollingHashMismatch`), then revert with `row.returnData`. The destination's `try/catch` absorbs the revert; the EVM rolls back the frame's state, hash folds, and cursor advance automatically.
 
-**3. No match** → fold `CALL_NOT_FOUND(crossChainCallHash)` into `_rollingHash` and return `""`. The entry later fails its rolling-hash check (`RollingHashMismatch`) at the `_executeEntry` boundary — the divergence survives any intermediate try/catch and rides the `ContextResult` payload across a revert-span boundary, so no side flag is needed. (Returning empty bytes may also revert the *caller's* frame sooner if it ABI-decodes a non-empty payload.)
+**3. No match** → fold `CALL_NOT_FOUND(crossChainCallHash)` into `_rollingHash` and return `""`. The entry later fails its rolling-hash check (`RollingHashMismatch`) at the `_executeEntry` boundary — `ContextResult` carries the divergence across deliberate revert spans; an ordinary enclosing revert rolls back the marker with the frame. (Returning empty bytes may also revert the *caller's* frame sooner if it ABI-decodes a non-empty payload.)
 
 **Why this works for reverts.** A reverting reentrant call needs **only** a `success == false` row — no `revertNextNCalls` wrapper: the destination's `try/catch` is the isolation boundary, the terminal revert restores the cursor and hash to the pre-call values, and the row's `revertedOrStaticRollingHash` pins exactly what the reverted frame executed.
 
@@ -1056,7 +1061,7 @@ A single mechanism handles atomic rollback: there are no continuation entries, n
 
 #### D.4.1 When to use `revertNextNCalls` (and when not to)
 
-**Use `revertNextNCalls > 0` only for forced reverts** — calls (or sequences of calls) that *would* succeed against the destination but whose state effects must not survive. The canonical scenario is a cross-chain call from rollup A to rollup B where the destination on B succeeds, but the prover output records that the call must be rolled back (for example, because the higher-level transaction that contained the call was reverted on A). The rolling hash still commits to a `CALL_END(success=true, retData=…)` outcome — what was promised — while the EVM rolls the state back.
+**Use `revertNextNCalls > 0` only for forced rollback of a span** — its state effects must not survive, while individual calls may succeed or fail. The canonical scenario is a cross-chain call from rollup A to rollup B where the destination on B succeeds, but the prover output records that the call must be rolled back (for example, because the higher-level transaction that contained the call was reverted on A). In that example the rolling hash commits to `CALL_END(success=true, retData=…)` while the EVM rolls the state back; failed calls elsewhere in a span retain their actual failure outcomes.
 
 **Do not use it to model a destination that naturally reverts.** With `revertNextNCalls = 0`, `_processNCalls` already invokes the destination via the proxy's `.call`, captures `(success=false, retData=revertReason)`, and hashes that into `CALL_END`. The destination's own revert rolls back its own state. Wrapping a single naturally-reverting call in a span of 1 produces the same observable state for no benefit — the mechanism only earns its keep when state would otherwise survive.
 
@@ -1064,7 +1069,7 @@ The protocol's revert paths are distinct — the full situation → structure de
 
 ### D.5 Flat Call Model
 
-The off-chain prover emits, per entry, a flat top-level `l2ToL1Calls[]` array plus the unified `ExpectedL1ToL2Call[]` table (L2: `incomingCalls[]` / `ExpectedOutgoingCrossChainCall[]`) in which each reentrant frame carries its own flat sub-array — it does not thread scope arrays through nested calls and does not partition one shared array. Return data from a call is captured directly into the rolling hash via `CALL_END`; natural failures are captured via `success=false` in the same tag. `revertNextNCalls` is reserved for forced-revert spans where state must be rolled back even though the call(s) succeeded.
+The off-chain prover emits, per entry, a flat top-level `l2ToL1Calls[]` array plus the unified `ExpectedL1ToL2Call[]` table (L2: `incomingCalls[]` / `ExpectedOutgoingCrossChainCall[]`) in which each reentrant frame carries its own flat sub-array — it does not thread scope arrays through nested calls and does not partition one shared array. Return data from a call is captured directly into the rolling hash via `CALL_END`; natural failures are captured via `success=false` in the same tag. `revertNextNCalls` is reserved for forced-revert spans where state must be rolled back regardless of individual success/failure outcomes.
 
 ---
 
@@ -1095,7 +1100,7 @@ CALL_NOT_FOUND = uint8(5)   _rollingHash = keccak256(_rollingHash ‖ CALL_NOT_F
 
 `CALL_BEGIN` binds the executed call's full identity (its seven-field `crossChainCallHash`, §C.5) so the hash commits to *which* call ran, not just its result. `NESTED_BEGIN` binds the reentrant call's identity the same way. **No call/frame index is folded in**: `_rollingHash` is a chain (each fold depends on the prior value), so order, count, and nesting are already bound by the chain + the tags; omitting an explicit index is also what lets a `revertNextNCalls` span be processed as a 0-based sub-slice without diverging the hash from a continuous run.
 
-`CALL_NOT_FOUND` is folded when a reentrant call finds no matching row in the unified table. The dedicated tag is distinct from `CALL_END(true, "")` (what the caller folds for a normal empty return), so a no-match can never be forged as one. The divergence is caught at the entry's rolling-hash check (surviving any intermediate try/catch and riding the `ContextResult` payload across a revert-span boundary), so no side flag is needed; a prover that deliberately pre-hashes the tag commits to a not-found at that exact position — a faithful outcome, not an attack.
+`CALL_NOT_FOUND` is folded when a reentrant call finds no matching row in the unified table. The dedicated tag is distinct from `CALL_END(true, "")` (what the caller folds for a normal empty return), so a no-match can never be forged as one. The divergence is caught at the entry's rolling-hash check if the marker remains in the committed trace (`ContextResult` carries it across deliberate revert spans; ordinary enclosing reverts undo it), so no side flag is needed; a prover that deliberately pre-hashes the tag commits to a not-found at that exact position — a faithful outcome, not an attack.
 
 After all calls and nestings complete:
 
@@ -1309,7 +1314,7 @@ The previous-state binding lives on the entry: `RollupUpdate.currentRoot` is che
 
 ### H.2 Ether Accounting (L1)
 
-For each entry: `totalEtherDelta == _entryEtherDelta`, where `totalEtherDelta` is the sum of the entry's `rollupUpdates[].etherDelta` and `_entryEtherDelta` is the entry's net physical flow — ALL `msg.value` received via `executeCrossChainCall` during the entry (the entry-point call's value plus every reentrant call's; 0 for `executeL2Txs` and immediate entries unless reentrant receipts occur) MINUS the `value` of every **successful** non-static outbound call. Calls inside a `revertNextNCalls` span contribute to neither side — their ETH transfers and their `_entryEtherDelta` subtractions are rolled back by the span's revert, even though the rolling hash still records them as successful.
+For each entry: `totalEtherDelta == _entryEtherDelta`, where `totalEtherDelta` is the sum of the entry's `rollupUpdates[].etherDelta` and `_entryEtherDelta` is the entry's net physical flow — ALL `msg.value` received via `executeCrossChainCall` during the entry (the entry-point call's value plus every reentrant call's; 0 for `executeL2Txs` and immediate entries unless reentrant receipts occur) MINUS the `value` of every **successful** non-static outbound call. Calls inside a `revertNextNCalls` span contribute to neither side — their ETH transfers and their `_entryEtherDelta` subtractions are rolled back by the span's revert, while the rolling hash still records their actual success/failure outcomes.
 
 Each entry independently balances — ether accounting is localized to a single entry rather than aggregated across the transaction — which simplifies the prover's job.
 

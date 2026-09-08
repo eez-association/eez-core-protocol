@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {EEZBase} from "../src/base/EEZBase.sol";
 import {BaseL2} from "./BaseL2.t.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZL2.sol";
+import {CrossChainCall, ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZL2.sol";
 
 /// @title GasProbeTest
 /// @notice Validates the callGas observation technique the test harnesses rely on: `callGas`
@@ -54,5 +55,40 @@ contract GasProbeTest is BaseL2 {
         (bool ok, bytes memory ret) = proxyAddr.call{value: 1 ether, gas: CALL_GAS}(data);
         assertTrue(ok, "real value call matches the probed hash");
         assertEq(ret, "value-ok");
+    }
+
+    function _loadStatic(bytes32 hash, bytes memory result, bool success) internal {
+        StaticExecutionEntry[] memory rows = new StaticExecutionEntry[](1);
+        rows[0].proxyEntryHash = hash;
+        rows[0].incomingCalls = new CrossChainCall[](0);
+        rows[0].success = success;
+        rows[0].returnData = result;
+        _loadEntries(new ExecutionEntry[](0), rows);
+    }
+
+    function test_StaticObservedGasRejectsZeroGasKey() public {
+        bytes memory data = hex"12345678";
+        bytes32 hash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);
+        _loadStatic(hash, "zero-gas-key", true);
+        vm.prank(caller);
+        (bool ok, bytes memory ret) = proxyAddr.staticcall{gas: CALL_GAS}(data);
+        assertFalse(ok);
+        assertEq(ret, abi.encodeWithSelector(EEZBase.ExecutionNotFound.selector));
+    }
+
+    function test_StaticGasDisabledKeepsZeroGasKey() public {
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false);
+        proxyAddr = manager.createCrossChainProxy(remoteTarget, REMOTE_ROLLUP_ID);
+        bytes memory data = hex"12345678";
+        bytes32 hash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);
+        _loadStatic(hash, "zero-gas-ok", true);
+        vm.prank(caller);
+        (bool ok, bytes memory ret) = proxyAddr.staticcall{gas: CALL_GAS}(data);
+        assertTrue(ok);
+        assertEq(ret, "zero-gas-ok");
+        vm.prank(caller);
+        (ok, ret) = proxyAddr.staticcall{gas: CALL_GAS - 1000}(data);
+        assertTrue(ok);
+        assertEq(ret, "zero-gas-ok");
     }
 }

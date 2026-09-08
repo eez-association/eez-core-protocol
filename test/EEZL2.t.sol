@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Test.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
+import {ICrossChainProxy} from "../src/interfaces/ICrossChainProxy.sol";
 import {
     ExecutionEntry,
     CrossChainCall,
@@ -134,6 +135,37 @@ contract EEZL2Test is BaseL2 {
     }
 
     // ── createCrossChainProxy ──
+
+    function test_BothProxyCreationPathsRejectSameNetwork() public {
+        bytes memory expected = abi.encodeWithSelector(EEZBase.SameNetworkProxy.selector, TEST_ROLLUP_ID);
+        vm.expectRevert(expected);
+        manager.createCrossChainProxy(address(0x1234), TEST_ROLLUP_ID);
+        vm.expectRevert(expected);
+        manager.getOrCreateCrossChainProxy(address(0x1234), TEST_ROLLUP_ID);
+        address predicted = manager.computeCrossChainProxyAddress(address(0x1234), TEST_ROLLUP_ID);
+        assertEq(predicted.code.length, 0);
+        (bool authorized,,) = manager.authorizedProxies(predicted);
+        assertFalse(authorized);
+    }
+
+    function test_GetOrCreateCrossChainProxy_Idempotent() public {
+        address proxy = manager.getOrCreateCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        bytes32 codeHash = proxy.codehash;
+        vm.recordLogs();
+        vm.prank(address(0xCAFE));
+        assertEq(manager.getOrCreateCrossChainProxy(address(target), REMOTE_ROLLUP_ID), proxy);
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(proxy.codehash, codeHash);
+        (bool authorized,,) = manager.authorizedProxies(proxy);
+        assertTrue(authorized);
+    }
+
+    function test_CreateCrossChainProxy_DuplicateReverts() public {
+        address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        vm.expectRevert();
+        manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
+        assertEq(manager.getOrCreateCrossChainProxy(address(target), REMOTE_ROLLUP_ID), proxy);
+    }
 
     function test_CreateCrossChainProxy() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
@@ -426,7 +458,7 @@ contract EEZL2Test is BaseL2 {
         CrossChainProxy p = CrossChainProxy(payable(proxy));
         vm.prank(address(0xDEAD));
         vm.expectRevert(EEZL2.ExecutionNotInCurrentBlock.selector);
-        p.executeOnBehalf(address(target), 0, abi.encodeCall(L2TestTarget.setValue, (42)));
+        ICrossChainProxy(address(p)).executeOnBehalf(address(target), 0, abi.encodeCall(L2TestTarget.setValue, (42)));
     }
 
     // ── Rolling hash mismatch ──

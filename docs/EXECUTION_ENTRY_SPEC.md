@@ -54,7 +54,7 @@ Loaded into `_transientEntries` (the immediate-prefix remainder, consumed via th
 
 ## Action Hash
 
-A cross-chain call is identified by its `crossChainCallHash`, computed by the `public pure` helper `computeCrossChainCallHash` on either manager (defined in `EEZBase`). `callGas` is `0` at every keying site except calls LEAVING an L2 (`EEZL2.executeCrossChainCall`, top-level `proxyEntryHash` match and nested `expectedOutgoingHash` alike), where `USE_GAS_LEFT` selects the observed `gasleft()` at manager entry (else `0`). Every fixture and current deployment runs `useGasLeft = false`, so build every key with `callGas = 0`. Formula, matching-site table, and off-chain helpers: `CORE_PROTOCOL_SPEC.md` §C.
+A cross-chain call is identified by its `crossChainCallHash`, computed by the `public pure` helper `computeCrossChainCallHash` on either manager (defined in `EEZBase`). `callGas` is `0` at every keying site except L2 inbound binding (`incomingCalls[0].gas`) and calls LEAVING an L2 (`EEZL2.executeCrossChainCall` and `staticCrossChainCall`, top-level `proxyEntryHash` match and nested `expectedOutgoingHash` alike), where `USE_GAS_LEFT` selects the `gasleft()` sampled after proxy validation (else `0`). Every fixture and current deployment runs `useGasLeft = false`, so build every key with `callGas = 0`. Formula, matching-site table, and off-chain helpers: `CORE_PROTOCOL_SPEC.md` §C.
 
 The on-chain contracts reconstruct the hash from the proxy's identity (`originalRollupId`, `originalAddress`) and the live call context (`msg.value`, `callData`, the proxy's caller, `MAINNET_ROLLUP_ID` on L1 or `ROLLUP_ID` on L2).
 
@@ -106,7 +106,7 @@ The processor (`_processNCalls`) walks the given call array by a plain local ind
 
 ### `revertNextNCalls`: forced-revert context
 
-`revertNextNCalls > 0` is the **forced-revert** mechanism: the next `revertNextNCalls` calls (including this one) execute, succeed, and have their state effects rolled back at the protocol layer. The rolling hash still commits to the calls' real outcomes (typically `success=true` with the captured `returnData`); only the EVM state changes disappear. Mechanically, the processor slices the span and self-calls `executeInContextAndRevert(span)`, which always reverts with `ContextResult(rollingHash, reentrantConsumed, callsProcessed)` — state rolls back, the rolling hash and reentrant cursor escape via the revert payload and are restored by the outer frame. Full mechanics: `CORE_PROTOCOL_SPEC.md` §D.4.
+`revertNextNCalls > 0` is the **forced-revert** mechanism: the next `revertNextNCalls` calls (including this one) execute, succeed, and have their state effects rolled back at the protocol layer. The rolling hash still commits to the calls' real outcomes (typically `success=true` with the captured `returnData`); only the EVM state changes disappear. Mechanically, the processor slices the span and self-calls `executeInContextAndRevert(span)`, which always reverts with `ContextResult(rollingHash, reentrantConsumed)` — state rolls back, the rolling hash and reentrant cursor escape via the revert payload and are restored by the outer frame. Full mechanics: `CORE_PROTOCOL_SPEC.md` §D.4.
 
 `revertNextNCalls` covers a contiguous run of calls within one call array (an entry's top-level array or one reentrant frame's own sub-array). Nested spans are a prover convention violation rather than an on-chain check — the processor would mechanically recurse, but the outer span's rollback already discards the inner state, so the prover never emits one.
 
