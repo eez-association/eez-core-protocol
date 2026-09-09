@@ -68,7 +68,7 @@ struct RollupConfig {
 ///      (c) `setRoot` lockout — reverts `RollupBatchActiveThisBlock` while `== block.number`.
 struct RollupVerification {
     uint64 lastVerifiedBlock; // block of the last verified batch
-    uint64 entryQueueIndex; // how many `entryQueue` entries have been consumed (packed with above)
+    uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped (packed with above)
     ExecutionEntry[] entryQueue; // entries awaiting consumption this block
     StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution; not block-gated (matchable while their root pins hold)
 }
@@ -192,6 +192,17 @@ interface IEEZ {
     /// @param originalRollupId The source rollup ID
     /// @return proxy The deployed proxy address
     function createCrossChainProxy(address originalAddress, uint64 originalRollupId) external returns (address proxy);
+
+    /// @notice Returns the authorized proxy for a remote address, deploying it if needed.
+    /// @param originalAddress The address this proxy represents on the source rollup
+    /// @param originalRollupId The source rollup ID
+    /// @return proxy The existing or newly deployed proxy address
+    function getOrCreateCrossChainProxy(
+        address originalAddress,
+        uint64 originalRollupId
+    )
+        external
+        returns (address proxy);
 
     /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
     function RECOVERY_ADDRESS() external view returns (address);

@@ -211,6 +211,37 @@ contract EEZTest is Base {
     //  CrossChainProxy creation
     // ──────────────────────────────────────────────
 
+    function test_BothProxyCreationPathsRejectSameNetwork() public {
+        bytes memory expected = abi.encodeWithSelector(EEZBase.SameNetworkProxy.selector, uint64(0));
+        vm.expectRevert(expected);
+        rollups.createCrossChainProxy(address(0x1234), uint64(0));
+        vm.expectRevert(expected);
+        rollups.getOrCreateCrossChainProxy(address(0x1234), uint64(0));
+        address predicted = rollups.computeCrossChainProxyAddress(address(0x1234), uint64(0));
+        assertEq(predicted.code.length, 0);
+        (bool authorized,,) = rollups.authorizedProxies(predicted);
+        assertFalse(authorized);
+    }
+
+    function test_GetOrCreateCrossChainProxy_Idempotent() public {
+        address proxy = rollups.getOrCreateCrossChainProxy(address(0x1234), uint64(1));
+        bytes32 codeHash = proxy.codehash;
+        vm.recordLogs();
+        vm.prank(address(0xCAFE));
+        assertEq(rollups.getOrCreateCrossChainProxy(address(0x1234), uint64(1)), proxy);
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(proxy.codehash, codeHash);
+        (bool authorized,,) = rollups.authorizedProxies(proxy);
+        assertTrue(authorized);
+    }
+
+    function test_CreateCrossChainProxy_DuplicateReverts() public {
+        address proxy = rollups.createCrossChainProxy(address(0x1234), uint64(1));
+        vm.expectRevert();
+        rollups.createCrossChainProxy(address(0x1234), uint64(1));
+        assertEq(rollups.getOrCreateCrossChainProxy(address(0x1234), uint64(1)), proxy);
+    }
+
     function test_CreateCrossChainProxy() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         address targetAddr = address(0x1234);
@@ -963,6 +994,7 @@ contract EEZTest is Base {
         vm.expectEmit(true, true, true, true);
         // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so this fresh rollup lands at id 1.
         emit EEZ.RollupCreated(1, address(r), keccak256("init"));
+        vm.prank(alice);
         rollups.registerRollup(address(r), keccak256("init"));
     }
 

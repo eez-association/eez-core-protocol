@@ -14,12 +14,35 @@
       sites at it. Same for L2 `executeIncomingCrossChainCall` (`loadExecutionTable` stays storage).
       Win ~300–400k per meta-hook batch.
 - [ ] **Look up reentrant rows without copying the whole table.** Every nested call copies
-      `expectedL1ToL2Calls` to memory before scanning. Scan the keys in place, copy only the match.
+      `expectedL1ToL2Calls` to memory before scanning. Scan the keys in place and copy only the match
+      (nested CALL and STATICCALL; immediate, meta-hook and persistent tables — transient rows are
+      already key-addressable). Keep cursor/rollback and empty-table behavior; no ABI, proof or
+      storage-layout change. Benchmark deep nesting (copying is quadratic today), gas and bytecode.
       Do after the item above.
+
+## BenchMark 
+- [ ] **Benchmark queue replacement cleanup (L1/L2).** Each new batch pays to `delete` the previous
+      table's nested arrays and bytes. Measure large-old/small-new batches first (net refunds and
+      peak gas — refunds do not replenish gas mid-execution), then compare direct overwrite,
+      generation-indexed storage, bounded cleanup and table limits, counting retained-state growth.
+      Any overwrite must drop stale tails and reset cursors, and L1 must invalidate old queues before
+      immediate execution/hooks; just removing `delete` would append to old queues. Note that array
+      assignment still clears shortened nested arrays.
+
+- [ ] **Benchmark execution log payloads (L1/L2).** Events carry full return data; L2 also logs the
+      whole loaded table. Set payload budgets; use hashes/IDs where full data is unnecessary.
+
+## Observability
+
+- [ ] **Identify execution events clearly.** Immediate entries report index zero, nested call
+      indices repeat, and `BatchPosted` carries only a rollup count. Consider batch IDs, real entry
+      indices and frame IDs, and distinguish proof acceptance, committed execution, deliberate
+      rollback and omitted work. Reverted frames erase their own logs, so keep the surviving
+      rollback-summary events distinct from committed target calls.
 
 ## Bytecode
 
-EEZ runtime 23,654 B of the 24,576 B EIP-170 limit (922 B headroom, 2026-09-02); EEZL2 13,382 B.
+EEZ runtime 23,825 B of the 24,576 B EIP-170 limit (751 B headroom, 2026-09-08); EEZL2 13,594 B.
 Initcode is not a concern (25.3 KB of 49 KB). The compiler is already fully tuned for size
 (`optimizer_runs = 1`, via-IR), so savings need config or source changes.
 

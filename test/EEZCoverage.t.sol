@@ -76,7 +76,7 @@ contract ReenterPostBatch is IMetaCrossChainReceiver {
 /// @notice An `IRollupContract` manager that returns a vkey array of the wrong length,
 ///         tripping the `_getVerificationKeysPerRollup` length guard.
 contract BadVkeyManager is IRollupContract {
-    function rollupContractRegistered(uint64) external {}
+    function rollupContractRegistered(uint64, address) external {}
 
     function checkProofSystemsAndGetVkeys(address[] calldata) external pure returns (bytes32[] memory vkeys) {
         // Caller passes 1 PS but we return 2 → length mismatch.
@@ -781,9 +781,8 @@ contract EEZCoverageTest is Base {
         _assertRevertSelector(ret, EEZBase.UnexpectedContextRevert.selector);
     }
 
-    /// @notice A reentrant call from an immediate L2Tx whose reentrant table is empty cannot resolve
-    ///         against any host and reverts `NoExpectedL1ToL2CallFound` (bubbled to the target).
-    function test_Nested_ImmediateL2TxWithEmptyTableReverts() public {
+    /// @notice An empty immediate table uses the same CALL_NOT_FOUND trace as a queued table.
+    function test_Nested_ImmediateL2TxWithEmptyTableRecordsNoMatch() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         uint64 rid = uint64(r.id);
         ReentryProber prober = new ReentryProber();
@@ -796,10 +795,13 @@ contract EEZCoverageTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(rid, deltas);
         entries[0].l2ToL1Calls = _oneCall(_call(L2_SENDER, rid, address(prober), 0, data));
-        entries[0].rollingHash = _oneCallHash(deltas, bytes32(0), cch, true, "");
+        bytes32 nestedHash =
+            _ccHash(NOT_STATIC_CALL, address(prober), 0, L2_REMOTE, rid, 0, abi.encodeWithSignature("ping()"));
+        bytes32 h = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), cch);
+        entries[0].rollingHash = _hCallEnd(_hCallNotFound(h, nestedHash), true, "");
         _postBatchOne(r, entries, _emptyStaticEntries(), 1, 0);
 
-        assertEq(prober.lastError(), EEZ.NoExpectedL1ToL2CallFound.selector);
+        assertEq(prober.lastError(), bytes4(0));
         assertEq(_getRollupState(r.id), keccak256("s1"));
     }
 
