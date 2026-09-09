@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per PR / branch; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FOUNDRY_PROFILE: default
+  FOUNDRY_DISABLE_NIGHTLY_WARNING: 1
+
+jobs:
+  contract-tests:
+    name: Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+      - name: Build
+        run: forge build
+      # EEZ sits within ~1 KB of the EIP-170 runtime limit. `forge build --sizes`
+      # cannot be used directly: BlobTranslator (script-side tooling, never
+      # deployed) is far over the limit, so check only the deployable contracts.
+      - name: Size guard for deployable contracts (EIP-170)
+        run: |
+          forge build --sizes --json > sizes.json || true
+          jq '{EEZ, EEZL2, CrossChainProxy, Rollup, ECDSAProofSystem} | map_values({runtime_size, runtime_margin})' sizes.json
+          jq -e '[.EEZ, .EEZL2, .CrossChainProxy, .Rollup, .ECDSAProofSystem] | all(.runtime_margin >= 0)' sizes.json > /dev/null \
+            || { echo "::error::a deployable contract exceeds the EIP-170 runtime size limit"; exit 1; }
+      - name: Unit + integration tests
+        run: forge test -vvv
+
+  local-e2e:
+    name: Local E2E (anvil)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+      - name: Build
+        run: forge build
+      - name: Run every e2e scenario on local anvils
+        env:
+          # Same-block harness: serial keeps the anvil mine race deterministic.
+          MAX_PARALLEL: "1"
+        run: bash script/e2e/run/local-parallel.sh
+      - name: Upload e2e logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/e2e-*/
+          if-no-files-found: warn
+          retention-days: 7
