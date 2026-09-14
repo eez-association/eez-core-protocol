@@ -9,8 +9,10 @@
 #
 # Worker funding goes through a MultiSend contract (script/e2e/shared/MultiSend.sol,
 # address cached per chain-id in multisend.txt): one `fundUpTo(address[],uint256,uint256)`
-# tx per chain tops every worker below FLOOR_ETH up to FUND_ETH (workers at or above
-# the floor keep their balance — no dust transfers) and refunds the remainder, instead
+# tx per nonempty chunk tops every worker below FLOOR_ETH up to FUND_ETH (workers at or above
+# the floor keep their balance — no dust transfers). Worker balances are checked
+# first, so the faucet needs only the missing ETH plus a gas reserve; fully funded
+# chains skip funding transactions. MultiSend refunds any excess, instead
 # of one tx per worker — devnet txpools cap pending txs per account (~20), which capped the
 # old per-worker funding at ~20 jobs.
 #
