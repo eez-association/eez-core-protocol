@@ -351,9 +351,11 @@ contract EEZL2CoverageTest is BaseL2 {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
 
+        bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
+        bytes32 hash = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
         vm.prank(proxy);
-        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
-        manager.staticCrossChainCall(address(this), abi.encodeCall(ViewTargetL2.getValue, ()));
+        vm.expectRevert(abi.encodeWithSelector(EEZL2.EntryNotFound.selector, hash, uint64(0)));
+        manager.staticCrossChainCall(address(this), cd);
     }
 
     /// Top-level lookup carrying a real static sub-call: `_processNStaticCalls` runs it
@@ -560,7 +562,7 @@ contract EEZL2CoverageTest is BaseL2 {
         assertTrue(ok, "entry with nested static read must commit");
     }
 
-    /// Nested staticCrossChainCall with no matching outgoing entry reverts ExecutionNotFound,
+    /// Nested staticCrossChainCall with no matching outgoing entry reverts EntryNotFound,
     /// surfacing as the outer call failing.
     function test_StaticLookup_NestedNoMatch() public {
         StaticReaderL2 reader = new StaticReaderL2();
@@ -585,7 +587,7 @@ contract EEZL2CoverageTest is BaseL2 {
         entry.expectedOutgoingCalls = new ExpectedOutgoingCrossChainCall[](0);
         entry.success = true;
         entry.returnData = "";
-        // The outer call's static read reverts (ExecutionNotFound), so reader's require fails →
+        // The outer call's static read reverts (EntryNotFound), so reader's require fails →
         // the outer call returns (false, ...). We set an incomplete rolling hash (seed + CALL_BEGIN
         // only) so the entry fails its rolling-hash check and the whole call reverts.
         entry.rollingHash = _hCallBegin(_hEntryBeginL2(outerHash), outerCallHash);

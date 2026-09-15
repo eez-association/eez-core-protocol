@@ -4,7 +4,7 @@
 #
 # Callers source this file and must set beforehand:
 #   SCRIPT_DIR RUN_DIR FUND_ETH FLOOR_ETH SOURCE_PK DIRECT FRESH L1_RPC L2_RPC
-# Optional: MULTISEND_BATCH (default 100).
+# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain).
 #
 # expand_jobs "<target>[:count]" ...   → JOB_NAMES[] JOB_SOLS[] NJOBS
 # fund_workers                         → WALLET_ADDRS[] WALLET_PKS[] (one per job),
@@ -144,11 +144,15 @@ expand_jobs() {
 # yields "replacement transaction underpriced".
 fund_workers() {
     exec 9>"$SCRIPT_DIR/.faucet.lock"
-    flock 9
+    flock 9 || { echo "Failed to acquire faucet lock"; exit 1; }
 
     MULTISEND_BATCH="${MULTISEND_BATCH:-100}"
-    local nchunks=$(( (NJOBS + MULTISEND_BATCH - 1) / MULTISEND_BATCH ))
-    local NEED_WEI=""   # faucet balance the run needs (faucet mode only)
+    [[ "$MULTISEND_BATCH" =~ ^[1-9][0-9]*$ ]] || {
+        echo "MULTISEND_BATCH must be a positive integer"; exit 1; }
+
+    FUND_BALANCE_WORKERS="${FUND_BALANCE_WORKERS:-16}"
+    [[ "$FUND_BALANCE_WORKERS" =~ ^[1-9][0-9]*$ ]] || {
+        echo "FUND_BALANCE_WORKERS must be a positive integer"; exit 1; }
 
     if $DIRECT; then
         # ── Direct mode: fund workers straight from the source key ──
@@ -172,19 +176,13 @@ fund_workers() {
             echo "Created faucet $FAUCET_ADDR → $FAUCET_FILE"
         fi
 
-        # The faucet itself is topped up from the source key inside _fund_chain
-        # (per chain, in parallel). bc, not $(( )) — FUND_ETH may be fractional
-        # (e.g. 0.2). 0.05/chunk covers each MultiSend tx's own gas (observed
-        # ~0.035 at 100 workers/chunk); fundUpTo refunds the value reused
-        # wallets don't need.
-        NEED_WEI=$(cast to-wei "$(echo "$NJOBS * $FUND_ETH + $nchunks * 0.05 + 0.1" | bc)")
     fi
 
     # ── One pooled wallet per job, topped up via MultiSend ──
-    # One `fundUpTo(address[],uint256,uint256)` tx per chain (chunked by
-    # MULTISEND_BATCH) tops every worker up to FUND_ETH — a single-sender tx count
-    # that devnet txpool per-account limits never touch. Reused wallets keep their
-    # leftover balance; the unspent value refunds to the faucet in the same tx.
+    # Workers below FLOOR_ETH are topped up to FUND_ETH, in MULTISEND_BATCH
+    # chunks. Plans contain only deficient workers and their missing value;
+    # already-funded chains send no funding transactions. Any excess caused
+    # by a balance increase after planning is refunded by MultiSend.
     local MULTISEND_FILE="$SCRIPT_DIR/multisend.txt"
     local POOL_FILE="$SCRIPT_DIR/wallet-pool.csv"
 
@@ -234,16 +232,67 @@ fund_workers() {
     done
 
     local FUND_WEI FLOOR_WEI MS_L1 MS_L2 pid_l1 pid_l2 rc=0
-    FUND_WEI=$(cast to-wei "$FUND_ETH")
-    FLOOR_WEI=$(cast to-wei "$FLOOR_ETH")
+    FUND_WEI=$(cast to-wei "$FUND_ETH") || exit 1
+    FLOOR_WEI=$(cast to-wei "$FLOOR_ETH") || exit 1
+    [[ "$FUND_WEI" =~ ^[0-9]+$ && "$FLOOR_WEI" =~ ^[0-9]+$ ]] || {
+        echo "Invalid funding target or floor"; exit 1; }
+
+    # Inspect workers before touching the faucet. Each chain has its own plan:
+    # address,missing-wei. Match MultiSend's floor AND target guards exactly.
+    _plan_funding() {  # $1=chain label $2=rpc
+        local chain="$1" rpc="$2" w pid rc=0 workers="$FUND_BALANCE_WORKERS"
+        local plan="$RUN_DIR/funding-$chain.csv" pids=() parts=()
+        : > "$plan" || { echo "Cannot write funding plan on $chain"; return 1; }
+        (( workers > ${#WALLET_ADDRS[@]} )) && workers=${#WALLET_ADDRS[@]}
+        # Each worker owns a file. Publish the plan only after every lookup succeeds.
+        for ((w = 0; w < workers; w++)); do
+            parts+=("$plan.worker-$w")
+            (
+                local i addr bal missing
+                for ((i = w; i < ${#WALLET_ADDRS[@]}; i += workers)); do
+                    addr="${WALLET_ADDRS[$i]}"
+                    bal=$(cast balance "$addr" --rpc-url "$rpc") || {
+                        echo "Worker balance lookup FAILED on $chain ($addr)" >&2; exit 1; }
+                    [[ "$bal" =~ ^[0-9]+$ ]] || {
+                        echo "Invalid worker balance on $chain ($addr)" >&2; exit 1; }
+                    if [[ $(echo "$bal < $FLOOR_WEI && $bal < $FUND_WEI" | bc) == 1 ]]; then
+                        missing=$(echo "$FUND_WEI - $bal" | bc)
+                        echo "$addr,$missing" || exit 1
+                    fi
+                done
+            ) > "$plan.worker-$w" &
+            pids+=("$!")
+        done
+        for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+        if (( rc == 0 && ${#parts[@]} > 0 )); then
+            cat "${parts[@]}" > "$plan" || rc=1
+        fi
+        if (( ${#parts[@]} > 0 )); then rm -f -- "${parts[@]}" || rc=1; fi
+        (( rc == 0 )) || return 1
+        echo "$chain: $(wc -l < "$plan")/$NJOBS workers need funding"
+    }
+    _plan_funding L1 "$L1_RPC" & pid_l1=$!
+    _plan_funding L2 "$L2_RPC" & pid_l2=$!
+    wait "$pid_l1" || rc=1
+    wait "$pid_l2" || rc=1
+    (( rc == 0 )) || exit 1
 
     # ── Faucet top-up from the source key, both chains at once ──
     # Must precede the MultiSend resolution: a (re)deploy is paid by the faucet.
     _topup_faucet() {  # $1=chain label $2=rpc
-        local chain="$1" rpc="$2" have topup
+        local chain="$1" rpc="$2" have topup need count chunks missing
+        local plan="$RUN_DIR/funding-$chain.csv"
+        [[ -s "$plan" ]] || return 0
+        count=$(wc -l < "$plan")
+        chunks=$(( (count + MULTISEND_BATCH - 1) / MULTISEND_BATCH ))
+        missing=$(cut -d, -f2 "$plan" | paste -sd+ - | bc)
+        # Keep the existing conservative gas/deployment reserve, but only for
+        # chains and batches that actually need funding.
+        need=$(echo "$missing + $chunks * 50000000000000000 + 100000000000000000" | bc)
         have=$(cast balance "$FAUCET_ADDR" --rpc-url "$rpc") || { echo "balance lookup FAILED on $chain"; return 1; }
-        if [[ $(echo "$have < $NEED_WEI" | bc) -eq 1 ]]; then
-            topup=$(echo "$NEED_WEI - $have" | bc)
+        [[ "$have" =~ ^[0-9]+$ ]] || { echo "Invalid faucet balance on $chain"; return 1; }
+        if [[ $(echo "$have < $need" | bc) -eq 1 ]]; then
+            topup=$(echo "$need - $have" | bc)
             echo "Faucet top-up on $chain: $(cast from-wei "$topup") ETH from source key"
             cast send "$FAUCET_ADDR" --value "$topup" \
                 --private-key "$SOURCE_PK" --rpc-url "$rpc" > /dev/null || {
@@ -262,8 +311,13 @@ fund_workers() {
 
     # Resolved before the parallel worker funding: a redeploy rewrites
     # multisend.txt, and two chains doing that at once would drop each other's line.
-    MS_L1=$(_ensure_multisend "$L1_RPC") || exit 1
-    MS_L2=$(_ensure_multisend "$L2_RPC") || exit 1
+    MS_L1=""; MS_L2=""
+    if [[ -s "$RUN_DIR/funding-L1.csv" ]]; then
+        MS_L1=$(_ensure_multisend "$L1_RPC") || exit 1
+    fi
+    if [[ -s "$RUN_DIR/funding-L2.csv" ]]; then
+        MS_L2=$(_ensure_multisend "$L2_RPC") || exit 1
+    fi
 
     # ── Worker top-ups, both chains at once ──
     # Per chain (their nonces are independent): fire every fundUpTo chunk at
@@ -272,11 +326,19 @@ fund_workers() {
     # now the whole sequence costs about one block per chain.
     _fund_chain() {  # $1=chain label $2=rpc $3=MultiSend address
         local chain="$1" rpc="$2" ms="$3"
-        local nonce off total h hashes=() deadline status
+        local nonce off total h hashes=() deadline status row
+        local recipients=() deficits=()
+        while IFS=, read -r row total; do
+            recipients+=("$row"); deficits+=("$total")
+        done < "$RUN_DIR/funding-$chain.csv" || return 1
+        if (( ${#recipients[@]} == 0 )); then
+            echo "  $chain: workers already funded; skipping funding transactions"
+            return 0
+        fi
         nonce=$(cast nonce "$FAUCET_ADDR" --rpc-url "$rpc") || { echo "nonce lookup FAILED on $chain"; return 1; }
-        for ((off = 0; off < NJOBS; off += MULTISEND_BATCH)); do
-            local slice=("${WALLET_ADDRS[@]:off:MULTISEND_BATCH}")
-            total=$(echo "$FUND_WEI * ${#slice[@]}" | bc)
+        for ((off = 0; off < ${#recipients[@]}; off += MULTISEND_BATCH)); do
+            local slice=("${recipients[@]:off:MULTISEND_BATCH}")
+            total=$(IFS=+; echo "${deficits[*]:off:MULTISEND_BATCH}" | bc)
             h=$(cast send "$ms" "fundUpTo(address[],uint256,uint256)" \
                 "[$(IFS=,; echo "${slice[*]}")]" "$FUND_WEI" "$FLOOR_WEI" --value "$total" \
                 --nonce "$nonce" --async --private-key "$FAUCET_PK" --rpc-url "$rpc") || {
@@ -293,7 +355,7 @@ fund_workers() {
             status="${status%% *}"   # cast versions print "true", "1 (success)" or "0x1"
             [[ "$status" == "true" || "$status" == "1" || "$status" == "0x1" ]] || { echo "Worker funding tx $h REVERTED on $chain"; return 1; }
         done
-        echo "  topped up $NJOBS worker(s) on $chain via MultiSend $ms (${#hashes[@]} tx)"
+        echo "  topped up ${#recipients[@]} worker(s) on $chain via MultiSend $ms (${#hashes[@]} tx)"
     }
     rc=0
     _fund_chain L1 "$L1_RPC" "$MS_L1" & pid_l1=$!

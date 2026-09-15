@@ -77,6 +77,7 @@ abstract contract Base is Test, TestHashes {
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
         handle.manager = new Rollup(address(rollups), owner_, 1, psList, vks);
+        vm.prank(owner_);
         handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }
 
@@ -93,6 +94,7 @@ abstract contract Base is Test, TestHashes {
         returns (RollupHandle memory handle)
     {
         handle.manager = new Rollup(address(rollups), owner_, threshold, psList, vks);
+        vm.prank(owner_);
         handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }
 

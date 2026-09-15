@@ -3,7 +3,7 @@ pragma solidity 0.8.34;
 
 import {IProofSystem} from "./interfaces/IProofSystem.sol";
 import {IRollupContract} from "./interfaces/IRollup.sol";
-import {CrossChainProxy} from "./base/CrossChainProxy.sol";
+import {ICrossChainProxy} from "./interfaces/ICrossChainProxy.sol";
 import {ExpectedL1ToL2CallTransient} from "./base/ExpectedL1ToL2CallTransient.sol";
 import {VerifiedRollupsTransient} from "./base/VerifiedRollupsTransient.sol";
 import {
@@ -161,8 +161,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         uint256 indexed entryIndex, bytes32 rollingHash, uint256 l2ToL1CallsProcessed, uint256 l1ToL2CallsConsumed
     );
 
-    /// @notice Emitted after a rollback window (`revertNextNCalls`) is processed via
-    ///         `executeInContextAndRevert` — `nCalls` calls ran, succeeded, then had their state rolled back.
+    /// @notice Emitted after a `revertNextNCalls` span: `nCalls` calls ran via `executeInContextAndRevert`
+    ///         (each succeeding or failing on its own), then their state effects were rolled back.
     event CallsReverted(uint256 indexed entryIndex, uint256 startL2ToL1Call, uint256 nCalls);
 
     /// @notice Error when proof verification fails
@@ -260,10 +260,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
     error RevertSpanOutOfBounds(uint256 start, uint256 span, uint256 length);
 
-    /// @notice A reentrant call resolved with no host entry: an immediate L2Tx with empty `expectedL1ToL2Calls`
-    ///         reaches `_getExpectedL1toL2Calls()` with `_currentEntryRollupId == 0`. Cannot match — graceful revert.
-    error NoExpectedL1ToL2CallFound();
-
     /// @notice Proxy protection (postAndVerifyBatch): a top-level static entry's `destinationRollupId` is
     ///         not among its own `expectedRoots` pins — the routing target must be pinned to
     ///         proven state (mirrors the entry `destination ∈ rollupUpdates` rule).
@@ -321,13 +317,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     // ──────────────────────────────────────────────
 
     /// @notice Registers a pre-deployed `IRollupContract`-conforming contract as a new rollup
-    /// @dev The caller deploys the rollup contract (e.g. our reference `Rollup.sol`, or a custom
-    ///      multisig / governance contract) with the desired proof systems / threshold /
-    ///      whatever ownership model it chooses baked in, then registers it here. Registry
-    ///      assigns a fresh rollupId and stores the initial root; the rollup contract learns
-    ///      its id via the `rollupContractRegistered` callback (there is no reverse-lookup mapping).
-    ///      The registry makes no assumption about how the rollup contract handles ownership —
-    ///      that's entirely its concern.
+    /// @dev The caller deploys the rollup contract first (reference `Rollup.sol`), then registers it here.
+    ///      The registry assigns a fresh rollupId, stores the initial root and calls
+    ///      `rollupContractRegistered(rollupId, msg.sender)`. The rollup contract checks that the
+    ///      caller is authorized and that it is not already registered.
     /// @param rollupContract Address of the pre-deployed `IRollupContract` contract
     /// @param initialRoot Initial root for this rollup
     /// @return rollupId Newly assigned rollup ID
@@ -337,10 +330,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         rollupId = ++rollupCounter;
         rollups[rollupId] = RollupConfig({rollupContract: rollupContract, root: initialRoot, etherBalance: 0});
 
-        // One-shot callback informing the rollup contract of its rollupId. It must accept this
-        // call only from the registry and only when not already initialized (otherwise reuse
-        // of an already-registered rollup contract would silently take over a different rollupId).
-        IRollupContract(rollupContract).rollupContractRegistered(rollupId);
+        // The registry authenticates the original registrant by forwarding its own msg.sender.
+        IRollupContract(rollupContract).rollupContractRegistered(rollupId, msg.sender);
 
         emit RollupCreated(rollupId, rollupContract, initialRoot);
     }
@@ -414,7 +405,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             try this._attemptExecuteImmediateL2Txs(batch.entries[i]) {
                 anyExecuted = true;
             } catch (bytes memory revertData) {
-                // Empty revert data means the frame itself ran out of gas — abort rather than skip.
+                // Treat empty revert data as fatal. It can indicate OOG, but does not prove it.
                 // Partial guard (see `ImmediateL2TxOutOfGas`): an under-gassed target call surfaces as
                 // a custom error and is skipped like any other failure.
                 if (revertData.length == 0) revert ImmediateL2TxOutOfGas(i);
@@ -450,8 +441,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // 8. Save the remaining executions to their per-rollup queues, unconditionally. Each entry
         //    records its expected pre-state in `RollupUpdate.currentRoot`, which is re-checked when the
         //    entry is consumed. So even if an entry is queued whose preconditions no longer hold (e.g.
-        //    its dependency was a transient leftover that got dropped), it simply reverts with
-        //    `RootMismatch` at consumption instead of executing incorrectly.
+        //    its dependency was a transient leftover that got dropped), matching skips it.
+        //    If no candidate matches, consumption reverts ExecutionNotFound.
         _saveRemainderEntries(batch);
 
         // 9. Clear the transient tables. Emptying `_transientEntries` also closes the re-entry window
@@ -775,7 +766,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      same-block re-verify, where a second proven batch fully SUPERSEDES the first for
     ///      this rollup (no append). Safe because state only mutates at consumption and every
     ///      entry is gated by `RollupUpdate.currentRoot`: any dropped entry a later batch
-    ///      wrongly assumed had applied fails `RootMismatch` loudly rather than corrupting
+    ///      wrongly assumed had applied fails the live-root match rather than corrupting
     ///      state — so discarding unconsumed-but-proven entries is a liveness choice, not a
     ///      safety one.
     function _markVerifiedBlockAndDeletePreviousEntries(uint64 rid) internal {
@@ -1050,8 +1041,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
         // No match: CALL_NOT_FOUND is a distinct tag from the CALL_END(true, "") folded for a normal
         // empty return, so it can't be forged as one. The hash divergence is what the entry boundary
-        // checks and it rides the `ContextResult` payload across a revert-span boundary, so it survives
-        // any intermediate try/catch.
+        // checks. ContextResult carries it across deliberate revert spans; an ordinary
+        // enclosing revert rolls back the marker with the rest of that frame.
         _rollingHashCallNotFound(crossChainCallHash);
         return "";
     }
@@ -1125,10 +1116,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
                 // No source check here: every executed call's `sourceRollupId` was already validated
                 // ∈ `rollupUpdates` in `_validateBatchStructure` (entry + reentrant sub-call walk).
-                address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
-                if (!authorizedProxies[sourceProxy].isProxy) {
-                    _createCrossChainProxyInternal(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
-                }
+                address sourceProxy = getOrCreateCrossChainProxy(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
 
                 bool success;
                 bytes memory retData;
@@ -1139,13 +1127,15 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
                     (success, retData) = sourceProxy.staticcall(
                         abi.encodeCall(
-                            CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                            ICrossChainProxy.executeOnBehalf,
+                            (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
                         )
                     );
                 } else {
                     (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(
                         abi.encodeCall(
-                            CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                            ICrossChainProxy.executeOnBehalf,
+                            (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
                         )
                     );
                     if (l2ToL1Call.value > 0 && success) {
@@ -1158,7 +1148,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 emit CallResult(_currentEntryIndex, i, success, retData);
                 i++;
             } else {
-                // Force-revert span: the next `n` calls (this one included) run, succeed, then have
+                // Force-revert span: the next `n` calls (this one included) run with their actual outcomes, then have
                 // their state rolled back. Run them in an isolated self-call that always reverts; its
                 // committed-to-`_rollingHash` and reentrant-consumption escape via `ContextResult` and
                 // are restored here, while the EVM discards the state. A no-match inside the span is
@@ -1173,7 +1163,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 L2ToL1Call[] memory revertedSpan = _sliceL2ToL1Calls(calls, i, revertNextNCalls);
                 try this.executeInContextAndRevert(revertedSpan) {}
                 catch (bytes memory revertData) {
-                    (_rollingHash, _lastL1ToL2CallConsumed,) = _decodeContextResult(revertData);
+                    (_rollingHash, _lastL1ToL2CallConsumed) = _decodeContextResult(revertData);
                 }
                 emit CallsReverted(_currentEntryIndex, i, revertNextNCalls);
                 i += revertNextNCalls; // skip past the span — its calls ran inside the self-call
@@ -1187,8 +1177,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     function executeInContextAndRevert(L2ToL1Call[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(calls);
-        // 3rd field is always 0 on L1; it exists for the shared L1/L2 ContextResult decoder.
-        revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed, 0);
+        revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed);
     }
 
     /// @notice The reentrant (L1→L2) table of the entry currently being processed — the source a proxy
@@ -1211,8 +1200,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         }
         // (c) normal proxy consumption: persistent queue. An immediate L2Tx whose held table (a) is EMPTY
         // yet still makes a reentrant call reaches here with `_currentEntryRollupId == 0` (never a real queue);
-        // the call could not have matched, so revert gracefully instead of OOB-panicking on the empty queue.
-        if (_currentEntryRollupId == 0) revert NoExpectedL1ToL2CallFound();
+        // return the empty table so CALL and STATICCALL use their normal no-match paths, exactly
+        // as they do for empty queued/meta-hook tables.
+        if (_currentEntryRollupId == 0) return new ExpectedL1ToL2Call[](0);
         return verificationByRollup[_currentEntryRollupId].entryQueue[_currentEntryIndex].expectedL1ToL2Calls;
     }
 
@@ -1220,7 +1210,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         `crossChainCallHash` and `destRid` (see `_entryMatches`), returning its index. Reverts
     ///         `ExecutionNotFound` if the scan reaches the end of the queue with no match.
     /// @dev Skipping intervening non-matches is what lets a top-level call reach past already-attempted
-    ///      failed entries (whose reverts left the cursor where it was). A skipped entry simply never
+    ///      failed entries only if they no longer match (a matching failure is retried). A skipped entry never
     ///      executes — anything depending on it later fails its own `currentRoot` check.
     function _findMatchingEntry(
         ExecutionEntry[] storage entryQueue,
@@ -1429,7 +1419,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
             (bool success, bytes memory retData) = sourceProxy.staticcall(
                 abi.encodeCall(
-                    CrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                    ICrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
                 )
             );
             computedHash = _rollingHashStaticResult(computedHash, success, retData);

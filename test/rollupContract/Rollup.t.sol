@@ -115,14 +115,28 @@ contract RollupTest is Test {
     function test_registerNonRegistryReverts() public {
         vm.prank(alice);
         vm.expectRevert(Rollup.NotEEZRegistry.selector);
-        rollup.rollupContractRegistered(1);
+        rollup.rollupContractRegistered(1, address(this));
+    }
+
+    function test_registerUnauthorizedRegistrantReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(Rollup.UnauthorizedRegistrantAccount.selector, alice));
+        rollup.rollupContractRegistered(1, alice);
+        assertEq(rollup.rollupId(), 0);
+    }
+
+    function test_registerUsesCurrentOwner() public {
+        rollup.transferOwnership(alice);
+        vm.expectRevert(abi.encodeWithSelector(Rollup.UnauthorizedRegistrantAccount.selector, address(this)));
+        rollup.rollupContractRegistered(1, address(this));
+        rollup.rollupContractRegistered(1, alice);
+        assertEq(rollup.rollupId(), 1);
     }
 
     function test_registerTwiceReverts() public {
-        rollup.rollupContractRegistered(5);
+        rollup.rollupContractRegistered(5, address(this));
         assertEq(rollup.rollupId(), 5);
         vm.expectRevert(Rollup.AlreadyRegistered.selector);
-        rollup.rollupContractRegistered(6);
+        rollup.rollupContractRegistered(6, address(this));
     }
 
     // ── owner ops ───────────────────────────────────────────────
@@ -173,7 +187,7 @@ contract RollupTest is Test {
     }
 
     function test_setRootEscapeHatch() public {
-        rollup.rollupContractRegistered(1);
+        rollup.rollupContractRegistered(1, address(this));
         rollup.setRoot(bytes32(uint256(0xDEAD)));
         assertEq(lastRoot, bytes32(uint256(0xDEAD)));
     }

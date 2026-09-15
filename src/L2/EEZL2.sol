@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {CrossChainProxy} from "../base/CrossChainProxy.sol";
+import {ICrossChainProxy} from "../interfaces/ICrossChainProxy.sol";
 import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
@@ -87,8 +87,11 @@ contract EEZL2 is EEZBase {
     /// @notice Entry 0's `proxyEntryHash` doesn't match the hash of its own `incomingCalls[0]`
     error EntryHashMismatch();
 
-    /// @notice No entry matched a top-level outgoing call. Carries the computed L2-outgoing hash and
-    ///         the observed `callGas` so the entry-builder can reproduce the key.
+    /// @notice No entry matched an outgoing call: a top-level mutable miss, or a static miss in
+    ///         either branch. Carries the computed L2-outgoing hash and the observed `callGas` so
+    ///         the entry-builder can reproduce the key.
+    /// @dev Observability aid: unlike L1's bare `ExecutionNotFound`, the payload exposes the key
+    ///      the manager searched for, which under `USE_GAS_LEFT` is difficult to be computed off-chain.
     error EntryNotFound(bytes32 crossChainCallHash, uint64 callGas);
 
     /// @notice A `revertNextNCalls` span declares more calls than remain in its array (malformed entry).
@@ -116,8 +119,8 @@ contract EEZL2 is EEZBase {
     );
 
     /// @notice Emitted when a cross-chain call LEAVING this L2 is executed via proxy. `callGas` is
-    ///         the value folded into the hash: the gas observed at manager entry (what the caller
-    ///         forwarded) when `USE_GAS_LEFT`, else 0.
+    ///         the value folded into the hash: with `USE_GAS_LEFT`, the gas left when the hash is
+    ///         computed (after proxy validation, the block check and any system-address transfer); else 0.
     /// @dev Overloads `EEZBase.CrossChainCallExecuted` (L1's five-field form) with an extra
     ///      trailing `callGas`; the two signatures have different topic0s.
     event CrossChainCallExecuted(
@@ -138,8 +141,8 @@ contract EEZL2 is EEZBase {
         uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 outgoingCallsConsumed
     );
 
-    /// @notice Emitted after a rollback window (`revertNextNCalls`) is processed via
-    ///         `executeInContextAndRevert` — `nCalls` calls ran, succeeded, then had their state rolled back.
+    /// @notice Emitted after a `revertNextNCalls` span: `nCalls` calls ran via `executeInContextAndRevert`
+    ///         (each succeeding or failing on its own), then their state effects were rolled back.
     event CallsReverted(uint256 indexed entryIndex, uint256 startCallNumber, uint256 nCalls);
 
     /// @param _rollupId Non-zero; 0 is reserved as the mainnet sentinel in call hashes.
@@ -231,6 +234,8 @@ contract EEZL2 is EEZBase {
             if (!success) revert EtherTransferFailed();
         }
 
+        // Intentionally sample remaining gas here, after proxy/storage checks and any value
+        // transfer. This is not gas at proxy or manager entry; replay must reproduce this point.
         uint64 callGas = USE_GAS_LEFT ? uint64(gasleft()) : 0;
         bytes32 crossChainCallHash = computeCrossChainCallHash(
             NOT_STATIC_CALL,
@@ -361,8 +366,8 @@ contract EEZL2 is EEZBase {
 
         // No match: CALL_NOT_FOUND is a distinct tag from the CALL_END(true, "") folded for a normal
         // empty return, so it can't be forged as one. The hash divergence is what the entry boundary
-        // checks and it rides the `ContextResult` payload across a revert-span boundary, so it survives
-        // any intermediate try/catch.
+        // checks. ContextResult carries it across deliberate revert spans; an ordinary
+        // enclosing revert rolls back the marker with the rest of that frame.
         _rollingHashCallNotFound(crossChainCallHash);
         return "";
     }
@@ -408,9 +413,9 @@ contract EEZL2 is EEZBase {
     /// @notice Consumes the next execution entry (forward-scanning for the matching `proxyEntryHash`),
     ///         runs it, and verifies the rolling hash.
     /// @dev Forward-scan from the cursor skips intervening non-matches so a top-level call can reach
-    ///      past already-attempted entries (a `success == false` entry reverts, leaving the cursor where
-    ///      it was). No reverted fallback: top-level reverting calls are normal entries
-    ///      (`success == false`), and the static pool (`StaticExecutionEntry`) is read-only (`staticCrossChainCall`).
+    ///      past failed entries only when their hashes do not match the new call. A matching
+    ///      failed entry is retried because its revert restores the cursor.
+    ///      Reverting calls are normal entries (`success == false`); the static pool is read-only.
     /// @param crossChainCallHash The expected action input hash for the next entry
     /// @return result The pre-computed return data from the action
     function _consumeAndExecute(bytes32 crossChainCallHash, uint64 callGas) internal returns (bytes memory result) {
@@ -505,9 +510,7 @@ contract EEZL2 is EEZBase {
     function executeInContextAndRevert(CrossChainCall[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processNCalls(calls);
-        // 3rd field is always 0 on L2 (no flat-call transient cursor); it exists for the shared
-        // L1/L2 ContextResult decoder.
-        revert ContextResult(_rollingHash, _lastOutgoingCallConsumed, 0);
+        revert ContextResult(_rollingHash, _lastOutgoingCallConsumed);
     }
 
     /// @notice Processes the WHOLE `calls` array (the calls an entry runs directly, a reentrant frame's
@@ -537,10 +540,7 @@ contract EEZL2 is EEZBase {
                     )
                 );
 
-                address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
-                if (!authorizedProxies[sourceProxy].isProxy) {
-                    _createCrossChainProxyInternal(cc.sourceAddress, cc.sourceRollupId);
-                }
+                address sourceProxy = getOrCreateCrossChainProxy(cc.sourceAddress, cc.sourceRollupId);
 
                 bool success;
                 bytes memory retData;
@@ -549,11 +549,11 @@ contract EEZL2 is EEZBase {
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (cc.value != 0) revert StaticCallWithValue();
                     (success, retData) = sourceProxy.staticcall(
-                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
+                        abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
                     );
                 } else {
                     (success, retData) = sourceProxy.call{value: cc.value}(
-                        abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
+                        abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
                     );
                 }
 
@@ -561,7 +561,7 @@ contract EEZL2 is EEZBase {
                 emit CallResult(_currentEntryIndex, i, success, retData);
                 i++;
             } else {
-                // Force-revert span: the next `n` calls (this one included) run, succeed, then have
+                // Force-revert span: the next `n` calls (this one included) run with their actual outcomes, then have
                 // their state rolled back. Run them in an isolated self-call that always reverts; its
                 // committed-to-`_rollingHash` and reentrant-consumption escape via `ContextResult` and
                 // are restored here, while the EVM discards the state. A no-match inside the span is
@@ -576,7 +576,7 @@ contract EEZL2 is EEZBase {
                 CrossChainCall[] memory revertedSpan = _sliceCrossChainCalls(calls, i, revertNextNCalls);
                 try this.executeInContextAndRevert(revertedSpan) {}
                 catch (bytes memory revertData) {
-                    (_rollingHash, _lastOutgoingCallConsumed,) = _decodeContextResult(revertData);
+                    (_rollingHash, _lastOutgoingCallConsumed) = _decodeContextResult(revertData);
                 }
                 emit CallsReverted(_currentEntryIndex, i, revertNextNCalls);
                 i += revertNextNCalls; // skip past the span — its calls ran inside the self-call
@@ -604,6 +604,9 @@ contract EEZL2 is EEZBase {
         if (!proxyInfo.isProxy) revert UnauthorizedProxy();
         address destAddress = proxyInfo.originalAddress;
 
+        // Static outgoing calls use the same gas-keying policy as mutable outgoing calls.
+        // Sample after proxy validation/storage reads, before lookup; no value transfer applies.
+        uint64 callGas = USE_GAS_LEFT ? uint64(gasleft()) : 0;
         bytes32 crossChainCallHash = computeCrossChainCallHash(
             IS_STATIC,
             sourceAddress,
@@ -611,7 +614,7 @@ contract EEZL2 is EEZBase {
             destAddress,
             proxyInfo.originalRollupId,
             0, // value is always 0 in static context
-            ZERO_CALL_GAS,
+            callGas,
             callData
         );
 
@@ -635,7 +638,7 @@ contract EEZL2 is EEZBase {
                     );
                 }
             }
-            revert ExecutionNotFound();
+            revert EntryNotFound(crossChainCallHash, callGas);
         }
 
         // Top-level: same-block pool, matched by hash alone (no pins on L2 — the block gate bounds staleness).
@@ -649,7 +652,7 @@ contract EEZL2 is EEZBase {
             }
         }
 
-        revert ExecutionNotFound();
+        revert EntryNotFound(crossChainCallHash, callGas);
     }
 
     /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
@@ -694,7 +697,7 @@ contract EEZL2 is EEZBase {
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
             (bool success, bytes memory retData) = sourceProxy.staticcall(
-                abi.encodeCall(CrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
+                abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
             );
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }

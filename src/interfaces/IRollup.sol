@@ -14,11 +14,15 @@ pragma solidity 0.8.34;
 interface IRollupContract {
     /// @notice Notification fired by `EEZ` when this contract becomes the registered manager
     ///         for a rollup via `EEZ.registerRollup`. The implementation MUST accept calls
-    ///         only from the central `EEZ` registry.
+    ///         only from the central `EEZ` registry and MUST authorize `registrant` under its
+    ///         registration policy before accepting the initial state. The reference Rollup
+    ///         requires `registrant` to be its current owner.
     /// @dev The rollupId is stored so that subsequent calls from this contract back into the
     ///      registry (`EEZ.setRoot(rid, root)`) can pass the id explicitly — the
     ///      registry has no reverse-lookup mapping from contract address to rollupId.
-    function rollupContractRegistered(uint64 rollupId) external;
+    /// @param rollupId Id the registry assigned to this rollup.
+    /// @param registrant Original caller of `EEZ.registerRollup`, forwarded by the registry.
+    function rollupContractRegistered(uint64 rollupId, address registrant) external;
 
     /// @notice Bulk vkey lookup used by `EEZ.postAndVerifyBatch` for the
     ///         subset of proof systems this rollup chose for the batch.

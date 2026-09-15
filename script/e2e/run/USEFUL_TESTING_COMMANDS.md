@@ -43,10 +43,12 @@ staged runs build in well under a second); `network-parallel.sh` /
 DEVNET_ENV=chain.env2 MAX_PARALLEL=30 bash script/e2e/run/network-parallel.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 ```
 
-Funding math: worst case jobs × `FUND_ETH` (default 0.1) + ~0.05/funding-chunk gas
-per chain — 770 jobs budget ~77.5 ETH on each chain from the source key (anvil #2
-by default), but reused pool wallets only draw their missing top-up and the rest
-refunds to the faucet. Halve the per-worker amount with `--fund 0.05` if the
+Funding checks worker balances separately on each chain first. Only workers below
+`FLOOR_ETH` (default 0.05) and `FUND_ETH` (default 0.1) enter the funding plan.
+The faucet needs their total missing ETH plus 0.05 ETH per nonempty funding chunk
+and a 0.1 ETH gas/deployment reserve. Its existing balance reduces the source
+key's top-up. Chains with no deficient workers skip faucet top-ups and MultiSend
+transactions entirely. The source key defaults to Anvil #2. Halve the per-worker amount with `--fund 0.05` if the
 source key is running low. `MAX_PARALLEL` (default 100) caps concurrency.
 
 ## Smaller variants
@@ -90,7 +92,7 @@ bash script/e2e/run/network-staged.sh counter:1 revertCounter:1
 bash script/e2e/run/network-staged.sh counter:2
 
 # The 770-job load mix through the staged runner
-DEVNET_ENV=chain.env2 PREPARE_PARALLEL=30 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
 bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10

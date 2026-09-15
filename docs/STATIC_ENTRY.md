@@ -149,7 +149,8 @@ success row omits its NESTED frame and diverges the entry hash.
 2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
 3. On match → `_resolveStaticEntry(l2ToL1Calls, revertedOrStaticRollingHash, success,
-   returnData)` (§4.3). On no match → `ExecutionNotFound` (a `view` frame cannot fold a
+   returnData)` (§4.3). On no match → `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)`
+   on L2 (a `view` frame cannot fold a
    `CALL_NOT_FOUND` divergence, so it reverts directly — unlike a reentrant CALL no-match,
    which folds the tag and returns empty so the entry fails later at `RollingHashMismatch`).
 
@@ -309,15 +310,16 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
   table by hash alone, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
   is its staleness bound — the pool is only resolvable in the block it was loaded.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
-  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0` and `callGas = 0` always
-  (see CORE_PROTOCOL_SPEC §C.2/§C.3).
+  and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0`, and `callGas = 0` on L1;
+  on L2 `callGas` follows the outgoing policy — `gasleft()` sampled after proxy validation when
+  `USE_GAS_LEFT`, else `0` (see CORE_PROTOCOL_SPEC §C.2/§C.3).
 - **Proxy protection**: L1's reentrant static branch checks `_containsVerifiedRollup(destRid)`
   against the executing entry's `rollupUpdates`; L2 has no allowed-rollups set.
 - **Reentrant-table source**: L1's `_getExpectedL1toL2Calls()` has three sources (the parked
   immediate-L2Tx table, the transient entry at `_currentEntryIndex`, or the persistent queue
   entry of `_currentEntryRollupId`; an empty parked table with `_currentEntryRollupId == 0`
-  reverts `NoExpectedL1ToL2CallFound`); L2's `_getExpectedOutgoingCalls()` always indexes the
-  single `entries` table.
+  yields an empty table, so a static read misses with L1's `ExecutionNotFound` and a CALL folds
+  `CALL_NOT_FOUND`); L2's `_getExpectedOutgoingCalls()` always indexes the single `entries` table.
 
 ---
 
@@ -339,8 +341,8 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
 - A REVERTED resolution runs its own sub-array with the tagged schema inside NESTED_BEGIN,
   checks the sub-hash, then terminal-reverts — state, cursor, and hash all roll back with it.
 - No-match asymmetry: a reentrant CALL no-match folds `CALL_NOT_FOUND` and returns `""` (the
-  entry fails at its rolling-hash check); a static no-match reverts `ExecutionNotFound`
-  immediately, in both branches.
+  entry fails at its rolling-hash check); a static no-match reverts immediately, in both
+  branches — `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)` on L2.
 - L1 top-level match = `proxyEntryHash` + `destinationRollupId` + all pins live; full-scan
   skip semantics; no block gate — pins govern freshness, and every re-verify of the rollup
   wipes its `staticEntryQueue`.

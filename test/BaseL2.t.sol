@@ -192,7 +192,7 @@ abstract contract BaseL2 is Test, TestHashes {
     //  the recipe validated against it.
 
     /// @notice Explicit gas attached to every probed/consuming proxy call. Under observed-gas
-    ///         keying, `callGas` is captured from `gasleft()` at manager entry, so a call only
+    ///         keying, `callGas` is captured from `gasleft()` after the manager's pre-hash checks, so a call only
     ///         reproduces its probed value when it attaches the same explicit gas.
     uint256 internal constant CALL_GAS = 5_000_000;
 

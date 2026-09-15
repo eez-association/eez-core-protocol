@@ -21,7 +21,7 @@ per-rollup-manager refactor on `feature/flatten`. Updated as the design evolves.
 │   - setRoot(rid, root)                  │
 └──────────────────────────────────────────────┘
               ▲                    ▲
-              │ checkProofSystems  │ rollupContractRegistered(rid)
+              │ checkProofSystems  │ rollupContractRegistered(rid, registrant)
               │ AndGetVkeys        │ (init callback)
               │ getCustomData      │
               │                    ▼
@@ -333,9 +333,10 @@ function registerRollup(address rollupContract, bytes32 initialRoot) external re
   (proofSystems, vkeys, threshold, ownership model) baked in, then registers it.
 - Registry assigns next `rollupId` (a `uint64`; sequential ids stay well below 2^64), stores
   `(rollupContract, initialRoot, etherBalance=0)`.
-- Fires `IRollupContract(rollupContract).rollupContractRegistered(rollupId)` — one-shot
-  callback so the manager learns its id. The reference impl stores the id and rejects a
-  second call (`rollupId != 0` ⇒ `AlreadyRegistered`).
+- Fires `IRollupContract(rollupContract).rollupContractRegistered(rollupId, registrant)` — one-shot
+  callback so the manager learns its id; `registrant` is the registry's own `msg.sender`. The
+  reference impl requires `registrant == owner()` (else `UnauthorizedRegistrantAccount`), stores
+  the id and rejects a second call (`rollupId != 0` ⇒ `AlreadyRegistered`).
 - Emits `RollupCreated(rollupId, rollupContract, initialRoot)`.
 
 ### No manager handoff
