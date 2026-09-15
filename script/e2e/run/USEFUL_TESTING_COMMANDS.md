@@ -92,7 +92,7 @@ bash script/e2e/run/network-staged.sh counter:1 revertCounter:1
 bash script/e2e/run/network-staged.sh counter:2
 
 # The 770-job load mix through the staged runner
-DEVNET_ENV=chain.env2 PREPARE_PARALLEL=30 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
 bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10

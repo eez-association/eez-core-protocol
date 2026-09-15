@@ -4,7 +4,7 @@
 #
 # Callers source this file and must set beforehand:
 #   SCRIPT_DIR RUN_DIR FUND_ETH FLOOR_ETH SOURCE_PK DIRECT FRESH L1_RPC L2_RPC
-# Optional: MULTISEND_BATCH (default 100).
+# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain).
 #
 # expand_jobs "<target>[:count]" ...   → JOB_NAMES[] JOB_SOLS[] NJOBS
 # fund_workers                         → WALLET_ADDRS[] WALLET_PKS[] (one per job),
@@ -150,6 +150,10 @@ fund_workers() {
     [[ "$MULTISEND_BATCH" =~ ^[1-9][0-9]*$ ]] || {
         echo "MULTISEND_BATCH must be a positive integer"; exit 1; }
 
+    FUND_BALANCE_WORKERS="${FUND_BALANCE_WORKERS:-16}"
+    [[ "$FUND_BALANCE_WORKERS" =~ ^[1-9][0-9]*$ ]] || {
+        echo "FUND_BALANCE_WORKERS must be a positive integer"; exit 1; }
+
     if $DIRECT; then
         # ── Direct mode: fund workers straight from the source key ──
         FAUCET_PK="$SOURCE_PK"
@@ -236,19 +240,35 @@ fund_workers() {
     # Inspect workers before touching the faucet. Each chain has its own plan:
     # address,missing-wei. Match MultiSend's floor AND target guards exactly.
     _plan_funding() {  # $1=chain label $2=rpc
-        local chain="$1" rpc="$2" addr bal missing
-        local plan="$RUN_DIR/funding-$chain.csv"
+        local chain="$1" rpc="$2" w pid rc=0 workers="$FUND_BALANCE_WORKERS"
+        local plan="$RUN_DIR/funding-$chain.csv" pids=() parts=()
         : > "$plan" || { echo "Cannot write funding plan on $chain"; return 1; }
-        for addr in "${WALLET_ADDRS[@]}"; do
-            bal=$(cast balance "$addr" --rpc-url "$rpc") || {
-                echo "Worker balance lookup FAILED on $chain ($addr)"; return 1; }
-            [[ "$bal" =~ ^[0-9]+$ ]] || {
-                echo "Invalid worker balance on $chain ($addr)"; return 1; }
-            if [[ $(echo "$bal < $FLOOR_WEI && $bal < $FUND_WEI" | bc) == 1 ]]; then
-                missing=$(echo "$FUND_WEI - $bal" | bc)
-                echo "$addr,$missing" >> "$plan" || return 1
-            fi
+        (( workers > ${#WALLET_ADDRS[@]} )) && workers=${#WALLET_ADDRS[@]}
+        # Each worker owns a file. Publish the plan only after every lookup succeeds.
+        for ((w = 0; w < workers; w++)); do
+            parts+=("$plan.worker-$w")
+            (
+                local i addr bal missing
+                for ((i = w; i < ${#WALLET_ADDRS[@]}; i += workers)); do
+                    addr="${WALLET_ADDRS[$i]}"
+                    bal=$(cast balance "$addr" --rpc-url "$rpc") || {
+                        echo "Worker balance lookup FAILED on $chain ($addr)" >&2; exit 1; }
+                    [[ "$bal" =~ ^[0-9]+$ ]] || {
+                        echo "Invalid worker balance on $chain ($addr)" >&2; exit 1; }
+                    if [[ $(echo "$bal < $FLOOR_WEI && $bal < $FUND_WEI" | bc) == 1 ]]; then
+                        missing=$(echo "$FUND_WEI - $bal" | bc)
+                        echo "$addr,$missing" || exit 1
+                    fi
+                done
+            ) > "$plan.worker-$w" &
+            pids+=("$!")
         done
+        for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+        if (( rc == 0 && ${#parts[@]} > 0 )); then
+            cat "${parts[@]}" > "$plan" || rc=1
+        fi
+        if (( ${#parts[@]} > 0 )); then rm -f -- "${parts[@]}" || rc=1; fi
+        (( rc == 0 )) || return 1
         echo "$chain: $(wc -l < "$plan")/$NJOBS workers need funding"
     }
     _plan_funding L1 "$L1_RPC" & pid_l1=$!
