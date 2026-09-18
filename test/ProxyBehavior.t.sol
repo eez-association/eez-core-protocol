@@ -13,6 +13,11 @@ contract GasBurningRecovery {
 
 contract ProxyManagerHarness {
     address public RECOVERY_ADDRESS;
+    uint256 public STATIC_CHECK_GAS = 1_000;
+
+    function setStaticCheckGas(uint256 newCap) external {
+        STATIC_CHECK_GAS = newCap;
+    }
     address public observedSource;
     uint256 public observedValue;
     bytes public observedData;
@@ -102,6 +107,29 @@ contract ProxyBehaviorTest is Test {
         assertTrue(ok);
         assertEq(result, data);
         assertEq(manager.observedSource(), address(0));
+    }
+
+    function test_ExistingProxyReadsUpdatedManagerProbeCap() public {
+        ProxyManagerHarness manager = new ProxyManagerHarness(address(0xCAFE));
+        address proxy = manager.deploy(0);
+        bytes memory data = hex"12345678";
+        (bool ok, bytes memory result) = proxy.call(data);
+        assertTrue(ok);
+        assertEq(result, bytes("forwarded"));
+
+        // Zero makes the probe fail even in mutable context, proving the cap is read live.
+        manager.setStaticCheckGas(0);
+        (ok, result) = proxy.call(data);
+        assertTrue(ok);
+        assertEq(result, data);
+
+        manager.setStaticCheckGas(2_000);
+        (ok, result) = proxy.call(data);
+        assertTrue(ok);
+        assertEq(result, bytes("forwarded"));
+        (ok, result) = proxy.staticcall(data);
+        assertTrue(ok);
+        assertEq(result, data);
     }
 
     function test_DeploymentCanSucceedAfterRecoveryExhaustsForwardedGas() public {

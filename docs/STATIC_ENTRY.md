@@ -10,7 +10,7 @@ There are **two homes**, split by execution context:
 |---|---|---|---|
 | REENTRANT static read, fired `_insideExecution()` | STATIC-kind `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
 | REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-kind `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
-| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedRoots` pin live (full scan); L2: `proxyEntryHash` alone, same-block only (`lastLoadBlock == block.number`) |
+| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedRoots` pin live (full scan); L2: `proxyEntryHash` alone |
 | TOP-LEVEL state-changing call that reverts | normal `ExecutionEntry` with `success == false` | entry queue | see `EXECUTION_ENTRY_SPEC.md` — out of scope here |
 
 There is no separate lookup struct and no separate lookup key space: reentrant reads and
@@ -190,16 +190,11 @@ staticEntry.proxyEntryHash == crossChainCallHash
 && _rootsMatch(staticEntry)        // every pin equals the live root — §6
 ```
 
-There is **no block gate** on the top-level static path (unlike entry consumption's
-`lastVerifiedBlock == block.number`): a static entry does not go stale with the block — as
-long as its root pins match the live roots, it resolves. Lifetime is bounded instead by
-the queue reset: every batch that verifies a rollup wipes that rollup's `staticEntryQueue`
-along with its entry queue.
+The standard [same-block restriction](CORE_PROTOCOL_SPEC.md#g4-same-block-restriction) applies.
+Every batch verifying the rollup also replaces its static and mutable queues.
 
 On L2 the pool is the single `staticEntries` table (replaced wholesale by every
-`loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone —
-but unlike L1, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
-is what bounds staleness.
+`loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone.
 
 A top-level static read is a *lookup*: it resolves from the pool and never produces a
 destination-side delivery. The same treatment applies to an L1→L2 call that reverts on L2 and
@@ -263,8 +258,7 @@ rollup's trajectory: a candidate only **matches** when every pin equals the live
 `rollups[rollupId].root` (`_rootsMatch`, full-scan semantics — a mismatching
 candidate is skipped and the scan continues; no dedicated error). The pins are:
 
-- **The freshness predicate** — with no block gate on the static path, the pins are what
-  invalidates a cached read once any pinned rollup's root moves on.
+- **State matching** — pins invalidate a cached read once any pinned rollup's root moves on.
 - **Transient-phase capable** — roots advance entry-by-entry during a batch, so a pin can
   target an intermediate mid-batch state.
 - **The validation-time proven set.** `_validateBatchStructure` enforces, per static entry:
@@ -294,7 +288,7 @@ static entries — never loaded transiently, never published to the queues
 (`_saveRemainderEntries` starts past them) — so the contract rejects the post
 (`ImmediateStaticEntriesWithoutImmediateEntries`, checked after the immediate L2Tx run).
 Composers whose immediate prefix is pure L2Txs set `immediateStaticEntryCount = 0` so the
-static entries flow to the persistent `staticEntryQueue`s (which are not block-gated).
+static entries flow to the persistent `staticEntryQueue`s.
 
 ---
 
@@ -306,9 +300,7 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
   self-relative names). The key helper (`_computeExpectedL1toL2Hash`) and the untagged
   accumulator (`_rollingHashStaticResult`) are shared in `EEZBase`.
 - **Pool**: L1 selects transient-vs-persistent by `_transientEntries.length` and matches with
-  destination + pins, with no block gate (pins bound staleness); L2 scans the one `staticEntries`
-  table by hash alone, gated on `lastLoadBlock == block.number`. L2 has no pins, so the block gate
-  is its staleness bound — the pool is only resolvable in the block it was loaded.
+  destination + pins; L2 scans the one `staticEntries` table by hash alone.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0`, and `callGas = 0` on L1;
   on L2 `callGas` follows the outgoing policy — `gasleft()` sampled after proxy validation when
@@ -344,8 +336,7 @@ static entries flow to the persistent `staticEntryQueue`s (which are not block-g
   entry fails at its rolling-hash check); a static no-match reverts immediately, in both
   branches — `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)` on L2.
 - L1 top-level match = `proxyEntryHash` + `destinationRollupId` + all pins live; full-scan
-  skip semantics; no block gate — pins govern freshness, and every re-verify of the rollup
-  wipes its `staticEntryQueue`.
+  skip semantics. Every re-verify of the rollup wipes its `staticEntryQueue`.
 - Validation (L1): pins strictly increasing and in-batch; `destinationRollupId` ∈ pins;
   every sub-call source ∈ pins; whole static entries folded into `publicInputsHash`;
   `immediateStaticEntryCount ≤ staticEntries.length`, and a non-zero count requires the

@@ -63,14 +63,13 @@ struct RollupConfig {
 ///          same-block re-verify REPLACES the prior batch instead of appending to it;
 ///      (b) read gate — `entryQueue` consumers (`executeCrossChainCall` / `executeL2Txs`) require
 ///          `lastVerifiedBlock == block.number`, so a stale entry queue from an earlier block is never
-///          read. The `staticEntryQueue` is EXEMPT: static entries stay resolvable across blocks for
-///          as long as their root pins hold;
+///          read. The same block gate applies to static lookups;
 ///      (c) `setRoot` lockout — reverts `RollupBatchActiveThisBlock` while `== block.number`.
 struct RollupVerification {
     uint64 lastVerifiedBlock; // block of the last verified batch
     uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped (packed with above)
     ExecutionEntry[] entryQueue; // entries awaiting consumption this block
-    StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution; not block-gated (matchable while their root pins hold)
+    StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution this block.
 }
 
 /// @notice A rollup's state transition for one entry.
@@ -206,6 +205,9 @@ interface IEEZ {
 
     /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
     function RECOVERY_ADDRESS() external view returns (address);
+
+    /// @notice Gas cap for the proxy's static-context probe.
+    function STATIC_CHECK_GAS() external view returns (uint256);
 
     /// @notice Computes the deterministic CREATE2 address of the CrossChainProxy for an (address, rollup) pair.
     /// @param originalAddress The address this proxy represents on the source rollup
