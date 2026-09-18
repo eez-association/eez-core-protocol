@@ -18,12 +18,18 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract ECDSAProofSystem is IProofSystem, Ownable {
     address public signer;
 
+    /// @notice Emitted on initialization (oldSigner is zero) and every signer update.
+    event SignerUpdated(address indexed oldSigner, address indexed newSigner);
+
     constructor(address initialOwner, address initialSigner) Ownable(initialOwner) {
         signer = initialSigner;
+        emit SignerUpdated(address(0), initialSigner);
     }
 
     function setSigner(address newSigner) external onlyOwner {
+        address oldSigner = signer;
         signer = newSigner;
+        emit SignerUpdated(oldSigner, newSigner);
     }
 
     function verify(bytes calldata proof, bytes32 publicInputsHash) external view returns (bool) {

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Base} from "./Base.t.sol";
+import {EEZ} from "../src/EEZ.sol";
 import {
     ExecutionEntry,
     RollupUpdate,
@@ -107,6 +108,34 @@ contract EEZStaticLookupTest is Base {
         vm.prank(proxyAddr);
         bytes memory res = rollups.staticCrossChainCall(sourceAddr, cd);
         assertEq(res, payload);
+    }
+
+    function test_StaticLookup_ExpiredBlockRevertsUntilReposted() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxyAddr = rollups.createCrossChainProxy(address(target), uint64(r.id));
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes memory payload = abi.encode(uint256(123));
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        lookups[0] = _staticEntry(r.id, _staticHash(r.id, address(target), cd, sourceAddr), true, payload);
+        _stdBatchPost(r, lookups);
+
+        vm.prank(sourceAddr);
+        (bool ok, bytes memory result) = proxyAddr.staticcall(cd);
+        assertTrue(ok);
+        assertEq(result, payload);
+
+        vm.roll(block.number + 1);
+        vm.prank(sourceAddr);
+        (ok, result) = proxyAddr.staticcall(cd);
+        assertFalse(ok);
+        assertEq(result, abi.encodeWithSelector(EEZ.ExecutionNotInCurrentBlock.selector, uint64(r.id)));
+
+        // Unchanged roots are not enough; publishing the table in this block restores access.
+        _stdBatchPost(r, lookups);
+        vm.prank(sourceAddr);
+        (ok, result) = proxyAddr.staticcall(cd);
+        assertTrue(ok);
+        assertEq(result, payload);
     }
 
     function test_StaticLookup_TopLevelFailedReverts() public {

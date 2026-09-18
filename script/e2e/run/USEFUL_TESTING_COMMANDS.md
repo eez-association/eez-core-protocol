@@ -82,6 +82,12 @@ receipt poll per chain, adaptive interval, until mined or `MINE_TIMEOUT`) →
 slowly, or again.
 
 ```bash
+
+## New network commands
+bash script/e2e/run/network-staged.sh all:1
+PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify all:5
+bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 --window 10 Counter
+
 # The whole suite once (28 scenarios; ~2 min end to end, 28/28 on 2026-09-03)
 bash script/e2e/run/network-staged.sh all:1
 
@@ -91,8 +97,10 @@ bash script/e2e/run/network-staged.sh counter:1 revertCounter:1
 # Smoke test
 bash script/e2e/run/network-staged.sh counter:2
 
-# The 770-job load mix through the staged runner
 DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+
+# The 770-job load mix through the staged runner no verify
+DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
 bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10
@@ -108,6 +116,11 @@ SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 counter:10 coun
 # Re-fire the triggers of a run the fronts dropped (accepted, never mined; nonces
 # still free): same pre-signed raw txs, old hashes archived as *.attempt<N>
 SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 --resend tmp/e2e-staged-net/<ts>
+# LOAD testing
+bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
+DEVNET_ENV=chain.env2 bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 --window 10 nestedCounter
+bash script/e2e/run/network-load.sh --txs 10000 --workers 100 --fund 1 --gas 1000000 deepNested
+
 ```
 
 A run is bound to the network it was prepared on: the resolved endpoints are

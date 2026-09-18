@@ -130,7 +130,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     event RootUpdated(uint64 indexed rollupId, bytes32 newRoot);
 
     /// @notice Emitted for each `RollupUpdate` an executed entry applies (root + ether balance)
-    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot);
+    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot, uint256 etherBalance);
 
     /// @notice Emitted when an execution entry is consumed. `entryQueueIndex` is the index in the
     ///         table scanned: the rollup's persistent queue, or the transient table during the meta hook.
@@ -141,8 +141,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Emitted when a precomputed L2 transaction is executed
     event L2TxExecuted(uint64 indexed rollupId);
 
-    /// @notice Emitted when a batch is posted, carrying the number of rollups verified
-    event BatchPosted(uint256 indexed rollupCount);
+    /// @notice Emitted when a batch is posted, carrying its shared public input hash.
+    /// @dev Each proof system verifies this public input and its vkey accumulator.
+    event BatchPosted(uint256 indexed rollupCount, bytes32 sharedPublicInput, uint64[] rollupIds);
 
     /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
     ///         immediate L2Tx run. The entry's state changes are rolled back; the cursor advances
@@ -379,7 +380,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
         // 3. Verify every proof atomically (any failure reverts the batch) BEFORE any state mutation.
         //    Safe to run before `_markVerifiedBlockAndDeletePreviousEntries` since verification is read-only.
-        _verifyProofSystemBatch(batch, verificationKeysPerRollup);
+        bytes32 sharedPublicInput = _verifyProofSystemBatch(batch, verificationKeysPerRollup);
 
         // 4. Mark touched rollups verified-this-block by setting `lastVerifiedBlock = block.number`.
         //    This both records that the rollup was verified in this block and opens the read gate
@@ -452,7 +453,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         delete _transientStaticEntries;
         _transientEntryIndex = 0;
 
-        emit BatchPosted(batch.rollupIdsWithProofSystems.length);
+        // Extract the sorted rollup IDs for the event.
+        uint64[] memory rollupIds = new uint64[](batch.rollupIdsWithProofSystems.length);
+        for (uint256 r = 0; r < rollupIds.length; r++) {
+            rollupIds[r] = batch.rollupIdsWithProofSystems[r].rollupId;
+        }
+        emit BatchPosted(rollupIds.length, sharedPublicInput, rollupIds);
     }
 
     // ──────────────────────────────────────────────
@@ -686,6 +692,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     )
         internal
         view
+        returns (bytes32)
     {
         // Selected blob hashes (indexed into the tx-level blob set)
         bytes32[] memory blobHashes = new bytes32[](batch.blobIndices.length);
@@ -759,6 +766,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 revert InvalidProof();
             }
         }
+
+        return sharedPublicInput;
     }
 
     /// @notice Marks `rid` as verified this block and resets its queue.
@@ -812,19 +821,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         payable
         returns (bytes memory result)
     {
-        // Get EEZ proxy info from msg.sender
-        ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-
-        // Check msg.sender is EEZ proxy
-        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
-
-        address destAddress = proxyInfo.originalAddress;
-        uint64 destRid = proxyInfo.originalRollupId;
-
-        // Entries can only be consumed in the block they were posted
-        if (verificationByRollup[destRid].lastVerifiedBlock != uint64(block.number)) {
-            revert ExecutionNotInCurrentBlock(destRid);
-        }
+        (address destAddress, uint64 destRid) = _validateProxyAndGetDestinationInfo();
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
             NOT_STATIC_CALL, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, msg.value, ZERO_CALL_GAS, callData
@@ -852,9 +849,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @dev The next entry must have `proxyEntryHash == bytes32(0)`.
     ///      Cannot run while reentrantly inside another cross-chain execution.
     function executeL2Txs(uint64 rollupId) external returns (bytes memory result) {
-        if (verificationByRollup[rollupId].lastVerifiedBlock != uint64(block.number)) {
-            revert ExecutionNotInCurrentBlock(rollupId);
-        }
+        _requireVerifiedThisBlock(rollupId);
 
         // This function is for starting L2 transactions, and cannot be called in the middle of another execution
         if (_insideExecution()) revert L2TxNotAllowedDuringExecution();
@@ -1276,7 +1271,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 config.etherBalance += uint256(int256(rollupUpdate.etherDelta));
             }
 
-            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot);
+            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot, config.etherBalance);
         }
     }
 
@@ -1311,14 +1306,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @param callData The original calldata sent to the proxy
     /// @return The pre-computed return data
     function staticCrossChainCall(address sourceAddress, bytes calldata callData) external view returns (bytes memory) {
-        // Get EEZ proxy info from msg.sender
-        ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
-
-        // Check msg.sender is EEZ proxy
-        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
-
-        address destAddress = proxyInfo.originalAddress;
-        uint64 destRid = proxyInfo.originalRollupId;
+        (address destAddress, uint64 destRid) = _validateProxyAndGetDestinationInfo();
 
         bytes32 crossChainCallHash = computeCrossChainCallHash(
             IS_STATIC, sourceAddress, MAINNET_ROLLUP_ID, destAddress, destRid, 0, ZERO_CALL_GAS, callData
@@ -1351,8 +1339,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
         // Top-level: scan the single table in scope — the batch's transient pool while one is
         // mid-flight (the transient phase is self-contained), otherwise
-        // `destRid`'s persistent queue. Static entries do not expire with the block: they stay
-        // resolvable for as long as their root pins hold.
+        // `destRid`'s persistent queue. Static entries require both current-block verification
+        // (checked above) and matching root pins.
         StaticExecutionEntry[] storage staticEntries =
             _transientEntries.length != 0 ? _transientStaticEntries : verificationByRollup[destRid].staticEntryQueue;
         for (uint256 i = 0; i < staticEntries.length; i++) {
@@ -1462,6 +1450,29 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     // ──────────────────────────────────────────────
     //  Internal helpers
     // ──────────────────────────────────────────────
+
+    /// @notice Validates the calling proxy and current-block verification, then returns its destination address and network.
+    function _validateProxyAndGetDestinationInfo() internal view returns (address, uint64) {
+        // Check msg.sender is EEZ proxy
+        ProxyInfo storage proxyInfo = authorizedProxies[msg.sender];
+        if (!proxyInfo.isProxy) revert UnauthorizedProxy();
+
+        // Get EEZ proxy info
+        address destAddress = proxyInfo.originalAddress;
+        uint64 destRid = proxyInfo.originalRollupId;
+        
+        // Check rollup was verified in this block.
+        _requireVerifiedThisBlock(destRid);
+
+        return (destAddress, destRid);
+    }
+
+    /// @notice Requires the rollup's entries to have been posted and verified in the current ethereum block.
+    function _requireVerifiedThisBlock(uint64 rollupId) internal view {
+        if (verificationByRollup[rollupId].lastVerifiedBlock != uint64(block.number)) {
+            revert ExecutionNotInCurrentBlock(rollupId);
+        }
+    }
 
     /// @notice L1's own network is mainnet — `createCrossChainProxy` may not proxy an L1 address.
     function _getRollupId() internal pure override returns (uint64) {

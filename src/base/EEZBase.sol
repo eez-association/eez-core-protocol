@@ -56,6 +56,12 @@ abstract contract EEZBase is IEEZ {
     ///         `executeIncomingCrossChainCall` verifies the inbound call with that call's own `gas` field.
     uint64 internal constant ZERO_CALL_GAS = 0;
 
+    /// @notice Gas cap for proxies' static-context probes; read from the EEZ contract on each call.
+    /// @dev TSTORE consumes the probe's gas in static context; 1,000 covers the current mutable probe.
+    ///      The EEZ contract will be upgradeable, but proxies will not. If a major EVM gas repricing
+    ///      occurs, upgrading the EEZ contract can adjust this cap without replacing proxies.
+    uint256 public constant STATIC_CHECK_GAS = 1_000;
+
     // ──────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────

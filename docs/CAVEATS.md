@@ -22,10 +22,6 @@
 
 - **L2 retries reuse the first matching result:** A failed entry restores the cursor, so retrying the same call hash hits the same row; a later row for that hash is only reachable after another successful consumption. This is why the system should load a fresh table for every transaction, or at least whenever the environment those results depend on changes.
 
-## Static-result validity
-
-- **Root pins do not cover uncommitted context:** a static result whose value depends on a timestamp, block number or other context outside the committed state can still be served while the roots are unchanged. EEZ imposes no expiry of its own; capturing such dependencies is up to the rollup's validity rules or to refreshing the table.
-
 ## Deployment and trust assumptions
 
 - **Accepted proofs replace queues before deferred root checks:** Every accepted batch replaces the participating rollups' execution/static queues and updates `lastVerifiedBlock`. An old proof that still verifies can therefore replace useful queued work or activate the same-block `setRoot` lock even if its deferred entries cannot execute against the current roots. Root advancement prevents stale state transitions; it does not prevent these posting-side effects. Queue replacement is a liveness policy, and rollup-defined verification context can enforce freshness where needed.

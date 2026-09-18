@@ -388,7 +388,7 @@ Each PS's `verify(proofs[k], publicInputsHash[k])` must return `true`. All proof
 5. **Drain the leading run of immediate L2Txs straight from calldata**: while `i < immediateEntryCount` and `batch.entries[i].proxyEntryHash == bytes32(0)`, self-call `try this._attemptExecuteImmediateL2Txs(batch.entries[i]) catch { emit L2TxSkipped(i, revertData); }` and advance — a skip is not a hard error, but if at least one L2Tx was attempted and NONE succeeded, revert `AllImmediateL2TxsFailed` (a fully-failed immediate prefix unwinds the whole post). Empty revert data from the self-call is treated as out-of-gas and aborts the post with `ImmediateL2TxOutOfGas(i)` instead of skipping. These entries are never SSTOREd whole; only each entry's reentrant table is parked in the `ExpectedL1ToL2CallTransient` transient region for the duration of that entry.
 6. **Meta hook**: if entries remain in the immediate prefix past the leading L2Tx run (`i < immediateEntryCount`), `msg.sender` must have code to receive the hook (revert `MetaEntriesWithoutReceiver` otherwise — the never-persisted prefix would be silently dropped): push `entries[i..immediateEntryCount)` into `_transientEntries` and `staticEntries[0..immediateStaticEntryCount)` into `_transientStaticEntries`, then call `IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions()`. The hook may invoke `executeCrossChainCall` and `executeL2Txs(rid)` to consume the transient stream. The static prefix is a companion of the META-HOOK entries, not of the immediate prefix as a whole: it loads only when the hook fires. If no hook fires (empty immediate prefix, or one that is pure L2Txs) a non-zero `immediateStaticEntryCount` would drop the leading static entries (never loaded transiently, never queued), so the post reverts `ImmediateStaticEntriesWithoutImmediateEntries` — composers set it to 0 in that shape (see `STATIC_ENTRY.md` §6).
 7. **Publish the remainder** (`_saveRemainderEntries(batch)`): push `entries[immediateEntryCount..]` into `verificationByRollup[entry.destinationRollupId].entryQueue` and `staticEntries[immediateStaticEntryCount..]` into the matching `staticEntryQueue`, **unconditionally** (even if the meta hook left transient entries unconsumed — there is no drain-cleanly gate). Soundness backstop: each entry's `RollupUpdate.currentRoot` is checked at consumption time, so dropped transient leftover doesn't poison persistent consumers.
-8. **Cleanup transient tables**: `delete _transientEntries; delete _transientStaticEntries; _transientEntryIndex = 0` (emptying `_transientEntries` also closes the reentry window). Finally, `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
+8. **Cleanup transient tables**: `delete _transientEntries; delete _transientStaticEntries; _transientEntryIndex = 0` (emptying `_transientEntries` also closes the reentry window). Finally, `emit BatchPosted(rollupIds.length, sharedPublicInput, rollupIds)`.
 
 **Revert conditions**: `PostBatchReentry`, `ExpectedRootMismatch(rid)`, `InvalidProofSystemConfig`, `DuplicateProofSystem(ps)`, `EntryHasNoRollupUpdates`, `RollupUpdatesNotStrictlyIncreasing(rid)`, `RollupNotInBatch(rid)`, `EntryDestinationNotInRollupUpdates(rid)`, `CallSourceNotVerified(rid)`, `ExpectedRootsNotStrictlyIncreasing(rid)`, `StaticEntryDestinationNotPinned(rid)`, `ImmediateCountExceedsEntries`, `ImmediateStaticEntryCountExceedsStaticEntries`, `ImmediateStaticEntriesWithoutImmediateEntries`, `ImmediateCountStrandsLeadingL2Tx`, threshold/vkey reverts from the manager (e.g. `ThresholdNotMet`, `ProofSystemNotAllowed`), `InvalidProof`, `AllImmediateL2TxsFailed`, plus whatever the meta hook reverts with (`RollingHashMismatch`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `ExecutionNotFound`, `RootMismatch(rid)`, …; an *immediate L2Tx*'s revert is caught by the try/catch and only skips that entry).
 
@@ -459,7 +459,7 @@ function staticCrossChainCall(address sourceAddress, bytes calldata callData)
     external view returns (bytes memory)
 ```
 
-Called via STATICCALL by `CrossChainProxy._fallback` when the proxy detects static context. Caller must be a registered proxy. There is **no block gate** on this path — a top-level static entry does not obsolete when a block passes; it stays resolvable for as long as its root pins match. Branches on `_insideExecution()`:
+Called via STATICCALL by `CrossChainProxy._fallback` when the proxy detects static context. Caller must be a registered proxy. The standard same-block restriction applies (§G.4). Branches on `_insideExecution()`:
 
 ```solidity
 uint64 destRid = proxyInfo.originalRollupId;
@@ -725,7 +725,7 @@ For each delta (the `currentRoot` precondition was already checked upfront in `_
 - Accumulate `delta.etherDelta` into `totalEtherDelta`.
 - If `delta.etherDelta < 0`: `etherBalance -= |delta|` (revert `InsufficientRollupBalance` on underflow).
 - If `delta.etherDelta > 0`: `etherBalance += delta`.
-- Emit `L2ExecutionPerformed(rollupId, newRoot)`.
+- Emit `L2ExecutionPerformed(rollupId, newRoot, etherBalance)`.
 
 ##### `_processNStaticCalls(L2ToL1Call[] memory calls) → bytes32`
 
@@ -912,7 +912,8 @@ Because the check is on `msg.sender`, a destination that makes the proxy call it
 #### `fallback() external payable` and `_fallback()` internal
 
 ```
-(detectSuccess, _) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeWithSelector(STATIC_CHECK_SELECTOR))
+staticCheckGas = IEEZ(EEZ).STATIC_CHECK_GAS() // manager-owned cap, read on every fallback
+(detectSuccess, _) = address(this).call{gas: staticCheckGas}(abi.encodeWithSelector(STATIC_CHECK_SELECTOR))
 if (!detectSuccess):
     // STATICCALL context — look up cached result
     (success, result) = EEZ.staticcall(abi.encodeCall(IEEZ.staticCrossChainCall, (msg.sender, msg.data)))
@@ -1263,7 +1264,7 @@ Two reads with the same `crossChainCallHash` and **no** intervening fold compute
 
 Read-only cross-chain calls (and pre-verified reverting reentrant calls) are resolved from prover-supplied data — never executed via the normal call path. Two entry points:
 
-1. **`staticCrossChainCall`** (external view) — used when the proxy's `_fallback` detects a real STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts). Inside an execution it scans the active entry's unified reentrant table with an `isStatic = true` key; outside, the top-level static-entry pool (L1: `proxyEntryHash` + `destinationRollupId` + live root pins, no block gate; L2: `proxyEntryHash` alone, same-block only).
+1. **`staticCrossChainCall`** (external view) — used when the proxy's `_fallback` detects a real STATICCALL context (a self-call to `staticCheck` whose `tstore` reverts). Inside an execution it scans the active entry's unified reentrant table with an `isStatic = true` key; outside, the top-level static-entry pool (L1: `proxyEntryHash` + `destinationRollupId` + live root pins; L2: `proxyEntryHash` alone).
 2. **Reverted-frame resolution inside `_consumeNestedCall`** — not a read, but the revert twin: a normal-CALL reentrant call matching a `success == false` row runs the frame and reverts with the cached payload (§D.3). It shares the unified table, keyed with `isStatic = false`.
 
 The full specification — match keys, resolution mechanics, static sub-calls, root pins, L1/L2 differences, invariants — lives in **`docs/STATIC_ENTRY.md`**. Within this document: the `staticCrossChainCall` pseudocode is in §B.1, the untagged static accumulator in §E.2, and static key disambiguation in §E.4. For which structure models which situation, see `EXECUTION_ENTRY_SPEC.md` § "When to use which structure".
@@ -1282,7 +1283,7 @@ Within a single `postAndVerifyBatch`:
 3. Drain the leading run of immediate L2Txs (`proxyEntryHash == 0`) via try/catch self-calls (skip-on-revert with `L2TxSkipped`; `AllImmediateL2TxsFailed` if a non-empty run had zero successes).
 4. Meta hook runs if immediate-prefix entries remain past the L2Tx run (`msg.sender` must have code — `MetaEntriesWithoutReceiver` otherwise) — the remainder is pushed to the transient tables first (consumption advances the global `_transientEntryIndex`; per-rollup cursors stay untouched until persistent consumption).
 5. Publish the batch's remainder to per-rollup queues by `destinationRollupId` (unconditionally — even if the transient prefix wasn't fully drained; there is no drain-cleanly gate). Soundness backstop is `RollupUpdate.currentRoot`.
-6. Wipe transient tables; reset `_transientEntryIndex`. Emit `BatchPosted(batch.rollupIdsWithProofSystems.length)`.
+6. Wipe transient tables; reset `_transientEntryIndex`. Emit `BatchPosted(rollupIds.length, sharedPublicInput, rollupIds)`.
 
 ### G.2 L2 Loading
 
@@ -1294,7 +1295,7 @@ Forward-scan — per consumption, the cursor jumps to `matchIndex + 1` (per-roll
 
 ### G.4 Same-Block Restriction
 
-On L1, `executeCrossChainCall` / `executeL2Txs` revert `ExecutionNotInCurrentBlock(rollupId)` if `verificationByRollup[rollupId].lastVerifiedBlock != block.number`. On L2, same with `lastLoadBlock`. Entries that aren't consumed in the posting block are never read again (the read gate), and the queue is wiped by the next batch that verifies the rollup. **Static entries are exempt on L1 only** — no block gate there (root pins bound staleness); L2's top-level static path shares the `lastLoadBlock == block.number` gate (no pins).
+Execution and static lookup tables are valid only in the block they were posted or loaded. L1 requires `verificationByRollup[rollupId].lastVerifiedBlock == block.number`; L2 uses `lastLoadBlock == block.number`. Expired tables are inaccessible, and posting/loading a new table replaces the previous one.
 
 ### G.5 Table Clearing
 
@@ -1345,7 +1346,7 @@ The same pair always maps to the same proxy address on the same manager. Two pro
 
 ### H.6 Same-Block Execution
 
-All execution entries posted in a given block must be consumed in that block — `verificationByRollup[rid].lastVerifiedBlock == block.number` (L1, per-rollup) or `lastLoadBlock == block.number` (L2). Static entries are exempt (§G.4).
+Execution and static lookups follow the same-block restriction (§G.4).
 
 ### H.7 Wipe On Every Verify
 

@@ -21,11 +21,6 @@ contract CrossChainProxy {
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
     uint256 transient _staticDetector;
 
-    /// @dev Gas for the `staticCheck` probe self-call. In a static context the tstore is an
-    ///      exceptional halt that consumes everything forwarded, so the probe must be capped;
-    ///      1,000 safely covers the current mutable path (~300 gas).
-    ///      Major EVM gas repricing could make proxies unusable.
-    uint256 private constant STATIC_CHECK_GAS = 1_000;
     bytes4 private constant STATIC_CHECK_SELECTOR = bytes4(keccak256("staticCheck()"));
 
     /// @dev Gas cap for the constructor's ether recovery. Bounds what a gas-burning recovery address
@@ -86,7 +81,11 @@ contract CrossChainProxy {
     function _fallback() internal {
         // Detect STATICCALL context: tstore reverts in static context, tload does not.
         // A self-call to staticCheck() isolates the tstore so we can catch the revert.
-        (bool success,) = address(this).call{gas: STATIC_CHECK_GAS}(abi.encodeWithSelector(STATIC_CHECK_SELECTOR));
+        // The EEZ contract will be upgradeable, but proxies will not. Read the cap from
+        // EEZ on each call so a major EVM gas repricing can be handled by upgrading EEZ
+        // to adjust this value, without redeploying proxies or changing their addresses.
+        uint256 staticCheckGas = IEEZ(EEZ).STATIC_CHECK_GAS();
+        (bool success,) = address(this).call{gas: staticCheckGas}(abi.encodeWithSelector(STATIC_CHECK_SELECTOR));
         bytes memory result;
 
         if (!success) {

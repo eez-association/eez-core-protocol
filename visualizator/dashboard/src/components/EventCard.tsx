@@ -36,7 +36,7 @@ function eventColor(eventName: string): string {
 function eventDetail(event: EventRecord): string {
   switch (event.eventName) {
     case "BatchPosted":
-      return `Posts ${String(event.args.subBatchCount ?? 0)} sub-${(event.args.subBatchCount ?? 0n) === 1n ? "batch" : "batches"} to L1`;
+      return `Posts ${String(event.args.rollupCount ?? 0)} ${(event.args.rollupCount ?? 0n) === 1n ? "rollup" : "rollups"} to L1`;
     case "ExecutionTableLoaded": {
       const entries = event.args.entries as unknown[] | undefined;
       return entries ? `Loads ${entries.length} ${entries.length === 1 ? "entry" : "entries"} into L2 table` : "";
