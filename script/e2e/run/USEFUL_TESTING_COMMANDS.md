@@ -82,6 +82,12 @@ receipt poll per chain, adaptive interval, until mined or `MINE_TIMEOUT`) →
 slowly, or again.
 
 ```bash
+
+## New network commands
+bash script/e2e/run/network-staged.sh all:1
+PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify all:5
+bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 --window 10 Counter
+
 # The whole suite once (28 scenarios; ~2 min end to end, 28/28 on 2026-09-03)
 bash script/e2e/run/network-staged.sh all:1
 

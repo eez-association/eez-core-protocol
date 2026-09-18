@@ -4,7 +4,7 @@ A binary format for publishing rollup activity as a single stream of
 messages — no header.
 **Everything is a message**: rollup-local operations, cross-rollup calls, results, reverts,
 and transaction boundaries differ only by message type. The one exception is the first
-byte of each blob stream — the reserved version byte (§6).
+byte of each stream — the reserved version byte (§6).
 
 Excalidraw: https://excalidraw.com/#json=0Efuogd9EmGs1-dtl7VQs,6TO97Ut9nvF7ePynMCBd-Q
 
@@ -13,7 +13,8 @@ Excalidraw: https://excalidraw.com/#json=0Efuogd9EmGs1-dtl7VQs,6TO97Ut9nvF7ePynM
 ## 1. Framing
 
 The very first byte of the stream is the **protocol version** (§6) — hardcoded `00` for
-this version. It is reserved in every blob stream and **not encoded as a message** — the
+this version. It is reserved in every stream, including calldata-only streams, and
+**not encoded as a message** — the
 one exception. Everything after it is messages.
 
 Every message begins with a `message_type` byte, which selects one of two shapes:
@@ -44,7 +45,8 @@ These conventions apply across the per-type layouts in §2:
 * **Blob layout.** The logical byte stream is the batch's EIP-4844 blobs in order,
   concatenated, with the batch `callData` appended after the last blob — one continuous
   stream. A message MAY span a blob boundary: the next blob simply *continues* the stream.
-  A `CloseBlobStream` (§2.1) ends the blob portion — it MUST appear exactly once: every
+  When the batch contains one or more blobs, a `CloseBlobStream` (§2.1) ends the blob
+  portion — it MUST appear exactly once: every
   byte after it, up to the end of the last blob, is zero padding. How that stream data is packed into a blob's field
   elements is detailed in §4.
 
@@ -52,6 +54,11 @@ These conventions apply across the per-type layouts in §2:
   is skipped and the stream **resumes in `callData`**. A `CloseBlobStream` cannot appear
   inside `callData` itself — there are no blobs left to close, so its type byte there is
   invalid (§5).
+
+  **Zero-blob batches (calldata only).** If the batch contains no blobs, the stream
+  starts directly in `callData` with the protocol version byte (`00`), followed by
+  messages. `CloseBlobStream` MUST be omitted: there is no blob portion to close.
+  The stream ends at the end of `callData`, with no padding.
 
 ### 1.2 The current executing rollup (context stack)
 
@@ -111,7 +118,7 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 | `10` | `FinishCrossRollupTransaction` | `u8 message_type` |
 
 > **Type `0` is reserved as invalid** so zero padding never parses as messages — a stream
-> missing its `CloseBlobStream` fails at the first padding byte instead of decoding it as
+> with blobs but missing its `CloseBlobStream` fails at the first padding byte instead of decoding it as
 > valid markers.
 
 > **Pairing.** Three pairs always come matched: every `Call` / `StaticCall` has a result —
@@ -121,7 +128,9 @@ Each row gives the complete field layout in wire order; §2.1–2.8 add the pros
 
 ### 2.1 `CloseBlobStream`
 Marks the end of meaningful content in the **blob portion** of the stream — **mandatory,
-emitted exactly once**; a stream without it is invalid (§5). Every byte after it, up to
+emitted exactly once when the batch contains one or more blobs**; such a stream without
+it is invalid (§5). For zero-blob batches it MUST be omitted (§1.1), and it MUST NOT
+appear in `callData`, including the tail of a batch with blobs. Every byte after it, up to
 the end of the last blob, is padding and MUST be **zeroed out** (readers skip it
 regardless); the stream continues in the `callData` tail (§1.1). A **bare marker** (§1.1):
 
@@ -408,10 +417,12 @@ The stream is valid iff **all** of the following hold:
 1. **Encoding layer (§4).** Every field element of every blob has its last (32nd) byte
    zero — a valid BLS12-381 scalar.
 2. **Version and stream close.** The first byte of the stream is a known protocol
-   version (§6) — for this spec, `00`; `CloseBlobStream` (`1`) appears exactly once, in
-   the blob portion.
+   version (§6) — for this spec, `00`. If the batch contains one or more blobs,
+   `CloseBlobStream` (`1`) appears exactly once, in the blob portion. If the batch
+   contains no blobs, the version byte is the first byte of `callData`, and
+   `CloseBlobStream` MUST be omitted.
 3. **Known types.** Every message begins with an assigned type byte: `1`–`10` — a `0`
-   (padding, §2) or any of `11`–`255` is invalid. Inside the `callData` tail,
+   (padding, §2) or any of `11`–`255` is invalid. Inside `callData` (whether the entire stream or a tail),
    `CloseBlobStream` is invalid too (§1.1).
 4. **No truncation.** Every message's fields decode completely within the stream; the
    stream ends exactly at a message boundary with no bracket still open (condition 6).
