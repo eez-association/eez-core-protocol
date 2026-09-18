@@ -627,6 +627,10 @@ contract EEZTest is Base {
         entries[0] = _shellEntry(r1.id, deltas);
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
 
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.L2ExecutionPerformed(uint64(r1.id), keccak256("s1"), 3 ether);
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.L2ExecutionPerformed(uint64(r2.id), keccak256("s2"), 2 ether);
         rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, entries, _emptyStaticEntries(), 1, 0));
 
         assertEq(_getRollupEtherBalance(r1.id), 3 ether);
@@ -1020,9 +1024,36 @@ contract EEZTest is Base {
         bytes32 acc = keccak256(abi.encode(bytes32(0), uint64(r.id), DEFAULT_VK));
         ps.setExpectedPublicInputsHash(keccak256(abi.encodePacked(sharedPublicInput, acc)));
 
+        uint64[] memory rollupIds = new uint64[](1);
+        rollupIds[0] = uint64(r.id);
         vm.expectEmit(true, false, false, true, address(rollups));
-        emit EEZ.BatchPosted(1, sharedPublicInput);
+        emit EEZ.BatchPosted(1, sharedPublicInput, rollupIds);
         _postBatchAutoTransient(r, entries);
+    }
+
+    function test_Event_BatchPosted_MultipleRollupsWithoutEntries() public {
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
+        uint64[] memory rollupIds = new uint64[](2);
+        rollupIds[0] = uint64(r1.id);
+        rollupIds[1] = uint64(r2.id);
+        bytes32[] memory customDataHashes = new bytes32[](2);
+        customDataHashes[0] = keccak256(abi.encode(rollupIds[0], bytes("")));
+        customDataHashes[1] = keccak256(abi.encode(rollupIds[1], bytes("")));
+        bytes32[] memory emptyHashes = new bytes32[](0);
+        bytes32 sharedPublicInput = keccak256(
+            abi.encodePacked(
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                keccak256(bytes("")),
+                abi.encode(customDataHashes),
+                address(0)
+            )
+        );
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(2, sharedPublicInput, rollupIds);
+        rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, _emptyEntries(), _emptyStaticEntries(), 0, 0));
     }
 
     function test_Event_RootUpdated_OnEscape() public {

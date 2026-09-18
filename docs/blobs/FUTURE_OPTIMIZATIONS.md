@@ -2,23 +2,23 @@
 
 Deferred size optimizations for the blob message format
 ([`BLOB_FORMAT_SPEC.md`](./BLOB_FORMAT_SPEC.md)). Version 1 of the format deliberately
-uses the simple encodings — plain `u64` chain ids, plain 32-byte `u256` values, 31 data
+uses the simple encodings — plain `u64` rollup ids, plain 32-byte `u256` values, 31 data
 bytes per blob field element. Each section below is a drop-in candidate for a future
 version of the format (spec §6: a new version means a new leading version byte).
 
-## 1. Compressed `chain_id`
+## 1. Compressed `rollup_id`
 
 Replaces the fixed `u64` with a self-delimiting, variable-length encoding (1–9 bytes): a
 leading byte gives the byte length of the little-endian value that follows, and its range
-picks whether `CHAIN_ID_OFFSET` is applied:
+picks whether `ROLLUP_ID_OFFSET` is applied:
 
-| leading byte | the chain id is… |
+| leading byte | the rollup id is… |
 |---|---|
 | `0`–`8` | the next `leading` bytes, little-endian (**raw**) |
-| `9`–`12` | `CHAIN_ID_OFFSET +` the next `leading − 8` bytes, little-endian (**offset**) |
+| `9`–`12` | `ROLLUP_ID_OFFSET +` the next `leading − 8` bytes, little-endian (**offset**) |
 | `13`–`255` | reserved |
 
-Raw ids reach `2^64 − 1`; offset ids reach `2^32 + 2^32 − 1`. `CHAIN_ID_OFFSET` is a
+Raw ids reach `2^64 − 1`; offset ids reach `2^32 + 2^32 − 1`. `ROLLUP_ID_OFFSET` is a
 protocol constant (`2^32`) — the base auto-assigned ids start from, so a large id like
 `2^32 + 5` collapses to one payload byte (`09 05`), and id `0` is a single byte (`00`).
 

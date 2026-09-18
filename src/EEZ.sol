@@ -130,7 +130,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     event RootUpdated(uint64 indexed rollupId, bytes32 newRoot);
 
     /// @notice Emitted for each `RollupUpdate` an executed entry applies (root + ether balance)
-    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot);
+    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot, uint256 etherBalance);
 
     /// @notice Emitted when an execution entry is consumed. `entryQueueIndex` is the index in the
     ///         table scanned: the rollup's persistent queue, or the transient table during the meta hook.
@@ -143,7 +143,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
     /// @notice Emitted when a batch is posted, carrying its shared public input hash.
     /// @dev Each proof system verifies this public input and its vkey accumulator.
-    event BatchPosted(uint256 indexed rollupCount, bytes32 sharedPublicInput);
+    event BatchPosted(uint256 indexed rollupCount, bytes32 sharedPublicInput, uint64[] rollupIds);
 
     /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
     ///         immediate L2Tx run. The entry's state changes are rolled back; the cursor advances
@@ -453,7 +453,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         delete _transientStaticEntries;
         _transientEntryIndex = 0;
 
-        emit BatchPosted(batch.rollupIdsWithProofSystems.length, sharedPublicInput);
+        // Extract the sorted rollup IDs for the event.
+        uint64[] memory rollupIds = new uint64[](batch.rollupIdsWithProofSystems.length);
+        for (uint256 r = 0; r < rollupIds.length; r++) {
+            rollupIds[r] = batch.rollupIdsWithProofSystems[r].rollupId;
+        }
+        emit BatchPosted(rollupIds.length, sharedPublicInput, rollupIds);
     }
 
     // ──────────────────────────────────────────────
@@ -1280,7 +1285,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 config.etherBalance += uint256(int256(rollupUpdate.etherDelta));
             }
 
-            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot);
+            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot, config.etherBalance);
         }
     }
 

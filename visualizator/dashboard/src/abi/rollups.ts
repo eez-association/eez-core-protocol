@@ -137,6 +137,7 @@ export const rollupsAbi = [
     inputs: [
       { name: "rollupCount", type: "uint256", indexed: true },
       { name: "sharedPublicInput", type: "bytes32", indexed: false },
+      { name: "rollupIds", type: "uint64[]", indexed: false },
     ],
   },
   {

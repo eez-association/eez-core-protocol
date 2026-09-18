@@ -4,7 +4,7 @@ load_worker() (
     set -euo pipefail
     local worker="$1" count="$2" address="$3" key="$4"
     local file="$RUN_DIR/worker-$worker.csv" nonce front_nonce i j raw hash receipt status
-    local failed=0 start now deadline sent=0
+    local failed=0 start now deadline sent=0 send_rc sign_rc
     local hashes=() starts=() nonces=() indexes=()
     : >"$file"
     nonce=$(timeout "$SEND_TIMEOUT" cast nonce "$address" --block pending --rpc-url "$READ_RPC")
@@ -16,15 +16,28 @@ load_worker() (
             start=$(_now_ms)
             # Explicit fees/chain ID make signing offline. Legacy transactions match
             # the devnet's gas-price model and avoid fee-estimation RPCs per trigger.
-            if ! raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
+            sign_rc=0
+            raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
-                --chain-id "$CHAIN_ID" --nonce "$nonce" --private-key "$key"); then
+                --chain-id "$CHAIN_ID" --nonce "$nonce" --private-key "$key") || sign_rc=$?
+            if (( sign_rc != 0 )); then
+                printf 'sign_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$sign_rc" "$SEND_TIMEOUT" >&2
+                (( sign_rc != 124 )) || echo 'Signing exceeded the timeout limit.' >&2
                 echo "$worker,$i,$nonce,,sign_error,0" >>"$file"
                 failed=1; break
             fi
             # Never advance past an uncertain send: doing so could leave a nonce gap.
-            if ! hash=$(timeout "$SEND_TIMEOUT" cast publish "$raw" --async --rpc-url "$SEND_RPC") ||
-                [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+            # stderr is retained in worker-N.log by the worker launcher.
+            send_rc=0
+            hash=$(timeout "$SEND_TIMEOUT" cast publish "$raw" --async --rpc-url "$SEND_RPC") || send_rc=$?
+            if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+                printf 'send_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$send_rc" "$SEND_TIMEOUT" >&2
+                if (( send_rc == 124 )); then
+                    echo 'Submission exceeded the timeout limit; the node may still have accepted it.' >&2
+                elif (( send_rc == 0 )); then
+                    echo 'Submission returned an invalid transaction hash.' >&2
+                fi
+                printf 'Submission stdout: %q\n' "$hash" >&2
                 echo "$worker,$i,$nonce,,send_error,0" >>"$file"
                 failed=1; break
             fi

@@ -49,6 +49,7 @@ export type TxMetadata = {
 export type BatchPostedArgs = {
   rollupCount: bigint;
   sharedPublicInput: `0x${string}`;
+  rollupIds: readonly bigint[];
 };
 
 export type ExecutionTableLoadedArgs = {
