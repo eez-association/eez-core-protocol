@@ -406,8 +406,8 @@ async function detectChain(txHash, l1, l2) {
 //  (ported from E2EBase.sh / decode-trace.sh)
 // ══════════════════════════════════════════════
 
-// BatchPosted event topic (precomputed)
-const BATCH_POSTED_TOPIC = "0x2f482312f12dceb86aac9ef0e0e1d9421ac62910326b3d50695d63117321b520";
+// Keep the topic tied to the current event signature.
+const BATCH_POSTED_TOPIC = ethers.id("BatchPosted(uint256,bytes32)");
 const L2_CONTEXT = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
 // Extract L2 block numbers from a postBatch tx's callData.

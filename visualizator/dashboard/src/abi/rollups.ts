@@ -135,7 +135,8 @@ export const rollupsAbi = [
     type: "event",
     name: "BatchPosted",
     inputs: [
-      { name: "subBatchCount", type: "uint256", indexed: false },
+      { name: "rollupCount", type: "uint256", indexed: true },
+      { name: "sharedPublicInput", type: "bytes32", indexed: false },
     ],
   },
   {

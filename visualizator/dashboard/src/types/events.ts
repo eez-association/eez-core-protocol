@@ -45,11 +45,10 @@ export type TxMetadata = {
 
 // Parsed event payloads for typed access
 
-// Post-refactor: BatchPosted is just a count. Entries no longer ride the event;
-// they must be decoded from the postBatch tx input or reconstructed from
-// EntryExecuted / ExecutionConsumed / CallResult / NestedActionConsumed.
+// Entries must be recovered from batch calldata; the hash commits to their content.
 export type BatchPostedArgs = {
-  subBatchCount: bigint;
+  rollupCount: bigint;
+  sharedPublicInput: `0x${string}`;
 };
 
 export type ExecutionTableLoadedArgs = {

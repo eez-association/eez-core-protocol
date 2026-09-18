@@ -224,3 +224,14 @@ later block on either chain.
   invariants.
 - **L2 calls**: `IncomingCrossChainCallExecuted` fields must re-hash to the emitted
   call hash and match the expected inbound call.
+
+## Load test one deployment
+
+Use [network-load.sh] to deploy a scenario once and send thousands of transactions through the same contract setup:
+
+```bash
+bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
+bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 nestedCounter
+```
+
+Reports trigger receipts and throughput; full settlement verification stays in the e2e runners.

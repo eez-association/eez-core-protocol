@@ -141,8 +141,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Emitted when a precomputed L2 transaction is executed
     event L2TxExecuted(uint64 indexed rollupId);
 
-    /// @notice Emitted when a batch is posted, carrying the number of rollups verified
-    event BatchPosted(uint256 indexed rollupCount);
+    /// @notice Emitted when a batch is posted, carrying its shared public input hash.
+    /// @dev Each proof system verifies this public input and its vkey accumulator.
+    event BatchPosted(uint256 indexed rollupCount, bytes32 sharedPublicInput);
 
     /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
     ///         immediate L2Tx run. The entry's state changes are rolled back; the cursor advances
@@ -379,7 +380,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
         // 3. Verify every proof atomically (any failure reverts the batch) BEFORE any state mutation.
         //    Safe to run before `_markVerifiedBlockAndDeletePreviousEntries` since verification is read-only.
-        _verifyProofSystemBatch(batch, verificationKeysPerRollup);
+        bytes32 sharedPublicInput = _verifyProofSystemBatch(batch, verificationKeysPerRollup);
 
         // 4. Mark touched rollups verified-this-block by setting `lastVerifiedBlock = block.number`.
         //    This both records that the rollup was verified in this block and opens the read gate
@@ -452,7 +453,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         delete _transientStaticEntries;
         _transientEntryIndex = 0;
 
-        emit BatchPosted(batch.rollupIdsWithProofSystems.length);
+        emit BatchPosted(batch.rollupIdsWithProofSystems.length, sharedPublicInput);
     }
 
     // ──────────────────────────────────────────────
@@ -686,6 +687,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     )
         internal
         view
+        returns (bytes32)
     {
         // Selected blob hashes (indexed into the tx-level blob set)
         bytes32[] memory blobHashes = new bytes32[](batch.blobIndices.length);
@@ -759,6 +761,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 revert InvalidProof();
             }
         }
+
+        return sharedPublicInput;
     }
 
     /// @notice Marks `rid` as verified this block and resets its queue.

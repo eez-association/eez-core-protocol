@@ -1002,9 +1002,27 @@ contract EEZTest is Base {
         RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
-        vm.recordLogs();
+        bytes32[] memory entryHashes = new bytes32[](1);
+        entryHashes[0] = keccak256(abi.encode(entries[0]));
+        bytes32[] memory emptyHashes = new bytes32[](0);
+        bytes32[] memory customDataHashes = new bytes32[](1);
+        customDataHashes[0] = keccak256(abi.encode(uint64(r.id), bytes("")));
+        bytes32 sharedPublicInput = keccak256(
+            abi.encodePacked(
+                abi.encode(entryHashes),
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                keccak256(bytes("")),
+                abi.encode(customDataHashes),
+                address(0)
+            )
+        );
+        bytes32 acc = keccak256(abi.encode(bytes32(0), uint64(r.id), DEFAULT_VK));
+        ps.setExpectedPublicInputsHash(keccak256(abi.encodePacked(sharedPublicInput, acc)));
+
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(1, sharedPublicInput);
         _postBatchAutoTransient(r, entries);
-        assertTrue(_findLog(vm.getRecordedLogs(), EEZ.BatchPosted.selector));
     }
 
     function test_Event_RootUpdated_OnEscape() public {

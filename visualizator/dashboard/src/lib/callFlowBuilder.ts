@@ -124,7 +124,7 @@ export function buildBundleSteps(events: EventRecord[]): BundleStep[] {
 function stepTitle(event: EventRecord): string {
   switch (event.eventName) {
     case "BatchPosted":
-      return `Post batch (${String(event.args.subBatchCount ?? 0)} sub-batches)`;
+      return `Post batch (${String(event.args.rollupCount ?? 0)} rollups)`;
     case "ExecutionTableLoaded": {
       const entries = event.args.entries as unknown[] | undefined;
       return `Load execution table (${entries?.length ?? 0} entries)`;
@@ -173,7 +173,7 @@ function stepDetail(event: EventRecord): string {
     case "ImmediateEntrySkipped":
       return `transientIdx=${String(event.args.transientIdx ?? "")}`;
     case "BatchPosted":
-      return `subBatchCount=${String(event.args.subBatchCount ?? "")}`;
+      return `rollupCount=${String(event.args.rollupCount ?? "")}`;
     case "RollupContractChanged":
       return `rollupId=${String(event.args.rollupId ?? "")} new=${truncateAddress(event.args.newContract as string)}`;
     default:

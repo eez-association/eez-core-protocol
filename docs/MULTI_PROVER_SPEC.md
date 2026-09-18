@@ -292,7 +292,7 @@ root match if they depended on it.
    `entryQueue[destinationRollupId]`, static entries past `immediateStaticEntryCount` into
    `staticEntryQueue[destinationRollupId]`.
 9. **Cleanup transient tables** (which also closes the re-entry window), then
-   `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
+   `emit BatchPosted(batch.rollupIdsWithProofSystems.length, sharedPublicInput)`.
 
 ### Reentrancy reasoning
 
