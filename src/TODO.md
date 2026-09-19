@@ -1,11 +1,5 @@
 # TODO
 
-## Design
-
-- [ ] **Beacon proxies for `CrossChainProxy`.** Today proxy logic can never change without
-      changing every proxy address. A beacon keeps addresses stable but adds ~2.7k gas per call
-      and needs an upgrade owner; break-even ≈ 70 calls per proxy. Decide.
-
 ## Gas
 
 - [ ] **Meta-hook entries through the transient serializer.** `_transientEntries` /

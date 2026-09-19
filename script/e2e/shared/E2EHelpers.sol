@@ -95,9 +95,10 @@ function crossChainCallHash(
     pure
     returns (bytes32)
 {
-    return crossChainCallHashWithGas(
-        isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, 0, data
-    );
+    return
+        crossChainCallHashWithGas(
+            isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, 0, data
+        );
 }
 
 /// @notice Full hash builder for observed events, where the emitted callGas must
@@ -115,9 +116,10 @@ function crossChainCallHashWithGas(
     pure
     returns (bytes32)
 {
-    return keccak256(
-        abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
-    );
+    return
+        keccak256(
+            abi.encode(isStatic, sourceAddress, sourceRollupId, targetAddress, targetRollupId, value, callGas, data)
+        );
 }
 
 /// @notice Key for a mutable call LEAVING an L2 (`EEZL2.executeCrossChainCall` top-level matching
@@ -201,6 +203,11 @@ library RollingHashBuilder {
     /// @notice keccak256(prev ++ CALL_NOT_FOUND ++ crossChainCallHash) — reentrant no-match divergence.
     function appendCallNotFound(bytes32 prev, bytes32 ccHash) internal pure returns (bytes32) {
         return _fold(prev, stepCallNotFound(ccHash));
+    }
+
+    /// @notice Shortage marker after CALL_BEGIN; stops the local call array without dispatch.
+    function appendCallInsufficientGas(bytes32 prev) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, uint8(6)));
     }
 
     /// @notice Static sub-call accumulator (untagged): keccak256(prev ++ success ++ retData).

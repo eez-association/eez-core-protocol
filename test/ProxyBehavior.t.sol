@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {EEZ} from "../src/EEZ.sol";
+import {IEEZ} from "../src/interfaces/IEEZ.sol";
 import {CrossChainProxy} from "../src/base/CrossChainProxy.sol";
 import {ICrossChainProxy} from "../src/interfaces/ICrossChainProxy.sol";
 
@@ -27,7 +29,7 @@ contract ProxyManagerHarness {
     }
 
     function deploy(bytes32 salt) external returns (address) {
-        return address(new CrossChainProxy{salt: salt}(address(this)));
+        return address(new CrossChainProxy{salt: salt}());
     }
 
     function executeCrossChainCall(address source, bytes calldata data) external payable returns (bytes memory) {
@@ -43,6 +45,27 @@ contract ProxyManagerHarness {
 
     function staticCrossChainCall(address, bytes calldata data) external pure returns (bytes memory) {
         return data;
+    }
+}
+
+/// @dev Runs EEZ in delegatecall context to test CREATE2 address prediction.
+contract DelegateEEZHarness {
+    address internal immutable implementation;
+
+    constructor(address impl) {
+        implementation = impl;
+    }
+
+    fallback() external payable {
+        address impl = implementation;
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let ok := delegatecall(gas(), impl, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            switch ok
+            case 0 { revert(0, returndatasize()) }
+            default { return(0, returndatasize()) }
+        }
     }
 }
 
@@ -132,10 +155,40 @@ contract ProxyBehaviorTest is Test {
         assertEq(result, data);
     }
 
+    function test_DelegatecallEEZProxyPredictionRecoveryAndAuthorization() public {
+        address recovery = makeAddr("recovery");
+        EEZ implementation = new EEZ(recovery);
+        EEZ delegated = EEZ(address(new DelegateEEZHarness(address(implementation))));
+        address predicted = delegated.computeCrossChainProxyAddress(address(0xBEEF), 1);
+        uint256 recoveryBefore = recovery.balance;
+        vm.deal(predicted, 1 ether);
+
+        address actual = delegated.createCrossChainProxy(address(0xBEEF), 1);
+        assertGt(actual.code.length, 0);
+        assertEq(actual, predicted);
+        assertEq(delegated.getOrCreateCrossChainProxy(address(0xBEEF), 1), actual);
+        assertEq(actual.balance, 0);
+        assertEq(recovery.balance, recoveryBefore + 1 ether);
+
+        // The deploying EEZ proxy is authorized; its implementation is not.
+        bytes memory payload = abi.encodeCall(
+            ICrossChainProxy.executeOnBehalf,
+            (address(implementation), uint64(0), abi.encodeCall(IEEZ.STATIC_CHECK_GAS, ()))
+        );
+        vm.prank(address(delegated));
+        (bool ok, bytes memory result) = actual.call(payload);
+        assertTrue(ok);
+        assertEq(abi.decode(result, (uint256)), implementation.STATIC_CHECK_GAS());
+        vm.prank(address(implementation));
+        (ok, result) = actual.call(payload);
+        assertFalse(ok);
+        assertEq(result, abi.encodeWithSelector(EEZ.ExecutionNotInCurrentBlock.selector, uint64(1)));
+    }
+
     function test_DeploymentCanSucceedAfterRecoveryExhaustsForwardedGas() public {
         GasBurningRecovery recovery = new GasBurningRecovery();
         ProxyManagerHarness manager = new ProxyManagerHarness(address(recovery));
-        bytes32 initHash = keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(manager))));
+        bytes32 initHash = keccak256(type(CrossChainProxy).creationCode);
         address predicted = address(
             uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(manager), bytes32(0), initHash))))
         );

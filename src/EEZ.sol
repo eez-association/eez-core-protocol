@@ -1113,6 +1113,16 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 // ∈ `rollupUpdates` in `_validateBatchStructure` (entry + reentrant sub-call walk).
                 address sourceProxy = getOrCreateCrossChainProxy(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
 
+                bytes memory payload = abi.encodeCall(
+                    ICrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
+                );
+
+                // Check if the context has enough gas.
+                if (!_hasEnoughCallGas(l2ToL1Call.gas, payload.length, l2ToL1Call.value)) {
+                    _rollingHashCallInsufficientGas();
+                    return;
+                }
+
                 bool success;
                 bytes memory retData;
                 if (l2ToL1Call.isStatic) {
@@ -1120,19 +1130,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (l2ToL1Call.value != 0) revert StaticCallWithValue();
 
-                    (success, retData) = sourceProxy.staticcall(
-                        abi.encodeCall(
-                            ICrossChainProxy.executeOnBehalf,
-                            (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
-                        )
-                    );
+                    (success, retData) = sourceProxy.staticcall(payload);
                 } else {
-                    (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(
-                        abi.encodeCall(
-                            ICrossChainProxy.executeOnBehalf,
-                            (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
-                        )
-                    );
+                    (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(payload);
                     if (l2ToL1Call.value > 0 && success) {
                         // Safe uint→int cast: the value was just physically transferred, so it is far below 2^255.
                         _entryEtherDelta -= int256(l2ToL1Call.value);
@@ -1405,11 +1405,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             address sourceProxy = computeCrossChainProxyAddress(l2ToL1Call.sourceAddress, l2ToL1Call.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
-            (bool success, bytes memory retData) = sourceProxy.staticcall(
-                abi.encodeCall(
-                    ICrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
-                )
+            bytes memory payload = abi.encodeCall(
+                ICrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
             );
+            
+            // Check if the context has enough gas.
+            if (!_hasEnoughCallGas(l2ToL1Call.gas, payload.length, 0)) revert InsufficientCallGas(l2ToL1Call.gas);
+
+            (bool success, bytes memory retData) = sourceProxy.staticcall(payload);
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
     }
@@ -1460,7 +1463,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // Get EEZ proxy info
         address destAddress = proxyInfo.originalAddress;
         uint64 destRid = proxyInfo.originalRollupId;
-        
+
         // Check rollup was verified in this block.
         _requireVerifiedThisBlock(destRid);
 

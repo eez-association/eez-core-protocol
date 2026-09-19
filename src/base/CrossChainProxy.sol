@@ -27,16 +27,16 @@ contract CrossChainProxy {
     ///      can cost, so deployment still completes after a failed sweep; ample for any plain receiver.
     uint256 private constant RECOVERY_ETHER_GAS = 100_000;
 
-    /// @param _eez The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
-    constructor(address _eez) {
-        EEZ = _eez;
+    /// @notice Stores the deploying EEZ contract as the immutable authorized caller.
+    constructor() {
+        EEZ = msg.sender;
 
         // Best-effort sweep of ether sent here before deployment (otherwise stuck —
         // the proxy only forwards msg.value). Ignore transfer failure; ETH then stays here.
         uint256 predeployedEther = address(this).balance;
         if (predeployedEther != 0) {
             // EVM forwards min(RECOVERY_ETHER_GAS, gas available).
-            IEEZ(_eez).RECOVERY_ADDRESS().call{value: predeployedEther, gas: RECOVERY_ETHER_GAS}("");
+            IEEZ(msg.sender).RECOVERY_ADDRESS().call{value: predeployedEther, gas: RECOVERY_ETHER_GAS}("");
         }
     }
 

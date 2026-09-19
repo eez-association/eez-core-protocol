@@ -888,12 +888,12 @@ Inherited from `EEZBase`. Identical formula on both L1 and L2 (§B.1); L2's `Sam
 ### B.3 CrossChainProxy.sol
 
 ```solidity
-constructor(address _eez)
+constructor()
 ```
 
-One immutable: `EEZ` (`src/base/CrossChainProxy.sol`), holding the manager address (L1 `EEZ` or L2 `EEZL2`). The `(originalAddress, originalRollupId)` pair lives in the CREATE2 salt and the manager's `authorizedProxies` mapping. The proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
+One immutable: `EEZ` (`src/base/CrossChainProxy.sol`), holding the deploying EEZ contract address from `msg.sender` (L1 `EEZ` or L2 `EEZL2`). The `(originalAddress, originalRollupId)` pair lives in the CREATE2 salt and the manager's `authorizedProxies` mapping. The proxy is constructed by `EEZBase._createCrossChainProxyInternal` (reached via the external `createCrossChainProxy` or auto-creation in `_processNCalls`).
 
-The constructor sweeps any ether predeployed at the proxy address (otherwise stuck) to `IEEZ(_eez).RECOVERY_ADDRESS()`, best-effort: the transfer result is ignored and failed recovery leaves ETH in the proxy. The sweep is capped at `RECOVERY_ETHER_GAS = 100_000` (the EVM forwards min(cap, available)), so a gas-burning recipient cannot starve the rest of the constructor. `RECOVERY_ADDRESS()` is on the shared `IEEZ` interface: an immutable on L1 (non-zero, else `InvalidRecoveryAddress`), `SYSTEM_ADDRESS` on L2.
+The constructor sweeps any ether predeployed at the proxy address (otherwise stuck) to `IEEZ(msg.sender).RECOVERY_ADDRESS()`, best-effort: the transfer result is ignored and failed recovery leaves ETH in the proxy. The sweep is capped at `RECOVERY_ETHER_GAS = 100_000` (the EVM forwards min(cap, available)), so a gas-burning recipient cannot starve the rest of the constructor. `RECOVERY_ADDRESS()` is on the shared `IEEZ` interface: an immutable on L1 (non-zero, else `InvalidRecoveryAddress`), `SYSTEM_ADDRESS` on L2.
 
 #### `executeOnBehalf(address destination, uint64 callGas, bytes calldata data)` (payable ABI through `ICrossChainProxy`)
 
@@ -1335,10 +1335,20 @@ _rollingHash == entry.rollingHash        // RollingHashMismatch
 
 This single check attests that every call described in the entry (and in every nested frame) was processed in the correct order, with the correct identity, the correct results, the correct nesting structure, and that nothing extra happened. There is no flat-call cursor check (each frame's whole array is processed — structural completeness) and no reentrant table-length check (the unified table mixes call rows with static rows; completeness of the success rows is enforced by the hash — a skipped frame omits its `NESTED` folds — and an unused row is inert).
 
+**Prover requirement:** valid entries and expected sub-hashes must never include
+`CALL_INSUFFICIENT_GAS` or `CALL_NOT_FOUND`. Certifying either is malicious prover
+behavior. These are failure markers, not permitted successful proof outcomes.
+
+The markers deliberately diverge from an honest expected hash, causing validation
+to revert the enclosing execution and its effects from the start. This is best-effort
+protection: an ordinary enclosing revert erases the marker, while `ContextResult`
+carries it through deliberate rollback spans. The hash mechanism does not independently
+enforce an honest prover; the proof system must reject expected hashes containing these paths.
+
 ### H.5 Proxy Determinism
 
 The proxy address for a `(originalAddress, originalRollupId)` pair is fully determined by:
-- The manager contract (`address(this)` at deployment time — also the sole constructor arg)
+- The deploying EEZ contract (the proxy captures it from `msg.sender`; there are no constructor arguments)
 - Salt: `keccak256(abi.encodePacked(originalRollupId, originalAddress))` — the ONLY place the pair enters the derivation; all proxies on a manager share identical init code
 - `CrossChainProxy` creation code
 

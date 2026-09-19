@@ -542,19 +542,24 @@ contract EEZL2 is EEZBase {
 
                 address sourceProxy = getOrCreateCrossChainProxy(cc.sourceAddress, cc.sourceRollupId);
 
+                bytes memory payload =
+                    abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data));
+
+                // Check if the context has enough gas.
+                if (!_hasEnoughCallGas(cc.gas, payload.length, cc.value)) {
+                    _rollingHashCallInsufficientGas();
+                    return;
+                }
+
                 bool success;
                 bytes memory retData;
                 if (cc.isStatic) {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (cc.value != 0) revert StaticCallWithValue();
-                    (success, retData) = sourceProxy.staticcall(
-                        abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
-                    );
+                    (success, retData) = sourceProxy.staticcall(payload);
                 } else {
-                    (success, retData) = sourceProxy.call{value: cc.value}(
-                        abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
-                    );
+                    (success, retData) = sourceProxy.call{value: cc.value}(payload);
                 }
 
                 _rollingHashCallEnd(success, retData);
@@ -696,9 +701,13 @@ contract EEZL2 is EEZBase {
             address sourceProxy = computeCrossChainProxyAddress(cc.sourceAddress, cc.sourceRollupId);
             // STATICCALL to a codeless address silently succeeds — reject so the prover can't pre-hash a no-op.
             if (sourceProxy.code.length == 0) revert StaticCallProxyNotDeployed(sourceProxy);
-            (bool success, bytes memory retData) = sourceProxy.staticcall(
-                abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data))
-            );
+            bytes memory payload = abi.encodeCall(ICrossChainProxy.executeOnBehalf, (cc.targetAddress, cc.gas, cc.data));
+
+            // Check if the context has enough gas.
+            if (!_hasEnoughCallGas(cc.gas, payload.length, 0)) revert InsufficientCallGas(cc.gas);
+
+            (bool success, bytes memory retData) = sourceProxy.staticcall(payload);
+
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
     }
