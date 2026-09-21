@@ -261,7 +261,7 @@ contract Deploy2 is Script {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// ExecuteL2 — local mode: SYSTEM-driven L2 simulation of the inbound nested call.
-/// `_processNCalls` lazily creates the source proxy for (alice, MAINNET) on first use,
+/// `_processIncomingCalls` lazily creates the source proxy for (alice, MAINNET) on first use,
 /// then forwards capL2.incrementProxy() through it; capL2's reentrant call to its
 /// counterL1 proxy hits `_consumeNestedAction`, which matches expectedOutgoingCalls[0].
 /// Env: MANAGER_L2, COUNTER_L1, COUNTER_AND_PROXY_L2

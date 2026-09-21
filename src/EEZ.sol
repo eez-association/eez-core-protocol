@@ -151,7 +151,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         revert payload (custom error or message) for off-chain debugging.
     event L2TxSkipped(uint256 indexed entryIndex, bytes revertData);
 
-    /// @notice Emitted after each call completes in `_processNCalls`.
+    /// @notice Emitted after each call completes in `_processL2ToL1Calls`.
     /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed l2ToL1CallNumber, bool success, bytes returnData);
 
@@ -929,7 +929,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      (SET by the top-level entry point before consumption), so it is NOT reset in
     ///      this preamble — only at the end, after the invariant check.
     /// @dev The entry's `l2ToL1Calls[]` is only the calls it runs directly (each reentrant frame carries
-    ///      its own sub-calls); `_processNCalls` runs the whole array, so completeness is structural
+    ///      its own sub-calls); `_processL2ToL1Calls` runs the whole array, so completeness is structural
     ///      (no cursor-vs-length check). The verified-rollups set is non-empty for the whole span (backs
     ///      `_insideExecution()`), so a reentrant call is routed correctly.
     /// @dev Takes the entry's fields individually so callers load only what execution needs.
@@ -973,7 +973,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         _rollingHashEntryBegin(rollupUpdates, proxyEntryHash); // initial hash: binds starting state + identity
         _lastL1ToL2CallConsumed = 0;
 
-        _processNCalls(l2ToL1Calls);
+        _processL2ToL1Calls(l2ToL1Calls);
         int256 totalEtherDelta = _applyRollupUpdates(rollupUpdates);
 
         // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
@@ -1060,7 +1060,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // Open the frame and run the sub-array (cursor already advanced by the caller, so the sub-frame's
         // own reentrant calls scan strictly forward).
         _rollingHashNestedBegin(crossChainCallHash);
-        _processNCalls(l2ToL1Calls);
+        _processL2ToL1Calls(l2ToL1Calls);
 
         if (expectedL1toL2Call.success) {
             // Defensive check of the prover constraint: the field is unused when success.
@@ -1088,7 +1088,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      position. Successful value calls SUBTRACT from the transient `_entryEtherDelta` (not a local)
     ///      so every frame folds into one entry-wide total; a force-revert span's subtractions roll back
     ///      with its revert (the tstore is undone with the physical value transfer).
-    function _processNCalls(L2ToL1Call[] memory calls) internal {
+    function _processL2ToL1Calls(L2ToL1Call[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
             uint256 revertNextNCalls = calls[i].revertNextNCalls;
 
@@ -1171,7 +1171,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         `storage` ref can't cross an external boundary; processes the whole slice.
     function executeInContextAndRevert(L2ToL1Call[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
-        _processNCalls(calls);
+        _processL2ToL1Calls(calls);
         revert ContextResult(_rollingHash, _lastL1ToL2CallConsumed);
     }
 

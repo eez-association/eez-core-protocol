@@ -37,7 +37,7 @@ contract CallGasBudgetHarness is EEZL2 {
 
     function run(CrossChainCall[] memory calls) external returns (bytes32) {
         _rollingHash = bytes32(uint256(1));
-        _processNCalls(calls);
+        _processIncomingCalls(calls);
         bytes32 result = _rollingHash;
         _rollingHash = 0;
         return result;

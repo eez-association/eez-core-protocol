@@ -42,7 +42,7 @@ import {
 //       static read with isStatic = true
 //    2. alice -> readerProxyL1.increment()   (the ONE user trigger)
 //       -> EEZ.executeCrossChainCall consumes the entry:
-//          _processNCalls EXECUTES the read for REAL — STATICCALL through
+//          _processL2ToL1Calls EXECUTES the read for REAL — STATICCALL through
 //          readerProxyL1 into the live CounterL1 — and folds
 //          CALL_BEGIN(staticCcHash) / CALL_END(true, abi.encode(1)) with the
 //          real returndata; then the entry returns cached abi.encode(1)
@@ -95,7 +95,7 @@ abstract contract NestedStaticActions {
     }
 
     /// Single L1 entry — the SOURCE side. The reader's static read of CounterL1 EXECUTES for
-    /// real here: l2ToL1Calls[0] carries isStatic = true, so `_processNCalls` dispatches it
+    /// real here: l2ToL1Calls[0] carries isStatic = true, so `_processL2ToL1Calls` dispatches it
     /// via STATICCALL against the live CounterL1 and folds the real returndata — the same
     /// staticCcHash digest the L2 STATIC row keys on.
     function _l1Entries(

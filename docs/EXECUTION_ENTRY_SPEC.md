@@ -102,7 +102,7 @@ struct L2ToL1Call {
 
 L2's `CrossChainCall` (`IEEZL2.sol`) is field-for-field identical; only the struct name differs.
 
-The processor (`_processNCalls`) walks the given call array by a plain local index and, for each non-revert-span call, derives the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creates the proxy if it doesn't exist, and routes the call through `CrossChainProxy.executeOnBehalf(targetAddress, gas, data){value: value}` (the call's `gas` field caps the destination call; `0` forwards all remaining) — a plain `.call`, or a `staticcall` when `isStatic` (a static call carrying value is malformed and reverts `StaticCallWithValue`). If the destination call itself reverts, the proxy's `.call` returns `(success=false, retData=revertReason)` and that is hashed into `CALL_END` — natural reverts need no special wrapping. Each call's identity (its `crossChainCallHash`, with `targetRollupId` = the executing chain's ID) is folded into `CALL_BEGIN`, so the hash commits to *which* call ran, not just its result. Every call's `sourceRollupId` must be in the entry's proven set (its `rollupUpdates` on L1) — enforced at batch validation (`CallSourceNotVerified`).
+The processor (`_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2) walks the given call array by a plain local index and, for each non-revert-span call, derives the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creates the proxy if it doesn't exist, and routes the call through `CrossChainProxy.executeOnBehalf(targetAddress, gas, data){value: value}` (the call's `gas` field caps the destination call; `0` forwards all remaining) — a plain `.call`, or a `staticcall` when `isStatic` (a static call carrying value is malformed and reverts `StaticCallWithValue`). If the destination call itself reverts, the proxy's `.call` returns `(success=false, retData=revertReason)` and that is hashed into `CALL_END` — natural reverts need no special wrapping. Each call's identity (its `crossChainCallHash`, with `targetRollupId` = the executing chain's ID) is folded into `CALL_BEGIN`, so the hash commits to *which* call ran, not just its result. Every call's `sourceRollupId` must be in the entry's proven set (its `rollupUpdates` on L1) — enforced at batch validation (`CallSourceNotVerified`).
 
 ### `revertNextNCalls`: forced-revert context
 
@@ -122,7 +122,7 @@ For natural failures — a destination contract that simply `revert`s — `rever
 
 Wrapping a single naturally-reverting call in `revertNextNCalls = 1` is purely ceremonial — it produces the same rolling hash and the same on-chain state as `revertNextNCalls = 0`, with an extra self-call frame for nothing. The mechanism only earns its cost when state would otherwise survive.
 
-**Reentrant reverted calls take a different path entirely.** When the destination contract called from `_processNCalls` re-enters the manager via a proxy and the caller try/catches, a revert of that nested call is a `success == false` entry in the unified reentrant table — *not* `revertNextNCalls`: the `try/catch` already provides the isolation boundary, and the row runs the reverted frame with its own sub-hash check (see the Reentrant Table section below). For the full situation → structure decision, see "When to use which structure".
+**Reentrant reverted calls take a different path entirely.** When the destination contract called from `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2 re-enters the manager via a proxy and the caller try/catches, a revert of that nested call is a `success == false` entry in the unified reentrant table — *not* `revertNextNCalls`: the `try/catch` already provides the isolation boundary, and the row runs the reverted frame with its own sub-hash check (see the Reentrant Table section below). For the full situation → structure decision, see "When to use which structure".
 
 ---
 
@@ -153,7 +153,7 @@ When a destination contract called by the processor calls back into a proxy (e.g
 1. Compute `expectedL1toL2Hash = keccak256(crossChainCallHash ‖ _rollingHash)`.
 2. Forward-scan the active entry's table from `_lastL1ToL2CallConsumed` (L2: `_lastOutgoingCallConsumed`) — calls are consumed in order, never before the cursor; the first key match IS the entry. On a match, advance the cursor past it, then resolve via `_resolveNestedReentrant`:
    - Hash `NESTED_BEGIN(crossChainCallHash)` into `_rollingHash`.
-   - Run the frame's **own** `l2ToL1Calls[]` (L2: `incomingCalls[]`) sub-array to completion via `_processNCalls` — these fold into the same continuous `_rollingHash`.
+   - Run the frame's **own** `l2ToL1Calls[]` (L2: `incomingCalls[]`) sub-array to completion via `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2 — these fold into the same continuous `_rollingHash`.
    - `success == true`: hash `NESTED_END`, return `returnData` to the destination contract (`revertedOrStaticRollingHash` is dead here — `== 0` is a prover constraint).
    - `success == false`: check `_rollingHash == revertedOrStaticRollingHash` (else `RollingHashMismatch`), then revert with `returnData` — the terminal revert rolls back the frame's state, hash, and cursor bump.
 3. No match: fold `CALL_NOT_FOUND(crossChainCallHash)` into `_rollingHash` and return empty bytes. The divergence surfaces as `RollingHashMismatch` at the entry boundary — it survives any intermediate `try/catch` (and any `revertNextNCalls` boundary, riding the `ContextResult` payload). On L1 there is one additional gate before all of this: the reentrant call's target rollup must be in the executing entry's proven set (`ReentrantDestinationNotVerified`).
@@ -166,7 +166,7 @@ A reentrant call that **must revert** (the caller catches it with `try/catch`) i
 
 ### Completeness accounting
 
-There are no per-frame call counts and no shared flat array: each frame's array is run to completion by `_processNCalls`, so completeness is **structural** for calls, and there is no cursor-vs-length check at the entry boundary. Completeness of the SUCCESS reentrant entries rests on the rolling hash: a skipped success frame omits its `NESTED_BEGIN`/`NESTED_END` folds and diverges the hash. An **unconsumed** table entry is inert — the unified table may legitimately contain STATIC and REVERTED entries that a given run never touches (e.g. inside a rolled-back span), so no table-length check is performed.
+There are no per-frame call counts and no shared flat array: each frame's array is run to completion by `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2, so completeness is **structural** for calls, and there is no cursor-vs-length check at the entry boundary. Completeness of the SUCCESS reentrant entries rests on the rolling hash: a skipped success frame omits its `NESTED_BEGIN`/`NESTED_END` folds and diverges the hash. An **unconsumed** table entry is inert — the unified table may legitimately contain STATIC and REVERTED entries that a given run never touches (e.g. inside a rolled-back span), so no table-length check is performed.
 
 ---
 

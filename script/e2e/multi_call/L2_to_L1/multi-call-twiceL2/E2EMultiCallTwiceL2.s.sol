@@ -39,7 +39,7 @@ import {
 //    postAndVerifyBatch carries ONE immediate system-driven entry
 //    (proxyEntryHash=0) whose l2ToL1Calls[] carry BOTH inbound increments
 //    from CallTwice-on-L2. The immediate L2Tx run executes it inline via
-//    _processNCalls, forwarding through the lazily-created source proxy for
+//    _processL2ToL1Calls, forwarding through the lazily-created source proxy for
 //    (CallTwice-on-L2, L2) into Counter.increment() on L1 twice → counter=2.
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -98,7 +98,7 @@ abstract contract MultiCallTwiceL2Actions {
     /// @dev Single L1 destination entry — system-driven (proxyEntryHash=0), executed as an
     ///      immediate L2Tx during `postAndVerifyBatch`. Both inbound increments are delivered
     ///      as l2ToL1Calls through the source proxy for (CallTwice-on-L2, L2), lazily created
-    ///      by `_processNCalls`.
+    ///      by `_processL2ToL1Calls`.
     function _l1Entries(address counterL1, address callTwiceL2)
         internal
         pure

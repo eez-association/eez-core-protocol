@@ -12,7 +12,7 @@
 
 ## Delivery and execution semantics
 
-- **The `gas` field on a call is a cap, not a guarantee:** `_processNCalls` forwards it with `call{gas: callGas}`, and the EVM gives the callee min(callGas, gas available minus 1/64). If the transaction is running low, the destination gets less than the entry committed to, may fail for that reason alone, and the entry then reverts (or is skipped, for an immediate L2Tx) even though the table was correct. Guaranteeing at least `callGas` would require the manager to check `gasleft()` before every proxy call and revert early; that check is not implemented today, so posters must supply enough gas for the whole batch.
+- **Gas-budget checks are estimates:** Both L1 and L2 check `_hasEnoughCallGas` before dispatching calls with non-zero `gas`. A detected shortage stops the local call array and folds `CALL_INSUFFICIENT_GAS` into the rolling hash; valid proofs must exclude that marker, so hash validation rejects executions that retain it. An ordinary enclosing revert can erase the marker. Static-entry execution instead reverts with `InsufficientCallGas`. The estimate excludes account-creation costs, return-data processing, and the rest of the entry, so it is not an unconditional gas-delivery or completion guarantee. A `gas` value of `0` skips the check and forwards available gas subject to EVM forwarding limits. Posters must still fund the whole batch.
 
 - **Posting does not guarantee delivery of every entry:** consumption forward-scans and skips non-matching entries for good, so composers must account for alternatives and work that are never executed.
 

@@ -655,16 +655,16 @@ s1: {
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice calls A.incrementProxy() -> A calls B\'',
-      detail:'A(CounterAndProxy) calls B\'(proxy for B on L2). B\'.fallback() -> Rollups.executeCrossChainCall. Computes actionHash = hash(L2,B,inc,src=A) -> matches entry at executionIndex. _consumeAndExecute: applies state delta (L2 S0->S1), _processNCalls(1) executes calls[0] via B\'.executeOnBehalf. Rolling hash: CALL_BEGIN(1) tag recorded, call executes, CALL_END(1) tag recorded. Hash verified against entry.rollingHash.',
+      detail:'A(CounterAndProxy) calls B\'(proxy for B on L2). B\'.fallback() -> Rollups.executeCrossChainCall. Computes actionHash = hash(L2,B,inc,src=A) -> matches entry at executionIndex. _consumeAndExecute: applies state delta (L2 S0->S1), _processL2ToL1Calls(1) executes calls[0] via B\'.executeOnBehalf. Rolling hash: CALL_BEGIN(1) tag recorded, call executes, CALL_END(1) tag recorded. Hash verified against entry.rollingHash.',
       l1Add:[], l1Rm:['s1e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Alice','A','Bprime','Rollups'], activeEdges:['Alice→A','A→Bprime','Bprime→Rollups'],
       diagram:[ ['Alice','','user',''], 'incrementProxy()', ['A','CounterAndProxy','contract','l1'], 'increment()', ["B'",'Proxy for B','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
-    { chain:'l2', title:'Cross to L2: _processNCalls executes B.increment()',
-      detail:'executeCrossChainCall(src=A) -> _consumeAndExecute -> _processNCalls(1): A\'.executeOnBehalf(B, inc) -> B.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed, executionIndex++.',
+    { chain:'l2', title:'Cross to L2: _processIncomingCalls executes B.increment()',
+      detail:'executeCrossChainCall(src=A) -> _consumeAndExecute -> _processIncomingCalls(1): A\'.executeOnBehalf(B, inc) -> B.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed, executionIndex++.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s1e2'], state:{'B.counter':1},
       activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime→ManagerL2'],
-      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["A'",'Proxy for A','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processIncomingCalls(1)','system','l2'], 'execOnBehalf', ["A'",'Proxy for A','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
     },
     { chain:'l1', title:'Back to L1: returnData returned to A',
       detail:'_consumeAndExecute returns entry.returnData = abi.encode(1) to B\'.fallback -> returned to A. A decodes result: targetCounter=1, counter++.',
@@ -693,13 +693,13 @@ s2: {
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores', ['L2 Table','','system','l2'] ]
     },
     { chain:'l2', title:'L2: Alice calls D.incrementProxy() -> D calls C\'',
-      detail:'D(CounterAndProxy) calls C\'(proxy for C on L1). C\'.fallback() -> ManagerL2.executeCrossChainCall. Computes actionHash = hash(MAIN,C,inc,src=D) -> matches entry. _consumeAndExecute: _processNCalls(1) executes calls[0]. Rolling hash verified. Entry consumed.',
+      detail:'D(CounterAndProxy) calls C\'(proxy for C on L1). C\'.fallback() -> ManagerL2.executeCrossChainCall. Computes actionHash = hash(MAIN,C,inc,src=D) -> matches entry. _consumeAndExecute: _processIncomingCalls(1) executes calls[0]. Rolling hash verified. Entry consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s2e2'], state:{},
       activeNodes:['Alice','D','Cprime','ManagerL2'], activeEdges:['Alice→D','D→Cprime','Cprime→ManagerL2'],
       diagram:[ ['Alice','','user',''], 'incrementProxy()', ['D','CounterAndProxy','contract','l2'], 'increment()', ["C'",'Proxy for C','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
-    { chain:'l1', title:'Cross to L1: executeL2TX -> _processNCalls executes C.increment()',
-      detail:'executeL2TX(L2_ROLLUP_ID, 0x01) -> _consumeAndExecute: applies L2 delta S0->S1. _processNCalls(1): D\'.executeOnBehalf(C, inc) -> C.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed.',
+    { chain:'l1', title:'Cross to L1: executeL2TX -> _processL2ToL1Calls executes C.increment()',
+      detail:'executeL2TX(L2_ROLLUP_ID, 0x01) -> _consumeAndExecute: applies L2 delta S0->S1. _processL2ToL1Calls(1): D\'.executeOnBehalf(C, inc) -> C.counter 0->1, returns 1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified. Entry consumed.',
       l1Add:[], l1Rm:['s2e1'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S1'},
       activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime→Rollups'],
       diagram:[ ['Rollups','executeL2TX','system','l1'], 'execOnBehalf', ["D'",'Proxy for D','proxy','l1'], 'inc()', ['C','counter: 0->1','contract','l1'] ]
@@ -731,16 +731,16 @@ s3: {
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 2', ['L2 Table','','system','l2'] ]
     },
     { chain:'l2', title:'L2: Alice calls A\' (proxy for A on L1)',
-      detail:'A\'.fallback() -> ManagerL2.executeCrossChainCall(src=Alice). Computes actionHash = hash(MAIN,A,incProxy,src=alice) -> matches L2 entry 1. _consumeAndExecute: _processNCalls(1) starts executing calls[0] via A\'.executeOnBehalf(A, incProxy). Entry 1 is consumed.',
+      detail:'A\'.fallback() -> ManagerL2.executeCrossChainCall(src=Alice). Computes actionHash = hash(MAIN,A,incProxy,src=alice) -> matches L2 entry 1. _consumeAndExecute: _processIncomingCalls(1) starts executing calls[0] via A\'.executeOnBehalf(A, incProxy). Entry 1 is consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e2'], state:{},
       activeNodes:['Alice','Aprime','ManagerL2'], activeEdges:['Alice→Aprime','Aprime-execCC'],
       diagram:[ ['Alice','','user',''], 'incProxy()', ["A'",'Proxy for A','proxy','l2'], 'execCC', ['ManagerL2','','system','l2'] ]
     },
-    { chain:'l1', title:'Cross to L1: executeL2TX -> _processNCalls(1) -> A.incrementProxy() runs',
-      detail:'executeL2TX(rlp=0x02) -> _consumeAndExecute: applies L2 delta S0->S1. _processNCalls(1): Alice\'.executeOnBehalf(A, incProxy) -> A.incrementProxy() starts. Rolling hash records CALL_BEGIN(1).',
+    { chain:'l1', title:'Cross to L1: executeL2TX -> _processL2ToL1Calls(1) -> A.incrementProxy() runs',
+      detail:'executeL2TX(rlp=0x02) -> _consumeAndExecute: applies L2 delta S0->S1. _processL2ToL1Calls(1): Alice\'.executeOnBehalf(A, incProxy) -> A.incrementProxy() starts. Rolling hash records CALL_BEGIN(1).',
       l1Add:[], l1Rm:['s3e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Rollups','AliceProxy','A'], activeEdges:['Rollups→AliceProxy','AliceProxy→A'],
-      diagram:[ ['Rollups','executeL2TX','system','l1'], '_processNCalls', ['Alice Proxy','','proxy','l1'], 'execOnBehalf', ['A','CounterAndProxy','contract','l1'] ]
+      diagram:[ ['Rollups','executeL2TX','system','l1'], '_processL2ToL1Calls', ['Alice Proxy','','proxy','l1'], 'execOnBehalf', ['A','CounterAndProxy','contract','l1'] ]
     },
     { chain:'l1', title:'L1: A calls B\' -> _consumeNestedAction (reentrant)',
       detail:'Inside A.incrementProxy(): A calls B\'(proxy for B) -> REENTRANT executeCrossChainCall. Computes actionHash = hash(L2,B,inc,src=A) -> matches nestedActions[0]. _consumeNestedAction returns returnData = abi.encode(1). Rolling hash: NESTED_BEGIN(1) + NESTED_END(1) accumulated. A: targetCounter=1, counter=1.',
@@ -750,14 +750,14 @@ s3: {
       diagram2:[ ['Rollups','ret=abi.encode(1)','system','l1'], '->', ['A','tgt=1, ctr=1','contract','l1'] ],
       d2label:'Returns:'
     },
-    { chain:'l2', title:'Cross to L2: _processNCalls executes B.increment()',
-      detail:'On L2, _consumeNestedAction consumed L2 entry 2 for the nested call: _processNCalls(1) -> A\'.executeOnBehalf(B, inc). B.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. _lastNestedActionConsumed incremented.',
+    { chain:'l2', title:'Cross to L2: _processIncomingCalls executes B.increment()',
+      detail:'On L2, _consumeNestedAction consumed L2 entry 2 for the nested call: _processIncomingCalls(1) -> A\'.executeOnBehalf(B, inc). B.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. _lastNestedActionConsumed incremented.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s3e3'], state:{'B.counter':1},
       activeNodes:['ManagerL2','Aprime','B'], activeEdges:['ManagerL2→Aprime','Aprime→B','B→Aprime','Aprime-RESULT'],
-      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["A'",'REENTRANT','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processIncomingCalls(1)','system','l2'], 'execOnBehalf', ["A'",'REENTRANT','proxy','l2'], 'inc()', ['B','counter: 0->1','contract','l2'] ]
     },
     { chain:'l1', title:'Back to L1: A returns -> CALL_END(1) completes rolling hash',
-      detail:'A.incrementProxy() returns (void). _processNCalls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash. All entries consumed.',
+      detail:'A.incrementProxy() returns (void). _processL2ToL1Calls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash. All entries consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['A','Bprime','Rollups'], activeEdges:['A-return-Bprime','Bprime-return-Rollups'],
       diagram:[ ['A','returns void','contract','l1'], 'CALL_END', ['Rollups','hash verified','system','l1'] ]
@@ -789,16 +789,16 @@ s4: {
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 1', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice calls D\' (proxy for D on L2)',
-      detail:'D\'.fallback() -> Rollups.executeCrossChainCall(src=Alice). Computes actionHash = hash(L2,D,incProxy,src=alice) -> matches L1 entry 1. _consumeAndExecute: applies L2 delta S0->S1, _processNCalls(1) starts. Entry 1 consumed.',
+      detail:'D\'.fallback() -> Rollups.executeCrossChainCall(src=Alice). Computes actionHash = hash(L2,D,incProxy,src=alice) -> matches L1 entry 1. _consumeAndExecute: applies L2 delta S0->S1, _processL2ToL1Calls(1) starts. Entry 1 consumed.',
       l1Add:[], l1Rm:['s4e1'], l2Add:[], l2Rm:[], state:{'L2 State':'S1'},
       activeNodes:['Alice','Dprime','Rollups'], activeEdges:['Alice→Dprime','Dprime-execCC'],
       diagram:[ ['Alice','','user',''], 'inc()', ["D'",'Proxy for D','proxy','l1'], 'execCC', ['Rollups','','system','l1'] ]
     },
-    { chain:'l2', title:'Cross to L2: _processNCalls(1) -> D.incrementProxy() runs',
-      detail:'_processNCalls(1) on L2: Alice\'.executeOnBehalf(D, incProxy) -> D.incrementProxy() starts. _consumeAndExecute consumed entry. Rolling hash records CALL_BEGIN(1).',
+    { chain:'l2', title:'Cross to L2: _processIncomingCalls(1) -> D.incrementProxy() runs',
+      detail:'_processIncomingCalls(1) on L2: Alice\'.executeOnBehalf(D, incProxy) -> D.incrementProxy() starts. _consumeAndExecute consumed entry. Rolling hash records CALL_BEGIN(1).',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s4e2'], state:{},
       activeNodes:['ManagerL2','AliceProxy','D'], activeEdges:['ManagerL2→AliceProxy','AliceProxy→D'],
-      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ['Alice Proxy','','proxy','l2'], 'inc()', ['D','CounterAndProxy','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processIncomingCalls(1)','system','l2'], 'execOnBehalf', ['Alice Proxy','','proxy','l2'], 'inc()', ['D','CounterAndProxy','contract','l2'] ]
     },
     { chain:'l2', title:'L2: D calls C\' -> _consumeNestedAction (reentrant)',
       detail:'Inside D.incrementProxy(): D calls C\'(proxy for C) -> REENTRANT executeCrossChainCall. Computes actionHash = hash(MAIN,C,inc,src=D) -> matches nestedActions[0]. _consumeNestedAction returns returnData = abi.encode(1). Rolling hash: NESTED_BEGIN(1) + NESTED_END(1). D: targetCounter=1, counter=1.',
@@ -808,14 +808,14 @@ s4: {
       diagram2:[ ['ManagerL2','ret=abi.encode(1)','system','l2'], '->', ['D','tgt=1, ctr=1','contract','l2'] ],
       d2label:'Returns:'
     },
-    { chain:'l1', title:'Cross to L1: _processNCalls executes C.increment()',
-      detail:'On L1, _consumeNestedAction consumed L1 entry 2 for the nested call: _processNCalls(1) -> D\'.executeOnBehalf(C, inc). C.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. L2 delta S1->S2 applied. _lastNestedActionConsumed incremented.',
+    { chain:'l1', title:'Cross to L1: _processL2ToL1Calls executes C.increment()',
+      detail:'On L1, _consumeNestedAction consumed L1 entry 2 for the nested call: _processL2ToL1Calls(1) -> D\'.executeOnBehalf(C, inc). C.counter 0->1. Rolling hash: CALL_BEGIN(1) + CALL_END(1) verified against entry 2. L2 delta S1->S2 applied. _lastNestedActionConsumed incremented.',
       l1Add:[], l1Rm:['s4e3'], l2Add:[], l2Rm:[], state:{'C.counter':1,'L2 State':'S2'},
       activeNodes:['Rollups','Dprime','C'], activeEdges:['Rollups→Dprime','Dprime→C','C→Dprime','Dprime-RESULT'],
-      diagram:[ ['Rollups','_processNCalls(1)','system','l1'], 'execOnBehalf', ["D'",'REENTRANT','proxy','l1'], 'inc()', ['C','counter: 0->1','contract','l1'] ]
+      diagram:[ ['Rollups','_processL2ToL1Calls(1)','system','l1'], 'execOnBehalf', ["D'",'REENTRANT','proxy','l1'], 'inc()', ['C','counter: 0->1','contract','l1'] ]
     },
     { chain:'l2', title:'Back to L2: D returns -> CALL_END(1) completes rolling hash',
-      detail:'D.incrementProxy() returns (void). _processNCalls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash.',
+      detail:'D.incrementProxy() returns (void). _processIncomingCalls records CALL_END(1). Full rolling hash = CALL_BEGIN(1) + NESTED_BEGIN(1) + NESTED_END(1) + CALL_END(1) verified against entry.rollingHash.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:[], state:{},
       activeNodes:['D','Cprime','ManagerL2'], activeEdges:['D-return-Cprime','Cprime-return-ManagerL2'],
       diagram:[ ['D','returns void','contract','l2'], 'CALL_END', ['ManagerL2','hash verified','system','l2'] ]
@@ -847,36 +847,36 @@ s5: {
       diagram:[ ['SYSTEM','','user',''], 'loadExecTable()', ['ManagerL2','','system','l2'], 'stores 3', ['L2 Table','','system','l2'] ]
     },
     { chain:'l1', title:'L1: Alice -> executor.execute() -> FlashLoan -> bridgeTokens',
-      detail:'Alice triggers the flow. executor.execute() -> FlashLoan.flashLoan(token, 10k) -> onFlashLoan: bridgeL1.bridgeTokens -> proxy -> executeCrossChainCall -> actionHash matches entry 1. _consumeAndExecute: _processNCalls(1) executes bridge forward call. Rolling hash verified. L2 S0->S1 applied. Tokens locked in Bridge_L1.',
+      detail:'Alice triggers the flow. executor.execute() -> FlashLoan.flashLoan(token, 10k) -> onFlashLoan: bridgeL1.bridgeTokens -> proxy -> executeCrossChainCall -> actionHash matches entry 1. _consumeAndExecute: _processL2ToL1Calls(1) executes bridge forward call. Rolling hash verified. L2 S0->S1 applied. Tokens locked in Bridge_L1.',
       l1Add:[], l1Rm:['s5e1'], l2Add:[], l2Rm:[], state:{'FlashLoan.tokens':'0 (loaned)','Bridge_L1.locked':'10k','L2 State':'S1'},
       activeNodes:['Alice','Executor','FlashLoan','BridgeL1','Rollups'], activeEdges:['Alice→Executor','Executor→FlashLoan','FlashLoan→Executor','Executor→BridgeL1','BridgeL1→Rollups'],
       diagram:[ ['Alice','','user',''], 'execute()', ['Executor','','contract','l1'], 'flashLoan', ['FlashLoan','-> onFlashLoan','contract','l1'], 'bridgeTokens', ['Bridge_L1','locks 10k','contract','l1'], 'execCC', ['Rollups','consumed','system','l1'] ]
     },
     { chain:'l2', title:'Cross to L2: Bridge_L2.receiveTokens (mints wrapped)',
-      detail:'executeCrossChainCall -> _consumeAndExecute entry 1: _processNCalls(1) -> BridgeL1\'.executeOnBehalf(Bridge_L2, receiveTokens) -> deploys WrappedToken, mints 10k to ExecutorL2. Rolling hash verified. Entry consumed.',
+      detail:'executeCrossChainCall -> _consumeAndExecute entry 1: _processIncomingCalls(1) -> BridgeL1\'.executeOnBehalf(Bridge_L2, receiveTokens) -> deploys WrappedToken, mints 10k to ExecutorL2. Rolling hash verified. Entry consumed.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s5e4'], state:{'ExecL2.wrapped':'10k'},
       activeNodes:['ManagerL2','BridgeL1Proxy','BridgeL2','ExecutorL2'], activeEdges:['MgrL2-BridgeL1Proxy','BridgeL1Proxy-BridgeL2'],
-      diagram:[ ['ManagerL2','_processNCalls(1)','system','l2'], 'execOnBehalf', ["BridgeL1'",'Proxy','proxy','l2'], 'recvTokens', ['Bridge_L2','mints 10k','contract','l2'] ]
+      diagram:[ ['ManagerL2','_processIncomingCalls(1)','system','l2'], 'execOnBehalf', ["BridgeL1'",'Proxy','proxy','l2'], 'recvTokens', ['Bridge_L2','mints 10k','contract','l2'] ]
     },
     { chain:'l1', title:'Back to L1: executor -> ExecL2\' (claimBack)',
-      detail:'executor calls ExecL2\'(proxy for ExecutorL2) -> executeCrossChainCall -> actionHash matches entry 2. _consumeAndExecute: _processNCalls(1) starts. L2 S1->S2 applied. Entry 2 consumed.',
+      detail:'executor calls ExecL2\'(proxy for ExecutorL2) -> executeCrossChainCall -> actionHash matches entry 2. _consumeAndExecute: _processL2ToL1Calls(1) starts. L2 S1->S2 applied. Entry 2 consumed.',
       l1Add:[], l1Rm:['s5e2'], l2Add:[], l2Rm:[], state:{'L2 State':'S2'},
       activeNodes:['Executor','ExecL2Proxy','Rollups'], activeEdges:['Exec-ExecL2Proxy','ExecL2Proxy-Rollups'],
       diagram:[ ['Executor','','contract','l1'], 'claimBack', ["ExecL2'",'Proxy','proxy','l1'], 'execCC', ['Rollups','consumed','system','l1'] ]
     },
     { chain:'l2', title:'Cross to L2: ExecutorL2.claimAndBridgeBack',
-      detail:'_consumeAndExecute entry 2: _processNCalls(1) -> ExecL2.claimAndBridgeBack -> claims NFT, burns wrapped via Bridge_L2.bridgeTokens -> REENTRANT executeCrossChainCall -> _consumeNestedAction: matches nestedActions[0] for bridge return. Rolling hash: NESTED_BEGIN + NESTED_END. _consumeNestedAction consumed L2 entry 3.',
+      detail:'_consumeAndExecute entry 2: _processIncomingCalls(1) -> ExecL2.claimAndBridgeBack -> claims NFT, burns wrapped via Bridge_L2.bridgeTokens -> REENTRANT executeCrossChainCall -> _consumeNestedAction: matches nestedActions[0] for bridge return. Rolling hash: NESTED_BEGIN + NESTED_END. _consumeNestedAction consumed L2 entry 3.',
       l1Add:[], l1Rm:[], l2Add:[], l2Rm:['s5e5','s5e6'], state:{'ExecL2.wrapped':'0','NFT.claimed':'yes'},
       activeNodes:['ManagerL2','ExecutorL2','NFT','BridgeL2'], activeEdges:['MgrL2-ExecL2','ExecL2-NFT','ExecL2-BridgeL2','BridgeL2-MgrL2'],
-      diagram:[ ['ManagerL2','_processNCalls','system','l2'], 'execOnBehalf', ['ExecutorL2','','contract','l2'], 'claim()', ['NFT','claimed!','contract','l2'] ],
+      diagram:[ ['ManagerL2','_processIncomingCalls','system','l2'], 'execOnBehalf', ['ExecutorL2','','contract','l2'], 'claim()', ['NFT','claimed!','contract','l2'] ],
       diagram2:[ ['ExecutorL2','burns wrapped','contract','l2'], 'bridgeTokens', ['Bridge_L2','','contract','l2'], 'REENTRANT', ['ManagerL2','_consumeNestedAction','system','l2'] ],
       d2label:'Reentrant bridge back:'
     },
     { chain:'l1', title:'Back to L1: _consumeNestedAction -> Bridge_L1.receiveTokens',
-      detail:'_consumeNestedAction consumed L1 entry 3: _processNCalls(1) -> proxy.executeOnBehalf -> Bridge_L1.receiveTokens -> releases 10k to executor. Rolling hash verified. L2 S2->S3 applied. All entries consumed.',
+      detail:'_consumeNestedAction consumed L1 entry 3: _processL2ToL1Calls(1) -> proxy.executeOnBehalf -> Bridge_L1.receiveTokens -> releases 10k to executor. Rolling hash verified. L2 S2->S3 applied. All entries consumed.',
       l1Add:[], l1Rm:['s5e3'], l2Add:[], l2Rm:[], state:{'Bridge_L1.locked':'0','Executor.tokens':'10k','L2 State':'S3'},
       activeNodes:['Rollups','BridgeL1','Executor'], activeEdges:['Rollups-BridgeL1-recv'],
-      diagram:[ ['Rollups','_processNCalls','system','l1'], 'recvTokens', ['Bridge_L1','releases 10k','contract','l1'], '->', ['Executor','has 10k','contract','l1'] ]
+      diagram:[ ['Rollups','_processL2ToL1Calls','system','l1'], 'recvTokens', ['Bridge_L1','releases 10k','contract','l1'], '->', ['Executor','has 10k','contract','l1'] ]
     },
     { chain:'l1', title:'L1: Flash loan repaid',
       detail:'executor transfers 10k tokens back to FlashLoan inside onFlashLoan callback. Flash loan balance restored. All L1 and L2 entries consumed. L2 state = S3.',

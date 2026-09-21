@@ -43,7 +43,7 @@ import {
 //
 //  L1 side (Execute): the read targets L1 state, so it EXECUTES for real there
 //  — the L2 user tx maps to ONE immediate zero-hash L2Tx entry whose
-//  l2ToL1Calls[0] is the read with isStatic = true: `_processNCalls`
+//  l2ToL1Calls[0] is the read with isStatic = true: `_processL2ToL1Calls`
 //  dispatches it via STATICCALL through the reader's L1-side source proxy into
 //  the live CounterL1 and folds CALL_BEGIN(staticCcHash) /
 //  CALL_END(true, abi.encode(1)) with the real returndata.
@@ -72,7 +72,7 @@ abstract contract StaticCounterL2Actions {
     /// Static read key, same digest on BOTH sides: `EEZL2.staticCrossChainCall` folds
     /// isStatic = true, source = the reader at the L2's OWN rollup id, target =
     /// (CounterL1, MAINNET), value 0, callGas 0 (static keys never fold gas, even under
-    /// USE_GAS_LEFT) — and L1's `_processNCalls` folds the identical preimage for the
+    /// USE_GAS_LEFT) — and L1's `_processL2ToL1Calls` folds the identical preimage for the
     /// executed isStatic call.
     function _staticKey(address counterL1, address readerL2) internal pure returns (bytes32) {
         return crossChainCallHashStatic(readerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
@@ -101,7 +101,7 @@ abstract contract StaticCounterL2Actions {
 
     /// The L2 user tx as ONE zero-hash L2Tx entry on L1: its only cross-chain activity is
     /// the static read, EXECUTED for real here — l2ToL1Calls[0] carries isStatic = true, so
-    /// `_processNCalls` dispatches it via STATICCALL against the live CounterL1 and folds
+    /// `_processL2ToL1Calls` dispatches it via STATICCALL against the live CounterL1 and folds
     /// the real returndata.
     function _l1Entries(address counterL1, address readerL2) internal pure returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);

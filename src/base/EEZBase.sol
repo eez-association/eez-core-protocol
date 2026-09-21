@@ -23,8 +23,8 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///        - The reentrant-table cursor — `_lastL1ToL2CallConsumed` on L1, `_lastOutgoingCallConsumed`
 ///          on L2 — and `_insideExecution()` (L1 derives it from its proxy-protection array, L2 from
 ///          a dedicated `_executing` flag). The flat-call position is a plain local index in
-///          `_processNCalls` on both sides (no transient cursor).
-///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
+///          `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2 (no transient cursor).
+///        - `_processL2ToL1Calls` / `_processIncomingCalls` (active call array by `memory`), `_consumeNestedCall`,
 ///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
 ///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
 ///          (`_resolveNestedReentrant`), `_resolveStaticEntry`, `_processNStaticCalls`,

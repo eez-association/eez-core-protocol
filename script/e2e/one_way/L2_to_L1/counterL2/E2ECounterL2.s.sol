@@ -42,8 +42,8 @@ import {
 //    1. postAndVerifyBatch carries ONE immediate entry
 //       (proxyEntryHash=0 — no source-side hash to match; system-driven) whose
 //       l2ToL1Calls describe the inbound call from CAP (L2) to Counter (L1)
-//    2. The immediate L2Tx run executes the entry inline via _processNCalls
-//    3. _processNCalls forwards through the lazily-created source proxy
+//    2. The immediate L2Tx run executes the entry inline via _processL2ToL1Calls
+//    3. _processL2ToL1Calls forwards through the lazily-created source proxy
 //       (proxy_for_CAP_on_L2 deployed on L1) into Counter.increment() on L1
 //    4. Counter.counter() on L1 advances to 1
 // ═══════════════════════════════════════════════════════════════════════
@@ -213,7 +213,7 @@ contract ExecuteL2 is Script, CounterL2Actions {
 /// @dev Drives the L1-side simulation of the L2-originated cross-chain call. `immediateEntryCount`
 ///      covers the leading zero-hash run, so the entry executes inline during `postAndVerifyBatch`.
 ///      The lazily-created source proxy for (CAP-on-L2, L2_ROLLUP_ID) lives on L1 and is created
-///      inside `_processNCalls` during the immediate L2Tx run.
+///      inside `_processL2ToL1Calls` during the immediate L2Tx run.
 /// Env: ROLLUPS, PROOF_SYSTEM, COUNTER_L1, COUNTER_AND_PROXY_L2
 contract Execute is Script, CounterL2Actions {
     function run() external {

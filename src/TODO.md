@@ -46,7 +46,7 @@ deltas overlap):
 | Region | Bytes |
 |---|---|
 | `postAndVerifyBatch` subsystem (validation 1,814 · verify 1,901 · vkeys 610 · save remainder 518 · transient pushes 393) | 9,681 |
-| `_processNCalls` | 1,721 |
+| `_processL2ToL1Calls` | 1,721 |
 | Embedded `CrossChainProxy` creation code (data block) | 1,365 |
 | `ExpectedL1ToL2CallTransient` serializer | 1,140 |
 | Nested path (`_consumeNestedCall`, `_resolveNestedReentrant`, `_getExpectedL1toL2Calls`) | 1,122 |

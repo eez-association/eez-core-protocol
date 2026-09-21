@@ -21,7 +21,7 @@ import {EEZBase} from "../base/EEZBase.sol";
 ///      results of reentrant calls fired FROM this L2 during execution. See `IEEZL2.sol`.
 /// @dev Mirrors `EEZ` (L1) structurally minus the L1-only machinery — no rollup updates / ether
 ///      accounting, no rollup registry, no proofs, no per-rollup queues, no proxy-protection set.
-///      Each frame carries its OWN flat call array (`_processNCalls` walks it by a local index, no
+///      Each frame carries its OWN flat call array (`_processIncomingCalls` walks it by a local index, no
 ///      global cursor); the reentrant (outgoing) table is a single unified `expectedOutgoingCalls`,
 ///      content-addressed by `expectedOutgoingHash` and forward-scanned by `_lastOutgoingCallConsumed`.
 contract EEZL2 is EEZBase {
@@ -132,7 +132,7 @@ contract EEZL2 is EEZBase {
         uint64 callGas
     );
 
-    /// @notice Emitted after each call completes in `_processNCalls`.
+    /// @notice Emitted after each call completes in `_processIncomingCalls`.
     /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
     event CallResult(uint256 indexed entryIndex, uint256 indexed callNumber, bool success, bytes returnData);
 
@@ -390,7 +390,7 @@ contract EEZL2 is EEZBase {
         // Open the frame and run the sub-array (cursor already advanced by the caller, so the sub-frame's
         // own reentrant calls scan strictly forward).
         _rollingHashNestedBegin(crossChainCallHash);
-        _processNCalls(incomingCalls);
+        _processIncomingCalls(incomingCalls);
 
         if (expectedOutgoing.success) {
             // Defensive check of the prover constraint: the field is unused when success.
@@ -457,7 +457,7 @@ contract EEZL2 is EEZBase {
     /// @notice Seeds the rolling hash, processes the entry's direct calls, verifies the rolling
     ///         hash, and (when `!success`) reverts with the entry's `returnData`.
     /// @dev `entry.incomingCalls` is only the calls it runs directly (each reentrant frame carries its own
-    ///      sub-calls); `_processNCalls` runs the whole array, so completeness is structural (no
+    ///      sub-calls); `_processIncomingCalls` runs the whole array, so completeness is structural (no
     ///      cursor-vs-length check). `_executing` is set true for the whole span (backs
     ///      `_insideExecution()`) so a reentrant call routes through `_consumeNestedCall`. Proxy
     ///      re-entries resolve the reentrant table from storage via `_getExpectedOutgoingCalls()`.
@@ -469,7 +469,7 @@ contract EEZL2 is EEZBase {
         _lastOutgoingCallConsumed = 0;
 
         // Storage→memory copy of the entry's calls (mirrors L1's by-`memory` processing).
-        _processNCalls(entry.incomingCalls);
+        _processIncomingCalls(entry.incomingCalls);
 
         // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
         // `RollingHashMismatch` — no separate no-match check needed. No reentrant table-length check:
@@ -509,7 +509,7 @@ contract EEZL2 is EEZBase {
     ///         `storage` ref can't cross an external boundary; processes the whole slice.
     function executeInContextAndRevert(CrossChainCall[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
-        _processNCalls(calls);
+        _processIncomingCalls(calls);
         revert ContextResult(_rollingHash, _lastOutgoingCallConsumed);
     }
 
@@ -519,7 +519,7 @@ contract EEZL2 is EEZBase {
     /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the outer
     ///      stack is preserved across the return), so there's nothing to save/restore for the
     ///      incoming-call position. L2 has no ether accounting (unlike L1), so this returns nothing.
-    function _processNCalls(CrossChainCall[] memory calls) internal {
+    function _processIncomingCalls(CrossChainCall[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
             uint256 revertNextNCalls = calls[i].revertNextNCalls;
 

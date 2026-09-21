@@ -649,7 +649,7 @@ contract EEZL2CoverageTest is BaseL2 {
     // ──────────────────────────────────────────────
 
     /// An entry whose top-level incoming call is `isStatic` dispatches via STATICCALL (read-only),
-    /// reading `target.getValue()`. Covers the static branch of `_processNCalls`.
+    /// reading `target.getValue()`. Covers the static branch of `_processIncomingCalls`.
     function test_IncomingStaticCall_InsideEntry() public {
         target.setValue(55);
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);

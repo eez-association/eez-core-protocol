@@ -175,7 +175,7 @@ real on the chain that owns the read state. Split by where the read fires:
   value instead). The chain that owns the state executes the read for real: that is
   what `isStatic: true` on `L2ToL1Call` exists for — put the read in the destination
   entry's `l2ToL1Calls[]` (or the reentrant frame's own sub-array when it fires inside
-  a nested frame) and `_processNCalls` dispatches it via STATICCALL through the
+  a nested frame) and `_processL2ToL1Calls` dispatches it via STATICCALL through the
   reader's source proxy into the live contract, folding
   `CALL_BEGIN(staticCcHash)` / `CALL_END(success, realRetData)`.
 - **Top-level from L2** (outside any execution, reading L1): the reader's chain

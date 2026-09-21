@@ -160,7 +160,7 @@ row:
 ```
 advance _lastL1ToL2CallConsumed past the matched row
 _rollingHashNestedBegin(crossChainCallHash)          // open the frame
-_processNCalls(row.l2ToL1Calls)                      // run the frame's OWN sub-array, tagged schema
+_processL2ToL1Calls(row.l2ToL1Calls)                      // run the frame's OWN sub-array, tagged schema
 require _rollingHash == row.revertedOrStaticRollingHash   // else RollingHashMismatch
 revert(row.returnData)                               // terminal revert
 ```
@@ -242,7 +242,7 @@ Every reentrant-table row and every static entry carries its **own** sub-call ar
 completion by its resolver:
 
 - STATIC rows / static entries: run flatly by `_processNStaticCalls` (untagged hash).
-- REVERTED rows: run by `_processNCalls` as a mini-entry (tagged schema, may itself contain
+- REVERTED rows: run by `_processL2ToL1Calls` as a mini-entry (tagged schema, may itself contain
   reentrant calls — resolved from the host table — and `revertNextNCalls` spans).
 
 There is no global flat-call cursor and no `callCount` partition: the entry's `l2ToL1Calls[]`

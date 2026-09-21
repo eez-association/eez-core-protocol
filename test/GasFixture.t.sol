@@ -454,7 +454,7 @@ abstract contract GasFixture is Base {
     }
 
     /// @notice Folds an executed entry's rolling hash AND builds the matching reentrant table, for
-    ///         any mix of plain/reentrant top-level calls (mirrors EEZ._processNCalls + the
+    ///         any mix of plain/reentrant top-level calls (mirrors EEZ._processL2ToL1Calls + the
     ///         nested-reentry resolution).
     /// @dev `seed` is `_hEntryBegin(deltas, proxyEntryHash)`. Each top-level call k folds
     ///      CALL_BEGIN(cch_k) / CALL_END(true, rets[k]); each call flagged in `reentrant` additionally

@@ -36,7 +36,7 @@ import {
 //
 //  L2 side (ExecuteL2):
 //    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: BRIDGE_AMOUNT}(...)
-//    → _processNCalls forwards through the source proxy into BridgeReceiver, which
+//    → _processIncomingCalls forwards through the source proxy into BridgeReceiver, which
 //    accepts the ETH via receive(). After: BridgeReceiver.balance == BRIDGE_AMOUNT.
 // ═══════════════════════════════════════════════════════════════════════
 

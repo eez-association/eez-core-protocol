@@ -959,7 +959,7 @@ contract EEZTest is Base {
 
     /// @notice Providing more top-level calls than the entry's `rollingHash` accounts for diverges
     ///         the hash (every call folds CALL_BEGIN/END), surfacing as `RollingHashMismatch`. The
-    ///         old dedicated `UnconsumedL2ToL1Calls` error is gone — `_processNCalls` runs the WHOLE
+    ///         old dedicated `UnconsumedL2ToL1Calls` error is gone — `_processL2ToL1Calls` runs the WHOLE
     ///         array and completeness is enforced structurally by the rolling hash.
     function test_UnconsumedCalls_Reverts() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
