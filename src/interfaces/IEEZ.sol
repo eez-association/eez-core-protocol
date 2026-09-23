@@ -109,7 +109,7 @@ struct L2ToL1Call {
 ///          then everything reverts with `returnData`, rolling their state back.
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
-    L2ToL1Call[] l2ToL1Calls; // the reentrant frame's own sub-calls, run as expected to completion
+    L2ToL1Call[] l2ToL1Calls; // this frame's sub-calls; a failed _hasEnoughCallGas check stops the array and marks the rolling hash
     bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls for static reads / reverted calls; must be bytes32(0) for a successful call (checked on-chain)
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)

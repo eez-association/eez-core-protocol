@@ -29,7 +29,7 @@
 ## Observability
 
 - [ ] **Identify execution events clearly.** Immediate entries report index zero, nested call
-      indices repeat, and `BatchPosted` carries only a rollup count. Consider batch IDs, real entry
+      indices repeat, and `BatchPosted` carries a shared public-input hash and rollup IDs. Consider batch IDs, real entry
       indices and frame IDs, and distinguish proof acceptance, committed execution, deliberate
       rollback and omitted work. Reverted frames erase their own logs, so keep the surviving
       rollback-summary events distinct from committed target calls.

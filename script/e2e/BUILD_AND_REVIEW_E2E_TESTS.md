@@ -179,20 +179,25 @@ real on the chain that owns the read state. Split by where the read fires:
   reader's source proxy into the live contract, folding
   `CALL_BEGIN(staticCcHash)` / `CALL_END(success, realRetData)`.
 - **Top-level from L2** (outside any execution, reading L1): the reader's chain
-  resolves it from the `staticEntries` pool (same-block gate, matched by hash alone),
+  resolves it from the `staticEntries` pool (same-block gate, matched by hash and live `entryIndex`),
   and the read still executes for real on L1 — the L2 user tx maps to its usual
   zero-hash L2Tx entry, whose `l2ToL1Calls[0]` is the `isStatic: true` read.
 - **Top-level from L1 reading L2** — the ONLY view-only case: L2 executes NOTHING (no
   delivery exists for it). The read resolves from the routed rollup's
   `staticEntryQueue` on L1 (match = key + `destinationRollupId` + every root pin
-  live; no block gate — the pins bound staleness), and the L2-side truth is the pins
-  plus asserting the real producer's live value where it is set.
+  live), and requires `lastVerifiedBlock(destRid) == block.number`. Matching roots
+  do not extend validity beyond the verification block. The L2-side truth is checked
+  against the pinned state and the real producer's value.
 
-The cross-chain tie for every static read is digest equality: both the reader-side key
-and the destination-side executed call fold the SAME `crossChainCallHash` preimage —
-`isStatic = true`, source = the reader contract at ITS chain's rollup id, `value = 0`,
-`callGas = 0` always (static keys never fold gas, even under `USE_GAS_LEFT`) — plus
-identical result bytes, which must come from the real contract's live state (rule 3).
+For each static read, correlate the source/target address and rollup pairs, calldata,
+static mode, and exact result bytes from the real producer (rule 3). Call-hash equality
+also requires matching gas inputs: L1 static keys and delivered-call `CALL_BEGIN`
+folds on both chains use `callGas = 0`; outgoing L2 static keys use
+`uint64(gasleft())` sampled after proxy authorization/storage reads when
+`USE_GAS_LEFT` is enabled, and zero otherwise. This applies to both top-level and
+nested static lookups. The gas-independent fixtures can compare these hashes directly;
+observed-gas integrations must correlate the call fields while accounting for the
+site-specific gas value. See the [core hash matrix](../../../docs/CORE_PROTOCOL_SPEC.md#c-action-hash-computation).
 
 Authoring notes specific to static scenarios:
 
@@ -206,8 +211,10 @@ Authoring notes specific to static scenarios:
   standard no-tx query: an eth_call through the proxy impersonating the READER
   (`vm.prank(address(reader))` — forge never broadcasts static calls), resolving the
   SAME entry the trigger uses. Exercise it in local `Execute` only (same block): the
-  entry matches just until the next tx that moves the pinned root — possibly later in
-  the SAME block — so a deferred `VerifyNetwork` must never re-issue it.
+  entry requires both current-block verification and matching root pins. A root change
+  or queue replacement can invalidate it within that block, and the block gate rejects
+  it in later blocks even if the roots still match. A deferred `VerifyNetwork` must
+  therefore verify persisted evidence rather than re-issue the read.
 - **Eventless sides are verified from calldata, not events.** Static resolution emits
   no events and a posted L1 `staticEntries` batch emits nothing per-entry either.
   Export `EXPECTED_*_HASHES` only for sides that actually have `ExecutionEntry`s

@@ -21,13 +21,14 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///      What lives in the children (`EEZ` / `EEZL2`) instead, because it names the per-side
 ///      execution structs or a per-side cursor:
 ///        - The reentrant-table cursor — `_lastL1ToL2CallConsumed` on L1, `_lastOutgoingCallConsumed`
-///          on L2 — and `_insideExecution()` (L1 derives it from its proxy-protection array, L2 from
+///          on L2 — and `_insideExecution()` (L1 derives it from its transient allowed-set count, L2 from
 ///          a dedicated `_executing` flag). The flat-call position is a plain local index in
 ///          `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2 (no transient cursor).
 ///        - `_processL2ToL1Calls` / `_processIncomingCalls` (active call array by `memory`), `_consumeNestedCall`,
 ///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
 ///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
-///          (`_resolveNestedReentrant`), `_resolveStaticEntry`, `_processNStaticCalls`,
+///          (`_resolveNestedReentrant`), `_resolveStaticEntry`,
+///          `_processStaticL2ToL1Calls` on L1 / `_processStaticIncomingCalls` on L2,
 ///          `staticCrossChainCall`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
 ///          `_sliceCrossChainCalls`).
 ///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
@@ -333,7 +334,9 @@ abstract contract EEZBase is IEEZ {
     // against `entry.rollingHash` at the end of execution.
     //
     // Valid proofs must exclude CALL_INSUFFICIENT_GAS and CALL_NOT_FOUND;
-    // these failure markers make the expected rolling-hash check fail.
+    // surviving failure markers make a valid expected rolling-hash check fail. Ordinary
+    // enclosing reverts erase them; ContextResult transports them across deliberate spans.
+    // Hash equality alone cannot enforce this external proof-policy requirement.
     //
     // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
     // prior value), so order, count, and nesting are already bound by the chain + the tags. An
@@ -374,7 +377,7 @@ abstract contract EEZBase is IEEZ {
     ///         whether accidental or deliberate, being mistaken for a destination call failure.
     /// @dev callGas == 0 skips the check and forwards available gas, subject to EVM forwarding limits.
     ///      Check after encoding the payload and resolving the proxy. Account-creation gas is
-    ///      the user's responsibility and, as welll as  normal EVM rules, may reduce the gas delivered
+    ///      the poster's responsibility and, along with normal EVM rules, may reduce the gas delivered
     ///      to the destination below callGas. This estimate excludes return-data processing and the rest of the entry.
     function _hasEnoughCallGas(uint64 callGas, uint256 payloadLength, uint256 value) internal view returns (bool) {
         if (callGas == 0) return true;

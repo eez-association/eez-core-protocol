@@ -407,7 +407,7 @@ async function detectChain(txHash, l1, l2) {
 // ══════════════════════════════════════════════
 
 // Keep the topic tied to the current event signature.
-const BATCH_POSTED_TOPIC = ethers.id("BatchPosted(uint256,bytes32)");
+const BATCH_POSTED_TOPIC = ethers.id("BatchPosted(uint256,bytes32,uint64[])");
 const L2_CONTEXT = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
 // Extract L2 block numbers from a postBatch tx's callData.

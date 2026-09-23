@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {ExecutionEntry, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {BlobMessage} from "./BlobMessages.sol";

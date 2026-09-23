@@ -6,7 +6,7 @@ import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {ScenarioStore, CallParams} from "./ScenarioStore.sol";
@@ -346,6 +346,22 @@ contract TableStitcher is TestHashes {
                     _unitStaticCursor[originUnit] - 1,
                     callHash,
                     l2StaticEntry.proxyEntryHash
+                );
+            }
+            uint256 expectedCursor;
+            for (uint256 i = _unitEntryCursor[originUnit]; i > 0; i--) {
+                if (_unitEntries[originUnit][i - 1].success) {
+                    expectedCursor = i;
+                    break;
+                }
+            }
+            if (l2StaticEntry.expectedEntryIndex != expectedCursor) {
+                revert RoundTripMismatch(
+                    "L2 static entry cursor",
+                    origin,
+                    _unitStaticCursor[originUnit] - 1,
+                    bytes32(expectedCursor),
+                    bytes32(l2StaticEntry.expectedEntryIndex)
                 );
             }
             (success, ret) = (l2StaticEntry.success, l2StaticEntry.returnData);

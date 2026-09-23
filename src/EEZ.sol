@@ -143,30 +143,33 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
     /// @notice Emitted when a batch is posted, carrying its shared public input hash.
     /// @dev Each proof system verifies this public input and its vkey accumulator.
-    event BatchPosted(uint256 indexed rollupCount, bytes32 sharedPublicInput, uint64[] rollupIds);
+    ///      The hash may repeat; it is not an occurrence ID. Queue contents require posting calldata.
+    event BatchPosted(bytes32 sharedPublicInput, uint64[] rollupIds);
 
-    /// @notice Emitted when an L2 tx entry's `_executeEntry` reverts during postAndVerifyBatch's
-    ///         immediate L2Tx run. The entry's state changes are rolled back; the cursor advances
-    ///         and the loop continues with the next L2 tx. `revertData` carries the inner
-    ///         revert payload (custom error or message) for off-chain debugging.
+    /// @notice Emitted for a nonempty caught failure in the immediate L2Tx run; entryIndex is
+    ///         the original batch index. Empty revert data aborts before emission.
     event L2TxSkipped(uint256 indexed entryIndex, bytes revertData);
 
     /// @notice Emitted after each call completes in `_processL2ToL1Calls`.
-    /// @dev Not emitted for calls inside a revertNextNCalls (those events are rolled back by the revert).
+    /// @dev CallResult logs inside a revertNextNCalls span are discarded, as are all logs of a later outer revert.
+    ///      Call numbers are local to each frame's array and restart in nested frames.
     event CallResult(uint256 indexed entryIndex, uint256 indexed l2ToL1CallNumber, bool success, bytes returnData);
 
-    /// @notice Emitted after an entry's execution completes and all verifications pass.
+    /// @notice Emitted after entry checks; a subsequent terminal or outer revert discards it.
+    /// @dev l2ToL1CallsProcessed is the direct input-array length, not a total dispatch count.
+    ///      entryIndex is zero for inline immediate entries, local to the copied suffix in the
+    ///      meta hook, or local to a rollup queue generation; it is not a global occurrence ID.
     ///         `l1ToL2CallsConsumed` is the reentrant cursor at the end (index past the last consumed
     ///         row — the forward scan may skip rows, so it is not a count).
     event EntryExecuted(
         uint256 indexed entryIndex, bytes32 rollingHash, uint256 l2ToL1CallsProcessed, uint256 l1ToL2CallsConsumed
     );
 
-    /// @notice Emitted after a `revertNextNCalls` span: `nCalls` calls ran via `executeInContextAndRevert`
-    ///         (each succeeding or failing on its own), then their state effects were rolled back.
+    /// @notice Emitted after `executeInContextAndRevert` rolls back a `revertNextNCalls` span.
+    /// @dev `nCalls` is the requested span length.
     event CallsReverted(uint256 indexed entryIndex, uint256 startL2ToL1Call, uint256 nCalls);
 
-    /// @notice Error when proof verification fails
+    /// @notice A verifier returned false. Verifier reverts propagate their original error.
     error InvalidProof();
 
     /// @notice Reverts when `postAndVerifyBatch` is re-entered (e.g., via the meta hook calling back
@@ -334,7 +337,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // The registry authenticates the original registrant by forwarding its own msg.sender.
         IRollupContract(rollupContract).rollupContractRegistered(rollupId, msg.sender);
 
-        emit RollupCreated(rollupId, rollupContract, initialRoot);
+        emit RollupCreated(rollupId, rollupContract, rollups[rollupId].root);
     }
 
     // ──────────────────────────────────────────────
@@ -458,7 +461,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         for (uint256 r = 0; r < rollupIds.length; r++) {
             rollupIds[r] = batch.rollupIdsWithProofSystems[r].rollupId;
         }
-        emit BatchPosted(rollupIds.length, sharedPublicInput, rollupIds);
+        emit BatchPosted(sharedPublicInput, rollupIds);
     }
 
     // ──────────────────────────────────────────────
@@ -468,7 +471,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Self-call wrapper that runs ONE leading immediate L2Tx entry, straight from the batch
     ///         calldata, in an isolated frame. Used by `postAndVerifyBatch` step 5+6 to make the immediate
     ///         L2Tx execution revertible: if this frame reverts, the surrounding `try/catch` in
-    ///         postAndVerifyBatch catches and skips to the next entry instead of aborting the whole batch.
+    ///         postAndVerifyBatch skips nonempty failures; empty revert data aborts before a skip log.
+    ///         An all-failed leading run or any later outer revert unwinds the entire post.
     ///         Unlike `executeInContextAndRevert`, this propagates the inner result — succeeds when
     ///         `_executeEntry` succeeds, reverts when it reverts.
     /// @dev The entry never lands in storage. Only its reentrant table is held transiently (commonly
@@ -929,7 +933,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      (SET by the top-level entry point before consumption), so it is NOT reset in
     ///      this preamble — only at the end, after the invariant check.
     /// @dev The entry's `l2ToL1Calls[]` is only the calls it runs directly (each reentrant frame carries
-    ///      its own sub-calls); `_processL2ToL1Calls` runs the whole array, so completeness is structural
+    ///      its own sub-calls); `_processL2ToL1Calls` walks its array, with early return on gas shortage
     ///      (no cursor-vs-length check). The verified-rollups set is non-empty for the whole span (backs
     ///      `_insideExecution()`), so a reentrant call is routed correctly.
     /// @dev Takes the entry's fields individually so callers load only what execution needs.
@@ -1080,7 +1084,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         }
     }
 
-    /// @notice Processes the WHOLE `calls` array (the calls an entry runs directly, a reentrant frame's
+    /// @notice Walks the `calls` array until completion or gas shortage (the calls an entry runs directly, a reentrant frame's
     ///         own calls, or a force-revert span slice), walked by a plain LOCAL index, folding the
     ///         rolling hash (call sources already validated in `_validateBatchStructure`).
     /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the outer
@@ -1168,7 +1172,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
     /// @notice Runs `calls` in an isolated context that always reverts (force-revert span executor).
     ///         Receives the span slice by `memory` (ABI-encoded across the self-call) since a
-    ///         `storage` ref can't cross an external boundary; processes the whole slice.
+    ///         `storage` ref can't cross an external boundary; walks the slice, might stop early on gas shortage.
     function executeInContextAndRevert(L2ToL1Call[] memory calls) external {
         if (msg.sender != address(this)) revert NotSelf();
         _processL2ToL1Calls(calls);
@@ -1376,7 +1380,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         view
         returns (bytes memory)
     {
-        if (_processNStaticCalls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
+        if (_processStaticL2ToL1Calls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
         if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
@@ -1390,7 +1394,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @dev No `revertNextNCalls` handling — there is no state to roll back (== 0 is a prover
     ///      constraint); referenced proxies must already be deployed (CREATE2 is unavailable
     ///      inside a STATICCALL frame).
-    function _processNStaticCalls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
+    function _processStaticL2ToL1Calls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory l2ToL1Call = calls[i];
 

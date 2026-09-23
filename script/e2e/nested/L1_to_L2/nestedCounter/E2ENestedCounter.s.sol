@@ -8,7 +8,7 @@ import {IEEZ} from "../../../../../src/interfaces/IEEZ.sol";
 import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../src/interfaces/IEEZL2.sol";

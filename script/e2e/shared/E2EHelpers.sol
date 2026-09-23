@@ -15,7 +15,7 @@ import {
     ExpectedL1ToL2Call
 } from "../../../src/interfaces/IEEZ.sol";
 import {
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";

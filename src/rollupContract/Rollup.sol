@@ -68,7 +68,8 @@ contract Rollup is IRollupContract, Ownable {
     /// @param proofSystems Initial proof system addresses — any contract conforming to
     ///        `IProofSystem`. There is no central registry; the rollup owner is responsible
     ///        for vetting each proof system before adding it.
-    /// @param vkeys Initial verification keys (parallel to proofSystems; non-zero, no duplicates)
+    /// @param vkeys Nonzero keys parallel to proofSystems; distinct proof-system addresses may share a key.
+    /// @dev Duplicate proof-system addresses are rejected.
     constructor(
         address rollupsRegistry,
         address _owner,
@@ -82,13 +83,10 @@ contract Rollup is IRollupContract, Ownable {
         if (proofSystems.length != vkeys.length) revert InvalidConfig();
 
         ROLLUPS = rollupsRegistry;
-        threshold = _threshold;
+        _setThreshold(_threshold);
 
         for (uint256 i = 0; i < proofSystems.length; i++) {
-            address ps = proofSystems[i];
-            if (vkeys[i] == bytes32(0)) revert InvalidConfig();
-            if (verificationKey[ps] != bytes32(0)) revert ProofSystemAlreadyAllowed(ps);
-            verificationKey[ps] = vkeys[i];
+            _addProofSystem(proofSystems[i], vkeys[i]);
         }
     }
 
@@ -131,8 +129,7 @@ contract Rollup is IRollupContract, Ownable {
     ///         exact L1 view.
     /// @dev Reference impl returns ABI-encoded `(timestamp, blockHash)` with timestamp 0: a
     ///      past block's timestamp can't be recovered on-chain (only `block.timestamp` of the
-    ///      current block is available), so it's read off-chain from the header instead. A real
-    ///      rollup can override this via handoff to commit any view its circuit expects.
+    ///      current block is available), so it's read off-chain from the header instead.
     /// @param blockNumber L1 block to bind. 0 = no block context (empty blob);
     ///        type(uint64).max = latest context (current timestamp + last block header).
     function getCustomData(uint64 blockNumber) external view returns (bytes memory customData) {
@@ -181,10 +178,7 @@ contract Rollup is IRollupContract, Ownable {
     /// @notice Adds a proof system to this rollup's allowed set. The owner is responsible
     ///         for verifying that `proofSystem` is a contract conforming to `IProofSystem`.
     function addProofSystem(address proofSystem, bytes32 vkey) external onlyOwner {
-        if (vkey == bytes32(0)) revert InvalidConfig();
-        if (verificationKey[proofSystem] != bytes32(0)) revert ProofSystemAlreadyAllowed(proofSystem);
-        verificationKey[proofSystem] = vkey;
-        emit ProofSystemAdded(proofSystem, vkey);
+        _addProofSystem(proofSystem, vkey);
     }
 
     /// @notice Removes a proof system. Owner is responsible for ensuring the remaining set
@@ -208,8 +202,7 @@ contract Rollup is IRollupContract, Ownable {
     ///         current PS count (locks the rollup) or zero (any batch passes the threshold
     ///         check). Owner is responsible for picking a sane value.
     function setThreshold(uint256 newThreshold) external onlyOwner {
-        threshold = newThreshold;
-        emit ThresholdChanged(newThreshold);
+        _setThreshold(newThreshold);
     }
 
     /// @notice Owner escape hatch — directly sets the rollup's root via the central
@@ -222,5 +215,21 @@ contract Rollup is IRollupContract, Ownable {
     function setRoot(bytes32 newRoot) external onlyOwner {
         IEEZRegistry(ROLLUPS).setRoot(rollupId, newRoot);
         emit RootEscape(newRoot);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Shared configuration helpers
+    // ──────────────────────────────────────────────
+
+    function _addProofSystem(address proofSystem, bytes32 vkey) internal {
+        if (vkey == bytes32(0)) revert InvalidConfig();
+        if (verificationKey[proofSystem] != bytes32(0)) revert ProofSystemAlreadyAllowed(proofSystem);
+        verificationKey[proofSystem] = vkey;
+        emit ProofSystemAdded(proofSystem, vkey);
+    }
+
+    function _setThreshold(uint256 newThreshold) internal {
+        threshold = newThreshold;
+        emit ThresholdChanged(newThreshold);
     }
 }

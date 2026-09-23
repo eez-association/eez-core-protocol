@@ -6,6 +6,17 @@ cross-chain execution: given a set of messages, the framework derives every chai
 derives the messages back from those tables, and **executes the derived tables on the real
 `EEZ` / `EEZL2` managers**.
 
+## Test-only delivery and root model
+
+The framework uses synthetic roots and scripted actors to exercise contract
+mechanics. In particular, scenario catalog cases 12, 13, and 15 attempt failed or
+rolled-back L2 deliveries and advance synthetic roots for touched rollups.
+With the current prover, the corresponding failed or subsequently reverted
+L1-to-L2 calls are lookups: no L2 delivery occurs and no L2 state or root change
+results from those calls. These harness scenarios test rollback behavior; they do
+not establish production delivery or root-transition behavior. See the
+[scenario catalog's model note](../../test/blob/SCENARIO_CATALOG.md#legend).
+
 ## The pipeline
 
 A scenario is written as a blob message list — nothing else. `runScenario` then checks:

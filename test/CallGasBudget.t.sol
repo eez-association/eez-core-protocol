@@ -44,7 +44,7 @@ contract CallGasBudgetHarness is EEZL2 {
     }
 
     function runStatic(CrossChainCall[] memory calls) external view returns (bytes32) {
-        return _processNStaticCalls(calls);
+        return _processStaticIncomingCalls(calls);
     }
 }
 

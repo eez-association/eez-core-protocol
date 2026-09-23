@@ -88,6 +88,22 @@ contract MetaLookupCaller is IMetaCrossChainReceiver {
     }
 }
 
+/// @notice Changes the stored root during registration to test the creation event.
+contract RegistrationRootUpdater {
+    EEZ internal immutable registry;
+    bytes32 internal immutable registrationRoot;
+
+    constructor(EEZ _registry, bytes32 _registrationRoot) {
+        registry = _registry;
+        registrationRoot = _registrationRoot;
+    }
+
+    function rollupContractRegistered(uint64 rollupId, address) external {
+        require(msg.sender == address(registry));
+        registry.setRoot(rollupId, registrationRoot);
+    }
+}
+
 contract EEZTest is Base {
     TestTarget public target;
 
@@ -1002,6 +1018,21 @@ contract EEZTest is Base {
         rollups.registerRollup(address(r), keccak256("init"));
     }
 
+    function test_Event_RollupCreatedUsesRootAfterCallback() public {
+        bytes32 inputRoot = bytes32(uint256(1));
+        bytes32 storedRoot = bytes32(uint256(99));
+        RegistrationRootUpdater r = new RegistrationRootUpdater(rollups, storedRoot);
+
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.RootUpdated(1, storedRoot);
+        vm.expectEmit(true, true, false, true, address(rollups));
+        emit EEZ.RollupCreated(1, address(r), storedRoot);
+        uint64 rollupId = rollups.registerRollup(address(r), inputRoot);
+
+        assertEq(rollupId, 1);
+        assertEq(_getRollupState(rollupId), storedRoot);
+    }
+
     function test_Event_BatchPosted() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
@@ -1026,8 +1057,8 @@ contract EEZTest is Base {
 
         uint64[] memory rollupIds = new uint64[](1);
         rollupIds[0] = uint64(r.id);
-        vm.expectEmit(true, false, false, true, address(rollups));
-        emit EEZ.BatchPosted(1, sharedPublicInput, rollupIds);
+        vm.expectEmit(false, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(sharedPublicInput, rollupIds);
         _postBatchAutoTransient(r, entries);
     }
 
@@ -1051,8 +1082,8 @@ contract EEZTest is Base {
                 address(0)
             )
         );
-        vm.expectEmit(true, false, false, true, address(rollups));
-        emit EEZ.BatchPosted(2, sharedPublicInput, rollupIds);
+        vm.expectEmit(false, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(sharedPublicInput, rollupIds);
         rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, _emptyEntries(), _emptyStaticEntries(), 0, 0));
     }
 

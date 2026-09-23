@@ -13,7 +13,7 @@ import {
 } from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -44,9 +44,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     // Same signature on L1 (l2ToL1Calls / expectedL1ToL2Calls) and L2 (incomingCalls / expectedOutgoingCalls).
     bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
 
-    // BatchPosted(uint256 rollupCount) — carries only the count; the posted entries travel in the
+    // BatchPosted(bytes32 sharedPublicInput, uint64[] rollupIds); posted entries travel in the
     // postAndVerifyBatch tx calldata (see VerifyL1BatchCalldata).
-    bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
+    bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(bytes32,uint64[])");
 
     // ExecutionConsumed on L1: (bytes32 crossChainCallHash, uint64 rollupId, uint256 entryQueueIndex) — all indexed
     bytes32 constant SIG_EXECUTION_CONSUMED_L1 = keccak256("ExecutionConsumed(bytes32,uint64,uint256)");
@@ -61,9 +61,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     //                      proxyEntryHash  incomingCalls  expectedOutgoingCalls          rollingHash success ret
     //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)  // revertNextNCalls, isStatic, gas, ...
     //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
-    //   StaticExecutionEntry           = (bytes32, CrossChainCall[], bytes32, bool, bytes)
+    //   StaticExecutionEntryL2         = (uint256, bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[],(uint256,bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[])"
     );
 
     // L2's outgoing-call event — 6 fields, trailing uint64 callGas. Only matched against L2

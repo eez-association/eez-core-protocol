@@ -8,7 +8,7 @@ import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, L2ToL1Call, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../../../../src/interfaces/IEEZL2.sol";
 import {Counter, ICounterView, StaticReadCounter} from "../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
@@ -91,6 +91,7 @@ abstract contract StaticCounterL2Actions {
     {
         entries = new L2StaticExecutionEntry[](1);
         entries[0] = L2StaticExecutionEntry({
+            expectedEntryIndex: 0,
             proxyEntryHash: _staticKey(counterL1, readerL2),
             incomingCalls: noL2Calls(),
             rollingHash: bytes32(0),

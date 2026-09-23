@@ -37,7 +37,7 @@ contract StaticReader {
 }
 
 /// @notice Coverage for `EEZ.staticCrossChainCall` (top-level pool + reentrant in-execution),
-///         `_resolveStaticEntry`, and `_processNStaticCalls`.
+///         `_resolveStaticEntry`, and `_processStaticL2ToL1Calls`.
 contract EEZStaticLookupTest is Base {
     ViewTarget internal target;
     address internal alice = makeAddr("alice");
@@ -180,7 +180,7 @@ contract EEZStaticLookupTest is Base {
         rollups.staticCrossChainCall(sourceAddr, abi.encodeCall(ViewTarget.getValue, ()));
     }
 
-    /// @notice Top-level static lookup carrying a real static sub-call: `_processNStaticCalls` runs it
+    /// @notice Top-level static lookup carrying a real static sub-call: `_processStaticL2ToL1Calls` runs it
     ///         and folds its result into the verified rolling hash.
     function test_StaticLookup_TopLevelWithSubCall() public {
         RollupHandle memory r = _makeRollup(bytes32(0));

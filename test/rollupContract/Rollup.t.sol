@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 
@@ -35,6 +36,60 @@ contract RollupTest is Test {
         vks[0] = VK1;
         // ROLLUPS = owner = this contract.
         rollup = new Rollup(address(this), address(this), 1, psList, vks);
+    }
+
+    // ── constructor events ──────────────────────────────────────
+
+    function testFuzz_constructorConfigurationReplay(uint256 initialThreshold) public {
+        address[] memory psList = new address[](2);
+        psList[0] = ps1;
+        psList[1] = ps2;
+        bytes32[] memory vks = new bytes32[](2);
+        vks[0] = VK1;
+        vks[1] = VK2;
+        _assertConstructorConfigurationLogs(initialThreshold, psList, vks);
+    }
+
+    function testFuzz_constructorEmptyConfigurationReplay(uint256 initialThreshold) public {
+        _assertConstructorConfigurationLogs(initialThreshold, new address[](0), new bytes32[](0));
+    }
+
+    function test_constructorEmptyZeroConfigurationReplay() public {
+        _assertConstructorConfigurationLogs(0, new address[](0), new bytes32[](0));
+    }
+
+    function _assertConstructorConfigurationLogs(
+        uint256 initialThreshold,
+        address[] memory psList,
+        bytes32[] memory vks
+    )
+        internal
+    {
+        vm.recordLogs();
+        Rollup deployed = new Rollup(address(this), address(this), initialThreshold, psList, vks);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        // Ownable initialization, then threshold, then membership in constructor input order.
+        assertEq(logs.length, 2 + psList.length);
+        assertEq(logs[0].topics[0], keccak256("OwnershipTransferred(address,address)"));
+        assertEq(logs[1].emitter, address(deployed));
+        assertEq(logs[1].topics.length, 1);
+        assertEq(logs[1].topics[0], keccak256("ThresholdChanged(uint256)"));
+        uint256 replayedThreshold = abi.decode(logs[1].data, (uint256));
+        assertEq(replayedThreshold, initialThreshold);
+        assertEq(replayedThreshold, deployed.threshold());
+
+        for (uint256 i = 0; i < psList.length; i++) {
+            Vm.Log memory entry = logs[i + 2];
+            assertEq(entry.emitter, address(deployed));
+            assertEq(entry.topics.length, 2);
+            assertEq(entry.topics[0], keccak256("ProofSystemAdded(address,bytes32)"));
+            address replayedProofSystem = address(uint160(uint256(entry.topics[1])));
+            bytes32 replayedKey = abi.decode(entry.data, (bytes32));
+            assertEq(replayedProofSystem, psList[i]);
+            assertEq(replayedKey, vks[i]);
+            assertEq(replayedKey, deployed.verificationKey(replayedProofSystem));
+        }
     }
 
     // ── constructor reverts ─────────────────────────────────────

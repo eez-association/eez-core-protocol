@@ -13,7 +13,7 @@ import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IEEZ, ExecutionEntry, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {MockProofSystem} from "../mocks/MockProofSystem.sol";
 import {BlobMessage, Msg} from "../../script/blob/BlobMessages.sol";

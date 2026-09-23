@@ -10,8 +10,8 @@ import {Vm} from "forge-std/Vm.sol";
 ///         L1 (EEZ.sol) and L2 (EEZL2.sol).
 ///
 /// NOTE: Pre-execution entry payload is NOT decoded by this script.
-///       Post-refactor, `BatchPosted(uint256 rollupCount)` carries only the
-///       number of rollups verified; the full `ExecutionEntry[]` payload lives in the
+///       `BatchPosted(bytes32 sharedPublicInput, uint64[] rollupIds)` identifies the
+///       verified batch and participating rollups; the full `ExecutionEntry[]` payload lives in the
 ///       `postAndVerifyBatch` transaction input calldata. Decoding tx input from inside
 ///       a Forge script is awkward (no direct cheatcode for it), so this
 ///       decoder reports execution flow purely from emitted events. The events
@@ -31,7 +31,7 @@ contract DecodeExecutions is Script {
     // ── Event signatures (L1 + L2 share most of these) ──
     // New flatten model: rollupIds are uint64; ImmediateEntrySkipped→L2TxSkipped;
     // RevertSpanExecuted→CallsReverted; L2TxExecuted carries only the rollupId.
-    bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(uint256)");
+    bytes32 constant SIG_BATCH_POSTED = keccak256("BatchPosted(bytes32,uint64[])");
     bytes32 constant SIG_ROLLUP_CREATED = keccak256("RollupCreated(uint64,address,bytes32)");
     bytes32 constant SIG_ROOT_UPDATED = keccak256("RootUpdated(uint64,bytes32)");
     bytes32 constant SIG_L2_EXEC_PERFORMED = keccak256("L2ExecutionPerformed(uint64,bytes32)");
@@ -52,9 +52,9 @@ contract DecodeExecutions is Script {
     //   ExecutionEntry  = (bytes32, CrossChainCall[], ExpectedOutgoingCrossChainCall[], bytes32, bool, bytes)
     //   CrossChainCall  = (uint16, bool, uint64, address, uint64, address, uint256, bytes)
     //   ExpectedOutgoingCrossChainCall = (bytes32, CrossChainCall[], bytes32, bool, bytes)
-    //   StaticExecutionEntry           = (bytes32, CrossChainCall[], bytes32, bool, bytes)
+    //   StaticExecutionEntryL2         = (uint256, bytes32, CrossChainCall[], bytes32, bool, bytes)
     bytes32 constant SIG_TABLE_LOADED = keccak256(
-        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[])"
+        "ExecutionTableLoaded((bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],(bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[],bytes32,bool,bytes)[],(uint256,bytes32,(uint16,bool,uint64,address,uint64,address,uint256,bytes)[],bytes32,bool,bytes)[])"
     );
     bytes32 constant SIG_INCOMING_CALL =
         keccak256("IncomingCrossChainCallExecuted(bytes32,bool,address,uint64,address,uint256,uint64,bytes)");
@@ -120,7 +120,7 @@ contract DecodeExecutions is Script {
         bytes32 sig = topics[0];
 
         if (sig == SIG_BATCH_POSTED) {
-            _printBatchPosted(topics, p);
+            _printBatchPosted(data, p);
         } else if (sig == SIG_ROLLUP_CREATED) {
             _printRollupCreated(topics, data, p);
         } else if (sig == SIG_ROOT_UPDATED) {
@@ -158,10 +158,18 @@ contract DecodeExecutions is Script {
 
     // ──────────────────── Per-event formatters ────────────────────
 
-    function _printBatchPosted(bytes32[] memory topics, string memory p) internal pure {
-        // event BatchPosted(uint256 indexed rollupCount)
-        uint256 count = uint256(topics[1]);
-        console.log(string.concat(p, "BatchPosted(rollups=", vm.toString(count), ")"));
+    function _printBatchPosted(bytes memory data, string memory p) internal pure {
+        (bytes32 sharedPublicInput, uint64[] memory rollupIds) = abi.decode(data, (bytes32, uint64[]));
+        console.log(
+            string.concat(
+                p,
+                "BatchPosted(rollups=",
+                vm.toString(rollupIds.length),
+                ", sharedPublicInput=",
+                vm.toString(sharedPublicInput),
+                ")"
+            )
+        );
     }
 
     function _printRollupCreated(bytes32[] memory topics, bytes memory data, string memory p) internal pure {

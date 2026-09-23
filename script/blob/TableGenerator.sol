@@ -11,7 +11,7 @@ import {
 import {
     ExecutionEntry as L2ExecutionEntry,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
 import {ScenarioStore, CallNode, TxSpec} from "./ScenarioStore.sol";
@@ -437,6 +437,13 @@ contract TableGenerator is TestHashes {
         } else {
             uint256 unitIdx = _originUnit(origin);
             L2StaticExecutionEntry storage staticEntry = _unitStatics[unitIdx].push();
+            // Failed consumptions roll back the live cursor; successful ones may skip rows.
+            for (uint256 i = _unitEntries[unitIdx].length; i > 0; i--) {
+                if (_unitEntries[unitIdx][i - 1].success) {
+                    staticEntry.expectedEntryIndex = i;
+                    break;
+                }
+            }
             staticEntry.proxyEntryHash = callHash;
             for (uint256 i = 0; i < node.children.length; i++) {
                 CallNode memory sub = _store.getNode(node.children[i]);

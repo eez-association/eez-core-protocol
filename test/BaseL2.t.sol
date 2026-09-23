@@ -7,7 +7,7 @@ import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry
+    StaticExecutionEntryL2
 } from "../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "./TestHashes.sol";
 
@@ -38,7 +38,7 @@ abstract contract BaseL2 is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     /// @notice Loads `entries` + `staticEntries` into the execution table as `SYSTEM_ADDRESS`.
-    function _loadEntries(ExecutionEntry[] memory entries, StaticExecutionEntry[] memory staticEntries) internal {
+    function _loadEntries(ExecutionEntry[] memory entries, StaticExecutionEntryL2[] memory staticEntries) internal {
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, staticEntries);
     }
@@ -47,7 +47,7 @@ abstract contract BaseL2 is Test, TestHashes {
     function _loadSingle(ExecutionEntry memory entry) internal {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
     }
 
     // ──────────────────────────────────────────────
@@ -229,7 +229,7 @@ abstract contract BaseL2 is Test, TestHashes {
         internal
         returns (uint64 g)
     {
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
         for (uint256 i = 0; i < 2; i++) {
             vm.prank(caller);
             (bool ok, bytes memory err) = proxyAddr.call{value: value, gas: attachedGas}(data);

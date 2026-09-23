@@ -13,7 +13,7 @@ import {EEZL2} from "../src/L2/EEZL2.sol";
 import {ExecutionEntry, RollupUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../src/interfaces/IEEZL2.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 

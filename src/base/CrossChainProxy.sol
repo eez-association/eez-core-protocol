@@ -45,24 +45,32 @@ contract CrossChainProxy {
     /// @dev Check the caller before ABI decoding so selector collisions with malformed arguments
     ///      still reach the remote fallback. Use ICrossChainProxy for the manager forwarding ABI.
     fallback() external payable {
+        // Allow executeOnBehalf only when called by the EEZ manager.
         if (msg.sender == EEZ && msg.sig == ICrossChainProxy.executeOnBehalf.selector) {
             (address destination, uint64 callGas, bytes memory data) =
                 abi.decode(msg.data[4:], (address, uint64, bytes));
+
+            // Cap gas at the target, leaving proxy overhead outside the cap; zero means uncapped.
+            // A manager STATICCALL keeps this CALL and its descendants in static context.
             (bool success, bytes memory result) = callGas == 0
                 ? destination.call{value: msg.value}(data)
                 : destination.call{value: msg.value, gas: callGas}(data);
+
             assembly {
                 switch success
                 case 0 { revert(add(result, 0x20), mload(result)) }
                 default { return(add(result, 0x20), mload(result)) }
             }
         }
+
+        // Handle the self-call used to detect static context.
         if (msg.sender == address(this) && msg.sig == STATIC_CHECK_SELECTOR) {
-            // Self-calls, run the static detector.
             // TSTORE halts in static context.
             _staticDetector = 0;
             return;
         }
+
+        // Route all other calls through cross-chain execution.
         _fallback();
     }
 
