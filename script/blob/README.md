@@ -178,7 +178,7 @@ Grammar (case-insensitive; `#` starts a comment; blank lines ignored):
 | Line | Meaning |
 |---|---|
 | `<chain> call <chain> [value <amount> [wei\|gwei\|ether]]` | executor calls target; opens a frame (optionally carrying ether — default unit wei) |
-| `<chain> staticCall <chain>` | read-only frame (a top-level one may nest leaf static sub-reads of the origin chain) |
+| `<chain> staticCall <chain>` | read-only frame; nested static calls may target any other chain |
 | `[<chain>] return` / `[<chain>] returnFail` | closes the innermost frame |
 | `[<chain>] snapshot` … `[<chain>] revert` | forced-revert region in the current frame |
 | `--` | transaction separator |
@@ -195,38 +195,83 @@ are auto-generated and globally unique (`dsl.tx#i`, `dsl.call#k`, `dsl.ret#k`,
 returns the compiled `BlobMessage[]` without executing, for message-level
 assertions.
 
-DSL limits (beyond the v1 shape restrictions below): no
+DSL limits (in addition to the structural rules below): no
 `ChainOperation`s, and one `runDsl` per test (a second run would diverge from a
 fresh generator's genesis-derived roots). Scenarios live in
 `test/blob/DslScenarios.t.sol`; parser rejection tests in
 `test/blob/DslParser.t.sol`.
 
-## What the sidecar is (and why it's honest)
+## Static calls, failures and nested rollback regions
 
-`TableStitcher` never sees the original messages — only the generator's tables plus a
-sidecar of data that *provably never reaches any table*:
+The DSL and table pipeline support:
 
-- per-tx metadata: origin chain, `tx_data`, root-slot kinds (tables don't delimit txs);
-- `ChainOperation` payloads and the `CloseBlobStream` position (chain-local, not cross-chain);
-- static call fields (both managers match static reads by hash only) — except a read's
-  own sub-reads, whose fields live in the static entry's sub-call array: for those only
-  the RESULTS ride the sidecar (they are only ever hashed into the untagged accumulator);
-- region sizes (destination markers can't distinguish one region over two siblings from
-  two adjacent regions).
+- Arbitrarily nested static callbacks within the configured depth/resource limits,
+  both under top-level reads and reentrant static reads.
+- Static reads through third chains, including callbacks returning to an earlier chain.
+- Successful mutable child calls followed by a parent `returnFail`; all affected
+  application state is rolled back at the appropriate chain/frame boundary.
+- Nested `snapshot` / `revert` regions, including regions that start at the same
+  call, share an endpoint, or nest inside a call on another chain.
+- Mixtures of the above with value transfers and static calls. The local harness
+  supplies a conservative system funding budget for L2 callbacks, including work
+  that later reverts; this does not specify production mint/inventory policy.
 
-Everything else — call fields, results, ordering, nesting, revert structure — is recovered
-from the tables and cross-checked against every entry's stored `rollingHash`.
+For example, a successful child can now be rolled back by its parent:
 
-## v1 shape restrictions (translation layer, not the codec)
+```text
+L1 call L2_A
+  L2_A call L2_B
+  return
+returnFail
+```
 
-The byte codec accepts any spec-valid stream; the table translation additionally requires:
-a static call nests only when it is a TOP-LEVEL read, and then only leaf static sub-reads
-of the reader chain (the chain that fired the read) — that is the shape the static
-entries verify, re-running the sub-read array live on the resolving chain against the
-untagged rolling hash; `Snapshot` regions don't nest, `CloseBlobStream` sits
-between transactions, a `ReturnFail` frame carries no committed (successful mutable)
-sub-call — the frame's terminal revert rolls back its own nested consumptions on the
-executing chain, so no stored rolling hash could match live (failing or static sub-calls
-are fine) — and a repeated identical call after a reverted region/entry on the
-same origin may re-match the rolled-back entry (protocol scan semantics). `ScenarioStore`
-rejects unsupported shapes with `UnsupportedShape(reason)`.
+And a reentrant static read can itself call back:
+
+```text
+L1 call L2_A
+  L2_A staticCall L1
+    L1 staticCall L2_A
+    return
+  return
+return
+```
+
+These shapes run through codec round-trip, IR round-trip, table generation,
+reverse decoding, and live execution on the local EEZ managers. `DslShapes.t.sol`
+adds mixed cases and bounded fuzz coverage.
+
+## Sidecar metadata and table validation
+
+`TableStitcher` receives tables and sidecar metadata, never the original messages.
+The sidecar carries transaction boundaries, static call fields and child counts,
+static outcomes, explicit rollback boundaries, chain operations, stream position,
+and source gas observations. Full static trees need this metadata because some
+read-only legs have no executing destination or independently stored lookup row.
+
+Where a static outcome also appears in a source row, the stitcher compares them.
+Callback identities and results are checked against callback arrays and their
+untagged hashes; executing destinations are checked against tagged hashes.
+Mutable fields/results continue to come from the tables. After reconstruction,
+canonical rollback spans are regenerated and compared with every table marker,
+so changing region metadata or dropping a required rollback cannot pass silently.
+
+**Compatibility:** the blob wire format is unchanged. The translator's `Tables.sidecar`
+ABI has changed: `SidecarStatic` includes `childCount`, static outcomes are ordered
+for every static node in DFS order, and `regions` records exact nested boundaries.
+Regenerate saved table/sidecar bundles and consumers from the updated ABI.
+
+## Remaining structural and runtime limits
+
+A call must target another chain, static descendants must remain static and carry
+no value, and rollback regions must be nonempty and close within their frame.
+`CloseBlobStream` remains between transactions. The DSL permits snapshots in mutable
+frames; it does not model local storage assignments or arbitrary application code.
+Payloads are generated uniquely, so these generic call-tree tests do not reproduce
+same-calldata retry aliasing by themselves.
+
+Supporting a shape in the DSL does not remove the runtime limits documented in
+[CALL_PATTERN_LIMITS.md](../../docs/CALL_PATTERN_LIMITS.md): identical mutable retries
+after rollback can still reselect an earlier row, gas-sensitive static outcomes may
+lack a discriminator, and candidate retries require sufficient gas. The four new
+static-local-write E2Es remain NOT LIVE YET for staged/parallel network testing and
+remain excluded from automatic `all` runs.

@@ -76,27 +76,6 @@ contract DslParser is DslScenarioBase {
         _expectFail(2, "cannot nest a mutable call inside a static call", "L1 staticCall L2_A\nL2_A call L2_B\n");
     }
 
-    function test_reject_staticSubReadNestingFurther() public {
-        _expectFail(
-            3, "static sub-reads cannot nest further", "L1 staticCall L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\n"
-        );
-    }
-
-    function test_reject_staticSubReadWrongTarget() public {
-        _expectFail(2, "static sub-read must target the reader chain", "L1 staticCall L2_A\nL2_A staticCall L2_B\n");
-    }
-
-    function test_reject_staticNestingUnderReentrantStatic() public {
-        // Only a TOP-LEVEL static frame may nest sub-reads; a reentrant one cannot.
-        _expectFail(3, "static sub-reads cannot nest further", "L1 call L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\n");
-    }
-
-    function test_reject_nestedSnapshot() public {
-        _expectFail(
-            4, "snapshot while a region is open (line 1)", "L2_A snapshot\nL2_A call L2_B\nL2_B return\nL2_A snapshot\n"
-        );
-    }
-
     function test_reject_revertWithoutSnapshot() public {
         _expectFail(3, "revert without matching snapshot", "L2_A call L2_B\nL2_B return\nL2_A revert\n");
     }
@@ -128,14 +107,6 @@ contract DslParser is DslScenarioBase {
 
     function test_reject_doubleSeparator() public {
         _expectFail(4, "empty transaction", "L1 call L2_A\nL2_A return\n--\n--\nL1 call L2_A\nL2_A return\n");
-    }
-
-    function test_reject_committedCallInsideFailFrame() public {
-        _expectFail(
-            4,
-            "returnFail frame contains a committed call (unsupported shape)",
-            "L1 call L2_A\nL2_A call L2_B\nL2_B return\nL2_A returnFail\n"
-        );
     }
 
     function test_reject_txOpenerNotACall() public {

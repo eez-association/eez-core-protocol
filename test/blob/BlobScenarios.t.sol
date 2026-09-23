@@ -212,10 +212,8 @@ contract BlobScenarios is BlobScenarioBase {
         assertEq(actorA.execCount(), 0, "failed delivery leaves no state on L2A");
     }
 
-    /// @notice A ReturnFail frame with a COMMITTED sub-call has no faithful table
-    ///         translation (the frame's terminal revert rolls back its own nested
-    ///         consumptions on the executing chain) — the IR parser rejects it.
-    function test_reject_ReturnFailFrameWithCommittedSubCall() public {
+    /// @notice A successful child is rolled back when its parent returns failure.
+    function test_ReturnFailFrameWithSuccessfulSubCall() public {
         MsgList memory l = Msg.list(8);
         Msg.push(l, Msg.initiate(0, "tx-data"));
         Msg.push(l, Msg.call(L2A, address(driverL1), address(actorA), 0, abi.encodeWithSignature("outer()")));
@@ -225,13 +223,9 @@ contract BlobScenarios is BlobScenarioBase {
         Msg.push(l, Msg.finish());
         Msg.push(l, Msg.closeBlobStream());
 
-        ScenarioStore store = new ScenarioStore();
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ScenarioStore.UnsupportedShape.selector, "ReturnFail frame with a committed sub-call"
-            )
-        );
-        store.fromMessages(Msg.done(l));
+        runScenario(Msg.done(l));
+        assertEq(actorA.execCount(), 0);
+        assertEq(actorB.execCount(), 0);
     }
 
     /// @notice Reentrant ReturnFail: A's nested call to B fails; A catches it and

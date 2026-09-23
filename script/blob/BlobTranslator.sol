@@ -10,7 +10,7 @@ import {TestHashes} from "../../test/TestHashes.sol";
 import {BlobMessage} from "./BlobMessages.sol";
 import {BlobCodec} from "./BlobCodec.sol";
 import {BlobPacking} from "./BlobPacking.sol";
-import {ScenarioStore, CallNode, TxSpec, ChainOpSpec} from "./ScenarioStore.sol";
+import {ScenarioStore, CallNode, TxSpec, ChainOpSpec, RevertRegion} from "./ScenarioStore.sol";
 import {SidecarTx, SidecarStatic, SidecarStaticResult, SidecarChainOp} from "./BlobSidecar.sol";
 import {ROOT_KIND_CALL, ROOT_KIND_STATIC} from "./BlobConstants.sol";
 import {TableGenerator} from "./TableGenerator.sol";
@@ -28,9 +28,9 @@ import {TableStitcher} from "./TableStitcher.sol";
 //      dataFromTables   Tables                   → bytes stream + tail (stitch → emit → encode)
 //
 //  `Tables` bundles everything the Table → Blob direction needs: the L1 batch
-//  artifacts, each L2 chain's units in execution order, and the SIDECAR of data
-//  that provably never reaches any table (tx boundaries, static call fields,
-//  chain ops, region sizes, per-call callGas — see TableStitcher). Because
+//  artifacts, each L2 chain's units in execution order, and SIDECAR metadata
+//  (tx boundaries, static trees/outcomes, rollback regions, chain ops and gas
+//  observations — see TableStitcher). Because
 //  `dataToTables` emits the sidecar alongside the tables, its output feeds
 //  `dataFromTables` directly and round-trips to the exact input bytes.
 //
@@ -51,15 +51,16 @@ contract BlobTranslator is TestHashes {
         L2StaticExecutionEntry[] statics; // the unit's static pool
     }
 
-    /// @notice The non-table data required to rebuild the blob (see TableStitcher's
+    /// @notice The additional metadata required to rebuild the blob (see TableStitcher's
     ///         sidecar rationale). `callGasKeys`/`callGasValues` are parallel arrays:
     ///         one row per L2-sourced mutable call in execution (DFS) order, keyed by
     ///         the destination-kind call hash (callGas = 0).
     struct Sidecar {
         SidecarTx[] txs; // per-tx: origin chain, tx_data, root slot kinds
         SidecarStatic[] statics; // fields of every hash-matched static call
-        SidecarStaticResult[] staticSubResults; // sub-read results, parent-DFS order
+        SidecarStaticResult[] staticSubResults; // every static node outcome, DFS order
         uint16[] regionSizes; // Snapshot region sizes, message order
+        RevertRegion[] regions; // exact nested boundaries, which span markers cannot uniquely encode
         bytes32[] callGasKeys;
         uint64[] callGasValues;
         SidecarChainOp[] chainOps;
@@ -153,6 +154,7 @@ contract BlobTranslator is TestHashes {
             stitcher.loadSidecarStaticSubResult(s.staticSubResults[i].success, s.staticSubResults[i].returnData);
         }
         stitcher.loadSidecarRegionSizes(s.regionSizes);
+        stitcher.loadSidecarRegions(s.regions);
         for (uint256 i = 0; i < s.callGasKeys.length; i++) {
             stitcher.loadSidecarCallGas(s.callGasKeys[i], s.callGasValues[i]);
         }
@@ -199,25 +201,23 @@ contract BlobTranslator is TestHashes {
         // Static call fields + sub-read results (fields of a sub-read live in the
         // static entry's sub-call array — only its result rides the sidecar).
         uint256[] memory staticIds = store.staticNodesInOrder();
-        uint256 subN = 0;
-        for (uint256 i = 0; i < staticIds.length; i++) {
-            subN += store.getNode(staticIds[i]).children.length;
-        }
         s.statics = new SidecarStatic[](staticIds.length);
-        s.staticSubResults = new SidecarStaticResult[](subN);
-        uint256 w = 0;
+        s.staticSubResults = new SidecarStaticResult[](staticIds.length);
         for (uint256 i = 0; i < staticIds.length; i++) {
             CallNode memory nd = store.getNode(staticIds[i]);
             s.statics[i] = SidecarStatic({
-                fromAddress: nd.fromAddress, toChain: nd.toChain, toAddress: nd.toAddress, gas: nd.gas, data: nd.data
+                fromAddress: nd.fromAddress,
+                toChain: nd.toChain,
+                toAddress: nd.toAddress,
+                gas: nd.gas,
+                data: nd.data,
+                childCount: nd.children.length
             });
-            for (uint256 c = 0; c < nd.children.length; c++) {
-                CallNode memory sub = store.getNode(nd.children[c]);
-                s.staticSubResults[w++] = SidecarStaticResult({success: sub.success, returnData: sub.returnData});
-            }
+            s.staticSubResults[i] = SidecarStaticResult({success: nd.success, returnData: nd.returnData});
         }
 
         s.regionSizes = store.regionSizesInOrder();
+        s.regions = store.getRegions();
 
         bytes32[] memory keys = new bytes32[](store.nodeCount());
         uint64[] memory vals = new uint64[](store.nodeCount());
