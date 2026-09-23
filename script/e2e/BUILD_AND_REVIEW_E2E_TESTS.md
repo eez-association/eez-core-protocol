@@ -236,6 +236,32 @@ Authoring notes specific to static scenarios:
 - **A sub-call-less static entry needs `rollingHash == 0`** (the untagged static
   accumulator seeds at zero and an empty sub-array is always compared).
 
+### Static read → write → read scenarios
+
+Each scenario runs one source transaction without reloading tables between reads:
+
+| Source | Scenario | Proxy calls in the trigger | Calls executed on the destination |
+| --- | --- | --- | --- |
+| L1 | `static/L1_to_L2/staticReadWrite` | read 0 → increment 1 → read 1 | One L2 increment delivery; static reads are L1 lookups. |
+| L2 | `static/L2_to_L1/staticReadWriteL2` | read 0 → increment 1 → read 1 | Three L1 calls in one zero-hash L2Tx entry. |
+| L1 | `static/L1_to_L2/staticReadX2Write` | read 0 → read 0 → increment 1 → read 1 → read 1 | One L2 increment delivery; static reads are L1 lookups. |
+| L2 | `static/L2_to_L1/staticReadX2WriteL2` | read 0 → read 0 → increment 1 → read 1 → read 1 | Five L1 calls in one zero-hash L2Tx entry. |
+
+All four use two static rows: before and after the increment. L1 rows pin the
+pre/post L2 roots; L2 rows pin `expectedEntryIndex` 0 and 1. The future row is first
+so matching must check the context. The X2 variants reuse each row twice and check
+that static reads do not advance the cursor.
+
+Each scenario file contains its target counter, trigger, `Actions`, deployment,
+execution and `ComputeExpected` contracts. Assertions check the observed read values,
+the real destination increment, and one mutable consumption. L1-originating cases
+also verify that static reads produce no L2 delivery or loaded entry.
+
+```bash
+bash script/e2e/run/local-parallel.sh staticReadWrite staticReadWriteL2
+bash script/e2e/run/local-parallel.sh staticReadX2Write staticReadX2WriteL2
+```
+
 ## Authoring rules (the audit checklist)
 
 Every scenario must satisfy all of these; they are what the suite is audited against.
