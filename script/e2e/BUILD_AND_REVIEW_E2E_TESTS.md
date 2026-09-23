@@ -262,6 +262,46 @@ bash script/e2e/run/local-parallel.sh staticReadWrite staticReadWriteL2
 bash script/e2e/run/local-parallel.sh staticReadX2Write staticReadX2WriteL2
 ```
 
+### Static read → local write → read with callbacks
+
+**Status: NOT LIVE YET in staged or parallel network testing.** These four scenarios
+are validated locally only and excluded from automatic `all` / `all:N` runs and the
+local default set. Their `E2E_EXCLUDE_FROM_ALL` markers control this exclusion.
+The explicit command below is for local development; names and category selections
+remain available and do not imply live readiness.
+
+These scenarios cover candidate retries without a mutable EEZ call between reads.
+Each scenario file contains its reader, remote quote producer, and both chains'
+entry builders. One `reader.run()` sets its local rate to `1 → 2 → 1` and reads the same
+remote `quote()` after each write. The quote calls back to the reader's `rate()` and
+returns that rate directly; all three results (`1 → 2 → 1`) are asserted individually inside the
+actual reader transaction and persisted for inspection. `run()` returns no data; there is no aggregate result to interpret.
+
+| Resolver under test | Scenario | Trigger and paired execution |
+| --- | --- | --- |
+| L1 top-level | `static/L1_to_L2/staticLocalWrite` | Direct L1 reader call; two static rows with identical live root pins. Real L2 quote results come from fork-only prediction with the source callback values. No L2 delivery; the quote key is asserted absent from mined L2 tables/events. |
+| L2 top-level | `static/L2_to_L1/staticLocalWriteL2` | Direct L2 reader call; two static rows at cursor 0. One L1 zero-hash L2Tx entry executes the three real quotes and resolves their static callbacks. |
+| L1 nested | `static/L2_to_L1/nestedStaticLocalWriteL1` | One L2 proxy call to the L1 reader. One L1 zero-hash L2Tx entry runs the reader with two sibling quote rows. The same L2 source entry executes all three real quotes, with callback rows keyed to their firing positions. |
+| L2 nested | `static/L1_to_L2/nestedStaticLocalWriteL2` | One L1 proxy call to the L2 reader. One L2 delivery runs the reader with two sibling quote rows. The L1 source entry executes the three real quotes, with callback rows keyed to their firing positions. |
+
+The reader-side rows have equal lookup keys and distinct callback hashes. The second
+read must reject the first candidate before selecting the second; the third must reuse
+the first. No reload occurs between reads. L2 asserts cursor 0 for top-level reads and
+exactly one mutable consumption for nested cases; L1 checks the expected root transition
+(or unchanged root for top-level L1 reads). Expected tables and L1 fold steps are built
+from the same call preimages used by both executions.
+
+The nested scenario suffix names the chain where the retry is tested; its directory
+names the mutable trigger direction. Local E2Es use `AcceptAllProofSystem`, so success
+establishes paired execution and table consistency, not production circuit acceptance.
+
+```bash
+bash script/e2e/run/local-parallel.sh staticLocalWrite staticLocalWriteL2 nestedStaticLocalWriteL1 nestedStaticLocalWriteL2
+```
+
+Protocol rules, candidate construction and failure handling:
+[STATIC_ENTRY §4.4](../../docs/STATIC_ENTRY.md#44-local-writes-between-identical-static-reads).
+
 ## Authoring rules (the audit checklist)
 
 Every scenario must satisfy all of these; they are what the suite is audited against.

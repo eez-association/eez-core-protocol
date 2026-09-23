@@ -21,6 +21,16 @@ even though its L2 table has one source entry per proxy consumption. Calls made 
 a cross-chain frame remains open stay in that frame's nested tables/sub-arrays and
 never become later system deliveries.
 
+**NOT LIVE YET — static reads around local writes:** `staticLocalWrite`,
+`staticLocalWriteL2`, `nestedStaticLocalWriteL1`, and `nestedStaticLocalWriteL2`
+have passed local Anvil runs only. They are not validated for live staged or
+parallel network testing. They are excluded from `all` / `all:N` discovery in
+`network-staged.sh` and `network-parallel.sh`, from `network-sequential.sh all`,
+and from the local parallel runner's default / `all` set. Each scenario carries
+an `E2E_EXCLUDE_FROM_ALL` marker; remove it only when the scenario is ready.
+Explicit names and category selections still include them; use explicit local
+runs for development. See the [scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
+
 ## Prerequisites
 
 [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `cast`),

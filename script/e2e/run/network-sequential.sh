@@ -44,8 +44,13 @@ done
 SOLS=()
 for arg in "$@"; do
     if [[ "$arg" == "all" ]]; then
-        while IFS= read -r sol; do SOLS+=("$sol"); done \
-            < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
+        while IFS= read -r sol; do
+            if grep -q '^// E2E_EXCLUDE_FROM_ALL:' "$sol"; then
+                echo "SKIP $sol: NOT LIVE YET (excluded from all)" >&2
+                continue
+            fi
+            SOLS+=("$sol")
+        done < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
     elif [[ -d "script/e2e/$arg" ]]; then
         while IFS= read -r sol; do SOLS+=("$sol"); done \
             < <(find "script/e2e/$arg" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)

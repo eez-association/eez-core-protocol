@@ -628,12 +628,16 @@ contract EEZL2 is EEZBase {
             for (uint256 i = _lastOutgoingCallConsumed; i < expectedCalls.length; i++) {
                 ExpectedOutgoingCrossChainCall storage expectedCall = expectedCalls[i];
                 if (expectedCall.expectedOutgoingHash == expectedOutgoingHash) {
-                    return _resolveStaticEntry(
-                        expectedCall.incomingCalls,
-                        expectedCall.revertedOrStaticRollingHash,
-                        expectedCall.success,
-                        expectedCall.returnData
-                    );
+                    if (
+                        _resolveStaticEntry(
+                            expectedCall.incomingCalls,
+                            expectedCall.revertedOrStaticRollingHash,
+                            expectedCall.success,
+                            expectedCall.returnData
+                        )
+                    ) {
+                        return expectedCall.returnData;
+                    }
                 }
             }
             revert EntryNotFound(crossChainCallHash, callGas);
@@ -643,19 +647,22 @@ contract EEZL2 is EEZBase {
         for (uint256 i = 0; i < staticEntries.length; i++) {
             StaticExecutionEntryL2 storage staticEntry = staticEntries[i];
             if (staticEntry.proxyEntryHash == crossChainCallHash && staticEntry.expectedEntryIndex == entryIndex) {
-                return _resolveStaticEntry(
-                    staticEntry.incomingCalls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
-                );
+                if (
+                    _resolveStaticEntry(
+                        staticEntry.incomingCalls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
+                    )
+                ) {
+                    return staticEntry.returnData;
+                }
             }
         }
 
         revert EntryNotFound(crossChainCallHash, callGas);
     }
 
-    /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
-    ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
-    ///         static entry's `rollingHash`), then return the cached data, or revert with it when
-    ///         `!success`.
+    /// @notice Returns false on a callback-hash mismatch so lookup can try the next candidate.
+    ///         Empty sub-call arrays hash to zero and are also checked. A matching failed
+    ///         entry reverts with its cached data; a matching successful entry returns true.
     function _resolveStaticEntry(
         CrossChainCall[] storage calls,
         bytes32 revertedOrStaticRollingHash,
@@ -664,15 +671,18 @@ contract EEZL2 is EEZBase {
     )
         internal
         view
-        returns (bytes memory)
+        returns (bool)
     {
-        if (_processStaticIncomingCalls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
+        if (_processStaticIncomingCalls(calls) != revertedOrStaticRollingHash) {
+            return false;
+        }
+
         if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
             }
         }
-        return returnData;
+        return true;
     }
 
     /// @notice Runs the static entry's `calls[]` in static context, folding an untagged rolling hash verified

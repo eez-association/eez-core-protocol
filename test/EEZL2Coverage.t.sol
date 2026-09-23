@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {EEZL2} from "../src/L2/EEZL2.sol";
+import {StaticRetryReader} from "./mocks/StaticRetryReader.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {
     ExecutionEntry,
@@ -29,7 +30,7 @@ contract ViewTargetL2 {
 
 /// @notice Performs a cross-chain STATICCALL through a proxy from inside an entry's call,
 ///         exercising the nested `staticCrossChainCall` path + the proxy's static-context detection.
-contract StaticReaderL2 {
+contract StaticReaderL2 is StaticRetryReader {
     function readUint(address proxy, bytes calldata data) external view returns (uint256) {
         (bool ok, bytes memory ret) = proxy.staticcall(data);
         require(ok, "static read failed");
@@ -316,12 +317,16 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes memory payload = hex"deadbeef";
         bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](2);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = false;
         lookups[0].incomingCalls = new CrossChainCall[](0);
         lookups[0].rollingHash = bytes32(0);
+        lookups[1].proxyEntryHash = h;
+        lookups[1].success = true;
+        lookups[1].incomingCalls = new CrossChainCall[](0);
+        lookups[1].returnData = abi.encode(uint256(99));
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
@@ -343,7 +348,7 @@ contract EEZL2CoverageTest is BaseL2 {
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
-        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
+        vm.expectRevert(abi.encodeWithSelector(EEZL2.EntryNotFound.selector, h, uint64(0)));
         manager.staticCrossChainCall(address(this), cd);
     }
 
@@ -507,6 +512,18 @@ contract EEZL2CoverageTest is BaseL2 {
     /// unified `expectedOutgoingCalls` (a static-keyed `success == true` element) via the proxy's
     /// static-context detection.
     function test_StaticLookup_NestedInsideExecution() public {
+        _nestedStaticLookup(false, false);
+    }
+
+    function test_StaticLookup_NestedRetriesAfterLocalWrites() public {
+        _nestedStaticLookup(true, false);
+    }
+
+    function test_StaticLookup_NestedRetriesPreserveCachedReverts() public {
+        _nestedStaticLookup(true, true);
+    }
+
+    function _nestedStaticLookup(bool retry, bool failAtOne) internal {
         StaticReaderL2 reader = new StaticReaderL2();
 
         // Inner: a proxy on this L2 for a remote view target.
@@ -519,7 +536,9 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes32 innerHash = _ccHash(IS_STATIC, address(reader), TEST_ROLLUP_ID, innerRemote, MAINNET, 0, innerData);
 
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
-        bytes memory outerData = abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
+        bytes memory outerData = retry
+            ? abi.encodeCall(StaticRetryReader.readAroundWrites, (innerProxy, innerData, failAtOne))
+            : abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
         // Top-level mutable key folds the observed callGas; the nested STATIC read folds callGas = 0.
         uint64 callGas = _probeOutgoing(address(0xD00D), outerProxy, 0, outerData);
@@ -534,7 +553,8 @@ contract EEZL2CoverageTest is BaseL2 {
         // The static read fires while inside the outer call: `_rollingHash` = seed → CALL_BEGIN(outer).
         bytes32 rhAtRead = _hCallBegin(_hEntryBeginL2(outerHash), outerCallHash);
 
-        ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
+        ExpectedOutgoingCrossChainCall[] memory outgoing =
+            new ExpectedOutgoingCrossChainCall[](retry ? (failAtOne ? 3 : 2) : 1);
         outgoing[0] = ExpectedOutgoingCrossChainCall({
             expectedOutgoingHash: _expectedOutgoingHash(innerHash, rhAtRead),
             incomingCalls: new CrossChainCall[](0), // no sub-calls; the read returns the pre-computed payload
@@ -542,6 +562,21 @@ contract EEZL2CoverageTest is BaseL2 {
             success: true,
             returnData: payload
         });
+        if (retry) {
+            CrossChainCall[] memory callbacks = new CrossChainCall[](1);
+            callbacks[0] = _cc(address(reader), 0, abi.encodeWithSignature("rate()"), innerRemote, MAINNET);
+            callbacks[0].isStatic = true;
+            // A matching cached revert is terminal even with a later successful candidate.
+            // At rate 2 the failed rate-1 candidate must instead be skipped by its hash.
+            for (uint256 i; i < outgoing.length; i++) {
+                uint256 rate = i == 1 ? 2 : 1;
+                outgoing[i].expectedOutgoingHash = outgoing[0].expectedOutgoingHash;
+                outgoing[i].incomingCalls = callbacks;
+                outgoing[i].revertedOrStaticRollingHash = _hStatic(bytes32(0), true, abi.encode(rate));
+                outgoing[i].success = !(failAtOne && i == 0);
+                outgoing[i].returnData = abi.encode(rate);
+            }
+        }
 
         // Outer call returns abi.encode(uint256(77)).
         bytes32 h = _rhSingle(outerHash, outerCallHash, true, abi.encode(innerResult));

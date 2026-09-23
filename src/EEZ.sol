@@ -1330,12 +1330,16 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
                 ExpectedL1ToL2Call memory expectedCall = expectedCalls[i];
                 if (expectedCall.expectedL1toL2Hash == expectedL1toL2Hash) {
-                    return _resolveStaticEntry(
-                        expectedCall.l2ToL1Calls,
-                        expectedCall.revertedOrStaticRollingHash,
-                        expectedCall.success,
-                        expectedCall.returnData
-                    );
+                    if (
+                        _resolveStaticEntry(
+                            expectedCall.l2ToL1Calls,
+                            expectedCall.revertedOrStaticRollingHash,
+                            expectedCall.success,
+                            expectedCall.returnData
+                        )
+                    ) {
+                        return expectedCall.returnData;
+                    }
                 }
             }
             revert ExecutionNotFound();
@@ -1357,19 +1361,22 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 staticEntry.proxyEntryHash == crossChainCallHash && staticEntry.destinationRollupId == destRid
                     && _rootsMatch(staticEntry)
             ) {
-                return _resolveStaticEntry(
-                    staticEntry.l2ToL1Calls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
-                );
+                if (
+                    _resolveStaticEntry(
+                        staticEntry.l2ToL1Calls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
+                    )
+                ) {
+                    return staticEntry.returnData;
+                }
             }
         }
 
         revert ExecutionNotFound();
     }
 
-    /// @notice Shared static-resolution body: run the sub-calls (untagged schema, always
-    ///         compared — an empty `calls[]` hashes to 0, which must match a sub-call-less
-    ///         static entry's `revertedOrStaticRollingHash`), then return the cached data, or revert with it when
-    ///         `!success`.
+    /// @notice Returns false on a callback-hash mismatch so lookup can try the next candidate.
+    ///         Empty sub-call arrays hash to zero and are also checked. A matching failed
+    ///         entry reverts with its cached data; a matching successful entry returns true.
     function _resolveStaticEntry(
         L2ToL1Call[] memory calls,
         bytes32 revertedOrStaticRollingHash,
@@ -1378,15 +1385,18 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     )
         internal
         view
-        returns (bytes memory)
+        returns (bool)
     {
-        if (_processStaticL2ToL1Calls(calls) != revertedOrStaticRollingHash) revert RollingHashMismatch();
+        if (_processStaticL2ToL1Calls(calls) != revertedOrStaticRollingHash) {
+            return false;
+        }
+
         if (!success) {
             assembly {
                 revert(add(returnData, 0x20), mload(returnData))
             }
         }
-        return returnData;
+        return true;
     }
 
     /// @notice Runs the static entry's `calls[]` in static context, folding an untagged rolling hash verified

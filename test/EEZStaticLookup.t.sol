@@ -11,6 +11,7 @@ import {
     StaticExecutionEntry,
     ExpectedRootPerRollup
 } from "../src/interfaces/IEEZ.sol";
+import {StaticRetryReader} from "./mocks/StaticRetryReader.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 
 /// @notice Simple view target used as a static sub-call destination.
@@ -28,7 +29,7 @@ contract ViewTarget {
 
 /// @notice Performs a cross-chain STATICCALL through a proxy from inside an entry's call,
 ///         exercising the reentrant `staticCrossChainCall` path + the proxy's static-context detection.
-contract StaticReader {
+contract StaticReader is StaticRetryReader {
     function readUint(address proxy, bytes calldata data) external view returns (uint256) {
         (bool ok, bytes memory ret) = proxy.staticcall(data);
         require(ok, "static read failed");
@@ -145,8 +146,9 @@ contract EEZStaticLookupTest is Base {
         bytes memory payload = hex"deadbeef";
         bytes32 h = _staticHash(r.id, address(target), cd, sourceAddr);
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](2);
         lookups[0] = _staticEntry(r.id, h, false, payload); // !success → reverts with payload
+        lookups[1] = _staticEntry(r.id, h, true, abi.encode(uint256(99)));
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
@@ -166,7 +168,7 @@ contract EEZStaticLookupTest is Base {
         _stdBatchPost(r, lookups);
 
         vm.prank(proxyAddr);
-        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
+        vm.expectRevert(EEZBase.ExecutionNotFound.selector);
         rollups.staticCrossChainCall(sourceAddr, cd);
     }
 
@@ -206,6 +208,32 @@ contract EEZStaticLookupTest is Base {
         vm.prank(proxyAddr);
         bytes memory res = rollups.staticCrossChainCall(sourceAddr, cd);
         assertEq(res, payload);
+    }
+
+    function test_StaticLookup_TopLevelRetriesAfterLocalWrites() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        address proxy = rollups.createCrossChainProxy(address(target), uint64(r.id));
+        bytes memory cd = abi.encodeCall(ViewTarget.getValue, ());
+        bytes32 h = _staticHash(r.id, address(target), cd, address(this));
+        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](2);
+        for (uint256 i; i < 2; i++) {
+            lookups[i] = _staticEntry(r.id, h, true, abi.encode(i + 1));
+            lookups[i].l2ToL1Calls = _oneCall(_staticCall(address(target), uint64(r.id), address(target), cd));
+            lookups[i].rollingHash = _hStatic(bytes32(0), true, abi.encode(i + 1));
+        }
+        _stdBatchPost(r, lookups);
+        for (uint256 i; i < 3; i++) {
+            uint256 value = i == 1 ? 2 : 1;
+            target.setValue(value);
+            (bool ok, bytes memory result) = proxy.staticcall(cd);
+            assertTrue(ok);
+            assertEq(abi.decode(result, (uint256)), value);
+            assertEq(_getRollupState(r.id), bytes32(0));
+        }
+        target.setValue(3);
+        (bool exhaustedOk, bytes memory exhaustedResult) = proxy.staticcall(cd);
+        assertFalse(exhaustedOk);
+        assertEq(exhaustedResult, abi.encodeWithSelector(EEZBase.ExecutionNotFound.selector));
     }
 
     /// @notice A static sub-call whose source proxy was never deployed reverts
@@ -303,6 +331,18 @@ contract EEZStaticLookupTest is Base {
     ///         unified `expectedL1ToL2Calls` (a static read: `success == true`) via the proxy's
     ///         static detection. The read is position-pinned by `_rollingHash` at the firing instant.
     function test_StaticLookup_NestedInsideExecution() public {
+        _nestedStaticLookup(false, false);
+    }
+
+    function test_StaticLookup_NestedRetriesAfterLocalWrites() public {
+        _nestedStaticLookup(true, false);
+    }
+
+    function test_StaticLookup_NestedRetriesPreserveCachedReverts() public {
+        _nestedStaticLookup(true, true);
+    }
+
+    function _nestedStaticLookup(bool retry, bool failAtOne) internal {
         RollupHandle memory r = _makeRollup(bytes32(0));
         StaticReader reader = new StaticReader();
 
@@ -316,7 +356,9 @@ contract EEZStaticLookupTest is Base {
         bytes32 innerHash = _ccHash(IS_STATIC, address(reader), MAINNET_ROLLUP_ID, innerL2, uint64(r.id), 0, innerData);
 
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
-        bytes memory outerData = abi.encodeCall(StaticReader.readUint, (innerProxy, innerData));
+        bytes memory outerData = retry
+            ? abi.encodeCall(StaticRetryReader.readAroundWrites, (innerProxy, innerData, failAtOne))
+            : abi.encodeCall(StaticReader.readUint, (innerProxy, innerData));
 
         RollupUpdate[] memory deltas = _oneDelta(r.id, bytes32(0), keccak256("s1"), 0);
 
@@ -327,7 +369,7 @@ contract EEZStaticLookupTest is Base {
         bytes32 hAtFire = _hCallBegin(_hEntryBegin(deltas, bytes32(0)), outerHash);
         bytes32 h = _hCallEnd(hAtFire, true, payload);
 
-        ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](1);
+        ExpectedL1ToL2Call[] memory reentrant = new ExpectedL1ToL2Call[](retry ? (failAtOne ? 3 : 2) : 1);
         reentrant[0] = ExpectedL1ToL2Call({
             expectedL1toL2Hash: _expectedL1toL2Hash(innerHash, hAtFire),
             l2ToL1Calls: _emptyCalls(),
@@ -335,6 +377,20 @@ contract EEZStaticLookupTest is Base {
             success: true,
             returnData: payload
         });
+        if (retry) {
+            L2ToL1Call[] memory callbacks =
+                _oneCall(_staticCall(innerL2, uint64(r.id), address(reader), abi.encodeWithSignature("rate()")));
+            // A matching cached revert is terminal even with a later successful candidate.
+            // At rate 2 the failed rate-1 candidate must instead be skipped by its hash.
+            for (uint256 i; i < reentrant.length; i++) {
+                uint256 rate = i == 1 ? 2 : 1;
+                reentrant[i].expectedL1toL2Hash = reentrant[0].expectedL1toL2Hash;
+                reentrant[i].l2ToL1Calls = callbacks;
+                reentrant[i].revertedOrStaticRollingHash = _hStatic(bytes32(0), true, abi.encode(rate));
+                reentrant[i].success = !(failAtOne && i == 0);
+                reentrant[i].returnData = abi.encode(rate);
+            }
+        }
 
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _shellEntry(r.id, deltas);
