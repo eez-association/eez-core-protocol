@@ -213,15 +213,25 @@ later block on either chain.
 
 ## What a network run verifies
 
-- **L1 settlement**: batch consumed our entries (`ExecutionConsumed` routing,
-  `EntryExecuted` rolling hash + call/nested counts).
-- **L1 posted batch** (when the settlement tx is identifiable and the scenario
-  prints `EXPECTED_L1_TABLE`): the `postAndVerifyBatch` calldata is decoded and every
+Known limits and deferred work are listed under [Verification TODO](#verification-todo). In particular,
+completion matching across a block does not yet bind an identical execution to
+one specific posting occurrence. The runners use the existing Solidity tooling;
+there is no Python settlement collector.
+
+- **L1 settlement**: each expected committing entry needs a distinct
+  `EntryExecuted` with its actual posted rolling hash. Proxy entries also need
+  `ExecutionConsumed` with the expected call hash and destination rollup. A total
+  completion count cannot replace these checks. Network discovery first scans call
+  hashes; completion matching happens after decoding the real posted roots.
+- **L1 posted batch** (when the scenario prints `EXPECTED_L1_TABLE`): the
+  `postAndVerifyBatch` calldata is decoded and every
   expected entry is field-matched against a posted twin (calls, reentrant frames,
   returnData, success flags; state updates: rollupId + etherDelta exact; the matched
   entries' per-rollup update chain must be contiguous and move the root), plus the
   structural invariants the contract itself enforces (proxy protection, immediate
-  prefix rules).
+  prefix rules). The network runner fails if the required settlement transaction
+  cannot be identified. Local runs perform this comparison for all expected L1
+  tables, including entries that have completion events.
 - **Rolling-hash replay** (when the scenario prints `EXPECTED_L1_STEPS` via
   `_printL1Steps`): each posted entry's rolling hash must be reproduced by replaying
   the scenario's recorded fold steps over the seed rebuilt from the POSTED state
@@ -234,6 +244,53 @@ later block on either chain.
   invariants.
 - **L2 calls**: `IncomingCrossChainCallExecuted` fields must re-hash to the emitted
   call hash and match the expected inbound call.
+
+The calldata verifier currently accepts direct `postAndVerifyBatch` transaction
+inputs. It reads completion logs from the pinned settlement block: the protocol
+requires deferred consumption in the posting block. Each scenario's expected
+`success=true` entries are expected to commit; a queued but unused or skipped entry
+does not satisfy this check. Reverting entries and static reads retain their input
+checks but have no required completion event. L1's final nested cursor is no longer
+emitted or checked directly; nested table contents and rolling hashes still are.
+The regression tests in `test/E2EEventVerification.t.sol` exercise missing,
+unrelated, duplicate and malformed completion evidence, both event layouts,
+single-use L2 table matching, and decoder summaries.
+
+## Verification TODO
+
+The current runners use the existing Solidity verifier and current event ABI.
+The proposed Python settlement collector was removed. Passing the current local
+scenarios does not establish coverage of the deferred cases below.
+
+- [ ] Associate L1 completions with the exact posting occurrence and queue generation.
+  Current checks match distinct completion hashes across the settlement block.
+  A completion from an earlier identical post can satisfy a later post's input
+  check even if the later entry was unused. Add a negative test with two identical
+  posts, only the first consumed, plus same-block queue replacement and disjoint queues.
+- [ ] Support posting through wrappers and combining one scenario's expected entries
+  across multiple posts. The current calldata verifier accepts direct
+  `postAndVerifyBatch` inputs and the local runner expects one candidate to contain
+  the full expected table. Cover multiple posts in one wrapper transaction,
+  reverted wrapper frames, and separate posting transactions. Choose the evidence
+  extraction design before adding a new tool or dependency.
+- [ ] Handle final-root checks when later posts in the same block advance a rollup.
+  A candidate batch containing only the scenario's entries does not imply that it
+  is the block's only batch. Preserve checks of the expected entry's own updates.
+- [ ] Add expected L1 hash-replay steps for the remaining scenarios with runtime calls.
+  Nineteen scenarios supplying an L1 table currently omit `EXPECTED_L1_STEPS`.
+  Local execution hashes are checked against the locally computed expectations;
+  network verification without steps cannot independently compare every expected
+  per-call runtime result after roots change. Do not substitute event counts for hashes.
+- [ ] Assert exact observed revert bytes and persisted caller evidence for eventless
+  network scenarios. A table with `success=false` and no delivery logs does not
+  establish that the intended attempt happened. A generic `lastCallFailed` flag
+  also accepts an unexpected lookup failure. Add negative tests for the wrong
+  revert reason and for an unused posted reverting entry.
+- [ ] Extend occurrence attribution to L2 table replacements. Exact loaded entries
+  and completion logs now have single-use matching, but matching across a queried
+  block set is not a complete reconstruction of each table-load generation.
+
+Backward compatibility with older event ABIs is outside the current scope.
 
 ## Load test one deployment
 

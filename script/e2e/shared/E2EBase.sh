@@ -402,9 +402,10 @@ verify_l1_batch() { _run_verifier VerifyL1BatchInRange "$1" "run(uint256,uint256
 verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(uint256,uint256,address,bytes32[],bytes)" "$2" "$3" "$4" "$5" "${6:-0x}"; }
 
 # Usage: verify_l1_calldata RPC BLOCK ROLLUPS EXPECTED_TABLE EXPECTED_STEPS EXPECTED_STATIC_TABLE
-# Content-addressed L1 check for entries that leave no usable event: a
-# success=false entry unwinds its events with its revert and a top-level static
-# entry never emits one. Lists the settlement txs of BLOCK
+# L1 input and completion check. A success=false entry unwinds its events with
+# its revert and a top-level static entry never emits one; committing entries
+# must have distinct completions matching the actual posted hashes.
+# Lists the settlement txs of BLOCK
 # (VerifyL1SettlementTxsInRange) and decodes each one's postAndVerifyBatch
 # calldata (VerifyL1BatchCalldata, pinned at BLOCK) until one holds the expected
 # entries and static entries. Fills VERIFY_OUT; rc 1 when none matched.

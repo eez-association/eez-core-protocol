@@ -16,6 +16,7 @@ import {
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 import {Counter, CounterAndProxy, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 /// @notice Simple target contract for testing
 contract TestTarget {
@@ -881,6 +882,32 @@ contract EEZTest is Base {
         assertEq(address(sink).balance, 1 ether, "nested outflow physically left EEZ");
         assertEq(address(forwarder).balance, 0.5 ether);
         assertEq(address(rollups).balance, 0.5 ether, "booked balance == physical balance");
+    }
+
+    function test_NestedCallResultsReuseEntryAndCallNumbers() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
+        _fundRollup(rid, 2 ether);
+        TestTarget sink = new TestTarget();
+        (ExecutionEntry[] memory entries,) = _nestedOutflowEntry(rid, address(sink), -1.5 ether);
+
+        vm.recordLogs();
+        _postBatchAutoTransient(r, entries);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 results;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter != address(rollups) || logs[i].topics.length == 0) continue;
+            if (logs[i].topics[0] != EEZ.CallResult.selector) continue;
+            assertEq(uint256(logs[i].topics[1]), 0, "both calls share entry index");
+            assertEq(uint256(logs[i].topics[2]), 0, "both frames start call numbering at zero");
+            (bool success, bytes memory returnData) = abi.decode(logs[i].data, (bool, bytes));
+            assertTrue(success);
+            if (results == 0) assertEq(returnData, ""); // nested sink call finishes first
+            if (results == 1) assertEq(returnData, abi.encode(uint256(2 ether))); // parent finishes second
+            results++;
+        }
+        assertEq(results, 2);
     }
 
     /// @notice Soundness: the delta a per-frame local would have accepted (−0.5, nested outflow

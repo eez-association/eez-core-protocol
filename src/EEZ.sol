@@ -134,18 +134,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Emitted when a rollup state is updated (only via the registered rollupContract)
     event RootUpdated(uint64 indexed rollupId, bytes32 newRoot);
 
-    /// @notice Emitted for each `RollupUpdate` an executed entry applies (root + ether balance)
-    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot, uint256 etherBalance);
-
-    /// @notice Emitted when an execution entry is consumed. `entryQueueIndex` is the index in the
-    ///         table scanned: the rollup's persistent queue, or the transient table during the meta hook.
-    event ExecutionConsumed(
-        bytes32 indexed crossChainCallHash, uint64 indexed rollupId, uint256 indexed entryQueueIndex
-    );
-
-    /// @notice Emitted when a precomputed L2 transaction is executed
-    event L2TxExecuted(uint64 indexed rollupId);
-
     /// @notice Emitted when a batch is posted, carrying its shared public input hash.
     /// @dev Each proof system verifies this public input and its vkey accumulator.
     ///      The hash may repeat; it is not an occurrence ID. Queue contents require posting calldata.
@@ -155,24 +143,31 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         the original batch index. Empty revert data aborts before emission.
     event L2TxSkipped(uint256 indexed entryIndex, bytes revertData);
 
+    /// @notice Emitted when a precomputed L2 transaction is executed
+    event L2TxExecuted(uint64 indexed rollupId);
+
+    /// @notice Emitted when an execution entry is consumed. `entryQueueIndex` is the index in the
+    ///         table scanned: the rollup's persistent queue, or the transient table during the meta hook.
+    event ExecutionConsumed(
+        bytes32 indexed crossChainCallHash, uint64 indexed rollupId, uint256 indexed entryQueueIndex
+    );
+
     /// @notice Emitted after each call completes in `_processL2ToL1Calls`.
     /// @dev CallResult logs inside a revertNextNCalls span are discarded, as are all logs of a later outer revert.
     ///      Call numbers are local to each frame's array and restart in nested frames.
     event CallResult(uint256 indexed entryIndex, uint256 indexed l2ToL1CallNumber, bool success, bytes returnData);
 
-    /// @notice Emitted after entry checks; a subsequent terminal or outer revert discards it.
-    /// @dev l2ToL1CallsProcessed is the direct input-array length, not a total dispatch count.
-    ///      entryIndex is zero for inline immediate entries, local to the copied suffix in the
-    ///      meta hook, or local to a rollup queue generation; it is not a global occurrence ID.
-    ///         `l1ToL2CallsConsumed` is the reentrant cursor at the end (index past the last consumed
-    ///         row — the forward scan may skip rows, so it is not a count).
-    event EntryExecuted(
-        uint256 indexed entryIndex, bytes32 rollingHash, uint256 l2ToL1CallsProcessed, uint256 l1ToL2CallsConsumed
-    );
-
     /// @notice Emitted after `executeInContextAndRevert` rolls back a `revertNextNCalls` span.
     /// @dev `nCalls` is the requested span length.
     event CallsReverted(uint256 indexed entryIndex, uint256 startL2ToL1Call, uint256 nCalls);
+
+    /// @notice Emitted for each `RollupUpdate` an executed entry applies (root + ether balance)
+    event L2ExecutionPerformed(uint64 indexed rollupId, bytes32 newRoot, uint256 etherBalance);
+
+    /// @notice Emitted after entry checks; a subsequent terminal or outer revert discards it.
+    /// @dev entryIndex is zero for inline immediate entries, local to the copied suffix in the
+    ///      meta hook, or local to a rollup queue generation; it is not a global occurrence ID.
+    event EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash);
 
     /// @notice A verifier returned false. Verifier reverts propagate their original error.
     error InvalidProof();
@@ -1012,7 +1007,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // so the invariant captures the full physical flow.
         if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch();
 
-        emit EntryExecuted(_currentEntryIndex, _rollingHash, l2ToL1Calls.length, _lastL1ToL2CallConsumed);
+        emit EntryExecuted(_currentEntryIndex, _rollingHash);
 
         // Top-level reverting entry: the trace is now verified, so unwind everything — the applied state
         // rollup updates, the inbound value, the cursor advance, and these cleanups all roll back with the revert,

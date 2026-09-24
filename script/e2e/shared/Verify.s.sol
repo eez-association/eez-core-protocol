@@ -40,9 +40,9 @@ interface IEEZL2View {
 // ══════════════════════════════════════════════════════════════════════
 
 abstract contract VerifyHelpers is ComputeExpectedBase {
-    // EntryExecuted(uint256 indexed entryIndex, bytes32 rollingHash, uint256 callsProcessed, uint256 consumed)
-    // Same signature on L1 (l2ToL1Calls / expectedL1ToL2Calls) and L2 (incomingCalls / expectedOutgoingCalls).
-    bytes32 constant SIG_ENTRY_EXECUTED = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
+    // L1 omits the call-array length and final nested cursor; L2 retains both.
+    bytes32 constant SIG_ENTRY_EXECUTED_L1 = keccak256("EntryExecuted(uint256,bytes32)");
+    bytes32 constant SIG_ENTRY_EXECUTED_L2 = keccak256("EntryExecuted(uint256,bytes32,uint256,uint256)");
 
     // BatchPosted(bytes32 sharedPublicInput, uint64[] rollupIds); posted entries travel in the
     // postAndVerifyBatch tx calldata (see VerifyL1BatchCalldata).
@@ -277,9 +277,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     //  rollingHash) identity. Empty blob = checks skipped (back-compat).
     // ══════════════════════════════════════════════════════════════════
 
-    /// @dev EntryExecuted payload: (rollingHash, callsProcessed, consumed) —
-    ///      same layout on L1 (l2ToL1Calls / expectedL1ToL2Calls) and L2
-    ///      (incomingCalls / expectedOutgoingCalls).
+    /// @dev L2 EntryExecuted payload: (rollingHash, callsProcessed, consumed).
     struct ExecutedTriple {
         bytes32 rollingHash;
         uint256 callsProcessed;
@@ -314,12 +312,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     function _collectExecutedTriples(Vm.EthGetLogs[] memory logs) internal pure returns (ExecutedTriple[] memory) {
         uint256 count;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED) count++;
+            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED_L2) count++;
         }
         ExecutedTriple[] memory triples = new ExecutedTriple[](count);
         uint256 kept;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
+            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED_L2) continue;
             if (logs[i].data.length < 96) continue; // foreign layout — don't decode
             (bytes32 rh, uint256 c, uint256 n) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
             triples[kept++] = ExecutedTriple(rh, c, n);
@@ -328,6 +326,20 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
             mstore(triples, kept)
         }
         return triples;
+    }
+
+    function _collectL1ExecutedHashes(Vm.EthGetLogs[] memory logs) internal pure returns (bytes32[] memory) {
+        bytes32[] memory hashes = new bytes32[](logs.length);
+        uint256 count;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length != 2) continue;
+            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED_L1 || logs[i].data.length != 32) continue;
+            hashes[count++] = abi.decode(logs[i].data, (bytes32));
+        }
+        assembly {
+            mstore(hashes, count)
+        }
+        return hashes;
     }
 
     /// @dev `nestedConsumed` is checked as an UPPER BOUND, not exactly: the consumed cursor
@@ -356,49 +368,65 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         return false;
     }
 
-    function _hasCountsTriple(
-        ExecutedTriple[] memory triples,
-        uint256 calls,
-        uint256 maxNested
-    )
-        internal
-        pure
-        returns (bool)
-    {
-        for (uint256 i = 0; i < triples.length; i++) {
-            if (triples[i].callsProcessed == calls && triples[i].nestedConsumed <= maxNested) return true;
-        }
-        return false;
-    }
-
     // ── L1: per-entry field checks against ExecutionConsumed / EntryExecuted + live roots ──
 
     function _verifyL1EntryFields(
         Vm.EthGetLogs[] memory logs,
-        address rollupsAddr,
         bytes memory expectedTable
     )
         internal
-        view
+        pure
         returns (bool ok)
     {
         ExecutionEntry[] memory expected = abi.decode(expectedTable, (ExecutionEntry[]));
         if (expected.length == 0) {
             console.log("NOTE: expected L1 table decodes to 0 entries - field checks are vacuous");
         }
-        ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
-        ok = true;
+        ok = _verifyL1Completions(logs, expected);
         for (uint256 i = 0; i < expected.length; i++) {
-            if (!_checkL1Entry(logs, executed, i, expected[i])) ok = false;
+            if (!_checkL1Entry(logs, i, expected[i])) ok = false;
         }
         if (ok) {
             console.log("PASS: L1 field checks on %s entries (EntryExecuted, rollupId, rollupUpdates)", expected.length);
         }
     }
 
+    /// @dev Use the actual posted rolling hashes when expected roots are placeholders.
+    ///      Each successful entry needs its own completion; unrelated logs and duplicate
+    ///      expectations cannot reuse one matching event. Reverting entries erase theirs.
+    function _verifyL1Completions(
+        Vm.EthGetLogs[] memory logs,
+        ExecutionEntry[] memory expected
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
+        bytes32[] memory executed = _collectL1ExecutedHashes(logs);
+        bool[] memory used = new bool[](executed.length);
+        ok = true;
+        for (uint256 i = 0; i < expected.length; i++) {
+            if (!expected[i].success) continue;
+            bool found;
+            for (uint256 j = 0; j < executed.length; j++) {
+                if (used[j] || executed[j] != expected[i].rollingHash) continue;
+                used[j] = true;
+                found = true;
+                break;
+            }
+            if (!found) {
+                console.log(
+                    "FAIL: entry %s: no unused EntryExecuted with posted rollingHash %s",
+                    i,
+                    vm.toString(expected[i].rollingHash)
+                );
+                ok = false;
+            }
+        }
+    }
+
     function _checkL1Entry(
         Vm.EthGetLogs[] memory logs,
-        ExecutedTriple[] memory executed,
         uint256 i,
         ExecutionEntry memory e
     )
@@ -408,9 +436,10 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     {
         ok = true;
         // ExecutionConsumed must route the entry to its declared destination rollup
-        if (e.proxyEntryHash != bytes32(0)) {
+        if (e.success && e.proxyEntryHash != bytes32(0)) {
+            bool consumed;
             for (uint256 j = 0; j < logs.length; j++) {
-                if (logs[j].topics[0] != SIG_EXECUTION_CONSUMED_L1 || logs[j].topics.length < 3) continue;
+                if (logs[j].topics.length != 4 || logs[j].topics[0] != SIG_EXECUTION_CONSUMED_L1) continue;
                 if (logs[j].topics[1] != e.proxyEntryHash) continue;
                 if (uint256(logs[j].topics[2]) != e.destinationRollupId) {
                     console.log(
@@ -420,31 +449,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                         e.destinationRollupId
                     );
                     ok = false;
+                } else {
+                    consumed = true;
                 }
             }
-        }
-        // EntryExecuted must report (rollingHash, callsProcessed) exactly; nestedConsumed is an
-        // upper bound (see _hasTriple). A `success: false` entry emits the event and then
-        // reverts — the log is discarded with the rollback — so it is only required for
-        // committing entries.
-        if (e.success && !_hasTriple(executed, e.rollingHash, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length)) {
-            // Root-agnostic fallback: the expected rollingHash folds placeholder state
-            // roots, so it cannot match a live devnet's real-root settlement. Accept an
-            // EntryExecuted with the right call/nested counts — the entry's full content
-            // (and, with EXPECTED_L1_STEPS, its exact rebased rolling hash) is pinned by
-            // the posted-calldata comparison.
-            if (_hasCountsTriple(executed, e.l2ToL1Calls.length, e.expectedL1ToL2Calls.length)) {
-                console.log("NOTE: entry %s EntryExecuted matched by counts only (rolling hash is root-dependent)", i);
-            } else {
-                console.log(
-                    "FAIL: entry %s: no EntryExecuted matching (rollingHash, callsProcessed, nestedConsumed)", i
-                );
-                console.log(
-                    "      want rollingHash=%s calls=%s nested<=%s",
-                    vm.toString(e.rollingHash),
-                    e.l2ToL1Calls.length,
-                    e.expectedL1ToL2Calls.length
-                );
+            if (!consumed) {
+                console.log("FAIL: entry %s: no ExecutionConsumed for its call hash and destination rollup", i);
                 ok = false;
             }
         }
@@ -647,6 +657,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         assembly {
             mstore(matched, nMatched)
         }
+        // The verifier is forked at the settlement block. Deferred entries must also
+        // execute in that block, so its receipts cover every committing matched entry.
+        // Matching posted content alone does not establish that a queued entry ran.
+        Vm.EthGetLogs[] memory completionLogs =
+            vm.eth_getLogs(block.number, block.number, rollupsAddr, new bytes32[](0));
+        if (!_verifyL1EntryFields(completionLogs, abi.encode(matched))) ok = false;
         if (allowPartial) {
             console.log("L1_CALLDATA_EXPECTED=%s", expected.length);
             console.log("L1_CALLDATA_MATCHED=[%s]", matchedIdx);
@@ -1096,6 +1112,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
             console.log("NOTE: expected L2 table decodes to 0 entries - field checks are vacuous");
         }
         ExecutedTriple[] memory executed = _collectExecutedTriples(logs);
+        bool[] memory usedActual = new bool[](actual.length);
+        bool[] memory usedExecuted = new bool[](executed.length);
         ok = true;
         // Exemptions are assertions, not a trust input: every declared hash must
         // identify an expected committing entry whose EntryExecuted evidence is
@@ -1130,7 +1148,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
         for (uint256 i = 0; i < expected.length; i++) {
             bool eventlessAllowed = _containsHash(eventlessEntryHashes, _entryHash(expected[i]));
-            if (!_checkL2Entry(actual, executed, i, expected[i], eventlessAllowed)) ok = false;
+            if (!_checkL2Entry(actual, executed, usedActual, usedExecuted, i, expected[i], eventlessAllowed)) {
+                ok = false;
+            }
         }
         if (ok) {
             console.log(
@@ -1149,6 +1169,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     function _checkL2Entry(
         L2ExecutionEntry[] memory actual,
         ExecutedTriple[] memory executed,
+        bool[] memory usedActual,
+        bool[] memory usedExecuted,
         uint256 i,
         L2ExecutionEntry memory e,
         bool eventlessAllowed
@@ -1165,9 +1187,11 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         uint256 firstHashMatch = type(uint256).max;
         bool matchedExact = false;
         for (uint256 j = 0; j < actual.length; j++) {
+            if (usedActual[j]) continue;
             if (_entryHash(actual[j]) != _entryHash(e)) continue;
             if (firstHashMatch == type(uint256).max) firstHashMatch = j;
             if (_l2EntryEq(actual[j], e)) {
+                usedActual[j] = true;
                 matchedExact = true;
                 break;
             }
@@ -1195,7 +1219,24 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // EntryExecuted must report (rollingHash, callsProcessed) exactly; outgoingConsumed is
         // an upper bound (see _hasTriple). A `success: false` entry's event is discarded with
         // its rollback — only required for committing entries.
-        if (e.success && !_hasTriple(executed, e.rollingHash, e.incomingCalls.length, e.expectedOutgoingCalls.length)) {
+        bool completed;
+        if (e.success && !eventlessAllowed) {
+            uint256 best = type(uint256).max;
+            for (uint256 j; j < executed.length; j++) {
+                if (usedExecuted[j]) continue;
+                if (
+                    executed[j].rollingHash != e.rollingHash || executed[j].callsProcessed != e.incomingCalls.length
+                        || executed[j].nestedConsumed > e.expectedOutgoingCalls.length
+                ) continue;
+                // Preserve smaller cursors for expectations with a tighter bound.
+                if (best == type(uint256).max || executed[j].nestedConsumed > executed[best].nestedConsumed) best = j;
+            }
+            if (best != type(uint256).max) {
+                usedExecuted[best] = true;
+                completed = true;
+            }
+        }
+        if (e.success && !completed) {
             if (eventlessAllowed) {
                 // The loaded entry is exact, but its only consumption ran inside an
                 // enclosing frame that reverted — EntryExecuted unwinds with that frame.
@@ -1403,7 +1444,7 @@ contract VerifyL1BatchInRange is VerifyHelpers {
             revert("Verification failed");
         }
 
-        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
+        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, expectedTable)) {
             revert("Field verification failed");
         }
 
@@ -1491,14 +1532,14 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
 
         uint256 count;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED) count++;
+            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED_L1) count++;
         }
         bytes32[] memory actualHashes = new bytes32[](count);
         uint256 idx;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED) {
-                if (logs[i].data.length < 96) continue; // foreign layout — don't decode
-                (bytes32 rollingHash,,) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
+            if (logs[i].topics[0] == SIG_ENTRY_EXECUTED_L1) {
+                if (logs[i].data.length != 32) continue; // foreign layout — don't decode
+                bytes32 rollingHash = abi.decode(logs[i].data, (bytes32));
                 actualHashes[idx++] = keccak256(abi.encode(bytes32(0), rollingHash));
             }
         }
@@ -1519,7 +1560,7 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
             revert("Verification failed");
         }
 
-        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, rollups, expectedTable)) {
+        if (expectedTable.length > 0 && !_verifyL1EntryFields(logs, expectedTable)) {
             revert("Field verification failed");
         }
 
@@ -1535,9 +1576,9 @@ contract VerifyL1ZeroHashEntriesInRange is VerifyHelpers {
         bytes32[] memory seenTxs = new bytes32[](logs.length);
         uint256 nSeen;
         for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED) continue;
-            if (logs[i].data.length < 96) continue; // foreign layout — don't decode
-            (bytes32 rollingHash,,) = abi.decode(logs[i].data, (bytes32, uint256, uint256));
+            if (logs[i].topics[0] != SIG_ENTRY_EXECUTED_L1) continue;
+            if (logs[i].data.length != 32) continue; // foreign layout — don't decode
+            bytes32 rollingHash = abi.decode(logs[i].data, (bytes32));
             bytes32 h = keccak256(abi.encode(bytes32(0), rollingHash));
             bool matched = false;
             for (uint256 j = 0; j < expectedEntryHashes.length; j++) {
