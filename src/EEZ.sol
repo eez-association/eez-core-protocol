@@ -78,11 +78,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     // ── Batch-scoped tables (would-be `transient`) ──
     //
     // The meta-hook entries of the immediate prefix live here for the duration of one
-    // postAndVerifyBatch call, then are `delete`d — plain storage only because Solidity 0.8.34 has
-    // no `transient` for these types (TODO: promote once it does). `_transientEntries.length != 0`
-    // also flags the meta-hook window for the postAndVerifyBatch reentrancy guard.
-    ExecutionEntry[] internal _transientEntries;
-    StaticExecutionEntry[] internal _transientStaticEntries;
+    // postAndVerifyBatch call, then each used mapping entry is deleted. The payloads use ordinary
+    // storage because Solidity 0.8.34 only supports transient value types; their active lengths
+    // and consumption cursor are transient. A non-zero _transientEntriesLength also flags the
+    // meta-hook window for the postAndVerifyBatch reentrancy guard.
+    mapping(uint256 => ExecutionEntry) internal _transientEntries;
+    mapping(uint256 => StaticExecutionEntry) internal _transientStaticEntries;
 
     // An immediate L2Tx entry never lands in storage, so while one executes its `expectedL1ToL2Calls`
     // are held in the transient region of `ExpectedL1ToL2CallTransient` — one entry's at a time,
@@ -102,8 +103,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     //  Transient state
     // ──────────────────────────────────────────────
 
+    /// @notice Active batch-scoped entry counts; explicitly reset after each batch in the same transaction.
+    uint256 transient _transientEntriesLength;
+    uint256 transient _transientStaticEntriesLength;
+
     /// @notice Cursor for the next transient entry to consume (meaningful while
-    ///         `_transientEntries.length != 0`). One GLOBAL cursor across all rollups; consumption is
+    ///         `_transientEntriesLength != 0`). One GLOBAL cursor across all rollups; consumption is
     ///         forward-only, and the scan may skip non-matching entries, which then never execute.
     uint256 transient _transientEntryIndex;
 
@@ -359,12 +364,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // Reentrancy guard: block a nested `postAndVerifyBatch` (e.g. from the meta hook, or from an
         // immediate L2Tx's proxy target) so it can't corrupt the shared transient tables. The two flags
         // cover every window in which a STATE-MUTATING external call is in flight: `_insideExecution()`
-        // during the immediate L2Tx run AND any executing entry, `_transientEntries.length != 0` during
+        // during the immediate L2Tx run AND any executing entry, `_transientEntriesLength != 0` during
         // the meta hook. The remaining external calls before the immediate L2Tx run
         // (`checkProofSystemsAndGetVkeys`, `getCustomData`, `verify`) are all `view`/STATICCALL, so a
         // reentrant batch (which SSTOREs immediately) can't survive there regardless. If reentrant
         // calls are ever allowed there (e.g. a non-view `getCustomData`), an explicit mutex is needed.
-        if (_insideExecution() || _transientEntries.length != 0) revert PostBatchReentry();
+        if (_insideExecution() || _transientEntriesLength != 0) revert PostBatchReentry();
 
         // 1a. OPTIONAL composer assertion: every `expectedRootPerRollup` pin must equal the live root.
         ExpectedRootPerRollup[] calldata rootPins = batch.expectedRootPerRollup;
@@ -382,14 +387,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         bytes32[][] memory verificationKeysPerRollup = _getVerificationKeysPerRollup(batch);
 
         // 3. Verify every proof atomically (any failure reverts the batch) BEFORE any state mutation.
-        //    Safe to run before `_markVerifiedBlockAndDeletePreviousEntries` since verification is read-only.
+        //    Safe to run before `_markVerifiedBlockAndResetQueues` since verification is read-only.
         bytes32 sharedPublicInput = _verifyProofSystemBatch(batch, verificationKeysPerRollup);
 
         // 4. Mark touched rollups verified-this-block by setting `lastVerifiedBlock = block.number`.
         //    This both records that the rollup was verified in this block and opens the read gate
         //    (`lastVerifiedBlock == block.number`) that later proxy calls / the meta hook check.
         for (uint256 r = 0; r < batch.rollupIdsWithProofSystems.length; r++) {
-            _markVerifiedBlockAndDeletePreviousEntries(batch.rollupIdsWithProofSystems[r].rollupId);
+            _markVerifiedBlockAndResetQueues(batch.rollupIdsWithProofSystems[r].rollupId);
         }
 
         // 5+6. Drain the LEADING run of L2Tx entries (`proxyEntryHash == 0`) straight from the batch
@@ -430,10 +435,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         if (i < immediateEntryCount) {
             if (msg.sender.code.length == 0) revert MetaEntriesWithoutReceiver();
             for (uint256 j = i; j < immediateEntryCount; j++) {
-                _transientEntries.push(batch.entries[j]);
+                _transientEntries[_transientEntriesLength++] = batch.entries[j];
             }
             for (uint256 j = 0; j < batch.immediateStaticEntryCount; j++) {
-                _transientStaticEntries.push(batch.staticEntries[j]);
+                _transientStaticEntries[_transientStaticEntriesLength++] = batch.staticEntries[j];
             }
             IMetaCrossChainReceiver(msg.sender).executeMetaCrossChainTransactions();
         } else if (batch.immediateStaticEntryCount != 0) {
@@ -449,12 +454,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         //    If no candidate matches, consumption reverts ExecutionNotFound.
         _saveRemainderEntries(batch);
 
-        // 9. Clear the transient tables. Emptying `_transientEntries` also closes the re-entry window
-        //    (the guard keys off its length). Unconsumed transient leftovers are dropped (they were never
-        //    persisted — the remainder saved above is a separate set of entries).
-        delete _transientEntries;
-        delete _transientStaticEntries;
-        _transientEntryIndex = 0;
+        // 9. Delete every used batch-scoped mapping entry, including unconsumed leftovers.
+        //    Reset the active lengths and cursor so another batch can run in this transaction.
+        //    The deferred queues saved above are separate and retain their storage for reuse.
+        _clearTransientEntries();
 
         // Extract the sorted rollup IDs for the event.
         uint64[] memory rollupIds = new uint64[](batch.rollupIdsWithProofSystems.length);
@@ -775,20 +778,20 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     }
 
     /// @notice Marks `rid` as verified this block and resets its queue.
-    /// @dev Wipes the entry / static-entry queues and cursor on EVERY verify — including a
+    /// @dev Resets the active queue bounds and cursor on EVERY verify without deleting entries — including a
     ///      same-block re-verify, where a second proven batch fully SUPERSEDES the first for
     ///      this rollup (no append). Safe because state only mutates at consumption and every
     ///      entry is gated by `RollupUpdate.currentRoot`: any dropped entry a later batch
     ///      wrongly assumed had applied fails the live-root match rather than corrupting
     ///      state — so discarding unconsumed-but-proven entries is a liveness choice, not a
     ///      safety one.
-    function _markVerifiedBlockAndDeletePreviousEntries(uint64 rid) internal {
+    function _markVerifiedBlockAndResetQueues(uint64 rid) internal {
         RollupVerification storage rec = verificationByRollup[rid];
         rec.lastVerifiedBlock = uint64(block.number);
-        // Wipe on every verify: a same-block verify replaces the queue.
-        delete rec.entryQueue;
-        delete rec.staticEntryQueue;
+        // Replace the active queues on every verify. Old slots remain stored for reuse.
         rec.entryQueueIndex = 0;
+        rec.entryQueueLength = 0;
+        rec.staticEntryQueueIndex = 0;
     }
 
     /// @notice Publishes the batch remainder (entries past `immediateEntryCount`)
@@ -796,7 +799,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     function _saveRemainderEntries(ProofSystemBatchPerVerificationEntries calldata batch) internal {
         for (uint256 i = batch.immediateEntryCount; i < batch.entries.length; i++) {
             uint64 destRid = batch.entries[i].destinationRollupId;
-            verificationByRollup[destRid].entryQueue.push(batch.entries[i]);
+            RollupVerification storage rec = verificationByRollup[destRid];
+            rec.entryQueue[rec.entryQueueLength++] = batch.entries[i];
         }
 
         for (uint256 i = batch.immediateStaticEntryCount; i < batch.staticEntries.length; i++) {
@@ -804,8 +808,22 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             // A static entry is queued under its own `destinationRollupId` — coherent by
             // construction: the `staticCrossChainCall` scan targets the proxy's `originalRollupId`, which
             // is also the target rollup bound into `crossChainCallHash`.
-            verificationByRollup[destRid].staticEntryQueue.push(batch.staticEntries[i]);
+            RollupVerification storage rec = verificationByRollup[destRid];
+            rec.staticEntryQueue[rec.staticEntryQueueIndex++] = batch.staticEntries[i];
         }
+    }
+
+    /// @notice Deletes all batch-scoped entries and resets their transient bounds and cursor.
+    function _clearTransientEntries() internal {
+        for (uint256 j = 0; j < _transientEntriesLength; j++) {
+            delete _transientEntries[j];
+        }
+        for (uint256 j = 0; j < _transientStaticEntriesLength; j++) {
+            delete _transientStaticEntries[j];
+        }
+        _transientEntriesLength = 0;
+        _transientStaticEntriesLength = 0;
+        _transientEntryIndex = 0;
     }
 
     // ──────────────────────────────────────────────
@@ -893,13 +911,17 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
         // Scan forward from the cursor to the first matching entry (skipping non-matches; see
         // `_entryMatches`).
-        if (_transientEntries.length != 0) {
-            idx = _findMatchingEntry(_transientEntries, _transientEntryIndex, crossChainCallHash, destRid);
+        if (_transientEntriesLength != 0) {
+            idx = _findMatchingEntry(
+                _transientEntries, _transientEntryIndex, _transientEntriesLength, crossChainCallHash, destRid
+            );
             _transientEntryIndex = idx + 1;
             entry = _transientEntries[idx];
         } else {
             RollupVerification storage rec = verificationByRollup[destRid];
-            idx = _findMatchingEntry(rec.entryQueue, rec.entryQueueIndex, crossChainCallHash, destRid);
+            idx = _findMatchingEntry(
+                rec.entryQueue, rec.entryQueueIndex, rec.entryQueueLength, crossChainCallHash, destRid
+            );
             rec.entryQueueIndex = uint64(idx + 1);
             entry = rec.entryQueue[idx];
             _currentEntryRollupId = destRid; // the queue _getExpectedL1toL2Calls() reads this
@@ -1194,7 +1216,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             return _transientExpectedL1toL2Calls();
         }
         // (b) meta-hook: batch mid-flight
-        if (_transientEntries.length != 0) {
+        if (_transientEntriesLength != 0) {
             return _transientEntries[_currentEntryIndex].expectedL1ToL2Calls;
         }
         // (c) normal proxy consumption: persistent queue. An immediate L2Tx whose held table (a) is EMPTY
@@ -1205,15 +1227,16 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         return verificationByRollup[_currentEntryRollupId].entryQueue[_currentEntryIndex].expectedL1ToL2Calls;
     }
 
-    /// @notice Forward-scans `entryQueue` from `startIndex` for the FIRST entry that matches
+    /// @notice Forward-scans the active mapping range from `startIndex` for the FIRST entry that matches
     ///         `crossChainCallHash` and `destRid` (see `_entryMatches`), returning its index. Reverts
     ///         `ExecutionNotFound` if the scan reaches the end of the queue with no match.
     /// @dev Skipping intervening non-matches is what lets a top-level call reach past already-attempted
     ///      failed entries only if they no longer match (a matching failure is retried). A skipped entry never
     ///      executes — anything depending on it later fails its own `currentRoot` check.
     function _findMatchingEntry(
-        ExecutionEntry[] storage entryQueue,
+        mapping(uint256 => ExecutionEntry) storage entryQueue,
         uint256 startIndex,
+        uint256 queueLen,
         bytes32 crossChainCallHash,
         uint64 destRid
     )
@@ -1221,7 +1244,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         view
         returns (uint256)
     {
-        uint256 queueLen = entryQueue.length;
         for (uint256 i = startIndex; i < queueLen; i++) {
             if (_entryMatches(entryQueue[i], crossChainCallHash, destRid)) {
                 return i;
@@ -1330,14 +1352,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             for (uint256 i = _lastL1ToL2CallConsumed; i < expectedCalls.length; i++) {
                 ExpectedL1ToL2Call memory expectedCall = expectedCalls[i];
                 if (expectedCall.expectedL1toL2Hash == expectedL1toL2Hash) {
-                    if (
-                        _resolveStaticEntry(
+                    if (_resolveStaticEntry(
                             expectedCall.l2ToL1Calls,
                             expectedCall.revertedOrStaticRollingHash,
                             expectedCall.success,
                             expectedCall.returnData
-                        )
-                    ) {
+                        )) {
                         return expectedCall.returnData;
                     }
                 }
@@ -1349,9 +1369,20 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // mid-flight (the transient phase is self-contained), otherwise
         // `destRid`'s persistent queue. Static entries require both current-block verification
         // (checked above) and matching root pins.
-        StaticExecutionEntry[] storage staticEntries =
-            _transientEntries.length != 0 ? _transientStaticEntries : verificationByRollup[destRid].staticEntryQueue;
-        for (uint256 i = 0; i < staticEntries.length; i++) {
+
+        // Default to the destination rollup's deferred static entries.
+        RollupVerification storage rec = verificationByRollup[destRid];
+        mapping(uint256 => StaticExecutionEntry) storage staticEntries = rec.staticEntryQueue;
+        uint256 staticEntryCount = rec.staticEntryQueueIndex;
+
+        // During the meta hook, only this batch's static entries are visible.
+        if (_transientEntriesLength != 0) {
+            staticEntries = _transientStaticEntries;
+            staticEntryCount = _transientStaticEntriesLength;
+        }
+
+        // Scan only active slots: the persistent mapping can retain older entries beyond this bound.
+        for (uint256 i = 0; i < staticEntryCount; i++) {
             StaticExecutionEntry storage staticEntry = staticEntries[i];
             // Proxy protection: fold the declared destination into the match. The transient pool
             // is a single global table (not queue-routed by rollup), so without this a prover could
@@ -1361,11 +1392,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                 staticEntry.proxyEntryHash == crossChainCallHash && staticEntry.destinationRollupId == destRid
                     && _rootsMatch(staticEntry)
             ) {
-                if (
-                    _resolveStaticEntry(
+                if (_resolveStaticEntry(
                         staticEntry.l2ToL1Calls, staticEntry.rollingHash, staticEntry.success, staticEntry.returnData
-                    )
-                ) {
+                    )) {
                     return staticEntry.returnData;
                 }
             }
@@ -1422,7 +1451,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             bytes memory payload = abi.encodeCall(
                 ICrossChainProxy.executeOnBehalf, (l2ToL1Call.targetAddress, l2ToL1Call.gas, l2ToL1Call.data)
             );
-            
+
             // Check if the context has enough gas.
             if (!_hasEnoughCallGas(l2ToL1Call.gas, payload.length, 0)) revert InsufficientCallGas(l2ToL1Call.gas);
 
@@ -1589,7 +1618,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Length of the deferred entry queue for `_rollupId` (only meaningful in the block the
     ///         rollup was last verified in — the entry-queue consumers' block gate rejects it afterwards)
     function queueLength(uint64 _rollupId) external view returns (uint256) {
-        return verificationByRollup[_rollupId].entryQueue.length;
+        return verificationByRollup[_rollupId].entryQueueLength;
     }
 
     /// @notice Cursor (next-to-consume) for the deferred queue of `_rollupId`

@@ -18,12 +18,13 @@ contract NoopMetaReceiver {
 ///             that consumes a deferred entry).
 ///
 ///         Every measured operation is run TWICE in consecutive blocks and only the SECOND
-///         (warm) run is reported — the first pays one-time cold-storage init ("the first one
+///         (steady, access-cooled) run is reported — the first pays one-time cold-storage init ("the first one
 ///         is more expensive"). Numbers are printed via `gasleft()` deltas with `console.log`;
-///         run with `-vv`.
+///         run with `-vv`. These legacy gasleft regions can include caller-side encoding/building.
+///         GasBreakdown uses vm.lastCallGas for isolated contract execution costs.
 ///
-///         Entry shape is held fixed at "touches 2 rollups (2 RollupUpdates), one destination
-///         rollup" so cases are comparable. Cases build up incrementally:
+///         Posting-shape comparisons use two rollups unless stated otherwise; execution cases
+///         use one or two RollupUpdates as indicated by the test. Cases build up incrementally:
 ///           bare entry -> +1 L2ToL1Call -> +1 reentrant ExpectedL1ToL2Call
 ///           -> erc20 / uniswap directly -> erc20 + uniswap + reentrant combined.
 contract GasCost is GasFixture {
@@ -31,7 +32,7 @@ contract GasCost is GasFixture {
     NoopMetaReceiver internal noopMetaReceiver = new NoopMetaReceiver();
 
     /// @notice Steady-state post of one rS entry of the given shape. Caller ensures the queue
-    ///         already holds one same-shape entry (the "previous block") so it is delete+push over
+    ///         already holds one same-shape entry (the "previous block") so it overwrites retained
     ///         non-zero originals. Colds slots first. Entries are built before the measured
     ///         window so the number covers only the post itself.
     function _measurePostSteadyShape(uint256 nCalls, uint256 nExpected) internal returns (uint256 gasUsed) {
@@ -161,7 +162,7 @@ contract GasCost is GasFixture {
         p2[0] = _entry(_twoDeltas("a", "b"), ph, _calls(_reentrantCall()), _reentrantExpected(), "", bytes32(0));
 
         // Each measured post follows a SAME-SHAPE post in the prior block, so every measurement
-        // wipes identical leftovers and rewrites non-zero slots — steady state, comparable deltas.
+        // resets the active bounds and rewrites non-zero slots — steady state, comparable deltas.
         _postTwoRollups(p0);
         vm.roll(block.number + 1);
 
@@ -291,18 +292,18 @@ contract GasCost is GasFixture {
         console.log("exec_erc20_transfer", g);
     }
 
-    function test_ExecCost_Uniswap() public {
+    function test_ExecCost_SwapCalldataSink() public {
         _measureExec(_calls(_uniswapCall()), _rets(""), false); // warm-up (sink returns empty)
         vm.roll(block.number + 1);
         uint256 g = _measureExec(_calls(_uniswapCall()), _rets(""), false);
-        console.log("exec_uniswap_swap", g);
+        console.log("exec_swap_calldata_sink", g);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
     //  EXECUTION COST — erc20 + uniswap + reentrant combined, from the user
     // ══════════════════════════════════════════════════════════════════════════
 
-    function test_ExecCost_Erc20_Uniswap_Reentrant() public {
+    function test_ExecCost_Erc20_SwapCalldataSink_Reentrant() public {
         L2ToL1Call[] memory calls = new L2ToL1Call[](3);
         calls[0] = _erc20Call();
         calls[1] = _uniswapCall();
@@ -317,7 +318,7 @@ contract GasCost is GasFixture {
         _measureExec(calls, rets, true); // warm-up
         vm.roll(block.number + 1);
         uint256 g = _measureExec(calls, rets, true);
-        console.log("exec_erc20_uniswap_reentrant", g);
+        console.log("exec_erc20_swap_sink_reentrant", g);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -325,8 +326,9 @@ contract GasCost is GasFixture {
     //  Same entry (1 L2ToL1Call + 1 ExpectedL1ToL2Call) loaded into the transient table:
     //   - proxyEntryHash == 0  -> runs inline (executed)
     //   - proxyEntryHash != 0  -> loaded + cleared, NOT run
-    //  Both batches load+clear the same transient entry, so the delta is the pure inline
-    //  execution cost via the transient path (no persistent queue write).
+    //  These are DIFFERENT dispatch paths: inline execution uses calldata and EIP-1153,
+    //  while the unconsumed meta-hook prefix is stored and deleted. Their difference is
+    //  a path comparison, not the isolated cost of executing an entry.
     // ══════════════════════════════════════════════════════════════════════════
 
     function _postImmediate(bool execute) internal {
@@ -343,7 +345,7 @@ contract GasCost is GasFixture {
         _postBatchTwoT(rA.id, rB.id, _one(e), 1); // immediateEntryCount = 1
     }
 
-    function test_Transient_ImmediateExecCost() public {
+    function test_InlineVsUnconsumedMetaHook() public {
         // WITH inline execution (proxyEntryHash == 0)
         _postImmediate(true); // warm-up
         vm.roll(block.number + 1);
@@ -361,14 +363,14 @@ contract GasCost is GasFixture {
         _postImmediate(false);
         uint256 withoutExec = g2 - gasleft();
 
-        console.log("transient_batch_with_exec   ", withExec);
-        console.log("transient_batch_without_exec", withoutExec);
-        // The !execute baseline pays the transient load (SSTORE pushes + hook) the execute case
+        console.log("inline_batch_executed   ", withExec);
+        console.log("meta_batch_unconsumed", withoutExec);
+        // The !execute baseline pays the transient load (SSTORE mapping writes + hook) the execute case
         // skips, so the delta can be negative.
         if (withExec >= withoutExec) {
-            console.log("  immediate execution cost  ", withExec - withoutExec);
+            console.log("  inline_minus_unconsumed_meta  ", withExec - withoutExec);
         } else {
-            console.log("  immediate execution cost  -", withoutExec - withExec);
+            console.log("  inline_minus_unconsumed_meta  -", withoutExec - withExec);
         }
     }
 
@@ -389,7 +391,7 @@ contract GasCost is GasFixture {
     //   Transient: ONE postBatch tx that loads + executes the entry inline.
     //   Storage:   a postBatch tx that saves the entry (steady) + a separate user tx to execute it.
     // postBatch execution is measured by gasleft(); each transaction additionally pays the 21k base
-    // (added in the report). Storage is two transactions, so it pays the base twice.
+    // plus calldata costs; these are excluded here. Storage needs two transactions.
     function test_FullCost_StorageVsTransient() public {
         _emptyBatch(); // warm-up
         vm.roll(block.number + 1);
@@ -520,9 +522,7 @@ contract GasCost is GasFixture {
         _postBatchTwo(rB.id, rS.id, _savedFor(rS.id, 1, 1, 1));
         uint256 seededFull = gA - gasleft();
 
-        // rS2: same, but its call+expected slots were never seeded → zero originals.
-        vm.roll(block.number + 1);
-        _postBatchTwo(rB.id, rS2.id, _savedFor(rS2.id, 1, 1, 1));
+        // rS2 stays BARE until the measured post. A full-shape warm-up here would erase the control.
         vm.roll(block.number + 1);
         _coolProtocol();
         vm.cool(address(rS2.manager));
@@ -561,11 +561,11 @@ contract GasCost is GasFixture {
     // ══════════════════════════════════════════════════════════════════════════
     //  POSTING COST — steady-state (rS queue seeded in setUp → non-zero originals)
     //  vs first-init (rA queue, zero originals). The gap is the SSTORE_SET premium
-    //  the queue's delete+push pays on a never-before-written queue.
+    //  publishing into a never-before-written queue pays for zero-init storage.
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_PostCost_SteadyState() public {
-        // 2-entry steady: rS queue holds 2 (seeded in setUp) → delete 2 + push 2 over non-zero originals.
+        // 2-entry steady: rS queue holds 2 (seeded in setUp) → reset bounds and overwrite 2 entries over non-zero originals.
         vm.roll(block.number + 1);
         _coolProtocol();
         vm.cool(address(rS.manager));
@@ -573,7 +573,7 @@ contract GasCost is GasFixture {
         _postBatchTwo(rB.id, rS.id, _savedFor(rS.id, 2, 1, 1));
         uint256 steady2 = g2 - gasleft();
 
-        // 1-entry steady: first bring the queue down to 1, then measure delete 1 + push 1.
+        // 1-entry steady: first bring the queue down to 1, then measure resetting bounds and overwriting 1 entry.
         vm.roll(block.number + 1);
         _postBatchTwo(rB.id, rS.id, _savedFor(rS.id, 1, 1, 1)); // queue -> 1
         vm.roll(block.number + 1);
@@ -623,7 +623,7 @@ contract GasCost is GasFixture {
     // ══════════════════════════════════════════════════════════════════════════
     //  POSTING COST — incremental entry shape, STEADY-STATE (non-zero originals)
     //  Each measured post: the queue already holds one same-shape entry from the
-    //  prior block, so it is delete+push over non-zero slots (subsequent, not first).
+    //  prior block, so it overwrites retained non-zero slots (subsequent, not first).
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_PostCost_IncrementalSteady() public {

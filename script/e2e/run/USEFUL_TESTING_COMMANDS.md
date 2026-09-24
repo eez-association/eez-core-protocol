@@ -1,5 +1,24 @@
 # Useful testing commands
 
+Before launching a suite containing `bridgeL2`, run the L1→L2 bridge E2E once
+and wait for it to pass. It deposits **0.001 ETH by default** into rollup escrow
+and verifies delivery to L2. Use the same `DEVNET_ENV` for this command and the
+subsequent suite.
+
+```bash
+# Default deposit: 0.001 ETH
+DEVNET_ENV=chain.env bash script/e2e/run/network-staged.sh bridge:1
+
+# Custom deposit: change 0.0001 to the amount of ETH you want to bridge
+DEVNET_ENV=chain.env E2E_BRIDGE_AMOUNT_WEI=$(cast to-wei 0.0001) \
+  bash script/e2e/run/network-staged.sh bridge:1
+```
+
+`E2E_BRIDGE_AMOUNT_WEI` changes only the L1→L2 `bridge` scenario. Each `bridgeL2`
+withdrawal still needs **0.001 ETH** of escrow, so a 0.0001 ETH deposit alone
+does not cover one withdrawal from empty escrow. The bridge worker also needs
+enough L1 ETH for the chosen deposit plus gas.
+
 Parallel network runs use `network-parallel.sh`: one wallet per job, taken from
 the persistent pool (`script/e2e/run/wallet-pool.csv`) and topped up to `FUND_ETH`
 from the run faucet through the `MultiSend` contract (one batched `fundUpTo` tx per
@@ -100,7 +119,7 @@ bash script/e2e/run/network-staged.sh counter:2
 DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # The 770-job load mix through the staged runner no verify
-DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
 bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10

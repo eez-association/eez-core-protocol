@@ -59,7 +59,7 @@ struct RollupConfig {
 ///         the rollup was last verified in. A verified batch leaves its non-immediate entries here to be pulled later
 ///         in the SAME block by proxy calls / `executeL2Txs`, rather than executing them immediately.
 /// @dev `lastVerifiedBlock`:
-///      (a) reset marker — every batch touching this rollup first wipes its queues + cursor, so a
+///      (a) reset marker — every batch touching this rollup first resets its queue bounds + cursor, so a
 ///          same-block re-verify REPLACES the prior batch instead of appending to it;
 ///      (b) read gate — `entryQueue` consumers (`executeCrossChainCall` / `executeL2Txs`) require
 ///          `lastVerifiedBlock == block.number`, so a stale entry queue from an earlier block is never
@@ -67,9 +67,11 @@ struct RollupConfig {
 ///      (c) `setRoot` lockout — reverts `RollupBatchActiveThisBlock` while `== block.number`.
 struct RollupVerification {
     uint64 lastVerifiedBlock; // block of the last verified batch
-    uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped (packed with above)
-    ExecutionEntry[] entryQueue; // entries awaiting consumption this block
-    StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution this block.
+    uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped
+    uint64 entryQueueLength; // active execution entries; append at this index
+    uint64 staticEntryQueueIndex; // active static entries; append at this index (all four counters share one slot)
+    mapping(uint256 => ExecutionEntry) entryQueue; // only entries below entryQueueLength are active
+    mapping(uint256 => StaticExecutionEntry) staticEntryQueue; // only entries below staticEntryQueueIndex are active
 }
 
 /// @notice A rollup's state transition for one entry.
