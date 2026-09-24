@@ -470,12 +470,10 @@ contract GasCost is GasFixture {
     //  colds them. This is why the measurements cool explicitly.
     // ══════════════════════════════════════════════════════════════════════════
 
-    // Probe: `vm.cool` models a FULL transaction boundary for the account — it colds access
-    // AND adopts the CURRENT storage values as the originals, as if they had been committed.
-    // So an in-test warm-up + cool prices exactly like state seeded in setUp, and zero-init
-    // pricing (SSTORE_SET) appears only when the slots' current values are actually zero.
-    // This is what lets every measurement here use in-test warm-ups as its steady state.
-    function test_Doc_CoolIsTxBoundary() public {
+    // Toolchain probe for this particular array rewrite: compare a cooled in-test seed with
+    // the fixture seeded in setUp. This does not establish that vm.cool resets every aspect
+    // of a transaction. The primary suites use --isolate and GasMeter for that separation.
+    function test_Doc_CooledArrayRewriteMatchesSeeded() public {
         // COMMITTED: `seeded` had a.fill(2) run in setUp. All three measured calls below go
         // through a stack variable so the call sites are identical.
         ArrayStore committedStore = seeded;

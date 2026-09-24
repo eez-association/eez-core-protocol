@@ -80,11 +80,11 @@ contract DoublePoster {
 ///                                      (call the cross-chain proxy) consumes it later.
 ///
 ///         Paths 1-2 are ONE transaction (post). Paths 3-4 are TWO transactions (save, then execute);
-///         each separate tx additionally pays the 21,000 intrinsic base not counted by `gasleft()` —
-///         noted in the printout. Reported numbers are the SECOND (warm) run; the first pays one-time
-///         cold-slot init. Inputs are built before cooling; vm.lastCallGas excludes fixture construction.
+///         intrinsic/calldata fees are excluded. Reported numbers follow a same-shape warm-up,
+///         with cold access during measurement. GasMeter captures the nested callee body, excluding
+///         both fixture construction and the isolated transaction's intrinsic costs.
 ///         Deferred L2Txs also need a preceding boundary entry: subtract its posting cost, but keep
-///         its scan overhead in execution. Run with: forge test --match-path test/GasExecPaths.t.sol -vv
+///         its scan overhead in execution. Run with: forge test --match-path test/GasExecPaths.t.sol --isolate -vv
 contract GasExecPaths is GasFixture {
     MetaExecDriver internal driver;
 
@@ -429,12 +429,14 @@ contract GasExecPaths is GasFixture {
         internal
         returns (uint256 gasUsed)
     {
+        uint256 snapshot = vm.snapshotState();
         ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(entries, immediateCount);
         vm.prank(alice);
         rollups.postAndVerifyBatch(batch);
         vm.roll(block.number + 1);
         _coolAll();
         gasUsed = meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false).gasUsed;
+        assertTrue(vm.revertToStateAndDelete(snapshot));
     }
 
     function test_PerUnit_ExecutedInline() public {
@@ -484,11 +486,15 @@ contract GasExecPaths is GasFixture {
     }
 
     function _immediateReentrantGas(uint256 count) internal returns (GasMeter.Sample memory) {
+        uint256 snapshot = vm.snapshotState();
         _postImmReentrant(count);
         ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(_one(_execEntry(0, count)), 1);
         vm.roll(block.number + 1);
         _coolAll();
-        return meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false);
+        GasMeter.Sample memory sample =
+            meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false);
+        assertTrue(vm.revertToStateAndDelete(snapshot));
+        return sample;
     }
 
     /// @dev Two batches in ONE tx. The first parks a 3-row reentrant table and clears it, which only
