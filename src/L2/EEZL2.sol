@@ -322,7 +322,7 @@ contract EEZL2 is EEZBase {
         //    SYSTEM_ADDRESS is not reentry-reachable so no `_insideExecution()` guard is needed.
         entryIndex = 1;
 
-        return entry.returnData;
+        return _returnOrRevert(entry.success, entry.returnData);
     }
 
     // ──────────────────────────────────────────────
@@ -406,52 +406,44 @@ contract EEZL2 is EEZBase {
         }
     }
 
-    /// @notice Consumes the next execution entry (forward-scanning for the matching `proxyEntryHash`),
-    ///         runs it, and verifies the rolling hash.
-    /// @dev Forward-scan from the cursor skips intervening non-matches so a top-level call can reach
-    ///      past failed entries only when their hashes do not match the new call. A matching
-    ///      failed entry is retried because its revert restores the cursor.
-    ///      Reverting calls are normal entries (`success == false`); the static pool is read-only.
-    /// @param crossChainCallHash The expected action input hash for the next entry
-    /// @return result The pre-computed return data from the action
-    function _consumeAndExecute(bytes32 crossChainCallHash, uint64 callGas) internal returns (bytes memory result) {
-        uint256 idx = _findMatchingEntry(entryIndex, crossChainCallHash, callGas);
-        entryIndex = idx + 1;
-        ExecutionEntry storage entry = entries[idx];
+    /// @notice Forward-scan matching entries, rolling back hash-mismatching attempts in full.
+    /// @dev The observed gas/call identity is fixed before the search. Incoming value is handled
+    ///      once by executeCrossChainCall, never forwarded again by the candidate self-calls.
+    function _consumeAndExecute(bytes32 crossChainCallHash, uint64 callGas) internal returns (bytes memory) {
+        bool mismatched;
+        for (uint256 i = entryIndex; i < entries.length; i++) {
+            ExecutionEntry storage entry = entries[i];
+            if (entry.proxyEntryHash != crossChainCallHash) continue;
 
-        emit ExecutionConsumed(crossChainCallHash, idx);
-
-        _currentEntryIndex = idx;
-        _executeEntry(entry);
-
-        // Reset the entry pointer now the entry is done (hygiene/symmetry — it's only read
-        // mid-`_executeEntry` and always re-set before the next read). On a revert it rolls back to 0.
-        _currentEntryIndex = 0;
-
-        return entry.returnData;
-    }
-
-    /// @notice Forward-scans `entries` from `startIndex` for the FIRST entry whose `proxyEntryHash`
-    ///         matches `crossChainCallHash`, returning its index. Reverts `EntryNotFound` if the
-    ///         scan reaches the end with no match.
-    function _findMatchingEntry(
-        uint256 startIndex,
-        bytes32 crossChainCallHash,
-        uint64 callGas
-    )
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 queueLen = entries.length;
-        for (uint256 i = startIndex; i < queueLen; i++) {
-            if (entries[i].proxyEntryHash == crossChainCallHash) return i;
+            try this._attemptExecuteEntry(i) {}
+            catch (bytes memory reason) {
+                if (reason.length != 4 || bytes4(reason) != RollingHashMismatch.selector) {
+                    return _returnOrRevert(false, reason);
+                }
+                mismatched = true;
+                continue;
+            }
+            return _returnOrRevert(entry.success, entry.returnData);
         }
+        if (mismatched) revert RollingHashMismatch();
         revert EntryNotFound(crossChainCallHash, callGas);
     }
 
-    /// @notice Seeds the rolling hash, processes the entry's direct calls, verifies the rolling
-    ///         hash, and (when `!success`) reverts with the entry's `returnData`.
+    /// @notice Execute and validate one selected entry in a revertible self-call.
+    /// @dev Callback failures are hashed, not bubbled. Only validation emits RollingHashMismatch;
+    ///      the caller delivers the cached application outcome outside the retry catch.
+    function _attemptExecuteEntry(uint256 index) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        ExecutionEntry storage entry = entries[index];
+        entryIndex = index + 1;
+        _currentEntryIndex = index;
+        emit ExecutionConsumed(entry.proxyEntryHash, index);
+        _executeEntry(entry);
+        _currentEntryIndex = 0;
+    }
+
+    /// @notice Seeds the rolling hash, executes the callbacks and verifies their trace.
+    /// @dev Validation only: the caller delivers the cached success/revert outcome separately.
     /// @dev `entry.incomingCalls` is only the calls it runs directly (each reentrant frame carries its own
     ///      sub-calls); `_processIncomingCalls` runs the whole array, with early return on gas shortage . 
     ///      `_executing` is set true for the whole span (backs `_insideExecution()`) so a reentrant call routes through `_consumeNestedCall`. 
@@ -474,16 +466,6 @@ contract EEZL2 is EEZBase {
         if (_rollingHash != entry.rollingHash) revert RollingHashMismatch();
 
         emit EntryExecuted(_currentEntryIndex, _rollingHash, entry.incomingCalls.length, _lastOutgoingCallConsumed);
-
-        // Top-level reverting entry: the trace is now verified, so unwind everything — the inbound
-        // value, the cursor advance, and these cleanups all roll back with the revert, surfacing
-        // `returnData` to the caller. Mirrors `_resolveNestedReentrant`'s `!success` branch.
-        if (!entry.success) {
-            bytes memory returnData = entry.returnData;
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
 
         _executing = false; // resets _insideExecution() to false
         _rollingHash = bytes32(0); // reset so the next entry's `_seedRollingHash` zero-guard passes

@@ -306,6 +306,18 @@ abstract contract EEZBase is IEEZ {
         }
     }
 
+    /// @notice Deliver an already validated candidate's cached outcome.
+    /// @dev Called outside the candidate self-call's catch: arbitrary application revert data,
+    ///      including RollingHashMismatch(), must never trigger another validation attempt.
+    function _returnOrRevert(bool success, bytes memory returnData) internal pure returns (bytes memory) {
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return returnData;
+    }
+
     /// @notice Content-addressed position key for a row of the unified reentrant table (L1's
     ///         `expectedL1toL2Hash`, L2's `expectedOutgoingHash` — same formula): the call's
     ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the

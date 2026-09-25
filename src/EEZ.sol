@@ -114,7 +114,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
     /// @notice Rollup whose persistent queue supplies the entry currently in `_executeEntry`, naming the
     ///         queue `_getExpectedL1toL2Calls()` reads its reentrant table from. Set ONLY by
-    ///         `_consumeAndExecuteEntry`'s persistent branch (to `destRid`) and cleared back to 0 there
+    ///         `_attemptExecuteEntry`'s persistent branch (to `destRid`) and cleared back to 0 there
     ///         once the entry finishes; 0 everywhere else (immediate L2Tx run and meta-hook phase, which route
     ///         their reentrant tables elsewhere).
     uint64 transient _currentEntryRollupId;
@@ -488,14 +488,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // Hold the reentrant table while `_transientEntries` stays empty (the signal that the immediate L2Tx run is active).
         _setTransientExpectedL1toL2Calls(entry.expectedL1ToL2Calls);
 
-        _executeEntry(
-            entry.rollupUpdates,
-            entry.proxyEntryHash,
-            entry.l2ToL1Calls,
-            entry.rollingHash,
-            entry.success,
-            entry.returnData
-        );
+        _executeEntry(entry.rollupUpdates, entry.proxyEntryHash, entry.l2ToL1Calls, entry.rollingHash);
+        _returnOrRevert(entry.success, entry.returnData);
 
         _clearTransientExpectedL1toL2Calls();
     }
@@ -897,51 +891,67 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      routing, and live `currentRoot` pins), we revert `ExecutionNotFound`. There is no
     ///      reverted-top-level fallback — top-level reverting calls are normal entries, and the static
     ///      pool (`StaticExecutionEntry`) is read-only (`staticCrossChainCall`).
+    ///      Each candidate runs in a self-call; a hash mismatch rolls back the whole entry and retries.
+    ///      If every eligible candidate mismatches, revert RollingHashMismatch. Zero-hash L2Tx
+    ///      entries remain sequential: their first eligible candidate is terminal.
     /// @param destRid The destination rollup whose queue / transient slot to consume from
     /// @param crossChainCallHash The `proxyEntryHash` the next entry must carry (`bytes32(0)` for an L2Tx)
     /// @return The entry's pre-computed return data
     function _consumeAndExecuteEntry(uint64 destRid, bytes32 crossChainCallHash) internal returns (bytes memory) {
-        ExecutionEntry storage entry;
-        uint256 idx;
-
-        // Scan forward from the cursor to the first matching entry (skipping non-matches; see
-        // `_entryMatches`).
+        mapping(uint256 => ExecutionEntry) storage queue = _transientEntries;
+        uint256 start;
+        uint256 length;
         if (_transientEntriesLength != 0) {
-            idx = _findMatchingEntry(
-                _transientEntries, _transientEntryIndex, _transientEntriesLength, crossChainCallHash, destRid
-            );
-            _transientEntryIndex = idx + 1;
-            entry = _transientEntries[idx];
+            start = _transientEntryIndex;
+            length = _transientEntriesLength;
         } else {
             RollupVerification storage rec = verificationByRollup[destRid];
-            idx = _findMatchingEntry(
-                rec.entryQueue, rec.entryQueueIndex, rec.entryQueueLength, crossChainCallHash, destRid
-            );
-            rec.entryQueueIndex = uint64(idx + 1);
-            entry = rec.entryQueue[idx];
-            _currentEntryRollupId = destRid; // the queue _getExpectedL1toL2Calls() reads this
+            queue = rec.entryQueue;
+            start = rec.entryQueueIndex;
+            length = rec.entryQueueLength;
         }
 
-        emit ExecutionConsumed(crossChainCallHash, destRid, idx);
+        bool mismatched;
+        for (uint256 i = start; i < length; i++) {
+            ExecutionEntry storage entry = queue[i];
+            if (!_entryMatches(entry, crossChainCallHash, destRid)) continue;
 
-        _currentEntryIndex = idx;
+            try this._attemptExecuteEntry(destRid, i) {}
+            catch (bytes memory reason) {
+                if (
+                    crossChainCallHash == bytes32(0) || reason.length != 4
+                        || bytes4(reason) != RollingHashMismatch.selector
+                ) return _returnOrRevert(false, reason);
+                mismatched = true;
+                continue;
+            }
+            // Outside the catch: a hash-valid application revert is always terminal.
+            return _returnOrRevert(entry.success, entry.returnData);
+        }
+        if (mismatched) revert RollingHashMismatch();
+        revert ExecutionNotFound();
+    }
 
-        // Load `returnData` since it's reused.
-        bytes memory returnData = entry.returnData;
-
-        // Execute entry
-        _executeEntry(
-            entry.rollupUpdates, entry.proxyEntryHash, entry.l2ToL1Calls, entry.rollingHash, entry.success, returnData
-        );
-
-        // Reset the entry pointers now the entry is done. `_currentEntryRollupId = 0` is load-bearing
-        // (the immediate L2Tx path relies on it being 0); `_currentEntryIndex = 0` is hygiene/symmetry —
-        // it's only read mid-`_executeEntry` and always re-set before the next read. On a revert both
-        // transient writes roll back to 0 anyway.
+    /// @notice Execute and validate one selected entry in a revertible self-call.
+    /// @dev Callback failures are hashed, not bubbled. Only validation emits RollingHashMismatch;
+    ///      the caller delivers the cached application outcome outside the retry catch.
+    function _attemptExecuteEntry(uint64 destRid, uint256 index) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        ExecutionEntry storage entry;
+        if (_transientEntriesLength != 0) {
+            entry = _transientEntries[index];
+            _transientEntryIndex = index + 1;
+        } else {
+            RollupVerification storage rec = verificationByRollup[destRid];
+            entry = rec.entryQueue[index];
+            rec.entryQueueIndex = uint64(index + 1);
+            _currentEntryRollupId = destRid;
+        }
+        _currentEntryIndex = index;
+        emit ExecutionConsumed(entry.proxyEntryHash, destRid, index);
+        _executeEntry(entry.rollupUpdates, entry.proxyEntryHash, entry.l2ToL1Calls, entry.rollingHash);
         _currentEntryRollupId = 0;
         _currentEntryIndex = 0;
-
-        return returnData;
     }
 
     /// @notice Applies rollup updates (with currentRoot validation), processes the entry's
@@ -962,16 +972,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @param l2ToL1Calls The calls this entry runs directly, in order (calls made inside a
     ///        reentrant frame live in that frame's `expectedL1ToL2Calls` row instead)
     /// @param rollingHash The expected accumulator value once all calls and nestings have run; a mismatch reverts
-    /// @param success When false the entry still executes and is verified, but reverts at the end
-    ///        with `returnData`, rolling its effects back
-    /// @param returnData The entry's pre-computed result — returned to the caller when `success` is true, the revert payload when not
+    /// @dev Validation only: the caller delivers the cached success/revert outcome separately.
     function _executeEntry(
         RollupUpdate[] memory rollupUpdates,
         bytes32 proxyEntryHash,
         L2ToL1Call[] memory l2ToL1Calls,
-        bytes32 rollingHash,
-        bool success,
-        bytes memory returnData
+        bytes32 rollingHash
     )
         internal
     {
@@ -1008,15 +1014,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch();
 
         emit EntryExecuted(_currentEntryIndex, _rollingHash);
-
-        // Top-level reverting entry: the trace is now verified, so unwind everything — the applied state
-        // rollup updates, the inbound value, the cursor advance, and these cleanups all roll back with the revert,
-        // surfacing `returnData` to the caller. Mirrors `_resolveStaticEntry`'s `!success` branch.
-        if (!success) {
-            assembly {
-                revert(add(returnData, 0x20), mload(returnData))
-            }
-        }
 
         _clearVerifiedRollups(); // clears the allowed set AND resets _insideExecution() to false
         _entryEtherDelta = 0; // reset for the next top-level entry in this tx
@@ -1220,31 +1217,6 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // as they do for empty queued/meta-hook tables.
         if (_currentEntryRollupId == 0) return new ExpectedL1ToL2Call[](0);
         return verificationByRollup[_currentEntryRollupId].entryQueue[_currentEntryIndex].expectedL1ToL2Calls;
-    }
-
-    /// @notice Forward-scans the active mapping range from `startIndex` for the FIRST entry that matches
-    ///         `crossChainCallHash` and `destRid` (see `_entryMatches`), returning its index. Reverts
-    ///         `ExecutionNotFound` if the scan reaches the end of the queue with no match.
-    /// @dev Skipping intervening non-matches is what lets a top-level call reach past already-attempted
-    ///      failed entries only if they no longer match (a matching failure is retried). A skipped entry never
-    ///      executes — anything depending on it later fails its own `currentRoot` check.
-    function _findMatchingEntry(
-        mapping(uint256 => ExecutionEntry) storage entryQueue,
-        uint256 startIndex,
-        uint256 queueLen,
-        bytes32 crossChainCallHash,
-        uint64 destRid
-    )
-        internal
-        view
-        returns (uint256)
-    {
-        for (uint256 i = startIndex; i < queueLen; i++) {
-            if (_entryMatches(entryQueue[i], crossChainCallHash, destRid)) {
-                return i;
-            }
-        }
-        revert ExecutionNotFound();
     }
 
     /// @notice Whether a candidate entry is the right one to consume: its identity
