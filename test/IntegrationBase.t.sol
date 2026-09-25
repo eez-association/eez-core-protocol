@@ -11,6 +11,7 @@ import {
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
+import {EEZProxy} from "../src/proxy/EEZProxy.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {ExecutionEntry, RollupUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
@@ -20,7 +21,7 @@ import {
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
 /// @notice Shared dual-manager fixture for the `IntegrationTest*` suites.
-/// @dev Deploys the L1 `EEZ` registry with one registered rollup (id = `L2_ROLLUP_ID`, managed
+/// @dev Deploys the L1 `EEZ` registry behind `EEZProxy` with one registered rollup (id = `L2_ROLLUP_ID`, managed
 ///      by a reference `Rollup` contract attested by a single `MockProofSystem`) plus the L2-side
 ///      `EEZL2` manager. Owns the shared constants, the cross-chain call hash + rolling-hash fold
 ///      helpers (mirroring `EEZBase`), the single-PS batch builder `_postBatchToL2`, the
@@ -56,8 +57,9 @@ abstract contract IntegrationBase is Test {
     address public alice = makeAddr("alice");
 
     function setUp() public virtual {
-        // ── L1 infrastructure ──
-        rollups = new EEZ(makeAddr("recovery"));
+        // ── L1 infrastructure: use the production transparent proxy for all dual-manager scenarios. ──
+        EEZ implementation = new EEZ(makeAddr("recovery"));
+        rollups = EEZ(address(new EEZProxy(address(implementation), makeAddr("EEZ upgrade owner"))));
         ps = new MockProofSystem();
 
         // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is

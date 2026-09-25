@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {
     ITransparentUpgradeableProxy,
     TransparentUpgradeableProxy
@@ -15,6 +16,35 @@ import {CrossChainProxy} from "../../src/base/CrossChainProxy.sol";
 import {EEZ} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {ECDSAProofSystem} from "../../src/proofSystems/ECDSAProofSystem.sol";
+
+// Test-only V2s: append storage and migrate it atomically through ProxyAdmin.
+// These exercise a changed implementation, not a proposed production upgrade.
+contract EEZV2Mock is EEZ, Initializable {
+    uint256 public v2Value;
+
+    constructor(address recovery) EEZ(recovery) {
+        _disableInitializers();
+    }
+
+    function migrateV2(uint256 value) external reinitializer(2) {
+        require(msg.sender == ERC1967Utils.getAdmin(), "Only proxy admin");
+        // Write before validation so a failing migration must roll back storage too.
+        v2Value = value;
+        require(value < 100, "Invalid V2 value");
+    }
+}
+
+contract RollupV2Mock is Rollup {
+    uint256 public v2Value;
+
+    constructor(address eez) Rollup(eez) {}
+
+    function migrateV2(uint256 value) external reinitializer(2) {
+        require(msg.sender == ERC1967Utils.getAdmin(), "Only proxy admin");
+        v2Value = value;
+        require(value < 100, "Invalid V2 value");
+    }
+}
 
 // Exercise the same deployment helpers used by the broadcast entry points.
 contract DeploymentHarness is DeploymentBase {
@@ -117,7 +147,7 @@ contract DeploymentTest is Test {
         assertEq(vm.load(address(eez), IMPLEMENTATION_SLOT), originalImplementation);
     }
 
-    function testUpgradePreservesStateAndCrossChainProxyAddresses() public {
+    function testUpgradeToV2PreservesStateAndCrossChainProxyAddresses() public {
         address original = makeAddr("L2 account");
         address crossChainProxy = eez.createCrossChainProxy(original, 1);
         bytes32 root = keccak256("updated root");
@@ -125,13 +155,29 @@ contract DeploymentTest is Test {
         rollup.setThreshold(2);
         bytes32 nextKey = keccak256("rotated key");
         rollup.updateVerificationKey(address(proof), nextKey);
-        EEZ nextEEZ = new EEZ(recovery);
-        Rollup nextRollup = new Rollup(address(eez));
+        address futureOriginal = makeAddr("future L2 account");
+        address futureProxy = eez.computeCrossChainProxyAddress(futureOriginal, 1);
+        EEZV2Mock nextEEZ = new EEZV2Mock(recovery);
+        RollupV2Mock nextRollup = new RollupV2Mock(address(eez));
+        assertTrue(
+            address(nextEEZ).codehash != address(uint160(uint256(vm.load(address(eez), IMPLEMENTATION_SLOT)))).codehash
+        );
+        assertTrue(
+            address(nextRollup).codehash
+                != address(uint160(uint256(vm.load(address(rollup), IMPLEMENTATION_SLOT)))).codehash
+        );
+        assertEq(nextEEZ.PROXY_INIT_CODE_HASH(), eez.PROXY_INIT_CODE_HASH());
         ProxyAdmin eezAdmin = _admin(address(eez));
         ProxyAdmin rollupAdmin = _admin(address(rollup));
         vm.startPrank(upgradeOwner);
-        eezAdmin.upgradeAndCall(ITransparentUpgradeableProxy(address(eez)), address(nextEEZ), "");
-        rollupAdmin.upgradeAndCall(ITransparentUpgradeableProxy(address(rollup)), address(nextRollup), "");
+        eezAdmin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(eez)), address(nextEEZ), abi.encodeCall(EEZV2Mock.migrateV2, (42))
+        );
+        rollupAdmin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(rollup)),
+            address(nextRollup),
+            abi.encodeCall(RollupV2Mock.migrateV2, (84))
+        );
         vm.stopPrank();
         assertEq(address(uint160(uint256(vm.load(address(eez), IMPLEMENTATION_SLOT)))), address(nextEEZ));
         assertEq(address(uint160(uint256(vm.load(address(rollup), IMPLEMENTATION_SLOT)))), address(nextRollup));
@@ -146,9 +192,78 @@ contract DeploymentTest is Test {
         assertEq(storedRoot, root);
         assertEq(eez.computeCrossChainProxyAddress(original, 1), crossChainProxy);
         assertEq(eez.getOrCreateCrossChainProxy(original, 1), crossChainProxy);
+        (bool authorized, address remote, uint64 remoteRollupId) = eez.authorizedProxies(crossChainProxy);
+        assertTrue(authorized);
+        assertEq(remote, original);
+        assertEq(remoteRollupId, 1);
+        assertEq(eez.createCrossChainProxy(futureOriginal, 1), futureProxy);
+        assertEq(EEZV2Mock(address(eez)).v2Value(), 42);
+        assertEq(RollupV2Mock(address(rollup)).v2Value(), 84);
+        // The appended fields belong to proxy storage, not implementation storage.
+        assertEq(nextEEZ.v2Value(), 0);
+        assertEq(nextRollup.v2Value(), 0);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        EEZV2Mock(address(eez)).migrateV2(43);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        RollupV2Mock(address(rollup)).migrateV2(85);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        rollup.initialize(attacker, 0, new address[](0), new bytes32[](0));
         rollup.setRoot(keccak256("post-upgrade root"));
         (, storedRoot,) = eez.rollups(1);
         assertEq(storedRoot, keccak256("post-upgrade root"));
+    }
+
+    function testRevertingEEZMigrationRollsBackUpgradeAndCanRetry() public {
+        EEZV2Mock next = new EEZV2Mock(recovery);
+        ProxyAdmin admin = _admin(address(eez));
+        bytes32 previousImplementation = vm.load(address(eez), IMPLEMENTATION_SLOT);
+        vm.prank(upgradeOwner);
+        vm.expectRevert(bytes("Invalid V2 value"));
+        admin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(eez)), address(next), abi.encodeCall(EEZV2Mock.migrateV2, (100))
+        );
+        assertEq(vm.load(address(eez), IMPLEMENTATION_SLOT), previousImplementation);
+        assertEq(eez.rollupCounter(), 1);
+        (, bytes32 root,) = eez.rollups(1);
+        assertEq(root, keccak256("genesis"));
+
+        // A reverted migration must also roll back the reinitializer version.
+        vm.prank(upgradeOwner);
+        admin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(eez)), address(next), abi.encodeCall(EEZV2Mock.migrateV2, (42))
+        );
+        assertEq(EEZV2Mock(address(eez)).v2Value(), 42);
+    }
+
+    function testRevertingRollupMigrationRollsBackUpgradeAndCanRetry() public {
+        RollupV2Mock next = new RollupV2Mock(address(eez));
+        ProxyAdmin admin = _admin(address(rollup));
+        bytes32 previousImplementation = vm.load(address(rollup), IMPLEMENTATION_SLOT);
+        vm.prank(upgradeOwner);
+        vm.expectRevert(bytes("Invalid V2 value"));
+        admin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(rollup)), address(next), abi.encodeCall(RollupV2Mock.migrateV2, (100))
+        );
+        assertEq(vm.load(address(rollup), IMPLEMENTATION_SLOT), previousImplementation);
+        assertEq(rollup.owner(), address(this));
+        assertEq(rollup.rollupId(), 1);
+        assertEq(rollup.threshold(), 1);
+        assertEq(rollup.verificationKey(address(proof)), KEY);
+
+        vm.prank(upgradeOwner);
+        admin.upgradeAndCall(
+            ITransparentUpgradeableProxy(address(rollup)), address(next), abi.encodeCall(RollupV2Mock.migrateV2, (84))
+        );
+        assertEq(RollupV2Mock(address(rollup)).v2Value(), 84);
+    }
+
+    function testV2ImplementationMigrationsAreLocked() public {
+        EEZV2Mock nextEEZ = new EEZV2Mock(recovery);
+        RollupV2Mock nextRollup = new RollupV2Mock(address(eez));
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        nextEEZ.migrateV2(42);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        nextRollup.migrateV2(84);
     }
 
     function testImplementationHasNoOperationalConfigurationAndIsLocked() public {

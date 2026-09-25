@@ -58,8 +58,13 @@ abstract contract Base is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     function setUpBase() internal {
-        rollups = new EEZ(makeAddr("recovery"));
+        rollups = _deployEEZ(makeAddr("recovery"));
         ps = new MockProofSystem();
+    }
+
+    /// @dev Override to run the same execution scenarios through a different deployment shape.
+    function _deployEEZ(address recovery) internal virtual returns (EEZ) {
+        return new EEZ(recovery);
     }
 
     // ──────────────────────────────────────────────
