@@ -292,7 +292,7 @@ root match if they depended on it.
    `entryQueue[destinationRollupId]`, static entries past `immediateStaticEntryCount` into
    `staticEntryQueue[destinationRollupId]`.
 9. **Cleanup transient tables** (which also closes the re-entry window), then
-   `emit BatchPosted(batch.rollupIdsWithProofSystems.length)`.
+   `emit BatchPosted(rollupIds.length, sharedPublicInput, rollupIds)`.
 
 ### Reentrancy reasoning
 
@@ -406,7 +406,7 @@ function setRoot(uint64 rollupId, bytes32 newRoot) external;
 - **`rollupId == 0` (MAINNET) excluded from batches**: the strict-increasing check
   starting at `MAINNET_ROLLUP_ID = 0` makes `rollupId == 0` unpostable. Pre-existing pattern;
   the registry's `++rollupCounter` assigns ids starting at 1, so id 0 is never registered.
-- **`_processNCalls` runs before `_applyRollupUpdates`**: outer entry's state deltas applied
+- **`_processL2ToL1Calls` runs before `_applyRollupUpdates`**: outer entry's state deltas applied
   at end. Reentrant entries from other rollups apply their own deltas during dispatch. By
   design, document.
 - **`_processNStaticCalls` rolling hash format differs** from the main rolling hash (no

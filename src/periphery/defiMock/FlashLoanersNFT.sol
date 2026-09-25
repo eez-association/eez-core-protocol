@@ -4,6 +4,7 @@ pragma solidity 0.8.34;
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+/// @notice Test-only periphery fixture; outside the protocol audit scope, not for production.
 contract FlashLoanersNFT is ERC721 {
     IERC20 public immutable token;
     uint256 public nextTokenId;

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../deployment/RollupDeployment.sol";
+
 import {Test, Vm} from "forge-std/Test.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
@@ -56,8 +58,13 @@ abstract contract Base is Test, TestHashes {
     // ──────────────────────────────────────────────
 
     function setUpBase() internal {
-        rollups = new EEZ(makeAddr("recovery"));
+        rollups = _deployEEZ(makeAddr("recovery"));
         ps = new MockProofSystem();
+    }
+
+    /// @dev Override to run the same execution scenarios through a different deployment shape.
+    function _deployEEZ(address recovery) internal virtual returns (EEZ) {
+        return new EEZ(recovery);
     }
 
     // ──────────────────────────────────────────────
@@ -76,7 +83,7 @@ abstract contract Base is Test, TestHashes {
         psList[0] = address(ps);
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
-        handle.manager = new Rollup(address(rollups), owner_, 1, psList, vks);
+        handle.manager = deployRollup(address(rollups), owner_, 1, psList, vks);
         vm.prank(owner_);
         handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }
@@ -93,7 +100,7 @@ abstract contract Base is Test, TestHashes {
         internal
         returns (RollupHandle memory handle)
     {
-        handle.manager = new Rollup(address(rollups), owner_, threshold, psList, vks);
+        handle.manager = deployRollup(address(rollups), owner_, threshold, psList, vks);
         vm.prank(owner_);
         handle.id = rollups.registerRollup(address(handle.manager), initialRoot);
     }

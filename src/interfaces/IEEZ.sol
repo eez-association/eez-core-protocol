@@ -59,18 +59,19 @@ struct RollupConfig {
 ///         the rollup was last verified in. A verified batch leaves its non-immediate entries here to be pulled later
 ///         in the SAME block by proxy calls / `executeL2Txs`, rather than executing them immediately.
 /// @dev `lastVerifiedBlock`:
-///      (a) reset marker — every batch touching this rollup first wipes its queues + cursor, so a
+///      (a) reset marker — every batch touching this rollup first resets its queue bounds + cursor, so a
 ///          same-block re-verify REPLACES the prior batch instead of appending to it;
 ///      (b) read gate — `entryQueue` consumers (`executeCrossChainCall` / `executeL2Txs`) require
 ///          `lastVerifiedBlock == block.number`, so a stale entry queue from an earlier block is never
-///          read. The `staticEntryQueue` is EXEMPT: static entries stay resolvable across blocks for
-///          as long as their root pins hold;
+///          read. The same block gate applies to static lookups;
 ///      (c) `setRoot` lockout — reverts `RollupBatchActiveThisBlock` while `== block.number`.
 struct RollupVerification {
     uint64 lastVerifiedBlock; // block of the last verified batch
-    uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped (packed with above)
-    ExecutionEntry[] entryQueue; // entries awaiting consumption this block
-    StaticExecutionEntry[] staticEntryQueue; // static entries awaiting resolution; not block-gated (matchable while their root pins hold)
+    uint64 entryQueueIndex; // next scan position; earlier entries may have been skipped
+    uint64 entryQueueLength; // active execution entries; append at this index
+    uint64 staticEntryQueueIndex; // active static entries; append at this index (all four counters share one slot)
+    mapping(uint256 => ExecutionEntry) entryQueue; // only entries below entryQueueLength are active
+    mapping(uint256 => StaticExecutionEntry) staticEntryQueue; // only entries below staticEntryQueueIndex are active
 }
 
 /// @notice A rollup's state transition for one entry.
@@ -110,7 +111,7 @@ struct L2ToL1Call {
 ///          then everything reverts with `returnData`, rolling their state back.
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
-    L2ToL1Call[] l2ToL1Calls; // the reentrant frame's own sub-calls, run as expected to completion
+    L2ToL1Call[] l2ToL1Calls; // this frame's sub-calls; a failed _hasEnoughCallGas check stops the array and marks the rolling hash
     bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls for static reads / reverted calls; must be bytes32(0) for a successful call (checked on-chain)
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
@@ -205,11 +206,17 @@ interface IEEZ {
         returns (address proxy);
 
     /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
+    /// @return Address receiving ether recovered during proxy deployment.
     function RECOVERY_ADDRESS() external view returns (address);
+
+    /// @notice Gas cap for the proxy's static-context probe.
+    /// @return Maximum gas forwarded to the proxy's static-context detection self-call.
+    function STATIC_CHECK_GAS() external view returns (uint256);
 
     /// @notice Computes the deterministic CREATE2 address of the CrossChainProxy for an (address, rollup) pair.
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
+    /// @return Predicted proxy address, whether or not the proxy has been deployed.
     function computeCrossChainProxyAddress(
         address originalAddress,
         uint64 originalRollupId

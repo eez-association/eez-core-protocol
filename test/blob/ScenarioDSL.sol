@@ -21,8 +21,8 @@ import {MAX_CALL_DEPTH} from "../../script/blob/BlobConstants.sol";
 //                                  executor calls target; opens a frame. The
 //                                  optional value clause attaches ether (default
 //                                  unit wei); reads can't carry value
-//      <chain> staticCall <chain>  read-only frame (a top-level one may nest
-//                                  leaf static sub-reads of the origin chain)
+//      <chain> staticCall <chain>  read-only frame; further static calls may nest
+//                                  on any other chain, up to the call-depth limit
 //      [<chain>] return            closes the innermost frame with ReturnSuccess
 //      [<chain>] returnFail        closes it with ReturnFail
 //      [<chain>] snapshot          opens a forced-revert region in the current frame
@@ -40,9 +40,9 @@ import {MAX_CALL_DEPTH} from "../../script/blob/BlobConstants.sol";
 //  are auto-generated and globally unique ("dsl.tx#i", "dsl.call#k",
 //  "dsl.ret#k", …), so repeated shapes never re-match a rolled-back entry.
 //
-//  Limits: no ChainOperations, one open region at a time,
-//  no committed (successful mutable) call inside a returnFail frame (both
-//  ScenarioStore v1 rules), one `runDsl` per test.
+//  Nested nonempty rollback regions and successful children of failed parents
+//  are supported. Limits: no ChainOperations, no same-chain proxy calls, no
+//  mutable calls under STATICCALL, and one `runDsl` per test.
 // ─────────────────────────────────────────────────────────────────────────────
 
 abstract contract DslScenarioBase is BlobScenarioBase {
@@ -157,6 +157,13 @@ abstract contract DslScenarioBase is BlobScenarioBase {
     //  Pass 2 — context-stack walk: emission + structural validation + counts
     // ──────────────────────────────────────────────
 
+    struct DslRegion {
+        uint256 sp;
+        uint256 line;
+        uint256 calls;
+        uint256[27] saved;
+    }
+
     struct DslBuild {
         MsgList l;
         uint64[] frameChain; // executing chain per open frame
@@ -168,14 +175,10 @@ abstract contract DslScenarioBase is BlobScenarioBase {
         uint64 origin;
         uint256 txIdx;
         uint256 txCalls; // calls emitted in the current tx
-        bool regionOpen;
-        uint256 regionSp; // stack depth the open region's siblings live at
-        uint256 regionLine;
-        uint256 regionCalls; // completed sibling calls inside the open region
+        DslRegion[] regions;
+        uint256 regionDepth;
         uint256 gCall; // global call-site counter (payload uniqueness)
         uint256[27][] pending; // pending[d][c]: committed count folded into depth d, per chain
-        uint256[27] regionSaved; // checkpoint of pending[regionSp] at Snapshot
-        bool[] childOk; // childOk[d]: a frame at depth d closed with `return` (unsupported under returnFail)
     }
 
     function _dslBuild(string[] memory lines, uint256 msgCap) internal returns (BlobMessage[] memory) {
@@ -186,7 +189,7 @@ abstract contract DslScenarioBase is BlobScenarioBase {
         b.frameCall = new uint256[](DSL_MAX_DEPTH);
         b.frameLine = new uint256[](DSL_MAX_DEPTH);
         b.pending = new uint256[27][](DSL_MAX_DEPTH + 1);
-        b.childOk = new bool[](DSL_MAX_DEPTH + 1);
+        b.regions = new DslRegion[](msgCap);
         for (uint256 c = 0; c <= DSL_MAX_CHAIN; c++) {
             _dslExpTarget[c] = 0;
             _dslExpDriver[c] = 0;
@@ -232,28 +235,24 @@ abstract contract DslScenarioBase is BlobScenarioBase {
             } else if (_dslEq(verb, "return") || _dslEq(verb, "returnfail")) {
                 _dslReturn(b, _dslEq(verb, "return"), lineNo);
             } else if (_dslEq(verb, "snapshot")) {
-                if (b.regionOpen) {
-                    _dslFail(
-                        lineNo, string.concat("snapshot while a region is open (line ", _dslUint(b.regionLine), ")")
-                    );
-                }
                 if (b.sp > 0 && b.frameStatic[b.sp - 1]) _dslFail(lineNo, "cannot nest inside a static call");
-                b.regionOpen = true;
-                b.regionSp = b.sp;
-                b.regionLine = lineNo;
-                b.regionCalls = 0;
+                DslRegion memory region = b.regions[b.regionDepth++];
+                region.sp = b.sp;
+                region.line = lineNo;
+                region.calls = 0;
                 for (uint256 c = 0; c <= DSL_MAX_CHAIN; c++) {
-                    b.regionSaved[c] = b.pending[b.sp][c];
+                    region.saved[c] = b.pending[b.sp][c];
                 }
                 Msg.push(b.l, Msg.snapshot());
             } else {
-                // "revert" — the only remaining verb after pass-1 validation.
-                if (!b.regionOpen || b.sp != b.regionSp) _dslFail(lineNo, "revert without matching snapshot");
-                if (b.regionCalls == 0) _dslFail(lineNo, "empty snapshot region");
-                for (uint256 c = 0; c <= DSL_MAX_CHAIN; c++) {
-                    b.pending[b.sp][c] = b.regionSaved[c];
+                if (b.regionDepth == 0 || b.sp != b.regions[b.regionDepth - 1].sp) {
+                    _dslFail(lineNo, "revert without matching snapshot");
                 }
-                b.regionOpen = false;
+                DslRegion memory region = b.regions[--b.regionDepth];
+                if (region.calls == 0) _dslFail(lineNo, "empty snapshot region");
+                for (uint256 c = 0; c <= DSL_MAX_CHAIN; c++) {
+                    b.pending[b.sp][c] = region.saved[c];
+                }
                 Msg.push(b.l, Msg.revertMarker());
             }
         }
@@ -272,11 +271,7 @@ abstract contract DslScenarioBase is BlobScenarioBase {
         if (tgt == exec) _dslFail(lineNo, "call target equals executing chain");
         uint256 value = (!isStatic && toks.length > 3) ? _dslValue(toks, lineNo) : 0;
         if (b.sp > 0 && b.frameStatic[b.sp - 1]) {
-            // Only a top-level static frame nests, and only leaf static sub-reads of
-            // the reader (origin) chain — the shape the static entries verify live.
             if (!isStatic) _dslFail(lineNo, "cannot nest a mutable call inside a static call");
-            if (b.sp != 1) _dslFail(lineNo, "static sub-reads cannot nest further");
-            if (tgt != b.origin) _dslFail(lineNo, "static sub-read must target the reader chain");
         }
         if (b.sp == DSL_MAX_DEPTH) _dslFail(lineNo, "call depth limit exceeded");
         if (address(dslTarget[tgt]) == address(0)) dslTarget[tgt] = newActor(tgt);
@@ -302,8 +297,13 @@ abstract contract DslScenarioBase is BlobScenarioBase {
     ///      `returnFail` discards the whole subtree, and statics never count.
     function _dslReturn(DslBuild memory b, bool ok, uint256 lineNo) internal pure {
         if (b.sp == 0) _dslFail(lineNo, "return with no open call");
-        if (b.regionOpen && b.sp <= b.regionSp) {
-            _dslFail(lineNo, string.concat("unclosed snapshot region (opened at line ", _dslUint(b.regionLine), ")"));
+        if (b.regionDepth > 0 && b.sp <= b.regions[b.regionDepth - 1].sp) {
+            _dslFail(
+                lineNo,
+                string.concat(
+                    "unclosed snapshot region (opened at line ", _dslUint(b.regions[b.regionDepth - 1].line), ")"
+                )
+            );
         }
         uint256 d = b.sp - 1;
         if (ok) {
@@ -313,20 +313,17 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                     b.pending[d][c] += b.pending[d + 1][c];
                 }
                 b.pending[d][b.frameChain[d]] += 1;
-                b.childOk[d] = true;
             }
         } else {
-            if (b.childOk[d + 1]) {
-                _dslFail(lineNo, "returnFail frame contains a committed call (unsupported shape)");
-            }
             Msg.push(b.l, Msg.returnFail(_dslBytes("dsl.fail#", b.frameCall[d])));
         }
         for (uint256 c = 0; c <= DSL_MAX_CHAIN; c++) {
             b.pending[d + 1][c] = 0;
         }
-        b.childOk[d + 1] = false;
         b.sp--;
-        if (b.regionOpen && b.sp == b.regionSp) b.regionCalls++;
+        for (uint256 i; i < b.regionDepth; i++) {
+            if (b.sp == b.regions[i].sp) b.regions[i].calls++;
+        }
     }
 
     /// @dev Closes the current tx (`--` or end of script): validates all brackets are
@@ -339,8 +336,13 @@ abstract contract DslScenarioBase is BlobScenarioBase {
                 lineNo, string.concat("unclosed call frame (opened at line ", _dslUint(b.frameLine[b.sp - 1]), ")")
             );
         }
-        if (b.regionOpen) {
-            _dslFail(lineNo, string.concat("unclosed snapshot region (opened at line ", _dslUint(b.regionLine), ")"));
+        if (b.regionDepth > 0) {
+            _dslFail(
+                lineNo,
+                string.concat(
+                    "unclosed snapshot region (opened at line ", _dslUint(b.regions[b.regionDepth - 1].line), ")"
+                )
+            );
         }
         if (b.txCalls == 0) _dslFail(lineNo, "empty transaction");
         Msg.push(b.l, Msg.finish());
@@ -349,7 +351,6 @@ abstract contract DslScenarioBase is BlobScenarioBase {
             b.pending[0][c] = 0;
         }
         _dslExpDriver[b.origin] += 1;
-        b.childOk[0] = false;
         b.txOpen = false;
         b.txIdx++;
     }

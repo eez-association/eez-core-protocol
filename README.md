@@ -15,6 +15,8 @@ Two sides:
 
 Shared machinery lives in `src/base/` (`EEZBase.sol`, `CrossChainProxy.sol`); per-side execution structs in `src/interfaces/` (`IEEZ.sol` for L1, `IEEZL2.sol` for L2); the per-rollup manager reference implementation in `src/rollupContract/Rollup.sol`. Tests are under `test/`, two-sided e2e devnet scenarios under `script/e2e/`, protocol documentation under `docs/`.
 
+`src/periphery/` (Bridge, WrappedToken and defiMock examples) is test-only infrastructure for exercising protocol flows. It is outside the protocol audit scope and is not a supported production bridge/token/DeFi implementation.
+
 ## Build & Test
 
 ```bash
@@ -25,7 +27,7 @@ forge fmt            # Format code
 
 ## Documentation
 
-Start with [`CLAUDE.md`](CLAUDE.md) — a condensed architecture reference (contracts, data types, key functions, execution flow, naming conventions). For depth:
+[`CLAUDE.md`](CLAUDE.md) is a condensed architecture reference (contracts, data types, key functions, execution flow, naming conventions). For depth:
 
 - [`docs/CORE_PROTOCOL_SPEC.md`](docs/CORE_PROTOCOL_SPEC.md) — formal protocol specification
 - [`docs/EXECUTION_ENTRY_SPEC.md`](docs/EXECUTION_ENTRY_SPEC.md) — how to build execution entries

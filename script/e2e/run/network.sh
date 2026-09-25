@@ -341,8 +341,9 @@ _CORR_TX=""; _CORR_BLOCK=""
 eez_correlation_detect "$L2_RPC"
 
 # One range wrapper serves both trigger directions. The settlement lister has
-# no expected arguments; content-addressed verification takes the expected
-# hashes/table. Keeping this in one place also makes calldata re-scans behave
+# no expected arguments; the consumption scan checks call hashes only. Expected
+# tables use placeholder roots, so exact completions are checked against the
+# actual posted table in step 5b. Keeping this in one place makes re-scans behave
 # identically for L1- and L2-triggered eventless entries.
 _l1_scan() {  # $1=fromBlock $2=toBlock
     if [[ "$_L1_CONTRACT" == "VerifyL1SettlementTxsInRange" ]]; then
@@ -352,7 +353,7 @@ _l1_scan() {  # $1=fromBlock $2=toBlock
     else
         forge script "script/e2e/shared/Verify.s.sol:$_L1_CONTRACT" \
             --rpc-url "$RPC" --sig "run(uint256,uint256,address,bytes32[],bytes)" \
-            "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" "$EXPECTED_L1_TABLE" 2>&1
+            "$1" "$2" "$ROLLUPS" "$_L1_EXPECTED" 0x 2>&1
     fi
 }
 
@@ -513,9 +514,14 @@ fi
 # ══════════════════════════════════════════════
 _L1_TABLES_PRESENT=false
 [[ "$EXPECTED_L1_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ]] && _L1_TABLES_PRESENT=true
+if $_HAS_COMPUTE && [[ -n "${EXPECTED_L1_CALL_HASHES:-}" && "$EXPECTED_L1_CALL_HASHES" != "[]" && "$EXPECTED_L1_TABLE" == "0x" ]]; then
+    echo "ERROR: L1 consumption checks require EXPECTED_L1_TABLE to verify posted content and exact completions"
+    FAILED=true
+fi
 if [[ "${FAILED:-false}" != true && -z "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRESENT; then
     echo ""
-    echo "NOTE: no settlement tx identified (no BatchPosted in the scanned logs) - skipping posted-batch calldata comparison"
+    echo "ERROR: no settlement tx identified - required posted-batch calldata verification cannot run"
+    FAILED=true
 fi
 if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRESENT; then
     # `|| true`: no CANDIDATE lines (e.g. L1-trigger verifiers don't emit them) must

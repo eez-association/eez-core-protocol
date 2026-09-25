@@ -8,7 +8,7 @@ import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, ExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../src/interfaces/IEEZL2.sol";

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {console} from "forge-std/Test.sol";
-import {Vm} from "forge-std/Vm.sol";
+import {GasMeter} from "./helpers/GasMeter.sol";
 import {GasFixture} from "./GasFixture.t.sol";
 import {
     EEZ,
@@ -62,7 +62,7 @@ contract DoublePoster {
 }
 
 /// @title GasExecPaths
-/// @notice Apples-to-apples gas for the FOUR ways one proven entry can be executed. Every path uses
+/// @notice Callee-body gas for the FOUR ways one proven entry can be executed. Every path uses
 ///         the EXACT same entry shape — a same-rollup reentrant entry on rA: 1 RollupUpdate, 1 flat
 ///         L2ToL1Call that re-enters EEZ once, 1 ExpectedL1ToL2Call — so the only thing that varies is
 ///         the consumption path. All marginal post costs subtract an empty-batch baseline (proofs
@@ -80,16 +80,18 @@ contract DoublePoster {
 ///                                      (call the cross-chain proxy) consumes it later.
 ///
 ///         Paths 1-2 are ONE transaction (post). Paths 3-4 are TWO transactions (save, then execute);
-///         each separate tx additionally pays the 21,000 intrinsic base not counted by `gasleft()` —
-///         noted in the printout. Reported numbers are the SECOND (warm) run; the first pays one-time
-///         cold-slot init. Run with: forge test --match-path test/GasExecPaths.t.sol -vv
+///         intrinsic/calldata fees are excluded. Reported numbers follow a same-shape warm-up,
+///         with cold access during measurement. GasMeter captures the nested callee body, excluding
+///         both fixture construction and the isolated transaction's intrinsic costs.
+///         Deferred L2Txs also need a preceding boundary entry: subtract its posting cost, but keep
+///         its scan overhead in execution. Run with: forge test --match-path test/GasExecPaths.t.sol --isolate -vv
 contract GasExecPaths is GasFixture {
     MetaExecDriver internal driver;
 
     // Rollups whose queues are SEEDED in setUp with the exact shape each saved measurement re-writes.
     // Seeding in setUp (a committed prior context) makes the queue slots non-zero ORIGINALS, so the
     // measured re-post pays the STEADY re-write cost — "some entries were already there" — instead of
-    // one-time zero-init. (vm.roll + an in-test warm-up does NOT establish non-zero originals.)
+    // one-time zero-init. Access warmth is reset separately before each measured call.
     RollupHandle internal gBare1; // 1 bare entry
     RollupHandle internal gBare2; // 2 bare entries
     RollupHandle internal g1Call; // 1 entry, 1 L2ToL1Call
@@ -208,7 +210,7 @@ contract GasExecPaths is GasFixture {
     /// @dev A deferred L2Tx (`peh == 0`) can't sit at the queue head — `ImmediateCountStrandsLeadingL2Tx`
     ///      guards the boundary slot. Park it behind a non-L2Tx boundary entry so executeL2Txs reaches
     ///      it by scanning. The proxy-target case (`peh != 0`) is itself a valid boundary entry.
-    function _runSave(bytes32 proxyEntryHash) internal {
+    function _savedBatch(bytes32 proxyEntryHash) internal view returns (ProofSystemBatchPerVerificationEntries memory) {
         ExecutionEntry[] memory entries;
         if (proxyEntryHash == bytes32(0)) {
             entries = new ExecutionEntry[](2);
@@ -217,7 +219,11 @@ contract GasExecPaths is GasFixture {
         } else {
             entries = _one(_sharedEntry(proxyEntryHash));
         }
-        ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(entries, 0);
+        return _buildBatch(entries, 0);
+    }
+
+    function _runSave(bytes32 proxyEntryHash) internal {
+        ProofSystemBatchPerVerificationEntries memory batch = _savedBatch(proxyEntryHash);
         vm.prank(alice);
         rollups.postAndVerifyBatch(batch);
     }
@@ -258,12 +264,14 @@ contract GasExecPaths is GasFixture {
         // ---- PATH 4: save (peh != 0) then proxy call later.
         (uint256 saveProxy, uint256 execProxy) = _measureSaveThenExecProxy();
 
+        console.log("base_post_2rollups_direct", baseEoa);
+        console.log("base_post_2rollups_driver", baseDriver);
         console.log("== SINGLE-TX immediate paths (marginal post cost, one tx) ==");
         console.log("1_immediate_l2tx_inline   ", immediateMarginal);
         console.log("2_meta_hook_transient     ", metaHookMarginal);
         console.log("");
-        console.log("== TWO-TX save-then-execute (each tx also pays +21000 intrinsic) ==");
-        console.log("3a_save_for_l2tx          ", saveL2Tx);
+        console.log("== TWO-TX save-then-execute (intrinsic/calldata gas excluded) ==");
+        console.log("3a_add_l2tx_after_boundary          ", saveL2Tx);
         console.log("3b_exec_l2tx_later        ", execL2Tx);
         console.log("   3_total_save+exec       ", saveL2Tx + execL2Tx);
         console.log("4a_save_for_proxy         ", saveProxy);
@@ -276,68 +284,63 @@ contract GasExecPaths is GasFixture {
     // ──────────────────────────────────────────────
 
     function _measureEmpty(bool viaDriver) internal returns (uint256 gasUsed) {
-        _runEmpty(viaDriver); // warm-up
-        vm.roll(block.number + 1);
-        _coolForExec();
-        uint256 g = gasleft();
         _runEmpty(viaDriver);
-        gasUsed = g - gasleft();
+        ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(new ExecutionEntry[](0), 0);
+        vm.roll(block.number + 1);
+        _coolAll();
+        if (viaDriver) {
+            return meter.measure(address(driver), alice, abi.encodeCall(MetaExecDriver.post, (batch)), false).gasUsed;
+        }
+        return meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false).gasUsed;
     }
 
     function _measureImmediate() internal returns (uint256 gasUsed) {
-        _runImmediateL2Tx(); // warm-up
-        vm.roll(block.number + 1);
-        _coolForExec();
-        uint256 g = gasleft();
         _runImmediateL2Tx();
-        gasUsed = g - gasleft();
+        ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(_one(_sharedEntry(bytes32(0))), 1);
+        vm.roll(block.number + 1);
+        _coolAll();
+        return meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false).gasUsed;
     }
 
     function _measureMetaHook() internal returns (uint256 gasUsed) {
-        _runMetaHook(); // warm-up
-        vm.roll(block.number + 1);
-        _coolForExec();
-        uint256 g = gasleft();
         _runMetaHook();
-        gasUsed = g - gasleft();
-    }
-
-    /// Save (measured, marginal over EOA baseline) then executeL2Txs (measured, cold) — SAME block, so
-    /// the saved entry is still consumable (lastVerifiedBlock == block.number).
-    function _measureSaveThenExecL2Tx() internal returns (uint256 saveMarginal, uint256 execGas) {
-        uint256 base = _measureEmpty(false);
-
-        _runSave(bytes32(0)); // warm-up save (originals become non-zero)
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _buildBatch(_one(_sharedEntry(_proxyEntryHashFrom(address(driver)))), 1);
         vm.roll(block.number + 1);
-        _coolForExec();
-        uint256 g = gasleft();
-        _runSave(bytes32(0)); // measured save (re-writes non-zero originals = steady state)
-        saveMarginal = (g - gasleft()) - base;
-
-        _coolForExec(); // the saved entry's slots are cold to the (separate) execute tx
-        g = gasleft();
-        rollups.executeL2Txs(uint64(rA.id));
-        execGas = g - gasleft();
+        _coolAll();
+        return meter.measure(address(driver), alice, abi.encodeCall(MetaExecDriver.post, (batch)), false).gasUsed;
     }
 
-    /// Save (peh = alice's trigger hash) then alice consumes via the proxy — SAME block.
+    /// The L2Tx requires a preceding non-L2Tx boundary. Subtract a boundary-only post,
+    /// so the saving delta describes adding the L2Tx; execution still scans over that boundary.
+    function _measureSaveThenExecL2Tx() internal returns (uint256 saveMarginal, uint256 execGas) {
+        ExecutionEntry[] memory boundary = _one(_sharedEntry(_proxyEntryHashFrom(address(driver))));
+        uint256 base = _measurePostSteady(boundary, 0);
+        _runSave(bytes32(0));
+        ProofSystemBatchPerVerificationEntries memory batch = _savedBatch(bytes32(0));
+        vm.roll(block.number + 1);
+        _coolAll();
+        saveMarginal = meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false)
+            .gasUsed - base;
+
+        _coolAll();
+        execGas =
+        meter.measure(address(rollups), alice, abi.encodeCall(EEZ.executeL2Txs, (uint64(rA.id))), false).gasUsed;
+    }
+
+    /// Save one proxy entry, then measure its consumption with cold protocol storage.
     function _measureSaveThenExecProxy() internal returns (uint256 saveMarginal, uint256 execGas) {
         uint256 base = _measureEmpty(false);
         bytes32 peh = _proxyEntryHashFrom(alice);
-
-        _runSave(peh); // warm-up save
+        _runSave(peh);
+        ProofSystemBatchPerVerificationEntries memory batch = _savedBatch(peh);
         vm.roll(block.number + 1);
-        _coolForExec();
-        uint256 g = gasleft();
-        _runSave(peh); // measured save
-        saveMarginal = (g - gasleft()) - base;
+        _coolAll();
+        saveMarginal = meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false)
+            .gasUsed - base;
 
-        _coolForExec();
-        g = gasleft();
-        vm.prank(alice);
-        (bool ok,) = triggerProxy.call("");
-        execGas = g - gasleft();
-        require(ok, "proxy exec reverted");
+        _coolAll();
+        execGas = meter.measure(triggerProxy, alice, "", false).gasUsed;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -400,11 +403,12 @@ contract GasExecPaths is GasFixture {
         internal
         returns (uint256 gasUsed)
     {
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _twoRollupBatch(rB.id, r.id, entries, _emptyStaticEntries(), 0, 0);
+        vm.roll(block.number + 1);
         _coolProtocol();
         vm.cool(address(r.manager));
-        uint256 g = gasleft();
-        _postBatchTwo(rB.id, r.id, entries);
-        gasUsed = g - gasleft();
+        gasUsed = meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false).gasUsed;
     }
 
     /// Cools every account a measured post/exec can touch (protocol + the reentrant scaffolding that
@@ -413,6 +417,7 @@ contract GasExecPaths is GasFixture {
         _coolForExec();
         vm.cool(address(actorA));
         vm.cool(counterProxyA);
+        if (address(driver) != address(0)) vm.cool(address(driver));
     }
 
     /// Steady-state post measurement: warm-up the SAME batch in block N (originals become non-zero),
@@ -424,14 +429,14 @@ contract GasExecPaths is GasFixture {
         internal
         returns (uint256 gasUsed)
     {
+        uint256 snapshot = vm.snapshotState();
+        ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(entries, immediateCount);
         vm.prank(alice);
-        rollups.postAndVerifyBatch(_buildBatch(entries, immediateCount)); // warm-up (seed originals)
+        rollups.postAndVerifyBatch(batch);
         vm.roll(block.number + 1);
         _coolAll();
-        uint256 g = gasleft();
-        vm.prank(alice);
-        rollups.postAndVerifyBatch(_buildBatch(entries, immediateCount)); // measured (re-write originals)
-        gasUsed = g - gasleft();
+        gasUsed = meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false).gasUsed;
+        assertTrue(vm.revertToStateAndDelete(snapshot));
     }
 
     function test_PerUnit_ExecutedInline() public {
@@ -454,9 +459,9 @@ contract GasExecPaths is GasFixture {
         console.log("exec_1_L2ToL1Call          ", c1);
         console.log("exec_2_L2ToL1Call          ", c2);
         console.log("  per_extra_L2ToL1Call      ", c2 - c1);
-        console.log("exec_1_L1ToL2Call          ", r1);
-        console.log("exec_2_L1ToL2Call          ", r2);
-        console.log("  per_extra_L1ToL2Call      ", r2 - r1);
+        console.log("exec_1_callback_roundtrip          ", r1);
+        console.log("exec_2_callback_roundtrips          ", r2);
+        console.log("  per_extra_callback_roundtrip      ", r2 - r1);
     }
 
     /// Posts one immediate batch whose single entry executes `nRe` reentrant L1ToL2Calls inline.
@@ -466,52 +471,30 @@ contract GasExecPaths is GasFixture {
         rollups.postAndVerifyBatch(_buildBatch(entries, 1));
     }
 
-    /// Does the `delete _expectedL1toL2CallsForImmediateL2Txs` refund actually make the storage park
-    /// free? Measure GROSS (gasleft, pre-refund) AND the raw refund (vm.lastCallGas), then apply the
-    /// EIP-3529 cap (refund <= gas_used / 5) to get the NET a standalone tx would be charged.
-    function test_ImmediateReentrant_RefundReality() public {
-        // 1 reentrant call
-        _postImmReentrant(1); // warm-up
+    /// Immediate reentrant tables now use EIP-1153, so parking/clearing them earns no SSTORE refund.
+    /// Report raw call refunds separately; a call-level number cannot determine a transaction receipt.
+    function test_ImmediateReentrant_GrossGasAndRefunds() public {
+        GasMeter.Sample memory one = _immediateReentrantGas(1);
+        GasMeter.Sample memory two = _immediateReentrantGas(2);
+        console.log("immediate_1roundtrip_body_gas", one.gasUsed);
+        console.log("immediate_2roundtrips_body_gas", two.gasUsed);
+        console.log("immediate_1roundtrip_raw_refund", int256(one.refund));
+        console.log("immediate_2roundtrips_raw_refund", int256(two.refund));
+        console.log("extra_roundtrip_body_gas", uint256(two.gasUsed) - one.gasUsed);
+        assertEq(one.refund, 0, "transient reentrant table must not earn a storage refund");
+        assertEq(two.refund, 0, "transient reentrant table must not earn a storage refund");
+    }
+
+    function _immediateReentrantGas(uint256 count) internal returns (GasMeter.Sample memory) {
+        uint256 snapshot = vm.snapshotState();
+        _postImmReentrant(count);
+        ProofSystemBatchPerVerificationEntries memory batch = _buildBatch(_one(_execEntry(0, count)), 1);
         vm.roll(block.number + 1);
         _coolAll();
-        uint256 g = gasleft();
-        _postImmReentrant(1);
-        uint256 gross1 = g - gasleft();
-        Vm.Gas memory cg1 = vm.lastCallGas();
-
-        // 2 reentrant calls
-        _postImmReentrant(2); // warm-up
-        vm.roll(block.number + 1);
-        _coolAll();
-        g = gasleft();
-        _postImmReentrant(2);
-        uint256 gross2 = g - gasleft();
-        Vm.Gas memory cg2 = vm.lastCallGas();
-
-        // Per-extra reentrant call, three ways:
-        uint256 grossMarginal = gross2 - gross1; // pre-refund (what gasleft showed before)
-        uint256 refundMarginal = _abs(cg2.gasRefunded) - _abs(cg1.gasRefunded); // extra raw refund per park
-
-        // NET for each as a standalone tx: charged = totalUsed - min(rawRefund, totalUsed / 5).
-        uint256 net1 = _net(cg1);
-        uint256 net2 = _net(cg2);
-
-        console.log("== ONE immediate batch, 1 reentrant L1ToL2Call ==");
-        console.log("call_gasTotalUsed (gross)  ", cg1.gasTotalUsed);
-        console.log("call_gasRefunded (raw)     ", _abs(cg1.gasRefunded));
-        console.log("refund_cap = used/5        ", uint256(cg1.gasTotalUsed) / 5);
-        console.log("NET charged (capped)       ", net1);
-        console.log("");
-        console.log("== ONE immediate batch, 2 reentrant L1ToL2Calls ==");
-        console.log("call_gasTotalUsed (gross)  ", cg2.gasTotalUsed);
-        console.log("call_gasRefunded (raw)     ", _abs(cg2.gasRefunded));
-        console.log("refund_cap = used/5        ", uint256(cg2.gasTotalUsed) / 5);
-        console.log("NET charged (capped)       ", net2);
-        console.log("");
-        console.log("== PER EXTRA reentrant L1ToL2Call ==");
-        console.log("gross marginal (pre-refund)", grossMarginal);
-        console.log("raw refund marginal        ", refundMarginal);
-        console.log("NET marginal (capped)      ", net2 - net1);
+        GasMeter.Sample memory sample =
+            meter.measure(address(rollups), alice, abi.encodeCall(EEZ.postAndVerifyBatch, (batch)), false);
+        assertTrue(vm.revertToStateAndDelete(snapshot));
+        return sample;
     }
 
     /// @dev Two batches in ONE tx. The first parks a 3-row reentrant table and clears it, which only
@@ -529,18 +512,6 @@ contract GasExecPaths is GasFixture {
 
         // 3 reentrant calls from the first batch, 1 from the second — all resolved and executed.
         assertEq(actorA.counter(), before + 4, "every reentrant call ran");
-    }
-
-    /// EIP-3529 net: gas charged = totalUsed - min(rawRefund, totalUsed / 5).
-    function _net(Vm.Gas memory cg) internal pure returns (uint256) {
-        uint256 used = uint256(cg.gasTotalUsed);
-        uint256 refund = _abs(cg.gasRefunded);
-        uint256 cap = used / 5;
-        return used - (refund < cap ? refund : cap);
-    }
-
-    function _abs(int64 x) internal pure returns (uint256) {
-        return x < 0 ? uint256(uint64(-x)) : uint256(uint64(x));
     }
 
     function test_PerUnit_Saved() public {

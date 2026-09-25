@@ -2,12 +2,13 @@
 pragma solidity ^0.8.28;
 
 import {EEZL2} from "../src/L2/EEZL2.sol";
+import {StaticRetryReader} from "./mocks/StaticRetryReader.sol";
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry
+    StaticExecutionEntryL2
 } from "../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy, PROXY_CALL_GAS} from "./mocks/CounterContracts.sol";
 import {BaseL2} from "./BaseL2.t.sol";
@@ -29,7 +30,7 @@ contract ViewTargetL2 {
 
 /// @notice Performs a cross-chain STATICCALL through a proxy from inside an entry's call,
 ///         exercising the nested `staticCrossChainCall` path + the proxy's static-context detection.
-contract StaticReaderL2 {
+contract StaticReaderL2 is StaticRetryReader {
     function readUint(address proxy, bytes calldata data) external view returns (uint256) {
         (bool ok, bytes memory ret) = proxy.staticcall(data);
         require(ok, "static read failed");
@@ -122,7 +123,7 @@ contract EEZL2CoverageTest is BaseL2 {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = entry;
         vm.prank(address(rejecter));
-        mgr2.loadExecutionTable(entries, new StaticExecutionEntry[](0));
+        mgr2.loadExecutionTable(entries, new StaticExecutionEntryL2[](0));
 
         // The EtherTransferFailed error bubbles up through the proxy as a revert.
         (bool ok,) = proxy.call{value: 3}(callData);
@@ -136,7 +137,7 @@ contract EEZL2CoverageTest is BaseL2 {
     function test_IncomingCrossChainCall_EmptyEntries() public {
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EmptyEntries.selector);
-        manager.executeIncomingCrossChainCall(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        manager.executeIncomingCrossChainCall(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
     }
 
     function test_IncomingCrossChainCall_EmptyIncomingCalls() public {
@@ -144,13 +145,13 @@ contract EEZL2CoverageTest is BaseL2 {
         entries[0].proxyEntryHash = bytes32(uint256(1));
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EmptyIncomingCalls.selector);
-        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntryL2[](0));
     }
 
     function test_IncomingCrossChainCall_NotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         vm.expectRevert(EEZL2.Unauthorized.selector);
-        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntryL2[](0));
     }
 
     function test_IncomingCrossChainCall_EntryHashMismatch() public {
@@ -165,7 +166,7 @@ contract EEZL2CoverageTest is BaseL2 {
 
         vm.prank(SYSTEM_ADDRESS);
         vm.expectRevert(EEZL2.EntryHashMismatch.selector);
-        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntry[](0));
+        manager.executeIncomingCrossChainCall(entries, new StaticExecutionEntryL2[](0));
     }
 
     function test_IncomingCrossChainCall_Success() public {
@@ -196,7 +197,7 @@ contract EEZL2CoverageTest is BaseL2 {
         emit EEZL2.ExecutionConsumed(inboundHash, 0);
 
         vm.prank(SYSTEM_ADDRESS);
-        bytes memory ret = manager.executeIncomingCrossChainCall{value: value}(entries, new StaticExecutionEntry[](0));
+        bytes memory ret = manager.executeIncomingCrossChainCall{value: value}(entries, new StaticExecutionEntryL2[](0));
 
         assertEq(ret, abi.encode(uint256(777)));
         assertEq(target.value(), 123);
@@ -297,7 +298,7 @@ contract EEZL2CoverageTest is BaseL2 {
         // Static lookup key: isStatic = true, source = (this caller, this L2), target = (target, remote).
         bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = true;
@@ -316,12 +317,16 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes memory payload = hex"deadbeef";
         bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](2);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = false;
         lookups[0].incomingCalls = new CrossChainCall[](0);
         lookups[0].rollingHash = bytes32(0);
+        lookups[1].proxyEntryHash = h;
+        lookups[1].success = true;
+        lookups[1].incomingCalls = new CrossChainCall[](0);
+        lookups[1].returnData = abi.encode(uint256(99));
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
@@ -334,7 +339,7 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes32 h = _ccHash(IS_STATIC, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
         lookups[0].success = true;
@@ -343,13 +348,13 @@ contract EEZL2CoverageTest is BaseL2 {
         _loadEntries(new ExecutionEntry[](0), lookups);
 
         vm.prank(proxy);
-        vm.expectRevert(EEZBase.RollingHashMismatch.selector);
+        vm.expectRevert(abi.encodeWithSelector(EEZL2.EntryNotFound.selector, h, uint64(0)));
         manager.staticCrossChainCall(address(this), cd);
     }
 
     function test_StaticLookup_TopLevelNoMatch() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
 
         bytes memory cd = abi.encodeCall(ViewTargetL2.getValue, ());
         bytes32 hash = _ccHash(true, address(this), TEST_ROLLUP_ID, address(target), REMOTE_ROLLUP_ID, 0, cd);
@@ -358,7 +363,7 @@ contract EEZL2CoverageTest is BaseL2 {
         manager.staticCrossChainCall(address(this), cd);
     }
 
-    /// Top-level lookup carrying a real static sub-call: `_processNStaticCalls` runs it
+    /// Top-level lookup carrying a real static sub-call: `_processStaticIncomingCalls` runs it
     /// and folds its result into the verified rolling hash.
     function test_StaticLookup_TopLevelWithSubCall() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
@@ -384,7 +389,7 @@ contract EEZL2CoverageTest is BaseL2 {
             data: subData
         });
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = payload;
         lookups[0].success = true;
@@ -417,7 +422,7 @@ contract EEZL2CoverageTest is BaseL2 {
             data: cd
         });
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].returnData = "";
         lookups[0].success = true;
@@ -449,7 +454,7 @@ contract EEZL2CoverageTest is BaseL2 {
             data: cd
         });
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].success = true;
         lookups[0].incomingCalls = subCalls;
@@ -488,7 +493,7 @@ contract EEZL2CoverageTest is BaseL2 {
             data: cd
         });
 
-        StaticExecutionEntry[] memory lookups = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory lookups = new StaticExecutionEntryL2[](1);
         lookups[0].proxyEntryHash = h;
         lookups[0].success = true;
         lookups[0].incomingCalls = subCalls;
@@ -507,6 +512,18 @@ contract EEZL2CoverageTest is BaseL2 {
     /// unified `expectedOutgoingCalls` (a static-keyed `success == true` element) via the proxy's
     /// static-context detection.
     function test_StaticLookup_NestedInsideExecution() public {
+        _nestedStaticLookup(false, false);
+    }
+
+    function test_StaticLookup_NestedRetriesAfterLocalWrites() public {
+        _nestedStaticLookup(true, false);
+    }
+
+    function test_StaticLookup_NestedRetriesPreserveCachedReverts() public {
+        _nestedStaticLookup(true, true);
+    }
+
+    function _nestedStaticLookup(bool retry, bool failAtOne) internal {
         StaticReaderL2 reader = new StaticReaderL2();
 
         // Inner: a proxy on this L2 for a remote view target.
@@ -519,7 +536,9 @@ contract EEZL2CoverageTest is BaseL2 {
         bytes32 innerHash = _ccHash(IS_STATIC, address(reader), TEST_ROLLUP_ID, innerRemote, MAINNET, 0, innerData);
 
         // Outer call: reader.readUint(innerProxy, innerData) → returns the decoded uint.
-        bytes memory outerData = abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
+        bytes memory outerData = retry
+            ? abi.encodeCall(StaticRetryReader.readAroundWrites, (innerProxy, innerData, failAtOne))
+            : abi.encodeCall(StaticReaderL2.readUint, (innerProxy, innerData));
         address outerProxy = manager.createCrossChainProxy(address(reader), REMOTE_ROLLUP_ID);
         // Top-level mutable key folds the observed callGas; the nested STATIC read folds callGas = 0.
         uint64 callGas = _probeOutgoing(address(0xD00D), outerProxy, 0, outerData);
@@ -534,7 +553,8 @@ contract EEZL2CoverageTest is BaseL2 {
         // The static read fires while inside the outer call: `_rollingHash` = seed → CALL_BEGIN(outer).
         bytes32 rhAtRead = _hCallBegin(_hEntryBeginL2(outerHash), outerCallHash);
 
-        ExpectedOutgoingCrossChainCall[] memory outgoing = new ExpectedOutgoingCrossChainCall[](1);
+        ExpectedOutgoingCrossChainCall[] memory outgoing =
+            new ExpectedOutgoingCrossChainCall[](retry ? (failAtOne ? 3 : 2) : 1);
         outgoing[0] = ExpectedOutgoingCrossChainCall({
             expectedOutgoingHash: _expectedOutgoingHash(innerHash, rhAtRead),
             incomingCalls: new CrossChainCall[](0), // no sub-calls; the read returns the pre-computed payload
@@ -542,6 +562,21 @@ contract EEZL2CoverageTest is BaseL2 {
             success: true,
             returnData: payload
         });
+        if (retry) {
+            CrossChainCall[] memory callbacks = new CrossChainCall[](1);
+            callbacks[0] = _cc(address(reader), 0, abi.encodeWithSignature("rate()"), innerRemote, MAINNET);
+            callbacks[0].isStatic = true;
+            // A matching cached revert is terminal even with a later successful candidate.
+            // At rate 2 the failed rate-1 candidate must instead be skipped by its hash.
+            for (uint256 i; i < outgoing.length; i++) {
+                uint256 rate = i == 1 ? 2 : 1;
+                outgoing[i].expectedOutgoingHash = outgoing[0].expectedOutgoingHash;
+                outgoing[i].incomingCalls = callbacks;
+                outgoing[i].revertedOrStaticRollingHash = _hStatic(bytes32(0), true, abi.encode(rate));
+                outgoing[i].success = !(failAtOne && i == 0);
+                outgoing[i].returnData = abi.encode(rate);
+            }
+        }
 
         // Outer call returns abi.encode(uint256(77)).
         bytes32 h = _rhSingle(outerHash, outerCallHash, true, abi.encode(innerResult));
@@ -649,7 +684,7 @@ contract EEZL2CoverageTest is BaseL2 {
     // ──────────────────────────────────────────────
 
     /// An entry whose top-level incoming call is `isStatic` dispatches via STATICCALL (read-only),
-    /// reading `target.getValue()`. Covers the static branch of `_processNCalls`.
+    /// reading `target.getValue()`. Covers the static branch of `_processIncomingCalls`.
     function test_IncomingStaticCall_InsideEntry() public {
         target.setValue(55);
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);

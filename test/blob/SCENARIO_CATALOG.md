@@ -45,10 +45,16 @@ Two recurring entry roles:
   queue; the L1 driver's proxy call consumes it right after the batch, in the
   same block.
 
-Root note: **every** rollup a tx touches appears in `rollupUpdates` with an
-advanced root — even when the delivery on that rollup is reverted or rolled
-back (cases 12/13/15). The root models the L2 block that processed (and rolled
-back) the call; only *committed effects* are undone, not the block itself.
+**Test-only root and delivery model.** The generator assigns synthetic roots to
+touched rollups, including those whose deliveries fail or are rolled back in
+cases 12/13/15. These cases deliberately attempt L2 deliveries to exercise the
+contracts' rollback mechanics; the generated roots are not production state roots.
+
+With the current prover, the corresponding failed or subsequently reverted
+L1-to-L2 calls are lookups: no L2 delivery occurs and no L2 state or root change
+results from those calls. The delivery attempts and root advances described in
+cases 12/13/15 belong only to this test harness. They do not describe a conflict
+in production protocol semantics.
 
 ---
 
@@ -152,8 +158,10 @@ immediateEntryCount = 0
 
 A read changes nothing, so there is no `ExecutionEntry` and no root advance —
 only a pool `StaticExecutionEntry` pinned to A's **live** root. The driver's
-`staticCrossChainCall` matches it by hash + pins (static entries ignore the
-block gate: they stay valid while the pins hold) and returns the cached result.
+`staticCrossChainCall` requires verification in the current block, matches the
+entry by hash + destination rollup + live root pins, and returns the cached result.
+Matching pins do not keep the entry usable in later blocks. A root change or a new
+batch replacing the queue can also invalidate it within the verification block.
 
 ## 5. L2 static_call L1
 
@@ -449,8 +457,8 @@ The `success = false` row runs as a mini-entry: fold `NESTED_BEGIN`, run the
 then revert with `returnData`. The revert rolls the host's hash and cursor
 back to the fire point, so the final `rollingHash` looks as if the frame never
 happened — the row itself is the only proof it did. Note B still appears in
-`rollupUpdates` with an advanced root: its L2 block processed (and reverted)
-the delivery.
+`rollupUpdates` with an advanced synthetic root under the test-only model above.
+The current prover does not deliver this failed call to B.
 
 ## 13. L2a call L1 ×3, revert the last two
 
@@ -616,6 +624,6 @@ and cursors escape through the `ContextResult` payload. Two orthogonal axes:
 
 It is also case 13 stripped to its core — one call in the span instead of a
 surviving call plus a two-call region — which isolates exactly what the span
-mechanism does. Both A and B still advance their roots: their L2 blocks
-processed the calls; only the committed effects on L1 are undone (`target_L1`
-and `target_B` end with `execCount == 0`).
+mechanism does. Both A and B still receive advanced synthetic roots in this harness, while
+`target_L1` and `target_B` end with `execCount == 0`. In the current prover's
+production flow, the rolled-back L1-to-B call causes no B delivery or B root change.

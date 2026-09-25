@@ -51,7 +51,7 @@ echo ""
 echo "(L2-block correlation no longer available post-refactor — see header comment)"
 
 # Post-refactor event sig — kept for documentation/callers that grep this file.
-SIG_BATCH_POSTED=$(cast keccak 'BatchPosted(uint256)')
+SIG_BATCH_POSTED=$(cast keccak 'BatchPosted(bytes32,uint64[])')
 : "$SIG_BATCH_POSTED"
 
 echo ""

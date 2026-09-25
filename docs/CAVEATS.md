@@ -12,7 +12,7 @@
 
 ## Delivery and execution semantics
 
-- **The `gas` field on a call is a cap, not a guarantee:** `_processNCalls` forwards it with `call{gas: callGas}`, and the EVM gives the callee min(callGas, gas available minus 1/64). If the transaction is running low, the destination gets less than the entry committed to, may fail for that reason alone, and the entry then reverts (or is skipped, for an immediate L2Tx) even though the table was correct. Guaranteeing at least `callGas` would require the manager to check `gasleft()` before every proxy call and revert early; that check is not implemented today, so posters must supply enough gas for the whole batch.
+- **Gas-budget checks are estimates:** Both L1 and L2 check `_hasEnoughCallGas` before dispatching calls with non-zero `gas`. A detected shortage stops the local call array and folds `CALL_INSUFFICIENT_GAS` into the rolling hash; valid proofs must exclude that marker, so hash validation rejects executions that retain it. An ordinary enclosing revert can erase the marker. Static-entry execution instead reverts with `InsufficientCallGas`. The estimate excludes account-creation costs, return-data processing, and the rest of the entry, so it is not an unconditional gas-delivery or completion guarantee. A `gas` value of `0` skips the check and forwards available gas subject to EVM forwarding limits. Posters must still fund the whole batch.
 
 - **Posting does not guarantee delivery of every entry:** consumption forward-scans and skips non-matching entries for good, so composers must account for alternatives and work that are never executed.
 
@@ -21,10 +21,6 @@
 - **Immediate dispatch is not proven:** `immediateEntryCount`, `immediateStaticEntryCount` and `expectedRootPerRollup` are outside the public input, so the poster picks them within the on-chain constraints (counts in range, no L2Tx stranded at the boundary, static prefix only when a meta hook fires). Consuming immediate entries is therefore a collaboration between composer, poster and users: a poster can receive the meta hook in a contract that consumes nothing and let those entries be discarded, so a valid proof alone does not guarantee they execute. When some entries must be processed a certain way, set `bindMsgSenderInPublicInput` so only the intended poster can post the batch, and enforce the policy in that poster's hook.
 
 - **L2 retries reuse the first matching result:** A failed entry restores the cursor, so retrying the same call hash hits the same row; a later row for that hash is only reachable after another successful consumption. This is why the system should load a fresh table for every transaction, or at least whenever the environment those results depend on changes.
-
-## Static-result validity
-
-- **Root pins do not cover uncommitted context:** a static result whose value depends on a timestamp, block number or other context outside the committed state can still be served while the roots are unchanged. EEZ imposes no expiry of its own; capturing such dependencies is up to the rollup's validity rules or to refreshing the table.
 
 ## Deployment and trust assumptions
 

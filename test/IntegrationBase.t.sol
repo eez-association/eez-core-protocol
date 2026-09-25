@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../deployment/RollupDeployment.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {
     EEZ,
@@ -9,16 +11,17 @@ import {
     RollupIdWithProofSystems
 } from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
+import {EEZProxy} from "../src/proxy/EEZProxy.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {ExecutionEntry, RollupUpdate, StaticExecutionEntry} from "../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../src/interfaces/IEEZL2.sol";
 import {MockProofSystem} from "./mocks/MockProofSystem.sol";
 
 /// @notice Shared dual-manager fixture for the `IntegrationTest*` suites.
-/// @dev Deploys the L1 `EEZ` registry with one registered rollup (id = `L2_ROLLUP_ID`, managed
+/// @dev Deploys the L1 `EEZ` registry behind `EEZProxy` with one registered rollup (id = `L2_ROLLUP_ID`, managed
 ///      by a reference `Rollup` contract attested by a single `MockProofSystem`) plus the L2-side
 ///      `EEZL2` manager. Owns the shared constants, the cross-chain call hash + rolling-hash fold
 ///      helpers (mirroring `EEZBase`), the single-PS batch builder `_postBatchToL2`, the
@@ -54,8 +57,9 @@ abstract contract IntegrationBase is Test {
     address public alice = makeAddr("alice");
 
     function setUp() public virtual {
-        // ── L1 infrastructure ──
-        rollups = new EEZ(makeAddr("recovery"));
+        // ── L1 infrastructure: use the production transparent proxy for all dual-manager scenarios. ──
+        EEZ implementation = new EEZ(makeAddr("recovery"));
+        rollups = EEZ(address(new EEZProxy(address(implementation), makeAddr("EEZ upgrade owner"))));
         ps = new MockProofSystem();
 
         // registerRollup pre-increments rollupCounter, so id 0 (MAINNET_ROLLUP_ID) is
@@ -65,7 +69,7 @@ abstract contract IntegrationBase is Test {
             psList[0] = address(ps);
             bytes32[] memory vks = new bytes32[](1);
             vks[0] = DEFAULT_VK;
-            l2Manager = new Rollup(address(rollups), address(this), 1, psList, vks);
+            l2Manager = deployRollup(address(rollups), address(this), 1, psList, vks);
             uint64 rid = rollups.registerRollup(address(l2Manager), L2_GENESIS_STATE);
             require(rid == L2_ROLLUP_ID, "expected L2_ROLLUP_ID = 1");
         }

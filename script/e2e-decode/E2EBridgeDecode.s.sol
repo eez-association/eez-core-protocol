@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../../deployment/RollupDeployment.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {
     EEZ,
@@ -73,7 +75,7 @@ contract BridgeBatcher {
 }
 
 /// @title E2EBridgeDeploy -- Deploy infra + bridge contracts
-/// @dev Burns rollupId 0 (MAINNET); L2 rollup at id=1.
+/// @dev Rollup ID 0 is reserved for MAINNET; the first registered L2 receives ID 1.
 contract E2EBridgeDeploy is Script {
     bytes32 constant DEFAULT_VK = keccak256("verificationKey");
 
@@ -88,10 +90,7 @@ contract E2EBridgeDeploy is Script {
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
 
-        Rollup burn = new Rollup(address(rollups), msg.sender, 1, psList, vks);
-        rollups.registerRollup(address(burn), bytes32(0));
-
-        Rollup l2Manager = new Rollup(address(rollups), msg.sender, 1, psList, vks);
+        Rollup l2Manager = deployRollup(address(rollups), msg.sender, 1, psList, vks);
         uint256 rid = rollups.registerRollup(address(l2Manager), keccak256("l2-initial-state"));
         require(rid == 1, "expected L2 rollupId = 1");
 

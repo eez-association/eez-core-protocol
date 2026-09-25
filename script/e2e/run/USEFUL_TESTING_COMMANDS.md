@@ -1,5 +1,33 @@
 # Useful testing commands
 
+Before launching a suite containing `bridgeL2`, run the L1→L2 bridge E2E once
+and wait for it to pass. It deposits **0.00001 ETH by default** into rollup escrow
+and verifies delivery to L2. Use the same `DEVNET_ENV` for this command and the
+subsequent suite.
+
+```bash
+# Default deposit: 0.00001 ETH
+DEVNET_ENV=chain.env bash script/e2e/run/network-staged.sh bridge:1
+
+# Custom deposit: change 0.00002 to the amount of ETH you want to bridge
+DEVNET_ENV=chain.env E2E_BRIDGE_AMOUNT_WEI=$(cast to-wei 0.00002) \
+  bash script/e2e/run/network-staged.sh bridge:1
+```
+
+`E2E_BRIDGE_AMOUNT_WEI` changes only the L1→L2 `bridge` scenario. Each `bridgeL2`
+withdrawal needs **0.00001 ETH** of escrow. Deposit enough to cover the total
+number of planned withdrawals. The bridge worker also needs enough L1 ETH for
+the chosen deposit plus deployment and trigger gas.
+
+Staged, parallel, and load runs share the same funding behavior: the default
+worker target is **0.001 ETH per chain**, and the floor is **0.0005 ETH**.
+Use `--fund` / `FUND_ETH` and `--floor` / `FLOOR_ETH` in any of the three runners
+to override them. Without an explicit floor, it follows `FUND_ETH / 2`.
+Balances are checked once before the run; eligible wallets receive only the
+missing amount, and wallets are not refilled during the run. Existing balances
+above the target are kept. For load tests, allow enough balance for the whole
+transaction count plus deployment gas on the first worker.
+
 Parallel network runs use `network-parallel.sh`: one wallet per job, taken from
 the persistent pool (`script/e2e/run/wallet-pool.csv`) and topped up to `FUND_ETH`
 from the run faucet through the `MultiSend` contract (one batched `fundUpTo` tx per
@@ -44,12 +72,12 @@ DEVNET_ENV=chain.env2 MAX_PARALLEL=30 bash script/e2e/run/network-parallel.sh co
 ```
 
 Funding checks worker balances separately on each chain first. Only workers below
-`FLOOR_ETH` (default 0.05) and `FUND_ETH` (default 0.1) enter the funding plan.
+`FLOOR_ETH` (default 0.0005) and `FUND_ETH` (default 0.001) enter the funding plan.
 The faucet needs their total missing ETH plus 0.05 ETH per nonempty funding chunk
 and a 0.1 ETH gas/deployment reserve. Its existing balance reduces the source
 key's top-up. Chains with no deficient workers skip faucet top-ups and MultiSend
-transactions entirely. The source key defaults to Anvil #2. Halve the per-worker amount with `--fund 0.05` if the
-source key is running low. `MAX_PARALLEL` (default 100) caps concurrency.
+transactions entirely. The source key defaults to Anvil #2. Use `--fund` and
+`--floor` to adjust worker funding. `MAX_PARALLEL` (default 100) caps concurrency.
 
 ## Smaller variants
 
@@ -82,6 +110,12 @@ receipt poll per chain, adaptive interval, until mined or `MINE_TIMEOUT`) →
 slowly, or again.
 
 ```bash
+
+## New network commands
+bash script/e2e/run/network-staged.sh all:1
+PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify all:5
+bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 --window 10 Counter
+
 # The whole suite once (28 scenarios; ~2 min end to end, 28/28 on 2026-09-03)
 bash script/e2e/run/network-staged.sh all:1
 
@@ -91,8 +125,10 @@ bash script/e2e/run/network-staged.sh counter:1 revertCounter:1
 # Smoke test
 bash script/e2e/run/network-staged.sh counter:2
 
-# The 770-job load mix through the staged runner
 DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=1800 bash script/e2e/run/network-staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+
+# The 770-job load mix through the staged runner no verify
+PREPARE_PARALLEL=200 bash script/e2e/run/network-staged.sh --no-verify counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # Every scenario x10 (260 jobs) — everything except bridge/bridgeL2 (see Caveats)
 bash script/e2e/run/network-staged.sh counter:10 counterL2:10 counter-multi-tx:10 multi-call-twice:10 multi-call-twiceL2:10 multi-call-two-diff:10 multi-call-two-diffL2:10 multi-call-nested:10 multi-call-nestedL2:10 nestedCounter:10 nestedCounterL2:10 deepNested:10 flash-loan:10 reentrant:10 revertCounter:10 revertCounterL2:10 revertFromOtherChain:10 revertFromOtherChainL2:10 revertFromOtherChainAndCallAgainL2:10 revertFromOtherChainNested:10 nestedCallRevert:10 nestedCallRevertL2:10 topLevelStaticCounter:10 staticCounterL2:10 nestedStaticCounter:10 nestedStaticCounterL2:10
@@ -108,6 +144,11 @@ SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 counter:10 coun
 # Re-fire the triggers of a run the fronts dropped (accepted, never mined; nonces
 # still free): same pre-signed raw txs, old hashes archived as *.attempt<N>
 SEND_PAUSE=0.5 bash script/e2e/run/network-staged.sh --workers 5 --resend tmp/e2e-staged-net/<ts>
+# LOAD testing
+bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
+DEVNET_ENV=chain.env2 bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 --window 10 nestedCounter
+bash script/e2e/run/network-load.sh --txs 10000 --workers 100 --fund 1 --gas 1000000 deepNested
+
 ```
 
 A run is bound to the network it was prepared on: the resolved endpoints are
@@ -230,7 +271,7 @@ deployed them.
 ## Caveats
 
 - `bridge` / `bridgeL2` are excluded from the parallel mix: `bridgeL2` needs the
-  escrow `bridge` deposits (both use the same 0.001 ether), so run them
+  escrow `bridge` deposits (both default to 0.00001 ether), so run them
   sequentially — `bash script/e2e/run/network-sequential.sh` covers the order.
 - Don't launch two orchestrator runs at once (`network-parallel.sh` OR
   `network-staged.sh` — they share the wallet pool): both take pool wallets from

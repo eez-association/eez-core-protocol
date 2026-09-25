@@ -5,6 +5,8 @@ import {BlobScenarioBase} from "./BlobScenarioBase.sol";
 import {BlobMessage, Msg, MsgList} from "../../script/blob/BlobMessages.sol";
 import {ScenarioStore} from "../../script/blob/ScenarioStore.sol";
 import {ScriptedActor} from "../../script/blob/ScriptedActor.sol";
+import {TableGenerator} from "../../script/blob/TableGenerator.sol";
+import {StaticExecutionEntryL2} from "../../src/interfaces/IEEZL2.sol";
 import {ExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 
 /// @title BlobScenarios
@@ -210,10 +212,8 @@ contract BlobScenarios is BlobScenarioBase {
         assertEq(actorA.execCount(), 0, "failed delivery leaves no state on L2A");
     }
 
-    /// @notice A ReturnFail frame with a COMMITTED sub-call has no faithful table
-    ///         translation (the frame's terminal revert rolls back its own nested
-    ///         consumptions on the executing chain) — the IR parser rejects it.
-    function test_reject_ReturnFailFrameWithCommittedSubCall() public {
+    /// @notice A successful child is rolled back when its parent returns failure.
+    function test_ReturnFailFrameWithSuccessfulSubCall() public {
         MsgList memory l = Msg.list(8);
         Msg.push(l, Msg.initiate(0, "tx-data"));
         Msg.push(l, Msg.call(L2A, address(driverL1), address(actorA), 0, abi.encodeWithSignature("outer()")));
@@ -223,13 +223,9 @@ contract BlobScenarios is BlobScenarioBase {
         Msg.push(l, Msg.finish());
         Msg.push(l, Msg.closeBlobStream());
 
-        ScenarioStore store = new ScenarioStore();
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ScenarioStore.UnsupportedShape.selector, "ReturnFail frame with a committed sub-call"
-            )
-        );
-        store.fromMessages(Msg.done(l));
+        runScenario(Msg.done(l));
+        assertEq(actorA.execCount(), 0);
+        assertEq(actorB.execCount(), 0);
     }
 
     /// @notice Reentrant ReturnFail: A's nested call to B fails; A catches it and
@@ -268,6 +264,36 @@ contract BlobScenarios is BlobScenarioBase {
 
         assertEq(actorA.execCount(), 1);
         assertEq(actorB.execCount(), 0, "a static read commits nothing");
+    }
+
+    function test_TopLevelL2StaticCursorAfterSuccess() public {
+        _topLevelL2StaticCursor(true);
+    }
+
+    function test_TopLevelL2StaticCursorAfterRevert() public {
+        _topLevelL2StaticCursor(false);
+    }
+
+    function _topLevelL2StaticCursor(bool success) internal {
+        MsgList memory l = Msg.list(10);
+        bytes memory readData = abi.encodeWithSignature("readC()");
+        Msg.push(l, Msg.initiate(L2A, "rlp-tx"));
+        Msg.push(l, Msg.staticCall(0, address(driverA), address(actorC), readData));
+        Msg.push(l, Msg.returnSuccess("read"));
+        Msg.push(l, Msg.call(0, address(driverA), address(actorC), 0, abi.encodeWithSignature("writeC()")));
+        Msg.push(l, success ? Msg.returnSuccess("write") : Msg.returnFail("failed"));
+        Msg.push(l, Msg.staticCall(0, address(driverA), address(actorC), readData));
+        Msg.push(l, Msg.returnSuccess("read"));
+        Msg.push(l, Msg.finish());
+        Msg.push(l, Msg.closeBlobStream());
+        BlobMessage[] memory msgs = Msg.done(l);
+        (,, address generated) = _generateTables(msgs);
+        StaticExecutionEntryL2[] memory statics = TableGenerator(generated).unitStatics(0);
+        assertEq(statics.length, 2);
+        assertEq(statics[0].expectedEntryIndex, 0);
+        assertEq(statics[1].expectedEntryIndex, success ? 1 : 0);
+        // Exercises table stitching and real manager lookup as well as generation.
+        runScenario(msgs);
     }
 
     /// @notice Top-level static read fired from an idle L1: a pool

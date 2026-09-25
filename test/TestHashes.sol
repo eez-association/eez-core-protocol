@@ -14,6 +14,7 @@ abstract contract TestHashes {
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
     uint8 internal constant CALL_NOT_FOUND = 5;
+    uint8 internal constant CALL_INSUFFICIENT_GAS = 6;
 
     // ── Readable isStatic flags (mirror EEZBase.sol) ──
     bool internal constant NOT_STATIC_CALL = false;
@@ -91,6 +92,10 @@ abstract contract TestHashes {
 
     function _hCallNotFound(bytes32 prev, bytes32 crossChainCallHash) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(prev, CALL_NOT_FOUND, crossChainCallHash));
+    }
+
+    function _hCallInsufficientGas(bytes32 prev) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(prev, CALL_INSUFFICIENT_GAS));
     }
 
     /// @notice Mirror of `EEZBase._rollingHashStaticResult` (untagged static sub-call schema).

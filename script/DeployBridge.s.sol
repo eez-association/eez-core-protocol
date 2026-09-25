@@ -56,12 +56,12 @@ contract BridgeComputeAddress is Script {
 
 /// @title BridgeDeployL1
 /// @dev forge script script/DeployBridge.s.sol:BridgeDeployL1 \
-///   --rpc-url $L1_RPC --broadcast --private-key $PK --sig "run(address,bytes32)" $ROLLUPS $SALT
+///   --rpc-url $L1_RPC --broadcast --private-key $PK --sig "run(address,bytes32)" $EEZContract $SALT
 contract BridgeDeployL1 is Script {
-    function run(address rollups, bytes32 salt) external {
+    function run(address EEZContract, bytes32 salt) external {
         vm.startBroadcast();
         address bridge = _deployBridge(salt);
-        Bridge(bridge).initialize(rollups, 0, msg.sender);
+        Bridge(bridge).initialize(EEZContract, 0, msg.sender);
         console.log("BRIDGE_L1=%s", bridge);
         vm.stopBroadcast();
     }

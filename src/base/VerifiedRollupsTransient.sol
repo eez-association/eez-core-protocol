@@ -9,12 +9,21 @@ pragma solidity 0.8.34;
 /// @dev The count word is authoritative: clearing leaves stale id words behind, which the
 ///      count-bounded reads never see.
 abstract contract VerifiedRollupsTransient {
+    // ──────────────────────────────────────────────
+    //  Constants
+    // ──────────────────────────────────────────────
+
     /// @dev ERC-7201 namespaced, so the region never collides with other transient regions.
     uint256 private constant _VERIFIED_ROLLUPS_SLOT = uint256(
         keccak256(abi.encode(uint256(keccak256("eez.transient.VerifiedRollups")) - 1)) & ~bytes32(uint256(0xff))
     );
 
+    // ──────────────────────────────────────────────
+    //  Transient rollup set
+    // ──────────────────────────────────────────────
+
     /// @notice Appends `rollupId` to the set (id `i` lives at slot + 1 + i).
+    /// @param rollupId Rollup ID to append; this helper does not check for duplicates.
     function _pushVerifiedRollup(uint64 rollupId) internal {
         uint256 slot = _VERIFIED_ROLLUPS_SLOT;
         assembly ("memory-safe") {
@@ -33,6 +42,7 @@ abstract contract VerifiedRollupsTransient {
     }
 
     /// @notice Number of ids held; 0 means no entry is executing.
+    /// @return count Number of rollup IDs in the active transient set.
     function _verifiedRollupCount() internal view returns (uint256 count) {
         uint256 slot = _VERIFIED_ROLLUPS_SLOT;
         assembly ("memory-safe") {
@@ -41,6 +51,8 @@ abstract contract VerifiedRollupsTransient {
     }
 
     /// @notice True iff `rollupId` is in the set. Linear scan (the set is an entry's few rollup updates).
+    /// @param rollupId Rollup ID to locate in the active transient set.
+    /// @return found True if the rollup ID is present.
     function _containsVerifiedRollup(uint64 rollupId) internal view returns (bool found) {
         uint256 slot = _VERIFIED_ROLLUPS_SLOT;
         assembly ("memory-safe") {

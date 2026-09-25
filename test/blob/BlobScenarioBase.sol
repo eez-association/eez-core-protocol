@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../../deployment/RollupDeployment.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {
     EEZ,
@@ -13,13 +15,13 @@ import {Rollup} from "../../src/rollupContract/Rollup.sol";
 import {IEEZ, ExecutionEntry, StaticExecutionEntry} from "../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {MockProofSystem} from "../mocks/MockProofSystem.sol";
 import {BlobMessage, Msg} from "../../script/blob/BlobMessages.sol";
 import {BlobCodec} from "../../script/blob/BlobCodec.sol";
 import {BlobPacking} from "../../script/blob/BlobPacking.sol";
-import {ScenarioStore, CallNode, TxSpec, ChainOpSpec} from "../../script/blob/ScenarioStore.sol";
+import {ScenarioStore, CallNode, TxSpec, ChainOpSpec, RevertRegion} from "../../script/blob/ScenarioStore.sol";
 import {TableGenerator} from "../../script/blob/TableGenerator.sol";
 import {TableStitcher} from "../../script/blob/TableStitcher.sol";
 import {SidecarStatic} from "../../script/blob/BlobSidecar.sol";
@@ -83,7 +85,7 @@ abstract contract BlobScenarioBase is Test {
             vks[0] = keccak256("blobfw-vk");
             // Named owner (not address(this)): no blob test exercises the owner path,
             // and forge script forbids address(this) in script contracts (BlobTools).
-            Rollup manager = new Rollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
+            Rollup manager = deployRollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
             bytes32 genesisRoot = _genesisRoot(i);
             vm.prank(makeAddr("rollup-owner"));
             uint64 rid = rollups.registerRollup(address(manager), genesisRoot);
@@ -179,7 +181,7 @@ abstract contract BlobScenarioBase is Test {
             stitcher.loadUnit(tag.chainId, tag.kind, gen.unitEntries(i), gen.unitStatics(i));
         }
 
-        // Sidecar: data that provably never reaches a table.
+        // Sidecar: static topology/outcomes, rollback boundaries and transaction metadata.
         for (uint256 t = 0; t < store.txCount(); t++) {
             TxSpec memory txSpec = store.getTx(t);
             uint8[] memory kinds = new uint8[](txSpec.rootCalls.length);
@@ -193,17 +195,20 @@ abstract contract BlobScenarioBase is Test {
             CallNode memory n = store.getNode(staticIds[i]);
             stitcher.loadSidecarStatic(
                 SidecarStatic({
-                    fromAddress: n.fromAddress, toChain: n.toChain, toAddress: n.toAddress, gas: n.gas, data: n.data
+                    fromAddress: n.fromAddress,
+                    toChain: n.toChain,
+                    toAddress: n.toAddress,
+                    gas: n.gas,
+                    data: n.data,
+                    childCount: n.children.length
                 })
             );
-            // Sub-read fields live in the static entry's sub-call array (a table);
-            // only their results ride the sidecar.
-            for (uint256 c = 0; c < n.children.length; c++) {
-                CallNode memory sub = store.getNode(n.children[c]);
-                stitcher.loadSidecarStaticSubResult(sub.success, sub.returnData);
-            }
+            // Results are checked against a source lookup row when one exists, or
+            // against the destination callback accumulator for an unmaterialized source.
+            stitcher.loadSidecarStaticSubResult(n.success, n.returnData);
         }
         stitcher.loadSidecarRegionSizes(store.regionSizesInOrder());
+        stitcher.loadSidecarRegions(store.getRegions());
         for (uint256 t = 0; t < store.txCount(); t++) {
             _feedCallGasSidecar(stitcher, store, store.getTx(t).rootCalls, gasByNode);
         }
@@ -354,42 +359,54 @@ abstract contract BlobScenarioBase is Test {
         view
         returns (ScriptedActor.Step[] memory steps)
     {
-        uint256 regions = 0;
-        for (uint256 i = 0; i < siblings.length; i++) {
-            if (store.nodeRevertSpan(siblings[i]) > 0) regions++;
+        RevertRegion[] memory regions = store.getRegions();
+        uint256 headers;
+        for (uint256 i; i < siblings.length; i++) {
+            for (uint256 r; r < regions.length; r++) {
+                if (regions[r].firstNode == siblings[i]) headers++;
+            }
         }
-        steps = new ScriptedActor.Step[](siblings.length + regions);
-        uint256 w = 0;
-        for (uint256 i = 0; i < siblings.length; i++) {
+        steps = new ScriptedActor.Step[](siblings.length + headers);
+        uint256[] memory starts = new uint256[](headers);
+        uint256[] memory ends = new uint256[](headers);
+        uint256 regionDepth;
+        uint256 w;
+        for (uint256 i; i < siblings.length; i++) {
             CallNode memory child = store.getNode(siblings[i]);
             require(child.fromChain == execChain, "child does not execute on its parent's chain");
-            if (child.revertSpan > 0) {
-                steps[w++] = ScriptedActor.Step({
-                    kind: STEP_SUBCONTEXT_REVERT,
-                    target: address(0),
-                    value: 0,
-                    stepGas: 0,
-                    data: "",
-                    expected: "",
-                    subCount: child.revertSpan
-                });
+            for (uint256 r; r < regions.length; r++) {
+                if (regions[r].firstNode == siblings[i]) {
+                    starts[regionDepth] = w;
+                    ends[regionDepth++] = regions[r].lastNode;
+                    steps[w++].kind = STEP_SUBCONTEXT_REVERT;
+                }
             }
-            uint8 kind;
-            if (child.isStatic) {
-                kind = child.success ? STEP_STATIC_READ : STEP_STATIC_EXPECT_REVERT;
-            } else {
-                kind = child.success ? STEP_CALL : STEP_CALL_EXPECT_REVERT;
+            steps[w++] = _callStep(child, execChain, depth);
+            while (regionDepth > 0 && ends[regionDepth - 1] == siblings[i]) {
+                uint256 start = starts[--regionDepth];
+                require(w - start - 1 <= type(uint16).max, "too many region steps");
+                steps[start].subCount = uint16(w - start - 1);
             }
-            steps[w++] = ScriptedActor.Step({
-                kind: kind,
-                target: _managerOf(execChain).computeCrossChainProxyAddress(child.toAddress, child.toChain),
-                value: child.value,
-                stepGas: child.isStatic ? STATIC_STEP_GAS : _gasAtDepth(depth),
-                data: child.data,
-                expected: child.returnData,
-                subCount: 0
-            });
         }
+    }
+
+    function _callStep(
+        CallNode memory child,
+        uint64 execChain,
+        uint256 depth
+    )
+        internal
+        view
+        returns (ScriptedActor.Step memory step)
+    {
+        step.kind = child.isStatic
+            ? (child.success ? STEP_STATIC_READ : STEP_STATIC_EXPECT_REVERT)
+            : (child.success ? STEP_CALL : STEP_CALL_EXPECT_REVERT);
+        step.target = _managerOf(execChain).computeCrossChainProxyAddress(child.toAddress, child.toChain);
+        step.value = child.value;
+        step.stepGas = child.isStatic ? STATIC_STEP_GAS : _gasAtDepth(depth);
+        step.data = child.data;
+        step.expected = child.returnData;
     }
 
     /// @dev Static sub-read steps for a read's live evaluation: one static proxy read
@@ -541,19 +558,37 @@ abstract contract BlobScenarioBase is Test {
         if (tag.kind == UNIT_KIND_ORIGIN_GROUP) {
             // Origin group: load the table, then the origin driver's own tx consumes it.
             vm.prank(SYSTEM_ADDRESS);
-            manager.loadExecutionTable(entries, statics);
+            manager.loadExecutionTable{value: _l2Funding(entries)}(entries, statics);
             TxSpec memory txSpec = store.getTx(tag.txIndex);
             ScriptedActor(payable(store.getNode(txSpec.rootCalls[0]).fromAddress)).drive();
         } else {
             // Inbound delivery: the system atomically loads + drives entries[0].
             CallNode memory n = store.getNode(tag.inboundNodeId);
             vm.prank(SYSTEM_ADDRESS);
-            try manager.executeIncomingCrossChainCall{value: n.value}(entries, statics) returns (bytes memory ret) {
+            try manager.executeIncomingCrossChainCall{value: _l2Funding(entries)}(entries, statics) returns (
+                bytes memory ret
+            ) {
                 assertTrue(n.success, "inbound call should have reverted");
                 assertEq(ret, n.returnData, "inbound return data");
             } catch (bytes memory err) {
                 assertFalse(n.success, "inbound call should have succeeded");
                 assertEq(err, n.returnData, "inbound revert data");
+            }
+        }
+    }
+
+    /// @dev Supply a conservative fixture budget for every possible local payout,
+    /// including callbacks inside failed frames. EEZL2 pools unused funding; this
+    /// harness asserts application effects, not production mint/inventory policy.
+    function _l2Funding(L2ExecutionEntry[] memory entries) internal pure returns (uint256 amount) {
+        for (uint256 i; i < entries.length; i++) {
+            for (uint256 j; j < entries[i].incomingCalls.length; j++) {
+                amount += entries[i].incomingCalls[j].value;
+            }
+            for (uint256 j; j < entries[i].expectedOutgoingCalls.length; j++) {
+                for (uint256 k; k < entries[i].expectedOutgoingCalls[j].incomingCalls.length; k++) {
+                    amount += entries[i].expectedOutgoingCalls[j].incomingCalls[k].value;
+                }
             }
         }
     }

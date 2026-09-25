@@ -5,11 +5,11 @@ pragma solidity ^0.8.28;
 //  BlobSidecar — the sidecar's data model, shared by TableStitcher (its input),
 //  BlobTranslator (bundles it with the tables), and the test harness (feeds it).
 //
-//  The sidecar carries exactly the data that provably never reaches any table:
-//  per-tx metadata, hash-matched static call fields, static sub-read results,
-//  region sizes, ChainOperation payloads, and the CloseBlobStream position.
-//  See TableStitcher's header for why each item cannot be recovered from the
-//  tables alone.
+//  The sidecar carries transaction metadata, the static call tree and outcomes,
+//  explicit rollback boundaries, chain operations and stream position. Static
+//  values duplicated in lookup rows are checked against those rows; callback
+//  outcomes are checked against their accumulators. Mutable fields/results are
+//  recovered from tables. This metadata does not replace table validation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice Per-transaction metadata (tables don't delimit transactions).
@@ -27,12 +27,12 @@ struct SidecarStatic {
     address toAddress;
     uint64 gas;
     bytes data;
+    uint256 childCount; // static subtree shape; rows alone do not delimit static nesting
 }
 
-/// @notice Result of one static sub-read, in parent-DFS order. A sub-read's
-///         FIELDS live in its static entry's sub-call array (a table), but its
-///         result is only ever hashed into the untagged accumulator — so the
-///         result alone rides the sidecar.
+/// @notice Result of one static node in DFS order. The stitcher cross-checks it
+///         against a source lookup and/or the destination callback accumulator.
+///         Fully unexecuted static legs require their result in the sidecar.
 struct SidecarStaticResult {
     bool success;
     bytes returnData;

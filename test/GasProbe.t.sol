@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {BaseL2} from "./BaseL2.t.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {CrossChainCall, ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZL2.sol";
+import {CrossChainCall, ExecutionEntry, StaticExecutionEntryL2} from "../src/interfaces/IEEZL2.sol";
 
 /// @title GasProbeTest
 /// @notice Validates the callGas observation technique the test harnesses rely on: `callGas`
@@ -57,7 +57,7 @@ contract GasProbeTest is BaseL2 {
     }
 
     function _loadStatic(bytes32 hash, bytes memory result, bool success) internal {
-        StaticExecutionEntry[] memory rows = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory rows = new StaticExecutionEntryL2[](1);
         rows[0].proxyEntryHash = hash;
         rows[0].incomingCalls = new CrossChainCall[](0);
         rows[0].success = success;
@@ -69,7 +69,7 @@ contract GasProbeTest is BaseL2 {
     ///      `EntryNotFound(hash, callGas)` too, so the same two-probe recipe recovers the gas a
     ///      later identical STATICCALL will fold.
     function _probeStatic(bytes memory data) internal returns (bytes32 hash, uint64 g) {
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
         for (uint256 i = 0; i < 2; i++) {
             vm.prank(caller);
             (bool ok, bytes memory err) = proxyAddr.staticcall{gas: CALL_GAS}(data);

@@ -1,11 +1,5 @@
 # TODO
 
-## Design
-
-- [ ] **Beacon proxies for `CrossChainProxy`.** Today proxy logic can never change without
-      changing every proxy address. A beacon keeps addresses stable but adds ~2.7k gas per call
-      and needs an upgrade owner; break-even ≈ 70 calls per proxy. Decide.
-
 ## Gas
 
 - [ ] **Meta-hook entries through the transient serializer.** `_transientEntries` /
@@ -35,7 +29,7 @@
 ## Observability
 
 - [ ] **Identify execution events clearly.** Immediate entries report index zero, nested call
-      indices repeat, and `BatchPosted` carries only a rollup count. Consider batch IDs, real entry
+      indices repeat, and `BatchPosted` carries a shared public-input hash and rollup IDs. Consider batch IDs, real entry
       indices and frame IDs, and distinguish proof acceptance, committed execution, deliberate
       rollback and omitted work. Reverted frames erase their own logs, so keep the surviving
       rollback-summary events distinct from committed target calls.
@@ -52,7 +46,7 @@ deltas overlap):
 | Region | Bytes |
 |---|---|
 | `postAndVerifyBatch` subsystem (validation 1,814 · verify 1,901 · vkeys 610 · save remainder 518 · transient pushes 393) | 9,681 |
-| `_processNCalls` | 1,721 |
+| `_processL2ToL1Calls` | 1,721 |
 | Embedded `CrossChainProxy` creation code (data block) | 1,365 |
 | `ExpectedL1ToL2CallTransient` serializer | 1,140 |
 | Nested path (`_consumeNestedCall`, `_resolveNestedReentrant`, `_getExpectedL1toL2Calls`) | 1,122 |
