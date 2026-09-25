@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../../deployment/RollupDeployment.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {
     EEZ,
@@ -83,7 +85,7 @@ abstract contract BlobScenarioBase is Test {
             vks[0] = keccak256("blobfw-vk");
             // Named owner (not address(this)): no blob test exercises the owner path,
             // and forge script forbids address(this) in script contracts (BlobTools).
-            Rollup manager = new Rollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
+            Rollup manager = deployRollup(address(rollups), makeAddr("rollup-owner"), 1, psList, vks);
             bytes32 genesisRoot = _genesisRoot(i);
             vm.prank(makeAddr("rollup-owner"));
             uint64 rid = rollups.registerRollup(address(manager), genesisRoot);

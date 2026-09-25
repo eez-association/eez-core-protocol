@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../deployment/RollupDeployment.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {
     EEZ,
@@ -65,7 +67,7 @@ abstract contract IntegrationBase is Test {
             psList[0] = address(ps);
             bytes32[] memory vks = new bytes32[](1);
             vks[0] = DEFAULT_VK;
-            l2Manager = new Rollup(address(rollups), address(this), 1, psList, vks);
+            l2Manager = deployRollup(address(rollups), address(this), 1, psList, vks);
             uint64 rid = rollups.registerRollup(address(l2Manager), L2_GENESIS_STATE);
             require(rid == L2_ROLLUP_ID, "expected L2_ROLLUP_ID = 1");
         }

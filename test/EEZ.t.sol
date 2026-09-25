@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../deployment/RollupDeployment.sol";
+
 import {Base} from "./Base.t.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
@@ -1037,7 +1039,7 @@ contract EEZTest is Base {
         psList[0] = address(ps);
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
-        Rollup r = new Rollup(address(rollups), alice, 1, psList, vks);
+        Rollup r = deployRollup(address(rollups), alice, 1, psList, vks);
         vm.expectEmit(true, true, true, true);
         // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so this fresh rollup lands at id 1.
         emit EEZ.RollupCreated(1, address(r), keccak256("init"));

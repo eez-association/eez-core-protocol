@@ -14,18 +14,34 @@ import {ICrossChainProxy} from "../interfaces/ICrossChainProxy.sol";
 ///      itself with the `staticCheck()` selector (via executeOnBehalf) reaches the detector rather
 ///      than a cross-chain call; this is acceptable.
 contract CrossChainProxy {
+    // ──────────────────────────────────────────────
+    //  Immutables
+    // ──────────────────────────────────────────────
+
     /// @notice The EEZ manager contract address (`EEZ` on L1, `EEZL2` on L2)
     address internal immutable EEZ;
+
+    // ──────────────────────────────────────────────
+    //  Transient state
+    // ──────────────────────────────────────────────
 
     /// @dev Dummy transient variable used to detect STATICCALL context.
     ///      Writing to it reverts in a static context; the self-call in _fallback catches this.
     uint256 transient _staticDetector;
+
+    // ──────────────────────────────────────────────
+    //  Constants
+    // ──────────────────────────────────────────────
 
     bytes4 private constant STATIC_CHECK_SELECTOR = bytes4(keccak256("staticCheck()"));
 
     /// @dev Gas cap for the constructor's ether recovery. Bounds what a gas-burning recovery address
     ///      can cost, so deployment still completes after a failed sweep; ample for any plain receiver.
     uint256 private constant RECOVERY_ETHER_GAS = 100_000;
+
+    // ──────────────────────────────────────────────
+    //  Constructor
+    // ──────────────────────────────────────────────
 
     /// @notice Stores the deploying EEZ contract as the immutable authorized caller.
     constructor() {
@@ -39,6 +55,10 @@ contract CrossChainProxy {
             IEEZ(msg.sender).RECOVERY_ADDRESS().call{value: predeployedEther, gas: RECOVERY_ETHER_GAS}("");
         }
     }
+
+    // ──────────────────────────────────────────────
+    //  Call dispatch
+    // ──────────────────────────────────────────────
 
     /// @notice Serves `executeOnBehalf` from the EEZ manager and the `staticCheck()` self-probe; every
     ///         other call goes to `_fallback()`, which executes it as a cross-chain call on EEZ.
@@ -73,6 +93,10 @@ contract CrossChainProxy {
         // Route all other calls through cross-chain execution.
         _fallback();
     }
+
+    // ──────────────────────────────────────────────
+    //  Internal helpers
+    // ──────────────────────────────────────────────
 
     /// @dev Internal fallback that forwards the call to the EEZ manager as a cross-chain execution.
     ///      Uses assembly return/revert which terminates the entire call context.

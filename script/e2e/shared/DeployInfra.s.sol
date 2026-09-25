@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../../../deployment/RollupDeployment.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../src/EEZ.sol";
 import {Rollup} from "../../../src/rollupContract/Rollup.sol";
@@ -36,7 +38,7 @@ contract DeployEEZL1 is Script {
         psList2[0] = address(ps);
         bytes32[] memory vks2 = new bytes32[](1);
         vks2[0] = DEFAULT_VK;
-        Rollup l2Manager = new Rollup(address(rollups), msg.sender, 1, psList2, vks2);
+        Rollup l2Manager = deployRollup(address(rollups), msg.sender, 1, psList2, vks2);
         uint256 rid = rollups.registerRollup(address(l2Manager), keccak256("l2-initial-state"));
         require(rid == 1, "expected L2 rollupId = 1");
 

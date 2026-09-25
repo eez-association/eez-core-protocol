@@ -23,6 +23,10 @@ import {ExpectedL1ToL2Call, L2ToL1Call} from "../interfaces/IEEZ.sol";
 ///      Packing the six small scalars into two words (241 and 224 bits used) costs 3 words per call
 ///      plus its length word, against 7 unpacked.
 abstract contract ExpectedL1ToL2CallTransient {
+    // ──────────────────────────────────────────────
+    //  Constants
+    // ──────────────────────────────────────────────
+
     /// @dev ERC-7201 namespaced, so the walk never collides with other transient regions.
     uint256 private constant _EXPECTED_L1_TO_L2_CALLS_SLOT = uint256(
         keccak256(abi.encode(uint256(keccak256("eez.transient.ExpectedL1ToL2Call")) - 1)) & ~bytes32(uint256(0xff))
@@ -37,8 +41,13 @@ abstract contract ExpectedL1ToL2CallTransient {
     // Row i lives at its own base, spaced like a `mapping(uint256 => ...)` slot, so a
     // variable-length row never has to be walked past to address row i.
 
+    // ──────────────────────────────────────────────
+    //  Transient table access
+    // ──────────────────────────────────────────────
+
     /// @notice Replace the table with `calls`.
     /// @dev The length word is authoritative, so a shorter table strands the previous one's tail rows.
+    /// @param calls Replacement expected-call table to serialize into transient storage.
     function _setTransientExpectedL1toL2Calls(ExpectedL1ToL2Call[] calldata calls) internal {
         uint256 n = calls.length;
         _tstore(_EXPECTED_L1_TO_L2_CALLS_SLOT, n);
@@ -53,11 +62,13 @@ abstract contract ExpectedL1ToL2CallTransient {
     }
 
     /// @notice Row count; 0 means nothing is held. One `tload`.
+    /// @return Number of rows in the active transient expected-call table.
     function _transientExpectedL1toL2CallsLength() internal view returns (uint256) {
         return _tload(_EXPECTED_L1_TO_L2_CALLS_SLOT);
     }
 
     /// @notice Deserialize every row.
+    /// @return calls All active expected-call rows reconstructed in memory.
     function _transientExpectedL1toL2Calls() internal view returns (ExpectedL1ToL2Call[] memory calls) {
         uint256 n = _tload(_EXPECTED_L1_TO_L2_CALLS_SLOT);
         calls = new ExpectedL1ToL2Call[](n);
@@ -70,6 +81,10 @@ abstract contract ExpectedL1ToL2CallTransient {
     //  Per-row (de)serialization over a cursor.
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// @dev Serializes one expected-call row and its nested calls into consecutive transient slots.
+    /// @param slot First transient slot to write.
+    /// @param c Expected-call row to serialize.
+    /// @return First slot after the serialized row.
     function _store(uint256 slot, ExpectedL1ToL2Call calldata c) private returns (uint256) {
         _tstore(slot, uint256(c.expectedL1toL2Hash));
         _tstore(slot + 1, uint256(c.revertedOrStaticRollingHash));
@@ -85,6 +100,10 @@ abstract contract ExpectedL1ToL2CallTransient {
         return slot;
     }
 
+    /// @dev Deserializes an expected-call row previously written by _store.
+    /// @param slot First transient slot of the row.
+    /// @return c Reconstructed expected-call row.
+    /// @return First slot after the serialized row.
     function _load(uint256 slot) private view returns (ExpectedL1ToL2Call memory c, uint256) {
         c.expectedL1toL2Hash = bytes32(_tload(slot));
         c.revertedOrStaticRollingHash = bytes32(_tload(slot + 1));
@@ -104,6 +123,10 @@ abstract contract ExpectedL1ToL2CallTransient {
     //  Per-`L2ToL1Call` (de)serialization — six scalars packed into two words.
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// @dev Packs a call's scalar fields and stores its length-prefixed calldata in transient storage.
+    /// @param slot First transient slot to write.
+    /// @param call Call to serialize.
+    /// @return First slot after the serialized call.
     function _storeCall(uint256 slot, L2ToL1Call calldata call) private returns (uint256) {
         _tstore(
             slot,
@@ -116,6 +139,10 @@ abstract contract ExpectedL1ToL2CallTransient {
         return _storeBytes(slot + 3, call.data);
     }
 
+    /// @dev Unpacks a call previously written by _storeCall.
+    /// @param slot First transient slot of the call.
+    /// @return call Reconstructed call, including its calldata.
+    /// @return First slot after the serialized call.
     function _loadCall(uint256 slot) private view returns (L2ToL1Call memory call, uint256) {
         uint256 header = _tload(slot);
         call.revertNextNCalls = uint16(header);
@@ -136,6 +163,10 @@ abstract contract ExpectedL1ToL2CallTransient {
     //  Length-prefixed bytes: length word, then ceil(len/32) full words.
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// @dev Stores a byte length followed by ceil(length / 32) transient data words.
+    /// @param slot Transient slot for the length prefix.
+    /// @param b Bytes to serialize; unused bytes in the final word may contain adjacent calldata.
+    /// @return First slot after the serialized bytes.
     function _storeBytes(uint256 slot, bytes calldata b) private returns (uint256) {
         _tstore(slot++, b.length);
         assembly ("memory-safe") {
@@ -149,6 +180,10 @@ abstract contract ExpectedL1ToL2CallTransient {
         return slot;
     }
 
+    /// @dev Loads length-prefixed bytes written by _storeBytes into newly allocated memory.
+    /// @param slot Transient slot containing the length prefix.
+    /// @return b Reconstructed bytes; padding beyond the declared length is not cleared.
+    /// @return First slot after the serialized bytes.
     function _loadBytes(uint256 slot) private view returns (bytes memory b, uint256) {
         uint256 len = _tload(slot++);
         assembly ("memory-safe") {
@@ -169,12 +204,18 @@ abstract contract ExpectedL1ToL2CallTransient {
     //  Slot primitives.
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// @dev Writes one word to transient storage for the current transaction.
+    /// @param slot Transient storage slot to write.
+    /// @param value Word to store.
     function _tstore(uint256 slot, uint256 value) private {
         assembly ("memory-safe") {
             tstore(slot, value)
         }
     }
 
+    /// @dev Reads one word from transient storage.
+    /// @param slot Transient storage slot to read.
+    /// @return value Word stored at slot, or zero if unwritten in this transaction.
     function _tload(uint256 slot) private view returns (uint256 value) {
         assembly ("memory-safe") {
             value := tload(slot)
@@ -183,6 +224,9 @@ abstract contract ExpectedL1ToL2CallTransient {
 
     /// @dev Per-index base, spaced exactly like a `mapping(uint256 => ...)` slot. Hashes out of the
     ///      0x00-0x40 scratch space, so nothing is allocated.
+    /// @param base Namespace slot used as the mapping seed.
+    /// @param index Zero-based row index within the table.
+    /// @return slot Keccak256-derived transient base slot for the indexed row.
     function _elementBase(uint256 base, uint256 index) private pure returns (uint256 slot) {
         assembly ("memory-safe") {
             mstore(0x00, index)

@@ -206,14 +206,17 @@ interface IEEZ {
         returns (address proxy);
 
     /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
+    /// @return Address receiving ether recovered during proxy deployment.
     function RECOVERY_ADDRESS() external view returns (address);
 
     /// @notice Gas cap for the proxy's static-context probe.
+    /// @return Maximum gas forwarded to the proxy's static-context detection self-call.
     function STATIC_CHECK_GAS() external view returns (uint256);
 
     /// @notice Computes the deterministic CREATE2 address of the CrossChainProxy for an (address, rollup) pair.
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
+    /// @return Predicted proxy address, whether or not the proxy has been deployed.
     function computeCrossChainProxyAddress(
         address originalAddress,
         uint64 originalRollupId
