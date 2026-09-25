@@ -301,4 +301,10 @@ bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
 bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 nestedCounter
 ```
 
+Funding matches the staged and parallel runners: wallets below **0.0005 ETH**
+are topped up to **0.001 ETH** on each chain before the run. Override with
+`--fund` / `FUND_ETH` and `--floor` / `FLOOR_ETH`; the floor defaults to half the
+target. Size the balance for the whole load run, including deployment gas on
+the first worker.
+
 Reports trigger receipts and throughput; full settlement verification stays in the e2e runners.

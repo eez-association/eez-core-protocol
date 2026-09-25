@@ -31,12 +31,12 @@
 #   network-parallel.sh all:3                       # every scenario 3x
 #   network-parallel.sh one_way:2 nested            # categories/dirs work too
 #   network-parallel.sh --direct counter:10         # fund workers straight from anvil #2
-#   network-parallel.sh --fund 0.05 counter:10      # 0.05 ETH per worker per chain
+#   network-parallel.sh --fund 0.002 counter:10     # target 0.002 ETH per worker per chain
 #
 # Flags:
 #   --direct         skip the run faucet: fund workers directly from the
 #                    source key (anvil #2, or SOURCE_PK if set).
-#   --fund <eth>     ETH given to each worker per chain (same as FUND_ETH env)
+#   --fund <eth>     Worker balance target on each chain (same as FUND_ETH env)
 #   --floor <eth>    skip topping up workers already holding this much (same as
 #                    FLOOR_ETH env; default FUND_ETH / 2). Must cover the most
 #                    expensive scenario's per-chain spend, or floor-admitted
@@ -46,7 +46,7 @@
 #
 # Env knobs:
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
-#   FUND_ETH         ETH given to each worker per chain (default 0.1)
+#   FUND_ETH         Worker balance target on each chain (default 0.001)
 #   FLOOR_ETH        top-up trigger threshold (default FUND_ETH / 2)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
 #   MULTISEND_BATCH  workers funded per MultiSend tx (default 100 — block-gas headroom)
@@ -78,7 +78,7 @@ for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2; do
 done
 
 # ══ DEFAULTS — edit here ══════════════════════════════════════════════════════
-DEFAULT_FUND_ETH=0.1        # ETH per worker per chain (override: --fund / FUND_ETH)
+DEFAULT_FUND_ETH=0.001       # ETH per worker per chain (override: --fund / FUND_ETH)
 DEFAULT_MAX_PARALLEL=100    # concurrent jobs cap (override: MAX_PARALLEL)
 DEFAULT_SOURCE_PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # anvil #2 (override: SOURCE_PK)
 # ══════════════════════════════════════════════════════════════════════════════

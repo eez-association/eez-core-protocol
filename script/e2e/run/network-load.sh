@@ -123,12 +123,14 @@ Usage: bash script/e2e/run/network-load.sh [options] <scenario>
                     (mutually exclusive with --txs)
   --workers N       Concurrent sender wallets (default 20)
   --window N        Pending transactions per wallet (default 10)
-  --fund ETH        Worker balance target on each chain (default 0.1)
+  --fund ETH        Worker balance target on each chain (default 0.001)
+  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0005)
   --direct          Fund directly from SOURCE_PK
   --fresh           Create new wallets instead of reusing the existing pool
   --gas N           Override trigger gas limit
   --help            Show this help
-Env: DEVNET_ENV=chain.env, SOURCE_PK, RECEIPT_TIMEOUT=420, SEND_TIMEOUT=30.
+Env: DEVNET_ENV=chain.env, FUND_ETH, FLOOR_ETH, SOURCE_PK,
+     RECEIPT_TIMEOUT=420, SEND_TIMEOUT=30.
 Examples:
   bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
   bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 nestedCounter
@@ -141,7 +143,7 @@ EOF
 TXS=1000 WORKERS=20 WINDOW=10 DIRECT=false FRESH=false
 TXS_PER_WALLET=""
 TOTAL_EXPLICIT=false
-FUND_ETH="${FUND_ETH:-0.1}"
+FUND_ETH="${FUND_ETH:-0.001}"
 GAS_OVERRIDE=""
 TARGET_SCENARIO=""
 while (( $# )); do
@@ -153,6 +155,7 @@ while (( $# )); do
         --workers) WORKERS="${2:?--workers needs a count}"; shift 2 ;;
         --window) WINDOW="${2:?--window needs a count}"; shift 2 ;;
         --fund) FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
+        --floor) FLOOR_ETH="${2:?--floor needs an amount}"; shift 2 ;;
         --gas) GAS_OVERRIDE="${2:?--gas needs a limit}"; shift 2 ;;
         --direct) DIRECT=true; shift ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -195,7 +198,8 @@ SOURCE_PK="${SOURCE_PK:-0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a8
 NJOBS=$WORKERS
 JOB_NAMES=()
 for ((i=0; i<WORKERS; i++)); do JOB_NAMES+=("sender-$i"); done
-FLOOR_ETH="$FUND_ETH"
+# Match staged/parallel runs: default floor follows the selected target.
+FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
 umask 077
 mkdir -p tmp/e2e-load
 RUN_DIR=$(mktemp -d "tmp/e2e-load/$(date +%Y%m%d-%H%M%S)-XXXXXX")

@@ -44,11 +44,11 @@ import {
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
-// Defaults to the 0.001 ETH that bridgeL2 releases. Override the L1-to-L2
+// Defaults to the 0.00001 ETH that bridgeL2 releases. Override the L1-to-L2
 // deposit per run with E2E_BRIDGE_AMOUNT_WEI; bridgeL2's amount is unchanged.
 // All script-side transaction fields and expected tables use the same value.
 function bridgeAmount() view returns (uint256 amount) {
-    amount = CHEATS.envOr("E2E_BRIDGE_AMOUNT_WEI", uint256(0.001 ether));
+    amount = CHEATS.envOr("E2E_BRIDGE_AMOUNT_WEI", uint256(0.00001 ether));
     require(amount > 0 && amount <= uint256(uint192(type(int192).max)), "invalid bridge amount");
 }
 
