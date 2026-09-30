@@ -20,10 +20,10 @@ forge script deployment/Deploy.s.sol:DeployL1 \
 # L2: use the ROLLUP_ID printed by L1. EEZL2 is not upgradeable.
 forge script deployment/Deploy.s.sol:DeployL2 \
   --rpc-url "$L2_RPC" --private-key "$PRIVATE_KEY" --broadcast \
-  --sig 'run(uint64,address,bool)' "$ROLLUP_ID" "$SYSTEM_ADDRESS" "$USE_GAS_LEFT"
+  --sig 'run(uint64,address,bool,address)' "$ROLLUP_ID" "$SYSTEM_ADDRESS" "$USE_GAS_LEFT" "$L2_RECOVERY_ADDRESS"
 ```
 
-`SYSTEM_ADDRESS` loads L2 execution tables; `USE_GAS_LEFT` selects observed-gas hashing.
+`SYSTEM_ADDRESS` loads L2 execution tables and receives outgoing call value; `USE_GAS_LEFT` selects observed-gas hashing. `L2_RECOVERY_ADDRESS` is a separate nonzero immutable recipient for ETH swept from prefunded proxies. Set it to the system address explicitly if both recipients should coincide.
 
 ## Individual deployments
 

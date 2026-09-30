@@ -20,7 +20,7 @@ contract GasProbeTest is BaseL2 {
         super.setUp();
         // The shared fixture runs with `useGasLeft = false`; this suite validates the observed-gas
         // keying itself, so it replaces the manager with a `useGasLeft = true` deployment.
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, true);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, true, SYSTEM_ADDRESS);
         proxyAddr = manager.createCrossChainProxy(remoteTarget, REMOTE_ROLLUP_ID);
         vm.deal(caller, 10 ether);
     }
@@ -123,7 +123,7 @@ contract GasProbeTest is BaseL2 {
     }
 
     function test_StaticGasDisabledKeepsZeroGasKey() public {
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false, SYSTEM_ADDRESS);
         proxyAddr = manager.createCrossChainProxy(remoteTarget, REMOTE_ROLLUP_ID);
         bytes memory data = hex"12345678";
         bytes32 hash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);

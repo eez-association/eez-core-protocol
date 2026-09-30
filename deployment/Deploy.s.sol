@@ -141,11 +141,20 @@ contract DeployProofSystem is Script {
 
 /// @notice Run on the L2 RPC after registering the rollup on L1.
 contract DeployL2 is Script {
-    function run(uint64 rollupId, address systemAddress, bool useGasLeft) external returns (EEZL2 manager) {
+    function run(
+        uint64 rollupId,
+        address systemAddress,
+        bool useGasLeft,
+        address recoveryAddress
+    )
+        external
+        returns (EEZL2 manager)
+    {
         require(rollupId != 0 && systemAddress != address(0), "Invalid L2 configuration");
         vm.startBroadcast();
-        manager = new EEZL2(rollupId, systemAddress, useGasLeft);
+        manager = new EEZL2(rollupId, systemAddress, useGasLeft, recoveryAddress);
         vm.stopBroadcast();
         console.log("EEZ_L2", address(manager));
+        console.log("L2_RECOVERY_ADDRESS", manager.RECOVERY_ADDRESS());
     }
 }

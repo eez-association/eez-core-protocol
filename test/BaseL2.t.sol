@@ -30,7 +30,7 @@ abstract contract BaseL2 is Test, TestHashes {
     address internal constant SYSTEM_ADDRESS = address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF);
 
     function setUp() public virtual {
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false, SYSTEM_ADDRESS);
     }
 
     // ──────────────────────────────────────────────

@@ -55,6 +55,7 @@ deploy_infra() {
     local l2_rpc="${3:-}"
     local l2_rollup_id="${4:-1}"
     local system_address="${5:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
+    local recovery_address="${6:-$system_address}"
 
     echo ""
     echo "====== Deploy EEZ (L1) ======"
@@ -73,7 +74,7 @@ deploy_infra() {
         echo "====== Deploy EEZL2 (L2) ======"
         output=$(forge script script/e2e/shared/DeployInfra.s.sol:DeployManagerL2 \
             --rpc-url "$l2_rpc" --broadcast --private-key "$pk" \
-            --sig "run(uint64,address)" "$l2_rollup_id" "$system_address" 2>&1)
+            --sig "run(uint64,address,address)" "$l2_rollup_id" "$system_address" "$recovery_address" 2>&1)
         MANAGER_L2=$(extract "$output" "MANAGER_L2")
         echo "MANAGER_L2=$MANAGER_L2"
     fi

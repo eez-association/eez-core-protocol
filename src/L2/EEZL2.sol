@@ -38,6 +38,9 @@ contract EEZL2 is EEZBase {
     ///      or swap the table mid-execution).
     address public immutable SYSTEM_ADDRESS;
 
+    /// @notice Recipient of ether swept from proxies at construction, independent of system funding.
+    address public immutable RECOVERY_ADDRESS;
+
     /// @notice Whether the `callGas` folded into outgoing call hashes is the observed `gasleft()`.
     /// @dev When false, `callGas` is fixed at 0 — outgoing hashes are then gas-independent and can
     ///      be pre-computed without observing the forwarded gas. Gas-observed keying (`true`) is the
@@ -48,17 +51,24 @@ contract EEZL2 is EEZBase {
     //  Storage
     // ──────────────────────────────────────────────
 
-    /// @notice Array of pre-computed entries
-    ExecutionEntry[] public entries;
+    /// @notice Reusable execution slots; only indices below entriesLength belong to the current table.
+    /// @dev Getters can expose retained inactive rows. Consumers must respect the active length.
+    mapping(uint256 => ExecutionEntry) public entries;
 
-    /// @notice Array of pre-computed top-level static entries; resolvable only in the load block
-    StaticExecutionEntryL2[] public staticEntries;
+    /// @notice Reusable static slots; only indices below staticEntriesLength are active in the load block.
+    mapping(uint256 => StaticExecutionEntryL2) public staticEntries;
 
     /// @notice Last block number when execution table was loaded
     uint256 public lastLoadBlock;
 
     /// @notice Index of the next execution entry to consume
     uint256 public entryIndex;
+
+    /// @notice Number of active execution entries, including already-consumed rows.
+    uint256 public entriesLength;
+
+    /// @notice Number of active top-level static entries.
+    uint256 public staticEntriesLength;
 
     // ──────────────────────────────────────────────
     //  Transient execution state
@@ -137,6 +147,9 @@ contract EEZL2 is EEZBase {
     /// @notice Error when constructor is given the reserved mainnet rollup id (0)
     error InvalidRollupId();
 
+    /// @notice The proxy recovery recipient must be nonzero, as on L1.
+    error InvalidRecoveryAddress();
+
     /// @notice Error when execution is attempted in a different block than the last load
     error ExecutionNotInCurrentBlock();
 
@@ -171,8 +184,11 @@ contract EEZL2 is EEZBase {
     /// @param _systemAddress The privileged address allowed to load execution tables
     /// @param _useGasLeft Whether outgoing call hashes fold the observed `gasleft()` (true) or a
     ///        fixed 0 (false — gas-independent keying)
-    constructor(uint64 _rollupId, address _systemAddress, bool _useGasLeft) {
+    /// @param _recoveryAddress Nonzero recipient of ether swept from proxies at construction
+    constructor(uint64 _rollupId, address _systemAddress, bool _useGasLeft, address _recoveryAddress) {
         if (_rollupId == 0) revert InvalidRollupId();
+        if (_recoveryAddress == address(0)) revert InvalidRecoveryAddress();
+        RECOVERY_ADDRESS = _recoveryAddress;
         ROLLUP_ID = _rollupId;
         SYSTEM_ADDRESS = _systemAddress;
         USE_GAS_LEFT = _useGasLeft;
@@ -193,7 +209,8 @@ contract EEZL2 is EEZBase {
     // ──────────────────────────────────────────────
 
     /// @notice Loads execution entries and static entries into the execution table (system only)
-    /// @dev Clears previous entries and stores new ones. Entries must be consumed in the same block.
+    /// @dev Replaces active bounds and overwrites slots without deleting the old table.
+    ///      Retained inactive slots are never searched. Entries must be consumed in the same block.
     ///      Payable: msg.value adds pooled system funding. Table replacement retains unused ETH;
     ///      no per-table ledger or per-load conservation check exists. The node/circuit must
     ///      reconcile inventory across partial consumption, replacement and reverted transfers.
@@ -211,7 +228,9 @@ contract EEZL2 is EEZBase {
     }
 
     /// @notice Internal: replaces the execution table and resets the consumption cursor
-    /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`
+    /// @dev Shared between `loadExecutionTable` and `executeIncomingCrossChainCall`.
+    ///      Reset cost is independent of the old table size. Overwriting a row may still clear
+    ///      shortened nested arrays/bytes. A reverting delivery restores rows, bounds and cursor.
     /// @param _entries Replacement execution entries in consumption order.
     /// @param _staticEntries Replacement pool of static entries pinned to execution cursors.
     function _loadExecutionTable(
@@ -220,15 +239,15 @@ contract EEZL2 is EEZBase {
     )
         internal
     {
-        delete entries;
-        delete staticEntries;
         entryIndex = 0;
+        entriesLength = _entries.length;
+        staticEntriesLength = _staticEntries.length;
 
         for (uint256 i = 0; i < _entries.length; i++) {
-            entries.push(_entries[i]);
+            entries[i] = _entries[i];
         }
         for (uint256 i = 0; i < _staticEntries.length; i++) {
-            staticEntries.push(_staticEntries[i]);
+            staticEntries[i] = _staticEntries[i];
         }
         lastLoadBlock = block.number;
         emit ExecutionTableLoaded(_entries, _staticEntries);
@@ -475,7 +494,7 @@ contract EEZL2 is EEZBase {
         view
         returns (uint256)
     {
-        uint256 queueLen = entries.length;
+        uint256 queueLen = entriesLength;
         for (uint256 i = startIndex; i < queueLen; i++) {
             if (entries[i].proxyEntryHash == crossChainCallHash) return i;
         }
@@ -678,7 +697,7 @@ contract EEZL2 is EEZBase {
         }
 
         // Top-level: same-block pool, matched by hash and the current  entry cursor.
-        for (uint256 i = 0; i < staticEntries.length; i++) {
+        for (uint256 i = 0; i < staticEntriesLength; i++) {
             StaticExecutionEntryL2 storage staticEntry = staticEntries[i];
             if (staticEntry.proxyEntryHash == crossChainCallHash && staticEntry.expectedEntryIndex == entryIndex) {
                 if (_resolveStaticEntry(
@@ -751,17 +770,6 @@ contract EEZL2 is EEZBase {
 
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
-    }
-
-    // ──────────────────────────────────────────────
-    //  Views
-    // ──────────────────────────────────────────────
-
-    /// @notice Recipient of ether swept from proxies (ether sent to a proxy address before deployment).
-    /// @dev On L2 this is `SYSTEM_ADDRESS` — same as the burn path in `executeCrossChainCall`.
-    /// @return SYSTEM_ADDRESS, which receives ether recovered during proxy deployment.
-    function RECOVERY_ADDRESS() external view returns (address) {
-        return SYSTEM_ADDRESS;
     }
 
     // ──────────────────────────────────────────────

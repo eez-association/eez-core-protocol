@@ -91,7 +91,7 @@ abstract contract BlobScenarioBase is Test {
             uint64 rid = rollups.registerRollup(address(manager), genesisRoot);
             require(rid == i, "chain id / rollup id mismatch");
             rollupManagers[i] = manager;
-            managers[i] = new EEZL2(i, SYSTEM_ADDRESS, false);
+            managers[i] = new EEZL2(i, SYSTEM_ADDRESS, false, SYSTEM_ADDRESS);
         }
         l2ChainCount = numL2s;
         vm.deal(SYSTEM_ADDRESS, 1_000_000 ether);

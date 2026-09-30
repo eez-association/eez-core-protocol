@@ -52,12 +52,12 @@ contract DeployEEZL1 is Script {
 }
 
 /// @title DeployManagerL2
-/// @notice Deploys EEZL2 for the given rollup ID / system address.
+/// @notice Deploys EEZL2 for the given rollup ID, system address and recovery recipient.
 /// Outputs: MANAGER_L2
 contract DeployManagerL2 is Script {
-    function run(uint64 rollupId, address systemAddress) external {
+    function run(uint64 rollupId, address systemAddress, address recoveryAddress) external {
         vm.startBroadcast();
-        EEZL2 manager = new EEZL2(rollupId, systemAddress, false);
+        EEZL2 manager = new EEZL2(rollupId, systemAddress, false, recoveryAddress);
         console.log("MANAGER_L2=%s", address(manager));
         vm.stopBroadcast();
     }

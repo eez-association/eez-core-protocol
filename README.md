@@ -25,6 +25,10 @@ forge test           # Run all tests
 forge fmt            # Format code
 ```
 
+## Deployment
+
+See [`deployment/README.md`](deployment/README.md) for parameterized L1/L2 deployment, rollup registration, and EEZ/Rollup upgrades.
+
 ## Documentation
 
 [`CLAUDE.md`](CLAUDE.md) is a condensed architecture reference (contracts, data types, key functions, execution flow, naming conventions). For depth:

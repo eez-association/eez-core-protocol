@@ -104,7 +104,7 @@ contract EEZL2CoverageTest is BaseL2 {
     function test_ExecuteCrossChainCall_EtherTransferFailed() public {
         // System address is a contract with no payable receive → transfer fails.
         RejectEther rejecter = new RejectEther();
-        EEZL2 mgr2 = new EEZL2(TEST_ROLLUP_ID, address(rejecter), false);
+        EEZL2 mgr2 = new EEZL2(TEST_ROLLUP_ID, address(rejecter), false, SYSTEM_ADDRESS);
         address proxy = mgr2.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
         bytes memory callData = abi.encodeCall(ViewTargetL2.setValue, (1));
 

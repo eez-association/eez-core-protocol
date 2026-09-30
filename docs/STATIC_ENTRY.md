@@ -1,4 +1,4 @@
-# Static Entry Specification (unified reentrant table + top-level `StaticExecutionEntry` pool)
+# Static Entry Specification
 
 This document specifies how **read-only cross-chain calls** (STATICCALLs) and **pre-verified
 reverting calls** resolve — every cross-chain interaction whose result is *looked up* from
@@ -10,7 +10,7 @@ There are **two homes**, split by execution context:
 |---|---|---|---|
 | REENTRANT static read, fired `_insideExecution()` | STATIC-kind `ExpectedL1ToL2Call` | the entry's unified `expectedL1ToL2Calls[]` table | `expectedL1toL2Hash == keccak256(crossChainCallHash, _rollingHash)`, with `isStatic = true` folded into `crossChainCallHash` |
 | REENTRANT call that reverts (caller catches with `try/catch`) | REVERTED-kind `ExpectedL1ToL2Call` (`success == false`) | same table | same key, with `isStatic = false` |
-| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedRoots` pin live (full scan); L2: `proxyEntryHash` alone |
+| TOP-LEVEL static read (including one that reverts) | `StaticExecutionEntry` | L1: `_transientStaticEntries` while a batch is mid-flight, else per-rollup `staticEntryQueue`; L2: the `staticEntries` pool | L1: `proxyEntryHash` + `destinationRollupId` + every `expectedRoots` pin live (full scan); L2: `proxyEntryHash` + `expectedEntryIndex == entryIndex` |
 | TOP-LEVEL state-changing call that reverts | normal `ExecutionEntry` with `success == false` | entry queue | see `EXECUTION_ENTRY_SPEC.md` — out of scope here |
 
 There is no separate lookup struct and no separate lookup key space: reentrant reads and
@@ -52,8 +52,8 @@ formula (`EEZBase.computeCrossChainCallHash` — `CORE_PROTOCOL_SPEC.md` §C.3),
 `isStatic = true` (a read keys DISTINCTLY from a state-changing call), `value = 0`,
 source = the proxy's caller on this chain's rollup ID, target = the proxy's
 (`originalAddress`, `originalRollupId`), and the original calldata. Static keys fold
-`callGas = 0` on both chains — a read never keys on gas, even on an L2 with
-`USE_GAS_LEFT`. It then branches on `_insideExecution()`:
+`callGas = 0` on L1. On L2 they fold `uint64(gasleft())` sampled after proxy
+validation/storage reads when `USE_GAS_LEFT`, otherwise `0`. It then branches on `_insideExecution()`:
 **inside** → the active entry's unified reentrant table (§4.1); **outside** → the top-level
 `StaticExecutionEntry` pool (§4.2).
 
@@ -68,7 +68,7 @@ source = the proxy's caller on this chain's rollup ID, target = the proxy's
 /// plain SUCCESS, read-only STATIC, and try/catch'd REVERTED (`!success`).
 struct ExpectedL1ToL2Call {
     bytes32 expectedL1toL2Hash;          // position key: keccak256(crossChainCallHash, expectedRollingHash)
-    L2ToL1Call[] l2ToL1Calls;            // this frame's OWN sub-calls, run to completion
+    L2ToL1Call[] l2ToL1Calls;            // this frame's OWN sub-calls, processed in order (subject to gas checks)
     bytes32 revertedOrStaticRollingHash; // expected sub-call hash, checked for STATIC / REVERTED; must be 0 for SUCCESS
     bool success;                        // whether resolution returns or reverts
     bytes returnData;                    // returned on success / reverted-with when !success
@@ -116,20 +116,20 @@ expectedL1toL2Hash = keccak256(abi.encodePacked(crossChainCallHash, expectedRoll
 
 where `expectedRollingHash` is the live `_rollingHash` at the instant the reentrant call (or
 read) fires. The rolling hash is a chain over every prior call result and nesting boundary, so
-it **uniquely pins the execution point** — no cursor coordinates, no context index:
+it pins the recorded hash context, rather than a unique occurrence or local state version:
 
-- Two textually identical calls at different points key differently (different `_rollingHash`).
+- Identical calls key differently when their `_rollingHash` values differ. Local writes with no intervening fold do not change the key.
 - A read and a state-changing call with identical params key differently (`isStatic` in the
   call hash).
 - A reverted sub-execution reuses the host table for its own reentrant calls; its rows can't
   collide with host-level rows because their keys embed the sub-execution's interior
   `_rollingHash` values.
 
-Matching walks **strictly forward** from the reentrant cursor `_lastL1ToL2CallConsumed`; the
-first key match is the row. A resolved CALL advances the cursor past its row; a static read
-cannot (it's a `view` frame) — it is *position-pinned* rather than *consumed*, so the same
-STATIC row satisfies repeated identical reads fired at the same hash point, and it still only
-matches at or after the cursor.
+Matching scans forward from the reentrant cursor `_lastL1ToL2CallConsumed`. A CALL resolves
+the first key match and advances the cursor past it. A STATIC read also checks each
+candidate's callback-result hash and skips a mismatch. It cannot advance the cursor
+(it is a `view` frame), so later reads can reuse any valid row at or after that cursor,
+including an earlier candidate skipped by a previous read.
 
 Completeness is enforced by the rolling hash, not by a table-length check: the unified table
 mixes success rows with static/reverted ones, so unused rows are inert, while a *skipped*
@@ -149,7 +149,7 @@ success row omits its NESTED frame and diverges the entry hash.
 2. Compute the key from the static-kind `crossChainCallHash` + live `_rollingHash`; scan
    the active table forward from `_lastL1ToL2CallConsumed`.
 3. On match → `_resolveStaticEntry(l2ToL1Calls, revertedOrStaticRollingHash, success,
-   returnData)` (§4.3). On no match → `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)`
+   returnData)` (§4.3); if it returns false, continue scanning. On no match → `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)`
    on L2 (a `view` frame cannot fold a
    `CALL_NOT_FOUND` divergence, so it reverts directly — unlike a reentrant CALL no-match,
    which folds the tag and returns empty so the entry fails later at `RollingHashMismatch`).
@@ -176,7 +176,7 @@ lookup, and is specified in `EXECUTION_ENTRY_SPEC.md`.
 
 `staticCrossChainCall`'s pool branch. Source selection on L1:
 
-- While a batch is mid-flight (`_transientEntries.length != 0`): **only** the batch's
+- While a batch is mid-flight (`_transientEntriesLength != 0`): **only** the batch's
   transient pool `_transientStaticEntries` — the transient phase is self-contained (see
   `docs/CAVEATS.md`).
 - Otherwise: the calling proxy's rollup queue,
@@ -193,25 +193,42 @@ staticEntry.proxyEntryHash == crossChainCallHash
 The standard [same-block restriction](CORE_PROTOCOL_SPEC.md#g4-same-block-restriction) applies.
 Every batch verifying the rollup also replaces its static and mutable queues.
 
-On L2 the pool is the single `staticEntries` table (replaced wholesale by every
-`loadExecutionTable` / `executeIncomingCrossChainCall`), matched by `proxyEntryHash` alone.
+On L2, lookup scans `staticEntries[0..staticEntriesLength)` and matches
+`proxyEntryHash` plus `expectedEntryIndex == entryIndex`. Both load entry points
+replace the active mapping bounds and reset the mutable cursor.
+The scan restarts at zero for every read, but candidates must also pin the live mutable
+cursor. Successful entry consumption therefore allows same-key read → write → read
+with distinct cached results. Failed consumption restores the cursor with its state.
+Local writes that leave the cursor unchanged can be distinguished by sibling candidates
+whose callback-result hashes differ (§4.4). The same retry rule applies to nested reads
+at an unchanged host rolling hash. If incompatible candidates both validate, the first
+wins; builders must reject or restructure that ambiguity. Observed gas is not a general
+state-version discriminator.
 
-A top-level static read is a *lookup*: it resolves from the pool and never produces a
-destination-side delivery. The same treatment applies to an L1→L2 call that reverts on L2 and
-to one whose L1 frame is reverted afterwards — a signed prediction (return or revert data),
-nothing applied on L2, root unchanged (`CORE_PROTOCOL_SPEC.md` §C, L2 prover constraints).
+A top-level L1→L2 static read is a *lookup*: it resolves from the pool and never produces
+an L2 delivery. The same lookup treatment applies to an L1→L2 call that reverts on L2
+and to one whose L1 frame is reverted afterwards — a signed prediction (return or revert
+data), nothing applied on L2, root unchanged (`CORE_PROTOCOL_SPEC.md` §A.1, L2 prover
+constraints). An L2→L1 top-level static read instead executes on L1 within the source
+transaction's zero-hash L2Tx entry.
 
-### 4.3 `_resolveStaticEntry` / `_processNStaticCalls` (shared body)
+### 4.3 `_resolveStaticEntry` / static call processing
+
+The processor is `_processStaticL2ToL1Calls` on L1 and `_processStaticIncomingCalls` on L2. The pseudocode below uses the L1 name.
 
 Both the reentrant STATIC branch and the top-level pool resolve through `_resolveStaticEntry`:
 
 ```
-require _processNStaticCalls(calls) == rollingHash   // else RollingHashMismatch
+if _processStaticL2ToL1Calls(calls) != rollingHash: return false
 if (!success) revert(returnData)
-return returnData
+return true // caller returns this row's cached returnData
 ```
 
-`_processNStaticCalls` runs the sub-call array flatly in **static context**:
+A false result continues the scan in the current lookup window. Exhaustion reports
+`ExecutionNotFound` on L1 or `EntryNotFound(hash, callGas)` on L2. A matching cached
+revert is terminal, and sub-call validation errors still revert immediately.
+
+`_processStaticL2ToL1Calls` runs the sub-call array flatly in **static context**:
 
 - Each sub-call is dispatched `sourceProxy.staticcall(executeOnBehalf(target, cc.gas, data))` —
   read-only, no value, reverts on any state write in the target.
@@ -228,26 +245,119 @@ return returnData
 - Every sub-call must be marked `isStatic` with `value == 0` — dispatch is read-only whatever
   the fields say, and the untagged hash folds neither, so a mismatch reverts (`NonStaticSubCall`
   / `StaticCallWithValue`) instead of silently executing a proven state-changing call read-only.
-- No `revertNextNCalls` handling — nothing mutates state, so there is nothing to force-revert; `== 0` on static sub-calls is a prover constraint.
+- `revertNextNCalls == 0` is both a prover constraint and a runtime requirement (`StaticCallWithRevertSpan`).
+- After resolving the already-deployed proxy and encoding the forwarding payload, a nonzero cap is checked by `_hasEnoughCallGas`; shortage reverts `InsufficientCallGas(uint64 callGas)`. Zero cap bypasses the estimate. The exclusions in CORE §B.1 apply.
 
 A naturally-reverting *sub-call* is not special: the STATICCALL returns `(false, retData)` and
 the untagged hash captures it. The entry-level `success == false` is for the *whole read*
 reverting toward its caller.
 
+
+### 4.4 Local writes between identical static reads
+
+Suppose the remote `quote()` calls back to the reader's local `rate()` and returns
+that value directly. A single reader invocation performs:
+
+```solidity
+rate = 1;
+quoteAtRate1 = remoteProxy.quote(); // must equal 1
+rate = 2;
+quoteAtRate2 = remoteProxy.quote(); // must equal 2
+rate = 1;
+quoteAfterResetToRate1 = remoteProxy.quote(); // must equal 1
+```
+
+The local writes occur outside the static calls. They need not change the lookup key,
+root pins, entry cursor or host rolling hash. Supply two candidates, in this order:
+
+| Candidate | Callback array | Expected callback-result hash | Cached outcome |
+| --- | --- | --- | --- |
+| A | STATICCALL the reader's `rate()`, sourced from the remote quote contract | `keccak256(abi.encodePacked(bytes32(0), true, abi.encode(uint256(1))))` | `success = true`, `abi.encode(uint256(1))` |
+| B | Same callback | `keccak256(abi.encodePacked(bytes32(0), true, abi.encode(uint256(2))))` | `success = true`, `abi.encode(uint256(2))` |
+
+Both candidates have the same lookup context. The first read selects A. The second
+read evaluates A, gets callback result 2, rejects A's hash, then evaluates and selects B.
+The third read selects A again. The scan starts from the normal lookup start on every
+read; it never remembers the last successful static candidate.
+
+The four E2Es have local Anvil coverage and are excluded from automatic network
+suites pending live validation. See the [runner status note](../script/e2e/README.md).
+
+This covers four execution paths:
+
+| Resolver path | Shared candidate context | E2E scenario |
+| --- | --- | --- |
+| L1 top-level | `proxyEntryHash`, `destinationRollupId`, live `expectedRoots` | [staticLocalWrite](../script/e2e/static/L1_to_L2/staticLocalWrite/E2EStaticLocalWrite.s.sol) |
+| L2 top-level | `proxyEntryHash`, `expectedEntryIndex = 0` | [staticLocalWriteL2](../script/e2e/static/L2_to_L1/staticLocalWriteL2/E2EStaticLocalWriteL2.s.sol) |
+| L1 nested | `expectedL1toL2Hash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL1](../script/e2e/static/L2_to_L1/nestedStaticLocalWriteL1/E2ENestedStaticLocalWriteL1.s.sol) |
+| L2 nested | `expectedOutgoingHash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL2](../script/e2e/static/L1_to_L2/nestedStaticLocalWriteL2/E2ENestedStaticLocalWriteL2.s.sol) |
+
+#### Builder and prover handling
+
+1. Simulate the full source transaction, including direct local writes. Keep the real
+   caller, calldata, static flag, gas-key mode and frame boundaries for each read.
+2. Preserve distinct static alternatives under the same key. Do not deduplicate solely
+   by `proxyEntryHash` or the nested position key. Identical complete rows may be reused.
+3. For each alternative, record its ordered callback array, callback success/revert
+   bytes, untagged callback-result hash, and the remote read's own success/return or
+   revert bytes. Prove that outcome against the applicable remote state and callbacks.
+4. Keep every required candidate in the same valid lookup window: current root pins
+   on L1, the live entry cursor on L2, or indices at/after the nested cursor. Do not
+   insert a mutable consumption or change the host hash to distinguish these reads.
+5. Represent only the logical cross-chain frames on the producer chain. Candidate
+   validation retries are local replay checks, not additional logical remote calls or
+   deliveries. In the nested E2Es, one `reader.run()` frame owns all three quotes.
+   On the quote chain, the three real quote executions have successive `CALL_BEGIN`
+   hashes, so their callback lookup rows are keyed to those separate host positions.
+6. Budget gas for every attempted candidate and all its callbacks. Attempts can change
+   remaining gas and access warmth even though they cannot write application state.
+   Gas-sensitive callbacks require simulation of those effects too.
+
+For top-level L1→L2, obtain the quote results by read-only simulation on L2 with the
+source trace's callback results; do not invent an L2 delivery or root transition.
+For top-level L2→L1, execute all three real quotes in the transaction's one L1 L2Tx
+entry. Nested reads stay within the original mutable frame on both chains.
+
+The callback hash is a validation predicate, not a new globally unique key. Two
+candidates with incompatible outcomes that both validate remain ambiguous: the first
+wins. Empty callback arrays all hash to zero. A builder must reject or restructure
+such cases rather than relying on row consumption, occurrence counts or table reloads
+between reads.
+
+#### Retry outcomes
+
+| Result while examining a candidate | Action |
+| --- | --- |
+| Lookup key/context does not match | Skip without executing its callbacks. |
+| Callback-result hash differs | `_resolveStaticEntry` returns false; try the next candidate. |
+| Hash matches and `success == true` | Return this candidate's cached `returnData`. |
+| Hash matches and `success == false` | Revert with this candidate's cached `returnData`; do not try later candidates. |
+| Malformed static sub-call, missing source proxy, or insufficient-gas preflight | Revert immediately with the existing validation error. |
+| All candidates exhausted | `ExecutionNotFound()` on L1; `EntryNotFound(crossChainCallHash, callGas)` on L2. |
+
+A callback's own natural revert is folded as `(false, revertData)` into the callback
+hash; it is not automatically a candidate-validation error. Mutable entry and mutable
+reentrant hash mismatches retain their existing `RollingHashMismatch` behavior.
+
+The four E2Es use the local runner's accepting proof fixture. They check actual
+execution, table content and frame mapping; they do not establish production circuit
+acceptance. Commands and expected call counts are in the
+[E2E authoring guide](../script/e2e/BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
+
 ---
 
-## 5. Per-frame sub-arrays (no shared partition)
+## 5. Per-frame sub-arrays
 
 Every reentrant-table row and every static entry carries its **own** sub-call array, run to
-completion by its resolver:
+completion by its resolver unless a revert or the mutable processor's gas-shortage return interrupts it:
 
-- STATIC rows / static entries: run flatly by `_processNStaticCalls` (untagged hash).
+- STATIC rows / static entries: run flatly by `_processStaticL2ToL1Calls` (untagged hash).
 - REVERTED rows: run by `_processL2ToL1Calls` as a mini-entry (tagged schema, may itself contain
   reentrant calls — resolved from the host table — and `revertNextNCalls` spans).
 
 There is no global flat-call cursor and no `callCount` partition: the entry's `l2ToL1Calls[]`
 holds only its TOP-LEVEL calls, and each frame's completeness is structural (the resolver
-processes the whole array it was handed).
+walks its own array; a mutable gas shortage stops only that array and folds tag 6).
 
 ---
 
@@ -294,13 +404,13 @@ static entries flow to the persistent `staticEntryQueue`s.
 
 ## 7. L1 / L2 differences
 
-- **Structs**: L2's `StaticExecutionEntry` drops `expectedRoots` and
+- **Structs**: L2's `StaticExecutionEntryL2` adds `expectedEntryIndex` and drops `expectedRoots` and
   `destinationRollupId` (single rollup, no roots); its reentrant row is
   `ExpectedOutgoingCrossChainCall` with `expectedOutgoingHash` / `incomingCalls` (same layout,
   self-relative names). The key helper (`_computeExpectedL1toL2Hash`) and the untagged
   accumulator (`_rollingHashStaticResult`) are shared in `EEZBase`.
-- **Pool**: L1 selects transient-vs-persistent by `_transientEntries.length` and matches with
-  destination + pins; L2 scans the one `staticEntries` table by hash alone.
+- **Pool**: L1 selects transient-vs-persistent by `_transientEntriesLength` and matches with
+  destination + pins; L2 scans the one `staticEntries` table by hash and live `entryIndex`.
 - **Call-hash source side**: the static key folds `sourceRollupId = MAINNET_ROLLUP_ID` on L1
   and `= ROLLUP_ID` on L2 (the reader lives on this chain), `value = 0`, and `callGas = 0` on L1;
   on L2 `callGas` follows the outgoing policy — `gasleft()` sampled after proxy validation when
@@ -323,9 +433,11 @@ static entries flow to the persistent `staticEntryQueue`s.
 - A static read never mutates: STATICCALL dispatch, untagged hash, no cursor advance, no
   proxy auto-creation (`StaticCallProxyNotDeployed` on a codeless proxy), no
   `revertNextNCalls`.
-- STATIC and REVERTED sub-arrays are verified against `revertedOrStaticRollingHash` (rows) /
-  `rollingHash` (static entries); the untagged accumulator seeds at `bytes32(0)`, so an empty
-  sub-array requires an expected hash of `0`.
+- STATIC rows/entries use the untagged local accumulator seeded at `bytes32(0)`: an empty
+  static array requires expected hash `0`.
+- REVERTED mutable rows use the tagged host accumulator after `NESTED_BEGIN`. With no
+  sub-calls, their expected hash is `keccak256(abi.encodePacked(hostHash, uint8(3), callHash))`,
+  generally nonzero.
 - STATIC and CALL kinds can never match each other's keys — `crossChainCallHash` folds
   `isStatic`.
 - Matching is strictly forward from the reentrant cursor; a CALL consumes its row (cursor
@@ -336,10 +448,53 @@ static entries flow to the persistent `staticEntryQueue`s.
   entry fails at its rolling-hash check); a static no-match reverts immediately, in both
   branches — `ExecutionNotFound` on L1, `EntryNotFound(hash, callGas)` on L2.
 - L1 top-level match = `proxyEntryHash` + `destinationRollupId` + all pins live; full-scan
-  skip semantics. Every re-verify of the rollup wipes its `staticEntryQueue`.
+  skip semantics. Every re-verify of the rollup resets `staticEntryQueueIndex` to zero without deleting `staticEntryQueue` mapping entries. Publishing overwrites slots from index zero; lookups scan only below the active bound.
 - Validation (L1): pins strictly increasing and in-batch; `destinationRollupId` ∈ pins;
   every sub-call source ∈ pins; whole static entries folded into `publicInputsHash`;
   `immediateStaticEntryCount ≤ staticEntries.length`, and a non-zero count requires the
   meta hook to actually fire (≥1 non-L2Tx immediate entry) — enforced after the immediate
   L2Tx run (`ImmediateStaticEntriesWithoutImmediateEntries`), since the transient static
   pool is only reachable through the hook — see §6.
+
+### L2 cursor pins
+
+`StaticExecutionEntryL2.expectedEntryIndex` must equal the live `entryIndex` when the read fires. A mismatching candidate is skipped. Static reads do not advance the cursor. Consuming mutable entry `j` leaves the cursor at `j + 1`; failed consumption rolls it back. Loading a new table replaces the active prefixes of both mappings and resets the cursor to zero. Static lookup is bounded by `staticEntriesLength`, so retained inactive rows cannot match. The builder must use the live cursor, not a count of successful calls. This distinguishes top-level reads across successful consumptions, but does not version local writes that leave the cursor unchanged. Nested lookup remains keyed by the rolling hash.
+
+### Static reads that still share one lookup context
+
+The local-write example in §4.4 works because the callback results distinguish the
+candidates. With identical call inputs, relevant state, callbacks and execution
+context, deterministic execution must produce the same result; conflicting cached
+outcomes cannot both be correct.
+
+A dependency can nevertheless change without changing the lookup key or callback
+hash. For example, `return gasleft() < 400_000 ? 1 : 2` produces different answers
+under different budgets. In gas-independent mode, two rows with empty callback
+arrays share both the call key and callback hash zero. The first matching row wins.
+This is an [accepted support limit](CAVEATS.md): builders must reject or restructure
+traces whose required outcomes cannot be selected.
+
+Candidate retries spend gas even when results are gas-insensitive. A stale candidate
+can consume the budget needed by the correct one. Mutable calls also have a separate
+retry limit: an enclosing revert restores their hash/cursor, and an identical retry
+selects the first matching row without trying alternatives on a hash mismatch.
+[EEZExpressiveness tests](../test/EEZExpressiveness.t.sol) cover these cases and the
+supported static revert/local-write/retry case.
+
+### Other static-read requirements, with examples
+
+These are validity and execution prerequisites, in addition to candidate validation above.
+
+| Case | Example and current behavior |
+| --- | --- |
+| Cached dependencies changed between transactions | Tx A prepares a callback to `rate() = 1`; another transaction changes it to 2; Tx B reuses the old row. Refresh the table when this invalidates its results. Reuse across transactions is allowed while results and lookup contexts remain valid within the load/verification block. |
+| Table is from an earlier block | Load/verify in block N, then read in N+1: the top-level same-block gate rejects it even if application state is unchanged. Load/verify again. |
+| Wrong cursor, root pins, call key or lookup window | L2 row expects cursor 1 while the live cursor is 0; L1 row pins R0 while the live root is R1; or a nested row lies before the forward cursor. Such rows do not match; without another matching row the read reverts. Under `USE_GAS_LEFT`, a different sampled gas value also changes the L2 call key. |
+| Wrong L1 table scope or proven rollup set | A read in the meta-hook window expects a row only in an older persistent pool, or a nested read targets a rollup absent from the active entry's proven set. Supply the row in the active pool and include the required rollup; there is no fallback to the older pool. |
+| Successful mutation during a static callback | A callback attempts `rate = 2`, emits a log or creates a contract: EVM static execution prevents it. An expected failed callback can still be represented; successful mutation cannot. |
+| Callback marked mutable or carrying ETH | A static row supplies `isStatic = false` or `value = 1`: the manager rejects it with `NonStaticSubCall` or `StaticCallWithValue`. Static callbacks must be read-only and zero-value. |
+| Rollback span inside a static row | A callback has `revertNextNCalls = 1`: rejected with `StaticCallWithRevertSpan`. An ordinary reverting read or callback is supported; mutable rollback spans are not part of static execution. |
+| Missing callback source proxy | The read would need to deploy its callback's source proxy: rejected with `StaticCallProxyNotDeployed`. Predeploy it before the static read. |
+| Insufficient execution gas | The supplied transaction cannot meet a callback's nonzero gas-cap preflight: `InsufficientCallGas`. A zero cap skips that estimate, not EVM gas limits; it does not guarantee completion. |
+
+Supply all required candidates for within-transaction reads. A gas-dependent key is not a general state-version guarantee.

@@ -75,7 +75,7 @@ abstract contract IntegrationBase is Test {
         }
 
         // ── L2 infrastructure ──
-        managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS, false);
+        managerL2 = new EEZL2(L2_ROLLUP_ID, SYSTEM_ADDRESS, false, SYSTEM_ADDRESS);
     }
 
     /// @notice Reads `rollups[rollupId].root`.

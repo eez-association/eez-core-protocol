@@ -11,7 +11,7 @@ import {CrossChainCall} from "../src/interfaces/IEEZL2.sol";
 import {ExecutionEntry, L2ToL1Call} from "../src/interfaces/IEEZ.sol";
 
 contract CallGasBudgetHarness is EEZL2 {
-    constructor() EEZL2(2, address(0x1234), false) {}
+    constructor() EEZL2(2, address(0x1234), false, address(0x1234)) {}
 
     function probe(
         address proxy,
