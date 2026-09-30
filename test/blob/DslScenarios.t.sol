@@ -83,8 +83,6 @@ contract DslScenarios is DslScenarioBase {
 
     /// @notice A failing frame whose sub-call ALSO fails: both roll back, and the
     ///         frame's terminal revert leaves the host hash consistent.
-    ///         (A committed sub-call inside a returnFail frame is an unsupported v1
-    ///         shape — see ScenarioStore — and is rejected at parse time.)
     function test_Dsl_FailedFrameWithFailedChild() public {
         runDsl(string.concat("L1 call L2_A\n", "L2_A call L2_B\n", "L2_B returnFail\n", "L2_A returnFail\n"));
         assertEq(dslTarget[L2A].execCount(), 0);
@@ -254,5 +252,53 @@ contract DslScenarios is DslScenarioBase {
         for (uint256 i = 0; i < want.length; i++) {
             assertTrue(Msg.eq(got[i], want[i]), string.concat("message mismatch at index ", vm.toString(i)));
         }
+    }
+
+    function test_Dsl_DeepStaticCallbacks() public {
+        runDsl(
+            "L1 staticCall L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\nL2_A staticCall L1\nreturn\nreturn\nreturn\nreturn\n"
+        );
+    }
+
+    function test_Dsl_ReentrantStaticCallbacks() public {
+        runDsl(
+            "L1 call L2_A\nL2_A staticCall L1\nL1 staticCall L2_A\nL2_A staticCall L1\nreturn\nreturn\nreturn\nreturn\n"
+        );
+    }
+
+    function test_Dsl_StaticReadThroughThirdChain() public {
+        runDsl("L1 staticCall L2_A\nL2_A staticCall L2_B\nL2_B staticCall L1\nreturn\nreturn\nreturn\n");
+    }
+
+    function test_Dsl_L2StaticCallbacksWithRevert() public {
+        runDsl("L2_A staticCall L1\nL1 staticCall L2_A\nL2_A staticCall L1\nreturnFail\nreturn\nreturn\n");
+    }
+
+    function test_Dsl_SuccessfulChildInsideFailedParent() public {
+        runDsl("L1 call L2_A\nL2_A call L2_B\nreturn\nreturnFail\n");
+    }
+
+    function test_Dsl_SuccessfulCallbackInsideFailedParent() public {
+        runDsl("L2_A call L1\nL1 call L2_A\nreturn\nreturnFail\n");
+    }
+
+    function test_Dsl_NestedRollbackSameStart() public {
+        runDsl(
+            "L2_A snapshot\nsnapshot\nL2_A call L1\nreturn\nrevert\nL2_A call L1\nreturn\nrevert\nL2_A call L1\nreturn\n"
+        );
+    }
+
+    function test_Dsl_NestedRollbackInsideFrame() public {
+        runDsl(
+            "L1 call L2_A\nsnapshot\nL2_A call L1\nreturn\nsnapshot\nL2_A call L1\nreturn\nrevert\nL2_A call L1\nreturn\nrevert\nreturn\n"
+        );
+    }
+
+    function test_Dsl_NestedRollbackAcrossChains() public {
+        runDsl("L2_A snapshot\nL2_A call L1\nsnapshot\nL1 call L2_B\nreturn\nrevert\nreturn\nrevert\n");
+    }
+
+    function test_Dsl_StaticAfterRolledBackConsumption() public {
+        runDsl("L2_A snapshot\nL2_A call L1\nreturn\nrevert\nL2_A staticCall L1\nreturn\n");
     }
 }

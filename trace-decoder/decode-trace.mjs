@@ -14,27 +14,17 @@
 // (the contract receiving executeCrossChainCall). Env vars with
 // 0x addresses are auto-picked up as labels.
 //
-// ─── PORTING STATUS (feature/multi-prover-flatten) ────────────────────
-// This decoder was authored against main's pre-flatten data model.
-// Surface renames have been applied (Rollups → EEZ, ManagerL2 → EEZL2,
-// postBatch → postAndVerifyBatch). The deep walker logic still assumes
-// the old shape and WILL NOT produce correct cross-chain joins on this
-// branch:
-//   - L1↔L2 matching uses `actionHash`; our model emits `proxyEntryHash`
-//     / `crossChainCallHash` via different events.
-//   - `ActionType` enum decoding (CALL/RESULT/L2TX/REVERT/REVERT_CONTINUE)
-//     has no analogue here — we use flat CrossChainCall[] + NestedAction[]
-//     with a rolling-hash accumulator.
-//   - `postBatch(entries, blobCount, callData, proof)` calldata parser
-//     no longer matches `postAndVerifyBatch(ProofSystemBatchPerVerificationEntries)`.
-// Treat this file as a starting point for a flatten-aware decoder, not
-// a working tool. The shell wrapper `script/e2e/shared/decode-trace.sh`
-// covers most debug needs in the meantime via `cast run --la`.
-// ───────────────────────────────────────────────────────────────────────
+// Current EEZ/EEZL2 ABIs come from local artifacts. Top-level event lists use
+// committed receipt logs; call-tree logs are explicitly marked as trace evidence.
+// Cross-chain hash matches are candidates, not occurrence identities. Different gas
+// policies can prevent a match. Batch callData is application-defined: the optional
+// block-reference decoder recognizes abi.encode(uint256[], bytes[]) only. Empty or
+// other payloads, and internal posts through wrappers, leave block joins unresolved.
 
 import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ══════════════════════════════════════════════
 //  Colors (disabled when piped)
@@ -92,14 +82,11 @@ function parseArgs() {
 }
 
 // Walk callTracer tree to find the contract that receives executeCrossChainCall
-function discoverSystemContracts(trace, opts) {
+function discoverSystemContracts(trace, opts, chain) {
   function walk(node) {
     if (node._funcName === "executeCrossChainCall" && node.to) {
-      // The contract receiving executeCrossChainCall is Rollups (L1) or ManagerL2 (L2)
-      if (!opts.rollups) opts.rollups = node.to;
-      else if (node.to.toLowerCase() !== opts.rollups.toLowerCase() && !opts.managerL2) {
-        opts.managerL2 = node.to;
-      }
+      const key = chain === "L2" ? "managerL2" : "rollups";
+      if (!opts[key]) opts[key] = node.to;
     }
     if (node._funcName === "executeIncomingCrossChainCall" && node.to) {
       if (!opts.managerL2) opts.managerL2 = node.to;
@@ -267,6 +254,30 @@ function decodeLog(log) {
   return null;
 }
 
+function decodeEventLog(log, provenance, receipt = null, reverted = false) {
+  const parsed = decodeLog(log);
+  return {
+    name: parsed?.name ?? null,
+    args: parsed?.args,
+    fragment: parsed?.fragment,
+    address: log.address ?? null,
+    topics: log.topics ?? [],
+    data: log.data ?? "0x",
+    transactionHash: log.transactionHash ?? receipt?.hash ?? null,
+    blockHash: log.blockHash ?? receipt?.blockHash ?? null,
+    blockNumber: log.blockNumber ?? receipt?.blockNumber ?? null,
+    logIndex: log.index ?? log.logIndex ?? null,
+    provenance,
+    committed: provenance === "receipt" ? true : (reverted ? false : null),
+  };
+}
+
+function decodeReceiptLogs(receipt) {
+  if (!receipt || Number(receipt.status) !== 1) return [];
+  return (receipt.logs || []).filter(log => !log.removed)
+    .map(log => decodeEventLog(log, "receipt", receipt));
+}
+
 // ══════════════════════════════════════════════
 //  Label Registry
 // ══════════════════════════════════════════════
@@ -363,40 +374,40 @@ async function getCallTrace(provider, txHash) {
   ]);
 }
 
-// Cache for proxy target info: proxyAddr → { originalAddress, originalRollupId }
-const proxyTargetCache = new Map();
-const PROXY_IFACE = new ethers.Interface([
-  "function originalAddress() view returns (address)",
-  "function originalRollupId() view returns (uint64)",
+// Proxy identity lives in the manager registry, not in getters on the proxy.
+const proxyTargetCache = new WeakMap();
+const PROXY_REGISTRY_IFACE = new ethers.Interface([
+  "function authorizedProxies(address) view returns (bool isProxy, address originalAddress, uint64 originalRollupId)",
 ]);
 
-async function resolveProxyTargetFromChain(proxyAddr, provider) {
-  const lo = proxyAddr.toLowerCase();
-  if (proxyTargetCache.has(lo)) return proxyTargetCache.get(lo);
+async function resolveProxyTargetFromChain(proxyAddr, provider, manager, blockTag) {
+  if (!manager || blockTag == null) return null;
+  let cache = proxyTargetCache.get(provider);
+  if (!cache) proxyTargetCache.set(provider, cache = new Map());
+  const key = `${manager.toLowerCase()}:${proxyAddr.toLowerCase()}:${blockTag}`;
+  if (cache.has(key)) return cache.get(key);
   try {
-    const [addrResult, ridResult] = await Promise.all([
-      provider.call({ to: proxyAddr, data: PROXY_IFACE.encodeFunctionData("originalAddress") }),
-      provider.call({ to: proxyAddr, data: PROXY_IFACE.encodeFunctionData("originalRollupId") }),
-    ]);
-    const originalAddress = PROXY_IFACE.decodeFunctionResult("originalAddress", addrResult)[0];
-    const originalRollupId = Number(PROXY_IFACE.decodeFunctionResult("originalRollupId", ridResult)[0]);
-    const info = { originalAddress, originalRollupId };
-    proxyTargetCache.set(lo, info);
+    const result = await provider.call({
+      to: manager,
+      data: PROXY_REGISTRY_IFACE.encodeFunctionData("authorizedProxies", [proxyAddr]),
+      blockTag,
+    });
+    const [isProxy, originalAddress, originalRollupId] =
+      PROXY_REGISTRY_IFACE.decodeFunctionResult("authorizedProxies", result);
+    const info = isProxy ? { originalAddress, originalRollupId: originalRollupId.toString() } : null;
+    cache.set(key, info);
     return info;
   } catch {
-    proxyTargetCache.set(lo, null);
     return null;
   }
 }
 
 async function detectChain(txHash, l1, l2) {
   try {
-    await l1.getTransaction(txHash);
-    return "L1";
+    if (await l1.getTransaction(txHash)) return "L1";
   } catch {}
   try {
-    await l2.getTransaction(txHash);
-    return "L2";
+    if (await l2.getTransaction(txHash)) return "L2";
   } catch {}
   return null;
 }
@@ -406,43 +417,59 @@ async function detectChain(txHash, l1, l2) {
 //  (ported from E2EBase.sh / decode-trace.sh)
 // ══════════════════════════════════════════════
 
-// BatchPosted event topic (precomputed)
-const BATCH_POSTED_TOPIC = "0x2f482312f12dceb86aac9ef0e0e1d9421ac62910326b3d50695d63117321b520";
+const BATCH_POSTED_IFACE = new ethers.Interface([
+  "event BatchPosted(bytes32 sharedPublicInput, uint64[] rollupIds)",
+]);
+const BATCH_POSTED_TOPIC = BATCH_POSTED_IFACE.getEvent("BatchPosted").topicHash;
 const L2_CONTEXT = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
-// Extract L2 block numbers from a postBatch tx's callData.
-// postBatch 3rd arg is bytes callData = abi.encode(uint256[] blockNumbers, bytes[] blockData)
-async function extractL2BlocksFromTx(txHash, provider) {
+// Optional application convention, not a core protocol field or delivery proof.
+// Only direct posts to the confirmed emitting manager are decoded here.
+async function extractL2BlocksFromTx(txHash, provider, manager) {
   try {
     const tx = await provider.getTransaction(txHash);
-    if (!tx) return [];
+    if (!tx || !manager || tx.to?.toLowerCase() !== manager.toLowerCase()) return [];
     const parsed = decodeFunctionCall(tx.data);
     if (!parsed || parsed.name !== "postAndVerifyBatch") return [];
-    const callDataBytes = parsed.args[2]; // 3rd param: bytes callData
+    const callDataBytes = parsed.args[0].callData;
     if (!callDataBytes || callDataBytes === "0x") return [];
     const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
       ["uint256[]", "bytes[]"],
       callDataBytes
     );
-    return decoded[0].map((n) => Number(n));
+    if (decoded[0].length !== decoded[1].length) return [];
+    return [...new Set(decoded[0].map((n) => ethers.getNumber(n)))];
   } catch {
     return [];
   }
 }
 
-// L1 → L2: find L2 blocks from an L1 block (look for BatchPosted logs)
-async function findL2BlocksFromL1(l1Block, opts, l1) {
-  const logs = await l1.getLogs({
-    fromBlock: l1Block,
-    toBlock: l1Block,
-    address: opts.rollups,
-    topics: [BATCH_POSTED_TOPIC],
+// Validate the emitter and payload, as well as topic0, before interpreting a post.
+async function getBatchLogs(fromBlock, toBlock, opts, provider) {
+  if (!opts.rollups) return [];
+  const logs = await provider.getLogs({
+    fromBlock, toBlock, address: opts.rollups, topics: [BATCH_POSTED_TOPIC],
   });
+  return logs.filter((log) => {
+    if (log.removed || log.address?.toLowerCase() !== opts.rollups.toLowerCase()) return false;
+    if (log.topics?.[0] !== BATCH_POSTED_TOPIC || !log.transactionHash) return false;
+    try {
+      return BATCH_POSTED_IFACE.parseLog(log) != null;
+    } catch {
+      return false;
+    }
+  });
+}
 
-  if (logs.length === 0) return { l2Blocks: [], batchTx: null };
-  const batchTx = logs[0].transactionHash;
-  const l2Blocks = await extractL2BlocksFromTx(batchTx, l1);
-  return { l2Blocks, batchTx };
+// Include every confirmed post in this block, not only the first transaction.
+async function findL2BlocksFromL1(l1Block, opts, l1) {
+  const logs = await getBatchLogs(l1Block, l1Block, opts, l1);
+  const batchTxs = [...new Set(logs.map((log) => log.transactionHash))];
+  const l2Blocks = new Set();
+  for (const txHash of batchTxs) {
+    for (const block of await extractL2BlocksFromTx(txHash, l1, opts.rollups)) l2Blocks.add(block);
+  }
+  return { l2Blocks: [...l2Blocks], batchTx: batchTxs[0] ?? null, batchTxs };
 }
 
 // L2 → L1: find the L1 batch block from an L2 block via L2Context contract.
@@ -463,19 +490,14 @@ async function findL1BlockFromL2(l2Block, l2) {
 
 // Search L1 blocks [from..to] for a BatchPosted tx referencing a specific L2 block.
 async function findBatchBlockByL2Ref(l2Block, l1From, l1To, opts, l1) {
-  const logs = await l1.getLogs({
-    fromBlock: l1From,
-    toBlock: l1To,
-    address: opts.rollups,
-    topics: [BATCH_POSTED_TOPIC],
-  });
+  const logs = await getBatchLogs(l1From, l1To, opts, l1);
 
   // Deduplicate by tx hash
   const seen = new Set();
   for (const log of logs) {
     if (seen.has(log.transactionHash)) continue;
     seen.add(log.transactionHash);
-    const l2Blocks = await extractL2BlocksFromTx(log.transactionHash, l1);
+    const l2Blocks = await extractL2BlocksFromTx(log.transactionHash, l1, opts.rollups);
     if (l2Blocks.includes(l2Block)) {
       return { l1Block: log.blockNumber, batchTx: log.transactionHash, l2Blocks };
     }
@@ -497,7 +519,10 @@ async function findL2ManagerTxs(l2Block, opts, l2) {
 //  Call tree enrichment
 // ══════════════════════════════════════════════
 
-async function enrichCallTree(node, provider, depth = 0) {
+async function enrichCallTree(node, provider, depth = 0, context = {}) {
+  const reverted = !!context.reverted || !!node.error || Number(context.receipt?.status) === 0;
+  const receiptLogs = context.receiptLogs ?? decodeReceiptLogs(context.receipt);
+  node._receiptLogs = receiptLogs;
   const addr = node.to?.toLowerCase() || "";
   node._label = label(node.to);
   node._depth = depth;
@@ -524,32 +549,24 @@ async function enrichCallTree(node, provider, depth = 0) {
     }
   }
 
-  // Decode logs
-  node._decodedLogs = (node.logs || []).map((log) => {
-    const parsed = decodeLog(log);
-    return parsed ? { name: parsed.name, args: parsed.args, fragment: parsed.fragment } : { raw: log };
-  });
+  // Trace logs may have been reverted; only receipt logs establish commitment.
+  node._decodedLogs = (node.logs || []).map(log => decodeEventLog(log, "trace", null, reverted));
 
-  // If this is a CrossChainProxy, resolve its target from ExecutionConsumed event in children
-  // The consumed action has destination (L2 target) and rollupId
-  if (node._label === "CrossChainProxy") {
-    for (const child of node.calls || []) {
-      const childLogs = collectAllLogs(child);
-      const consumed = childLogs.find((l) => l.name === "ExecutionConsumed");
-      if (consumed) {
-        const action = consumed.args?.action ?? consumed.args?.[1];
-        if (action) {
-          node._proxyTargetAddr = action[2]; // destination
-          node._proxyRollupId = Number(action[1]); // rollupId
-        }
-        break;
-      }
-    }
+  for (const child of node.calls || []) {
+    await enrichCallTree(child, provider, depth + 1, { ...context, receiptLogs, reverted });
   }
 
-  // Recurse
-  for (const child of node.calls || []) {
-    await enrichCallTree(child, provider, depth + 1);
+  if (node._label === "CrossChainProxy" && provider) {
+    const managerCall = (node.calls || []).find(child =>
+      child._funcName === "executeCrossChainCall" || child._funcName === "staticCrossChainCall");
+    if (managerCall) {
+      const info = await resolveProxyTargetFromChain(
+        node.to, provider, managerCall.to, context.receipt?.blockNumber);
+      if (info) {
+        node._proxyTargetAddr = info.originalAddress;
+        node._proxyRollupId = info.originalRollupId;
+      }
+    }
   }
 
   // Identify cross-chain boundaries
@@ -586,63 +603,6 @@ function trimHex(hex) {
   return hex.slice(0, 10) + "..." + hex.slice(-8);
 }
 
-// ActionType enum: 0=CALL, 1=RESULT, 2=L2TX, 3=REVERT, 4=REVERT_CONTINUE
-const ACTION_TYPES = ["CALL", "RESULT", "L2TX", "REVERT", "REVERT_CONTINUE"];
-
-// Format an Action struct from ExecutionConsumed event into a short summary
-// action = [actionType, rollupId, destination, value, data, failed, sourceAddress, sourceRollup, scope]
-function formatActionSummary(action, prefix) {
-  const actionType = ACTION_TYPES[Number(action[0])] || `type(${action[0]})`;
-  const rollupId = Number(action[1]);
-  const destination = action[2];
-  const value = BigInt(action[3]);
-  const data = action[4];
-  const failed = action[5];
-  const sourceAddress = action[6];
-  const sourceRollup = Number(action[7]);
-
-  if (actionType === "CALL") {
-    const destLabel = label(destination);
-    const selector = data?.length >= 10 ? data.slice(0, 10) : "?";
-    const parsed = data?.length >= 10 ? decodeFunctionCall(data) : null;
-    const fnName = parsed ? parsed.name : selector;
-    const srcLabel = label(sourceAddress);
-    const valStr = value > 0n ? ` {value: ${value}}` : "";
-    return `${prefix}: CALL ${destLabel}.${fnName}()${valStr} from ${srcLabel}@rollup${sourceRollup} → rollup${rollupId}`;
-  }
-
-  if (actionType === "RESULT") {
-    const status = failed ? "FAILED" : "ok";
-    // Try to decode the return data
-    let retStr = "";
-    if (data && data !== "0x" && data.length > 2) {
-      try {
-        // Result data is ABI-encoded return value — try common types
-        const decoded = ethers.AbiCoder.defaultAbiCoder().decode(["string"], data);
-        retStr = ` → "${decoded[0]}"`;
-      } catch {
-        try {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(["uint256"], data);
-          retStr = ` → ${decoded[0]}`;
-        } catch {
-          retStr = data.length > 10 ? ` → ${trimHex(data)}` : "";
-        }
-      }
-    }
-    return `${prefix}: RESULT ${status}${retStr}`;
-  }
-
-  if (actionType === "L2TX") {
-    return `${prefix}: L2TX rollup${rollupId}`;
-  }
-
-  if (actionType === "REVERT" || actionType === "REVERT_CONTINUE") {
-    return `${prefix}: ${actionType}${failed ? " (failed)" : ""}`;
-  }
-
-  return `${prefix}: ${actionType}`;
-}
-
 // Try to decode the output of executeCrossChainCall (returns bytes = ABI-encoded proxy result).
 // The proxy wraps the actual return value, so we try to unwrap it.
 function tryDecodeProxyReturn(output) {
@@ -675,14 +635,23 @@ function tryDecodeProxyReturn(output) {
 //  Cross-chain matching
 // ══════════════════════════════════════════════
 
-function extractActionHashes(decodedLogs, eventName) {
-  const hashes = [];
-  for (const dl of decodedLogs) {
-    if (dl.name === eventName && dl.args) {
-      hashes.push(dl.args.actionHash || dl.args[0]);
-    }
-  }
-  return hashes;
+// Only logs emitted in this call (including its delegatecall implementation).
+function ownCallLogs(node) {
+  return [ ...(node._decodedLogs || []), ...(node.calls || [])
+    .filter(child => child.type === "DELEGATECALL").flatMap(ownCallLogs) ];
+}
+
+function committedOutgoingCalls(node, manager) {
+  if (!manager) return [];
+  return ownCallLogs(node).filter(log => {
+    if (log.committed === false || log.name !== "CrossChainCallExecuted" ||
+        log.address?.toLowerCase() !== manager.toLowerCase()) return false;
+    const matches = (node._receiptLogs || []).filter(receiptLog =>
+      receiptLog.address?.toLowerCase() === log.address.toLowerCase() &&
+      receiptLog.data === log.data && JSON.stringify(receiptLog.topics) === JSON.stringify(log.topics));
+    // Identical occurrences cannot be assigned to a frame from payload alone.
+    return matches.length === 1;
+  });
 }
 
 function collectAllLogs(node) {
@@ -712,7 +681,6 @@ function findUserExecution(node) {
     "executeIncomingCrossChainCall",
     "loadExecutionTable",
     "executeOnBehalf",
-    "newScope",
     "postAndVerifyBatch",
   ]);
 
@@ -739,7 +707,7 @@ function findUserExecution(node) {
 //  JSON serialization (for --json / --serve)
 // ══════════════════════════════════════════════
 
-function serializeCallNode(node, chain, l2Traces) {
+function serializeCallNode(node, chain, l2Traces, opts = {}) {
   const serialized = {
     type: node.type || "CALL",
     from: node.from || "",
@@ -767,38 +735,36 @@ function serializeCallNode(node, chain, l2Traces) {
   }
 
   // Cross-chain inlining
-  if (node._isExecuteCrossChainCall && l2Traces) {
-    const allLogs = collectAllLogs(node);
-    const ccEvents = allLogs.filter(l => l.name === "CrossChainCallExecuted");
+  if (chain === "L1" && node._isExecuteCrossChainCall && l2Traces) {
+    const ccEvents = committedOutgoingCalls(node, opts.rollups);
     for (const ccEvent of ccEvents) {
-      const actionHash = String(ccEvent.args?.actionHash ?? ccEvent.args?.[0]);
-      const matchingL2 = findMatchingL2Trace(actionHash, l2Traces);
+      const callHash = String(ccEvent.args.crossChainCallHash);
+      const matchingL2 = findMatchingL2Trace(callHash, l2Traces, opts.managerL2);
       if (matchingL2) {
         const userCall = findUserExecution(matchingL2);
         const proxyInfo = findProxyInfo(matchingL2);
         serialized.inlinedL2 = {
+          correlation: "hash-candidate",
           txHash: matchingL2._txHash || "",
           blockNumber: matchingL2._blockNumber || 0,
-          userCall: userCall ? serializeCallNode(userCall, "L2", l2Traces) : null,
-          fullTrace: serializeCallNode(matchingL2, "L2", []),
+          userCall: userCall ? serializeCallNode(userCall, "L2", [], opts) : null,
+          fullTrace: serializeCallNode(matchingL2, "L2", [], opts),
           proxyInfo: proxyInfo,
         };
         // Also include user call's children
         if (userCall) {
           serialized.inlinedL2.userCall.calls = (userCall.calls || []).map(
-            child => serializeCallNode(child, "L2", l2Traces)
+            child => serializeCallNode(child, "L2", [], opts)
           );
         }
       }
     }
   }
 
-  // Recurse children (skip for executeCrossChainCall — handled via inlinedL2)
-  if (!node._isExecuteCrossChainCall) {
-    serialized.calls = (node.calls || []).map(
-      child => serializeCallNode(child, chain, l2Traces)
-    );
-  }
+  // Local callbacks remain visible even when remote correlation is unavailable.
+  serialized.calls = (node.calls || []).map(
+    child => serializeCallNode(child, chain, l2Traces, opts)
+  );
 
   return serialized;
 }
@@ -815,22 +781,30 @@ function serializeEvent(dl, chain) {
   return {
     chain,
     name: dl.name || null,
-    address: dl.address || "",
+    address: dl.address ?? null,
+    transactionHash: dl.transactionHash,
+    blockHash: dl.blockHash,
+    blockNumber: dl.blockNumber,
+    logIndex: dl.logIndex,
+    provenance: dl.provenance,
+    committed: dl.committed,
+    topics: dl.topics,
+    data: dl.data,
     params,
   };
 }
 
-function buildJsonResponse(l1Trace, l2Traces, l1Receipt, opts) {
-  const callTree = serializeCallNode(l1Trace, "L1", l2Traces);
+function buildJsonResponse(l1Trace, l2Traces, l1Receipt, opts, l2Receipts = []) {
+  const callTree = serializeCallNode(l1Trace, "L1", l2Traces, opts);
 
   // Collect all events
   const events = [];
-  const l1Logs = collectAllLogs(l1Trace);
+  const l1Logs = decodeReceiptLogs(l1Receipt);
   for (const dl of l1Logs) {
     if (dl.name) events.push(serializeEvent(dl, "L1"));
   }
-  for (const l2t of l2Traces) {
-    const l2Logs = collectAllLogs(l2t);
+  for (const receipt of l2Receipts) {
+    const l2Logs = decodeReceiptLogs(receipt);
     for (const dl of l2Logs) {
       if (dl.name) events.push(serializeEvent(dl, "L2"));
     }
@@ -844,6 +818,7 @@ function buildJsonResponse(l1Trace, l2Traces, l1Receipt, opts) {
     from: l1Receipt.from,
     to: l1Receipt.to,
     callTree,
+    l2Traces: l2Traces.map(trace => serializeCallNode(trace, "L2", [], opts)),
     events,
     blockContext: null, // filled by caller if needed
     systemContracts: {
@@ -871,16 +846,16 @@ function renderUnified(l1Trace, l2Traces, l1Receipt, l2Receipts, opts) {
 
   // Events section
   lines.push("│");
-  lines.push(`│ ${c.dim("Events:")}`);
+  lines.push(`│ ${c.dim("Committed receipt events:")}`);
 
-  const l1Logs = collectAllLogs(l1Trace);
+  const l1Logs = decodeReceiptLogs(l1Receipt);
   for (const dl of l1Logs) {
-    if (dl.name) eventLines.push(`│   ${c.bold("L1")}  ${formatEvent(dl)}`);
+    if (dl.name) eventLines.push(`│   ${c.bold("L1")}  ${dl.address ?? "?"} ${formatEvent(dl)}`);
   }
-  for (const l2t of l2Traces) {
-    const l2Logs = collectAllLogs(l2t);
+  for (const receipt of l2Receipts) {
+    const l2Logs = decodeReceiptLogs(receipt);
     for (const dl of l2Logs) {
-      if (dl.name) eventLines.push(`│   ${c.bold("L2")}  ${formatEvent(dl)}`);
+      if (dl.name) eventLines.push(`│   ${c.bold("L2")}  ${dl.address ?? "?"} ${formatEvent(dl)}`);
     }
   }
 
@@ -916,27 +891,21 @@ function renderNode(node, chain, l2Traces, lines, eventLines, opts, depth, isLas
   lines.push(`│ ${chainTag} ${indent}${icon} ${funcDisplay}`);
 
   // If this is executeCrossChainCall, inline the matching L2 trace
-  if (node._isExecuteCrossChainCall) {
-    const allLogs = collectAllLogs(node);
-    const ccEvents = allLogs.filter((l) => l.name === "CrossChainCallExecuted");
+  if (chain === "L1" && node._isExecuteCrossChainCall) {
+    const ccEvents = committedOutgoingCalls(node, opts.rollups);
     for (const ccEvent of ccEvents) {
-      const actionHash = String(ccEvent.args?.actionHash ?? ccEvent.args?.[0]);
-      const matchingL2 = findMatchingL2Trace(actionHash, l2Traces);
+      const callHash = String(ccEvent.args.crossChainCallHash);
+      const matchingL2 = findMatchingL2Trace(callHash, l2Traces, opts.managerL2);
       if (matchingL2) {
-        lines.push(`│      ${contIndent}${c.dim("═══════════════════ L2 ═══════════════════")}`);
+        lines.push(`│      ${contIndent}${c.dim("════════════ L2 hash candidate ═══════════")}`);
         renderL2Inline(matchingL2, l2Traces, lines, eventLines, opts, depth + 1);
         lines.push(`│      ${contIndent}${c.dim("═════════════════════════════════════════")}`);
       }
     }
   }
 
-  // Recurse into children (skip executeCrossChainCall children — already handled above)
-  if (!node._isExecuteCrossChainCall) {
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      const childIsLast = i === children.length - 1;
-      renderNode(child, chain, l2Traces, lines, eventLines, opts, depth + 1, childIsLast);
-    }
+  for (let i = 0; i < children.length; i++) {
+    renderNode(children[i], chain, l2Traces, lines, eventLines, opts, depth + 1, i === children.length - 1);
   }
 
   // Return value (only at the call site, not for internal system calls)
@@ -1007,52 +976,26 @@ function formatCallHeader(node, chain, opts) {
   return c.bold(lbl + "::" + fn + "()");
 }
 
-function findMatchingL2Trace(actionHash, l2Traces) {
-  for (const l2t of l2Traces) {
-    const l2Logs = collectAllLogs(l2t);
-    const incoming = l2Logs.find(
-      (l) =>
-        l.name === "IncomingCrossChainCallExecuted" &&
-        String(l.args?.actionHash ?? l.args?.[0]) === actionHash
-    );
-    if (incoming) return l2t;
-
-    // Also check CrossChainCallExecuted (for L2-side calls)
-    const ccall = l2Logs.find(
-      (l) =>
-        l.name === "CrossChainCallExecuted" &&
-        String(l.args?.actionHash ?? l.args?.[0]) === actionHash
-    );
-    if (ccall) return l2t;
+function findMatchingL2Trace(callHash, l2Traces, manager) {
+  if (!manager) return null;
+  const matches = [];
+  for (const trace of l2Traces) {
+    for (const log of trace._receiptLogs || []) {
+      if (log.name === "IncomingCrossChainCallExecuted" &&
+          log.address?.toLowerCase() === manager.toLowerCase() &&
+          String(log.args.crossChainCallHash) === callHash) matches.push(trace);
+    }
   }
-  return null;
+  // An outgoing L2 request is not incoming delivery; repeated hashes are ambiguous.
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function findProxyInfo(l2Trace) {
-  const logs = collectAllLogs(l2Trace);
-  const incoming = logs.find((l) => l.name === "IncomingCrossChainCallExecuted");
-  if (incoming) {
-    const source = incoming.args?.sourceAddress ?? incoming.args?.[4];
-    const sourceRollup = incoming.args?.sourceRollup ?? incoming.args?.[5];
-    if (source) {
-      return `proxy[${label(source)}@rollup${sourceRollup ?? "?"}]`;
-    }
-  }
-  return null;
-}
-
-function resolveProxyTarget(proxyCall, opts) {
-  // A CrossChainProxy forwards to executeCrossChainCall
-  // The proxy's originalAddress tells us what L2 contract it represents
-  // We can get this from CrossChainProxyCreated events or from the proxy's call target
-  for (const child of proxyCall.calls || []) {
-    if (child._funcName === "executeCrossChainCall" && child._parsed?.args) {
-      // 1st arg is sourceAddress, but the proxy target is the address it represents
-      // For now, return the proxy label
-      return proxyCall._label;
-    }
-  }
-  return null;
+  const incoming = (l2Trace._receiptLogs || []).filter(log =>
+    log.name === "IncomingCrossChainCallExecuted" &&
+    log.address?.toLowerCase() === l2Trace._managerAddress?.toLowerCase());
+  if (incoming.length !== 1) return null;
+  return `proxy[${label(incoming[0].args.sourceAddress)}@rollup${incoming[0].args.sourceRollup}]`;
 }
 
 function resolveInnerFunction(proxyCall) {
@@ -1105,18 +1048,15 @@ async function traceTransaction(txHash, l1, l2, opts, { silent = false } = {}) {
     await enrichCallTree(l1Trace, null);
     log(c.dim("Discovering contracts..."));
     await discoverLabels(l1Trace, opts);
-    discoverSystemContracts(l1Trace, opts);
+    discoverSystemContracts(l1Trace, opts, "L1");
     refreshSystemLabels(opts);
     if (opts.rollups) log(c.dim(`Rollups: ${label(opts.rollups)} (${opts.rollups})`));
-    await enrichCallTree(l1Trace, l1);
+    await enrichCallTree(l1Trace, l1, 0, { receipt: l1Receipt });
 
     log(c.dim("Finding L2 blocks..."));
-    const { l2Blocks } = opts.rollups
-      ? await findL2BlocksFromL1(l1Block, opts, l1)
-      : { l2Blocks: [] };
+    const { l2Blocks, batchTxs } = await findL2BlocksFromL1(l1Block, opts, l1);
     log(c.dim(`L2 blocks: [${l2Blocks.join(", ")}]`));
 
-    if (!opts.managerL2 && opts.rollups) opts.managerL2 = opts.rollups;
     const l2Traces = [];
     const l2Receipts = [];
     for (const block of l2Blocks) {
@@ -1128,11 +1068,13 @@ async function traceTransaction(txHash, l1, l2, opts, { silent = false } = {}) {
           trace._txHash = l2TxHash;
           await enrichCallTree(trace, null);
           await discoverLabels(trace, opts);
-          discoverSystemContracts(trace, opts);
+          discoverSystemContracts(trace, opts, "L2");
           refreshSystemLabels(opts);
-          await enrichCallTree(trace, l2);
-          l2Traces.push(trace);
           const receipt = await l2.getTransactionReceipt(l2TxHash);
+          await enrichCallTree(trace, l2, 0, { receipt });
+          trace._blockNumber = receipt.blockNumber;
+          trace._managerAddress = opts.managerL2;
+          l2Traces.push(trace);
           l2Receipts.push(receipt);
         } catch (e) {
           log(c.dim(`  Failed to trace ${l2TxHash.slice(0, 10)}: ${e.message}`));
@@ -1140,17 +1082,19 @@ async function traceTransaction(txHash, l1, l2, opts, { silent = false } = {}) {
       }
     }
 
-    return { chain, l1Trace, l2Traces, l1Receipt, l2Receipts, l2Blocks, opts };
+    return { chain, l1Trace, l2Traces, l1Receipt, l2Receipts, l2Blocks, batchTxs, opts };
   } else {
     log(c.dim("Tracing L2 tx..."));
     const l2Trace = await getCallTrace(l2, txHash);
     l2Trace._txHash = txHash;
     await enrichCallTree(l2Trace, null);
     await discoverLabels(l2Trace, opts);
-    discoverSystemContracts(l2Trace, opts);
+    discoverSystemContracts(l2Trace, opts, "L2");
     refreshSystemLabels(opts);
-    await enrichCallTree(l2Trace, l2);
     const l2Receipt = await l2.getTransactionReceipt(txHash);
+    await enrichCallTree(l2Trace, l2, 0, { receipt: l2Receipt });
+    l2Trace._blockNumber = l2Receipt.blockNumber;
+    l2Trace._managerAddress = opts.managerL2;
 
     return { chain, l2Trace, l2Receipt, opts };
   }
@@ -1171,21 +1115,22 @@ async function main() {
   const l2 = new ethers.JsonRpcProvider(opts.l2Rpc);
 
   // Load ABIs
-  const outDir = path.resolve(process.cwd(), "out");
-  console.log(c.dim("Loading ABIs from " + outDir + "..."));
+  const outDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../out");
+  if (!opts.json) console.log(c.dim("Loading ABIs from " + outDir + "..."));
   loadLocalABIs(outDir);
-  console.log(c.dim(`Loaded ${selectorToIface.size} selectors, ${topicToIface.size} event topics`));
+  if (!opts.json) console.log(c.dim(`Loaded ${selectorToIface.size} selectors, ${topicToIface.size} event topics`));
   buildLabels(opts);
 
-  const result = await traceTransaction(opts.tx, l1, l2, opts);
+  const result = await traceTransaction(opts.tx, l1, l2, opts, { silent: opts.json });
 
   if (result.chain === "L1") {
     if (opts.json) {
-      const response = buildJsonResponse(result.l1Trace, result.l2Traces, result.l1Receipt, result.opts);
+      const response = buildJsonResponse(result.l1Trace, result.l2Traces, result.l1Receipt, result.opts, result.l2Receipts);
       response.blockContext = {
         l1Block: result.l1Receipt.blockNumber,
         l2Blocks: result.l2Blocks,
-        batchTxHash: result.l1Receipt.hash,
+        batchTxHash: result.batchTxs.length === 1 ? result.batchTxs[0] : null,
+        batchTxHashes: result.batchTxs,
       };
       console.log(JSON.stringify(response, bigintReplacer, 2));
     } else {
@@ -1193,8 +1138,8 @@ async function main() {
     }
   } else {
     if (opts.json) {
-      const callTree = serializeCallNode(result.l2Trace, "L2", []);
-      const events = collectAllLogs(result.l2Trace).filter(dl => dl.name).map(dl => serializeEvent(dl, "L2"));
+      const callTree = serializeCallNode(result.l2Trace, "L2", [], opts);
+      const events = decodeReceiptLogs(result.l2Receipt).filter(dl => dl.name).map(dl => serializeEvent(dl, "L2"));
       const response = {
         txHash: opts.tx,
         chain: "L2",
@@ -1227,7 +1172,16 @@ function printCallTree(node, depth) {
   }
 }
 
-main().catch((e) => {
-  console.error(c.red("Fatal: " + e.message));
-  process.exit(1);
-});
+export {
+  BATCH_POSTED_TOPIC, loadLocalABIs, decodeFunctionCall, decodeEventLog, decodeReceiptLogs,
+  extractL2BlocksFromTx, findL2BlocksFromL1, findBatchBlockByL2Ref, enrichCallTree,
+  serializeCallNode, serializeEvent, buildJsonResponse, findMatchingL2Trace,
+  resolveProxyTargetFromChain, detectChain, discoverSystemContracts, traceTransaction,
+};
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((e) => {
+    console.error(c.red("Fatal: " + e.message));
+    process.exitCode = 1;
+  });
+}

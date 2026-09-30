@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Base} from "./Base.t.sol";
+import {GasMeter} from "./helpers/GasMeter.sol";
 import {ProofSystemBatchPerVerificationEntries, ExpectedRootPerRollup, RollupIdWithProofSystems} from "../src/EEZ.sol";
 import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {Counter, CounterAndProxy} from "./mocks/CounterContracts.sol";
@@ -64,6 +65,7 @@ abstract contract GasFixture is Base {
     // rollup of any reentrant L1→L2 call (EEZ forces it via `executeCrossChainCall`).
     uint64 internal constant MAINNET_ROLLUP_ID = 0;
 
+    GasMeter internal meter;
     GasTestToken internal token;
     Sink internal sink;
 
@@ -163,6 +165,7 @@ abstract contract GasFixture is Base {
         // Seeded with a 2-RollupUpdate full entry → measure the marginal cost of one extra RollupUpdate.
         rS3 = _makeRollup(keccak256("rS3-init")); // id 5
         _postBatchTwo(rB.id, rS3.id, _one(_steadyShaped2(rS3.id)));
+        meter = new GasMeter();
     }
 
     /// @notice `nEntries` identical DEFERRED (saved, never executed) entries routed to `dest`, each
@@ -454,7 +457,7 @@ abstract contract GasFixture is Base {
     }
 
     /// @notice Folds an executed entry's rolling hash AND builds the matching reentrant table, for
-    ///         any mix of plain/reentrant top-level calls (mirrors EEZ._processNCalls + the
+    ///         any mix of plain/reentrant top-level calls (mirrors EEZ._processL2ToL1Calls + the
     ///         nested-reentry resolution).
     /// @dev `seed` is `_hEntryBegin(deltas, proxyEntryHash)`. Each top-level call k folds
     ///      CALL_BEGIN(cch_k) / CALL_END(true, rets[k]); each call flagged in `reentrant` additionally
@@ -522,10 +525,9 @@ abstract contract GasFixture is Base {
     //  Cooling helpers
     // ──────────────────────────────────────────────
 
-    /// @notice Colds the protocol-side accounts/slots (EEZ registry, both rollup managers, the
-    ///         proof system). `vm.cool` models a full transaction boundary for the account: access
-    ///         warmth resets AND current storage values become the originals (as if committed), so
-    ///         a measured call prices exactly like a fresh transaction against the current state.
+    /// @notice Cools protocol storage for an independently measured call. The storage-price probe
+    ///         in GasCost checks the installed Foundry version against a fixture seeded in setUp.
+    ///         This is not a full transaction reset: transient state and refund accounting are separate.
     function _coolProtocol() internal {
         vm.cool(address(rollups));
         vm.cool(address(rA.manager));
@@ -537,14 +539,19 @@ abstract contract GasFixture is Base {
     ///         proxy stays warm per EIP-2929). Used so execution pays realistic cold SLOAD/account
     ///         costs instead of slots warmed by the post earlier in the same test context.
     function _coolForExec() internal {
-        _coolProtocol();
+        // Resolve addresses first: calling EEZ after cooling it would warm the measured account again.
+        address genericProxy = rollups.computeCrossChainProxyAddress(genericSource, uint64(rA.id));
+        address actorProxy = rollups.computeCrossChainProxyAddress(actorCaller, uint64(rA.id));
         vm.cool(address(token));
         vm.cool(address(sink));
         vm.cool(address(actor));
+        vm.cool(address(actorA));
         vm.cool(address(counterReal));
         vm.cool(tokenHolderProxy);
         vm.cool(counterProxy);
-        vm.cool(rollups.computeCrossChainProxyAddress(genericSource, uint64(rA.id)));
-        vm.cool(rollups.computeCrossChainProxyAddress(actorCaller, uint64(rA.id)));
+        vm.cool(counterProxyA);
+        vm.cool(genericProxy);
+        vm.cool(actorProxy);
+        _coolProtocol();
     }
 }

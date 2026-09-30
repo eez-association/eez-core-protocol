@@ -21,13 +21,14 @@ import {CrossChainProxy} from "./CrossChainProxy.sol";
 ///      What lives in the children (`EEZ` / `EEZL2`) instead, because it names the per-side
 ///      execution structs or a per-side cursor:
 ///        - The reentrant-table cursor — `_lastL1ToL2CallConsumed` on L1, `_lastOutgoingCallConsumed`
-///          on L2 — and `_insideExecution()` (L1 derives it from its proxy-protection array, L2 from
+///          on L2 — and `_insideExecution()` (L1 derives it from its transient allowed-set count, L2 from
 ///          a dedicated `_executing` flag). The flat-call position is a plain local index in
-///          `_processNCalls` on both sides (no transient cursor).
-///        - `_processNCalls` (takes the active call array by `memory` on both sides), `_consumeNestedCall`,
+///          `_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2 (no transient cursor).
+///        - `_processL2ToL1Calls` / `_processIncomingCalls` (active call array by `memory`), `_consumeNestedCall`,
 ///          `_consumeAndExecute`(`Entry`), the active reentrant-table accessor (L1:
 ///          `_getExpectedL1toL2Calls`; L2: `_getExpectedOutgoingCalls`), the reentrant resolver
-///          (`_resolveNestedReentrant`), `_resolveStaticEntry`, `_processNStaticCalls`,
+///          (`_resolveNestedReentrant`), `_resolveStaticEntry`,
+///          `_processStaticL2ToL1Calls` on L1 / `_processStaticIncomingCalls` on L2,
 ///          `staticCrossChainCall`, and the force-revert-span slicer (L1: `_sliceL2ToL1Calls`; L2:
 ///          `_sliceCrossChainCalls`).
 ///        - The per-side events and errors (L1: `EntryExecuted`, `CallResult`, …;
@@ -41,6 +42,7 @@ abstract contract EEZBase is IEEZ {
     uint8 internal constant NESTED_BEGIN = 3;
     uint8 internal constant NESTED_END = 4;
     uint8 internal constant CALL_NOT_FOUND = 5;
+    uint8 internal constant CALL_INSUFFICIENT_GAS = 6;
 
     /// @notice Readable `isStatic` argument for `computeCrossChainCallHash` on non-static (call) paths.
     bool internal constant NOT_STATIC_CALL = false;
@@ -56,15 +58,24 @@ abstract contract EEZBase is IEEZ {
     ///         `executeIncomingCrossChainCall` verifies the inbound call with that call's own `gas` field.
     uint64 internal constant ZERO_CALL_GAS = 0;
 
+    /// @notice Gas cap for proxies' static-context probes; read from the EEZ contract on each call.
+    /// @dev TSTORE consumes the probe's gas in static context; 1,000 covers the current mutable probe.
+    ///      The EEZ contract will be upgradeable, but proxies will not. If a major EVM gas repricing
+    ///      occurs, upgrading the EEZ contract can adjust this cap without replacing proxies.
+    uint256 public constant STATIC_CHECK_GAS = 1_000;
+
+    /// @dev Estimated dispatch and account-access overhead across EEZ -> proxy -> destination.
+    ///      Excludes payload processing and ETH transfers, which are estimated separately.
+    uint256 internal constant ESTIMATED_FIXED_CALL_OVERHEAD = 10_000;
+
     // ──────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────
 
-    /// @notice Hash of the CrossChainProxy creation code (constructor arg included) used in the
-    ///         CREATE2 address derivation. Both operands are fixed at deployment, so it is
-    ///         computed once in the constructor instead of re-hashing the ~1.4 KB creation code
-    ///         per derivation.
-    bytes32 internal immutable PROXY_INIT_CODE_HASH;
+    /// @notice Cached hash of the argument-free proxy creation code for CREATE2 address prediction.
+    /// @dev The proxy captures its deploying EEZ contract via msg.sender, so this hash is also
+    ///      valid when EEZ runs through delegatecall. CREATE2 binds the deployer address separately.
+    bytes32 public immutable PROXY_INIT_CODE_HASH;
 
     // ──────────────────────────────────────────────
     //  Storage shared with children
@@ -139,6 +150,9 @@ abstract contract EEZBase is IEEZ {
     ///      malformed entry. We reject it explicitly rather than silently dropping the value.
     error StaticCallWithValue();
 
+    /// @notice A static sub-call cannot be dispatched with its declared gas cap.
+    error InsufficientCallGas(uint64 callGas);
+
     /// @notice Error when a sub-call of a static resolution is not marked `isStatic`.
     /// @dev Those calls run via STATICCALL whatever the flag says, and the untagged static rolling
     ///      hash folds only `(success, retData)` — so an unchecked `false` would let a proven
@@ -165,10 +179,10 @@ abstract contract EEZBase is IEEZ {
     //  Constructor
     // ──────────────────────────────────────────────
 
+    /// @notice Caches the proxy creation-code hash used to compute deterministic proxy addresses.
     constructor() {
         // Every proxy is deployed with the same creation code
-        PROXY_INIT_CODE_HASH =
-            keccak256(abi.encodePacked(type(CrossChainProxy).creationCode, abi.encode(address(this))));
+        PROXY_INIT_CODE_HASH = keccak256(type(CrossChainProxy).creationCode);
     }
 
     // ──────────────────────────────────────────────
@@ -177,6 +191,7 @@ abstract contract EEZBase is IEEZ {
 
     /// @notice This manager's own network rollup id — a proxy may NOT be created for it.
     /// @dev L1 (EEZ) returns `MAINNET_ROLLUP_ID` (0); L2 (EEZL2) returns its own `ROLLUP_ID`.
+    /// @return Identifier of this manager's own network, which cannot be a proxy's remote network.
     function _getRollupId() internal view virtual returns (uint64);
 
     /// @notice Creates a new CrossChainProxy for an address on another rollup
@@ -207,6 +222,9 @@ abstract contract EEZBase is IEEZ {
     }
 
     /// @notice Deploys a CrossChainProxy via CREATE2 and registers it as authorized
+    /// @param originalAddress Remote address represented by the new proxy.
+    /// @param originalRollupId Remote rollup ID; must differ from this manager's own network.
+    /// @return proxy Newly deployed and authorized proxy address.
     function _createCrossChainProxyInternal(
         address originalAddress,
         uint64 originalRollupId
@@ -217,7 +235,7 @@ abstract contract EEZBase is IEEZ {
         // A proxy stands in for a REMOTE address — never one on this manager's own network.
         if (originalRollupId == _getRollupId()) revert SameNetworkProxy(originalRollupId);
         bytes32 salt = keccak256(abi.encodePacked(originalRollupId, originalAddress));
-        proxy = address(new CrossChainProxy{salt: salt}(address(this)));
+        proxy = address(new CrossChainProxy{salt: salt}());
         authorizedProxies[proxy] = ProxyInfo(true, originalAddress, originalRollupId);
         emit CrossChainProxyCreated(proxy, originalAddress, originalRollupId);
     }
@@ -225,6 +243,7 @@ abstract contract EEZBase is IEEZ {
     /// @notice Computes the deterministic CREATE2 address for a CrossChainProxy
     /// @param originalAddress The address this proxy represents on the source rollup
     /// @param originalRollupId The source rollup ID
+    /// @return Predicted proxy address, whether or not the proxy has been deployed.
     function computeCrossChainProxyAddress(
         address originalAddress,
         uint64 originalRollupId
@@ -251,6 +270,15 @@ abstract contract EEZBase is IEEZ {
     ///      pre-computes the hash. `isStatic` makes a read-only call hash distinctly from an
     ///      otherwise-identical state-changing one. `callGas` is 0 except for calls leaving an L2
     ///      with `USE_GAS_LEFT`, where it is the gas left when the L2 manager computes this hash.
+    /// @param isStatic Whether the cross-chain call is read-only.
+    /// @param sourceAddress Original caller address on the source rollup.
+    /// @param sourceRollupId Identifier of the source rollup.
+    /// @param targetAddress Destination address on the target rollup.
+    /// @param targetRollupId Identifier of the target rollup.
+    /// @param value Ether value bound to the call.
+    /// @param callGas Gas field committed into the call identity according to the calling path's gas policy.
+    /// @param data Calldata bound to the call.
+    /// @return Keccak256 hash of the ABI-encoded call fields in protocol order.
     function computeCrossChainCallHash(
         bool isStatic,
         address sourceAddress,
@@ -277,6 +305,9 @@ abstract contract EEZBase is IEEZ {
     /// @notice Decodes a `ContextResult` revert payload returned by `executeInContextAndRevert`.
     /// @dev Validates selector AND length (4 + 2*32 = 68) before the raw mloads — defense
     ///      against a truncated revert that happens to share the selector.
+    /// @param revertData Raw revert payload expected to encode ContextResult.
+    /// @return rollingHash Accumulator value reported by the reverted execution context.
+    /// @return reentrantConsumed Reentrant-table cursor reported by the reverted execution context.
     function _decodeContextResult(bytes memory revertData)
         internal
         pure
@@ -298,6 +329,9 @@ abstract contract EEZBase is IEEZ {
     ///         identity hash (which already folds `isStatic` and the routed rollup) bound to the
     ///         live `_rollingHash` at the instant it fires. One comparison replaces the old
     ///         (hash, rollingHash, isStatic) triple.
+    /// @param crossChainCallHash Identity hash of the reentrant cross-chain call.
+    /// @param rollingHash Execution accumulator at the point the call is made.
+    /// @return Lookup key binding the call identity to its execution position.
     function _computeExpectedL1toL2Hash(
         bytes32 crossChainCallHash,
         bytes32 rollingHash
@@ -313,12 +347,17 @@ abstract contract EEZBase is IEEZ {
     //  Rolling hash helpers
     // ──────────────────────────────────────────────
     //
-    // The entry-level `_rollingHash` accumulator is updated at five event points during
+    // The entry-level `_rollingHash` accumulator is updated at six event points during
     // entry execution: at the start and end of each executed call, at the start and end of
-    // each reentrant frame, and when a reentrant call finds no matching row. Each event is
-    // tagged with a domain byte (CALL_BEGIN/CALL_END/NESTED_BEGIN/NESTED_END/CALL_NOT_FOUND)
+    // each reentrant frame, when a reentrant call finds no matching row, and when a capped
+    // call lacks dispatch gas. Each event has a distinct domain-byte tag,
     // so the same set of inputs can't collide across event types. The final value is checked
     // against `entry.rollingHash` at the end of execution.
+    //
+    // Valid proofs must exclude CALL_INSUFFICIENT_GAS and CALL_NOT_FOUND;
+    // surviving failure markers make a valid expected rolling-hash check fail. Ordinary
+    // enclosing reverts erase them; ContextResult transports them across deliberate spans.
+    // Hash equality alone cannot enforce this external proof-policy requirement.
     //
     // No call/frame INDEX is folded in: `_rollingHash` is a chain (each fold depends on the
     // prior value), so order, count, and nesting are already bound by the chain + the tags. An
@@ -344,6 +383,8 @@ abstract contract EEZBase is IEEZ {
     ///      deterministic.
     ///   seed         = keccak(…keccak(0, rollupId_1, currentRoot_1)…, rollupId_n, currentRoot_n)
     ///   _rollingHash = keccak(seed, proxyEntryHash)
+    /// @param rollupUpdates Ordered rollup IDs and starting roots to bind into the seed.
+    /// @param proxyEntryHash Inbound call identity, or zero for a pure-L2 transaction entry.
     function _rollingHashEntryBegin(RollupUpdate[] memory rollupUpdates, bytes32 proxyEntryHash) internal {
         if (_rollingHash != bytes32(0)) revert RollingHashNotCleared();
 
@@ -355,20 +396,51 @@ abstract contract EEZBase is IEEZ {
         _rollingHash = keccak256(abi.encodePacked(_rollupRootsHash, proxyEntryHash));
     }
 
+    /// @notice Checks the estimated gas budget to protect users from composer underfunding,
+    ///         whether accidental or deliberate, being mistaken for a destination call failure.
+    /// @dev callGas == 0 skips the check and forwards available gas, subject to EVM forwarding limits.
+    ///      Check after encoding the payload and resolving the proxy. Account-creation gas is
+    ///      the poster's responsibility and, along with normal EVM rules, may reduce the gas delivered
+    ///      to the destination below callGas. This estimate excludes return-data processing and the rest of the entry.
+    /// @param callGas Requested destination gas cap; zero bypasses the budget check.
+    /// @param payloadLength Byte length of the already-encoded proxy forwarding payload.
+    /// @param value Ether value forwarded, used to estimate transfer overhead.
+    /// @return True if the cap is zero or gasleft() meets the estimated dispatch budget.
+    function _hasEnoughCallGas(uint64 callGas, uint256 payloadLength, uint256 value) internal view returns (bool) {
+        if (callGas == 0) return true;
+        // Arithmetic is bounded by the uint64 cap and the allocated payload's EVM memory limits.
+        unchecked {
+            // Extra words allow for rounding, headers and scratch space in the proxy.
+            uint256 words = payloadLength / 32 + 8;
+            // Proxy copying: 3 gas/word; memory expansion: 3 gas/word + words²/512.
+            // EEZ encoded the payload before this check, so its encoding cost is already paid.
+            uint256 payloadCost = 6 * words + words * words / 512;
+            // Fixed overhead plus two 9,000-gas transfers when sending ETH.
+            uint256 budget = uint256(callGas) + ESTIMATED_FIXED_CALL_OVERHEAD + payloadCost + (value == 0 ? 0 : 18_000);
+            // Approximate both EIP-150 margins with 64/62, rounded up.
+            uint256 required = (budget * 64 + 61) / 62;
+            return gasleft() >= required;
+        }
+    }
+
     /// @notice Folds a CALL_BEGIN event into `_rollingHash`, binding the call's IDENTITY
     ///         (`crossChainCallHash`) so the hash commits to which call ran, not just its result.
+    /// @param crossChainCallHash Identity hash of the call whose execution is beginning.
     function _rollingHashCallBegin(bytes32 crossChainCallHash) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_BEGIN, crossChainCallHash));
     }
 
     /// @notice Folds a CALL_END event into `_rollingHash`, including the call's observed
     ///         outcome (success flag + raw return/revert data).
+    /// @param success Whether the executed call succeeded.
+    /// @param retData Raw return data on success or revert data on failure.
     function _rollingHashCallEnd(bool success, bytes memory retData) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_END, success, retData));
     }
 
     /// @notice Folds a NESTED_BEGIN event into `_rollingHash` (start of a reentrant frame), binding
     ///         the reentrant call's IDENTITY (`crossChainCallHash`).
+    /// @param crossChainCallHash Identity hash of the reentrant call opening the nested frame.
     function _rollingHashNestedBegin(bytes32 crossChainCallHash) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_BEGIN, crossChainCallHash));
     }
@@ -378,15 +450,21 @@ abstract contract EEZBase is IEEZ {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, NESTED_END));
     }
 
-    /// @notice Folds a CALL_NOT_FOUND event into `_rollingHash` when a reentrant call has no
-    ///         matching expected entry. The dedicated tag is distinct from CALL_END(true, ""), so a
-    ///         no-match can never be forged as a normal empty-bytes return; the divergence reverts the
-    ///         entry at its rolling-hash check. An ordinary enclosing revert rolls it back. It rides the
-    ///         `_rollingHash` already carried across the `ContextResult` boundary, so no side flag is
-    ///         needed. A prover that deliberately pre-hashes this tag commits to a not-found at this
-    ///         exact position — a faithful outcome, not an attack.
+    /// @notice Appends CALL_NOT_FOUND (5) when a reentrant call has no matching expected entry.
+    /// @dev Distinct from a normal empty return. Valid proofs must exclude this marker,
+    ///      so the hash mismatch reverts the enclosing execution at validation.
+    ///      Ordinary reverts erase it; ContextResult preserves it across deliberate rollback spans.
+    /// @param crossChainCallHash Identity hash of the reentrant call with no matching expected row.
     function _rollingHashCallNotFound(bytes32 crossChainCallHash) internal {
         _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_NOT_FOUND, crossChainCallHash));
+    }
+
+    /// @notice Appends CALL_INSUFFICIENT_GAS (6) when a call lacks gas and its local call array stops.
+    /// @dev CALL_BEGIN already identifies the call. Valid proofs must exclude this marker,
+    ///      so the hash mismatch reverts the enclosing execution at validation.
+    ///      Ordinary reverts erase it; ContextResult preserves it across deliberate rollback spans.
+    function _rollingHashCallInsufficientGas() internal {
+        _rollingHash = keccak256(abi.encodePacked(_rollingHash, CALL_INSUFFICIENT_GAS));
     }
 
     /// @notice Folds a static sub-call result into a local accumulator. Pure: doesn't touch
@@ -394,6 +472,10 @@ abstract contract EEZBase is IEEZ {
     ///         `StaticExecutionEntry.rollingHash`, a separate per-static-entry accumulator.
     /// @dev The schema is untagged — the surrounding static-entry key already pins the
     ///      entry/call context that the tagged events disambiguate at entry level.
+    /// @param prev Accumulator before this sub-call, or zero for the first result.
+    /// @param success Whether the static sub-call succeeded.
+    /// @param retData Raw return data on success or revert data on failure.
+    /// @return Updated static-result accumulator.
     function _rollingHashStaticResult(bytes32 prev, bool success, bytes memory retData)
         internal
         pure

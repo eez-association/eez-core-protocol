@@ -35,13 +35,13 @@ import {
 //  `etherBalance` credit — `InsufficientRollupBalance` otherwise). Local mode
 //  sets both on the anvil node (see _fundEscrow); network mode fires only the
 //  L2 trigger, so the devnet must already hold escrow — a full sequential run
-//  does (`bridge` deposits the same 0.001 ether and sorts first).
+//  does (`bridge` deposits the same 0.00001 ether and sorts first).
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 // Kept small on purpose — the scenario is meant to run on real testnets too.
-uint256 constant BRIDGE_AMOUNT = 0.001 ether;
+uint256 constant BRIDGE_AMOUNT = 0.00001 ether;
 
 contract BridgeSenderL2 {
     address public immutable L1_PROXY;

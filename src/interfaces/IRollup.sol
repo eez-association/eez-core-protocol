@@ -31,6 +31,8 @@ interface IRollupContract {
     ///      `proofSystems.length` is below the manager's threshold. On success, every entry
     ///      of the returned `vkeys` is non-zero. The registry consumes the result verbatim;
     ///      successful return means both threshold and per-PS membership are satisfied.
+    /// @param proofSystems Proof-system subset selected for this rollup, in strictly increasing address order.
+    /// @return vkeys Nonzero verification keys corresponding to proofSystems in input order.
     function checkProofSystemsAndGetVkeys(address[] calldata proofSystems)
         external
         view
@@ -47,5 +49,7 @@ interface IRollupContract {
     ///      non-zero `blockNumber` binds the rollup's chosen view; implementations SHOULD
     ///      reject a blockNumber they cannot resolve so a stale value can't silently bind an
     ///      empty blob into the proof commit.
+    /// @param blockNumber L1 block context requested by the batch, interpreted by the rollup manager.
+    /// @return customData Rollup-defined context bytes committed into the shared public input.
     function getCustomData(uint64 blockNumber) external view returns (bytes memory customData);
 }

@@ -19,22 +19,10 @@ import {NO_NODE, MAX_CALL_DEPTH} from "./BlobConstants.sol";
 //  A storage contract (not a library) so the recursive tree can use dynamic
 //  push — instantiate one per conversion; state is append-only.
 //
-//  Shape restrictions (parse reverts `UnsupportedShape`; the byte codec
-//  still accepts these streams — the limits apply to table translation only):
-//    - a static call nests only when it is a TOP-LEVEL read, and then only
-//      leaf static sub-reads of the reader chain (the chain that fired the
-//      read). That is exactly the shape the static entries verify: the pool
-//      entry resolves on the reader chain and re-runs its sub-read array live
-//      via STATICCALL against the untagged rolling hash — reads landing
-//      anywhere else could not be re-run there,
-//    - Snapshot/Revert regions don't nest and close between transactions is
-//      the only supported CloseBlobStream position,
-//    - a call's target is never the chain it executes on (the protocol rejects
-//      same-network proxies),
-//    - a ReturnFail frame carries no committed (successful mutable) sub-calls —
-//      its terminal revert rolls back the frame's own nested consumptions on the
-//      executing chain, so the generator's folded hash could never match live
-//      (failing or static sub-calls are fine).
+//  Static calls may nest across chains, including under reentrant static reads.
+//  Successful children of failed frames and nested rollback regions are preserved.
+//  Static descendants must remain static; calls must cross chains; rollback regions
+//  are nonempty and stay within their frame. CloseBlobStream sits between transactions.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// @notice One call in the tree. `fromChain` is derived from the context stack
@@ -78,9 +66,18 @@ struct ChainOpSpec {
     uint256 txsBefore; // # transactions fully emitted before this op (position)
 }
 
+/// @notice Explicit rollback boundaries; multiple regions may start at one call.
+struct RevertRegion {
+    uint256 firstNode;
+    uint256 lastNode;
+    uint16 span;
+}
+
 contract ScenarioStore {
     CallNode[] internal _nodes;
-    mapping(uint256 => bool) internal _isRoot; // node id → is a transaction root call
+    RevertRegion[] internal _regions;
+    mapping(uint256 => uint256) internal _parent;
+    mapping(uint256 => uint256) internal _nodeTx;
     TxSpec[] internal _txs;
     ChainOpSpec[] internal _chainOps;
     uint256 public closeTxsBefore;
@@ -127,14 +124,8 @@ contract ScenarioStore {
         return _chainOps[id];
     }
 
-    /// @notice Node ids of every top-level-or-nested static call in message (DFS)
-    ///         order, EXCLUDING sub-reads of a static read — sidecar input for
-    ///         TableStitcher: these calls' fields never appear in any table (both
-    ///         sides match them by hash only), so they ride the blob, not the
-    ///         tables. A static read's own sub-reads are different: their full
-    ///         fields live in the static entry's sub-call array, so the stitcher
-    ///         recovers them from the tables (only their RESULTS ride the sidecar —
-    ///         see `TableStitcher.loadSidecarStaticSubResult`).
+    /// @notice Every static node in DFS order, including descendants. The sidecar
+    ///         records the static tree, including portions with no executing destination.
     function staticNodesInOrder() external view returns (uint256[] memory ids) {
         uint256[] memory buf = new uint256[](_nodes.length);
         uint256 n = 0;
@@ -151,20 +142,42 @@ contract ScenarioStore {
     ///         sidecar input: destination-side markers alone can't distinguish one
     ///         region over two sibling calls from two adjacent single-call regions.
     function regionSizesInOrder() external view returns (uint16[] memory sizes) {
-        uint256[] memory buf = new uint256[](_nodes.length);
-        uint256 n = 0;
-        for (uint256 t = 0; t < _txs.length; t++) {
-            n = _collectRegionStarts(_txs[t].rootCalls, buf, n);
-        }
-        sizes = new uint16[](n);
-        for (uint256 i = 0; i < n; i++) {
-            sizes[i] = _nodes[buf[i]].revertSpan;
+        sizes = new uint16[](_regions.length);
+        for (uint256 i; i < sizes.length; i++) {
+            sizes[i] = _regions[i].span;
         }
     }
 
-    /// @dev DFS over `siblings` collecting static nodes. A static node's children
-    ///      (its own sub-reads, always static) are NOT collected — their fields
-    ///      live in the static entry's sub-call array, not the sidecar.
+    function getRegions() external view returns (RevertRegion[] memory) {
+        return _regions;
+    }
+
+    function addRevertRegion(uint256 firstNode, uint256 lastNode, uint16 span) public {
+        if (
+            span == 0 || firstNode >= _nodes.length || lastNode >= _nodes.length
+                || _nodeTx[firstNode] != _nodeTx[lastNode] || _parent[firstNode] != _parent[lastNode]
+        ) {
+            revert ParseInvariant("invalid rollback region");
+        }
+        uint256 frame = _parent[firstNode];
+        uint256 txId = _nodeTx[firstNode];
+        uint256 count = _frameChildCount(txId, frame);
+        bool found;
+        for (uint256 i; i < count; i++) {
+            if (_frameChild(txId, frame, i) == firstNode) {
+                if (i + span > count || _frameChild(txId, frame, i + span - 1) != lastNode) {
+                    revert ParseInvariant("rollback region span mismatch");
+                }
+                found = true;
+                break;
+            }
+        }
+        if (!found) revert ParseInvariant("rollback region start missing");
+        _regions.push(RevertRegion(firstNode, lastNode, span));
+        if (span > _nodes[firstNode].revertSpan) _nodes[firstNode].revertSpan = span;
+    }
+
+    /// @dev DFS over every static node, including its children.
     function _collectStatics(
         uint256[] storage siblings,
         uint256[] memory buf,
@@ -178,29 +191,8 @@ contract ScenarioStore {
             CallNode storage node = _nodes[siblings[i]];
             if (node.isStatic) {
                 buf[n++] = siblings[i];
-            } else {
-                n = _collectStatics(node.children, buf, n);
             }
-        }
-        return n;
-    }
-
-    /// @dev DFS over `siblings` collecting each region's first node (revertSpan > 0).
-    function _collectRegionStarts(
-        uint256[] storage siblings,
-        uint256[] memory buf,
-        uint256 n
-    )
-        internal
-        view
-        returns (uint256)
-    {
-        for (uint256 i = 0; i < siblings.length; i++) {
-            CallNode storage node = _nodes[siblings[i]];
-            if (node.revertSpan > 0) {
-                buf[n++] = siblings[i];
-            }
-            n = _collectRegionStarts(node.children, buf, n);
+            n = _collectStatics(node.children, buf, n);
         }
         return n;
     }
@@ -219,6 +211,8 @@ contract ScenarioStore {
     function newCall(uint256 txId, uint256 parentId, CallParams memory p) public returns (uint256 nodeId) {
         if (p.toChain == p.fromChain) revert UnsupportedShape("call target == executing chain");
         nodeId = _nodes.length;
+        _parent[nodeId] = parentId;
+        _nodeTx[nodeId] = txId;
         CallNode storage n = _nodes.push();
         n.isStatic = p.isStatic;
         n.fromChain = p.fromChain;
@@ -229,18 +223,11 @@ contract ScenarioStore {
         n.gas = p.gas;
         n.data = p.data;
         if (parentId == ROOT_FRAME) {
-            _isRoot[nodeId] = true;
             _txs[txId].rootCalls.push(nodeId);
         } else {
             CallNode storage parent = _nodes[parentId];
             if (parent.isStatic) {
-                // A static entry re-runs its sub-read array live on the chain resolving
-                // it (the reader chain) — only leaf reads landing there translate.
                 if (!p.isStatic) revert UnsupportedShape("mutable call inside a static call");
-                if (!_isRoot[parentId]) revert UnsupportedShape("static sub-reads cannot nest further");
-                if (p.toChain != parent.fromChain) {
-                    revert UnsupportedShape("static sub-read must target the reader chain");
-                }
             }
             parent.children.push(nodeId);
         }
@@ -249,10 +236,6 @@ contract ScenarioStore {
     function setResult(uint256 nodeId, bool success, bytes memory returnData) public {
         _nodes[nodeId].success = success;
         _nodes[nodeId].returnData = returnData;
-    }
-
-    function setRevertSpan(uint256 nodeId, uint16 span) public {
-        _nodes[nodeId].revertSpan = span;
     }
 
     function addChainOp(uint64 chainId, bytes memory operations, uint256 txsBefore) public {
@@ -274,7 +257,7 @@ contract ScenarioStore {
 
     /// @notice Parses a validated message list (run it through `BlobCodec.decode`
     ///         first — this parser assumes bracket discipline holds and only checks
-    ///         the v1 shape restrictions on top).
+    ///         cross-chain/static constraints on top).
     function fromMessages(BlobMessage[] calldata msgs) external {
         if (_nodes.length != 0 || _txs.length != 0) revert ParseInvariant("store already populated");
 
@@ -286,9 +269,10 @@ contract ScenarioStore {
         bool inTx = false;
         uint256 curTx = 0;
 
-        bool regionOpen = false;
-        uint256 regionFrame = 0;
-        uint256 regionStart = 0;
+        uint256[] memory regionFrames = new uint256[](msgs.length);
+        uint256[] memory regionStarts = new uint256[](msgs.length);
+        uint256[] memory regionIds = new uint256[](msgs.length);
+        uint256 regionDepth;
 
         for (uint256 i = 0; i < msgs.length; i++) {
             BlobMessage calldata m = msgs[i];
@@ -322,31 +306,23 @@ contract ScenarioStore {
                 sp++;
             } else if (t == BlobMsgType.ReturnSuccess || t == BlobMsgType.ReturnFail) {
                 sp--;
-                if (t == BlobMsgType.ReturnFail) {
-                    // A failing frame's terminal revert rolls back its own nested
-                    // consumptions on the executing chain, so a committed (successful
-                    // mutable) sub-call has no faithful table translation.
-                    uint256[] storage kids = _nodes[frames[sp]].children;
-                    for (uint256 k = 0; k < kids.length; k++) {
-                        if (!_nodes[kids[k]].isStatic && _nodes[kids[k]].success) {
-                            revert UnsupportedShape("ReturnFail frame with a committed sub-call");
-                        }
-                    }
-                }
                 setResult(frames[sp], t == BlobMsgType.ReturnSuccess, m.data);
             } else if (t == BlobMsgType.Snapshot) {
-                if (regionOpen) revert UnsupportedShape("nested Snapshot regions");
-                regionOpen = true;
-                regionFrame = frames[sp - 1];
-                regionStart = _frameChildCount(curTx, regionFrame);
+                regionFrames[regionDepth] = frames[sp - 1];
+                regionStarts[regionDepth] = _frameChildCount(curTx, frames[sp - 1]);
+                regionIds[regionDepth++] = _regions.length;
+                _regions.push();
             } else if (t == BlobMsgType.Revert) {
-                // Codec guarantees the Revert arrives at the Snapshot's stack depth,
-                // which in a linear walk means the same frame.
-                uint256 count = _frameChildCount(curTx, regionFrame);
-                if (count == regionStart) revert UnsupportedShape("empty Snapshot region");
-                uint256 firstChild = _frameChild(curTx, regionFrame, regionStart);
-                setRevertSpan(firstChild, uint16(count - regionStart));
-                regionOpen = false;
+                uint256 depth = --regionDepth;
+                uint256 frame = regionFrames[depth];
+                uint256 start = regionStarts[depth];
+                uint256 count = _frameChildCount(curTx, frame);
+                if (count == start) revert UnsupportedShape("empty Snapshot region");
+                if (count - start > type(uint16).max) revert UnsupportedShape("Snapshot region too large");
+                uint256 first = _frameChild(curTx, frame, start);
+                uint16 span = uint16(count - start);
+                _regions[regionIds[depth]] = RevertRegion(first, _frameChild(curTx, frame, count - 1), span);
+                if (span > _nodes[first].revertSpan) _nodes[first].revertSpan = span;
             } else if (t == BlobMsgType.FinishCrossChainTransaction) {
                 inTx = false;
                 sp = 0;
@@ -373,10 +349,7 @@ contract ScenarioStore {
     ///         built by `fromMessages` this reproduces the input exactly; for an IR
     ///         built by TableStitcher it IS the Table→Blob direction.
     function toMessages() external view returns (BlobMessage[] memory) {
-        uint256 regions = 0;
-        for (uint256 i = 0; i < _nodes.length; i++) {
-            if (_nodes[i].revertSpan > 0) regions++;
-        }
+        uint256 regions = _regions.length;
         MsgList memory l =
             Msg.list(2 * _nodes.length + 2 * regions + 2 * _txs.length + _chainOps.length + (hasClose ? 1 : 0));
 
@@ -414,17 +387,19 @@ contract ScenarioStore {
     /// @notice Emits a run of sibling calls, wrapping `revertSpan` groups in
     ///         Snapshot … Revert brackets.
     function _emitSiblings(MsgList memory l, uint256[] storage siblings) internal view {
-        uint256 regionEnd = type(uint256).max; // sibling index the active region closes after
-        for (uint256 i = 0; i < siblings.length; i++) {
-            CallNode storage n = _nodes[siblings[i]];
-            if (n.revertSpan > 0) {
-                Msg.push(l, Msg.snapshot());
-                regionEnd = i + n.revertSpan - 1;
+        uint256[] memory ends = new uint256[](_regions.length);
+        uint256 depth;
+        for (uint256 i; i < siblings.length; i++) {
+            for (uint256 r; r < _regions.length; r++) {
+                if (_regions[r].firstNode == siblings[i]) {
+                    Msg.push(l, Msg.snapshot());
+                    ends[depth++] = _regions[r].lastNode;
+                }
             }
             _emitSubtree(l, siblings[i]);
-            if (regionEnd == i) {
+            while (depth > 0 && ends[depth - 1] == siblings[i]) {
                 Msg.push(l, Msg.revertMarker());
-                regionEnd = type(uint256).max;
+                depth--;
             }
         }
     }

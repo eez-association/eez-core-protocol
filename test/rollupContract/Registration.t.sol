@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../../deployment/RollupDeployment.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {EEZ} from "../../src/EEZ.sol";
 import {Rollup} from "../../src/rollupContract/Rollup.sol";
@@ -11,7 +13,7 @@ contract RollupRegistrationTest is Test {
 
     function setUp() public {
         registry = new EEZ(makeAddr("recovery"));
-        manager = new Rollup(address(registry), address(this), 0, new address[](0), new bytes32[](0));
+        manager = deployRollup(address(registry), address(this), 0, new address[](0), new bytes32[](0));
     }
 
     function testFuzz_UnauthorizedRegistrationRollsBackThenOwnerRegisters(

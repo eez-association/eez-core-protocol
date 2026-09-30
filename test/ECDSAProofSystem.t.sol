@@ -38,8 +38,16 @@ contract ECDSAProofSystemTest is Test {
         assertFalse(verifier.verify(proof, message));
     }
 
+    function test_Constructor_EmitsSignerUpdated() public {
+        vm.expectEmit(true, true, false, true);
+        emit ECDSAProofSystem.SignerUpdated(address(0), signerAddr);
+        new ECDSAProofSystem(owner, signerAddr);
+    }
+
     function test_SetSigner_ByOwner() public {
         address newSigner = address(0x1234);
+        vm.expectEmit(true, true, false, true, address(verifier));
+        emit ECDSAProofSystem.SignerUpdated(signerAddr, newSigner);
         vm.prank(owner);
         verifier.setSigner(newSigner);
         assertEq(verifier.signer(), newSigner);

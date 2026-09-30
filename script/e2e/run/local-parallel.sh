@@ -22,10 +22,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Default list: every scenario in the category tree. Order is irrelevant for
+# Default list: scenarios without E2E_EXCLUDE_FROM_ALL. Order is irrelevant for
 # parallel dispatch, so plain find order is used.
 DEFAULT_TESTS=()
 while IFS= read -r _sol; do
+    if grep -q '^// E2E_EXCLUDE_FROM_ALL:' "$_sol"; then
+        continue
+    fi
     DEFAULT_TESTS+=("$(basename "$(dirname "$_sol")")")
 done < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
 
@@ -35,7 +38,9 @@ if [[ $# -gt 0 ]]; then
     # categories expand to every scenario under them.
     TESTS=()
     for arg in "$@"; do
-        if [[ -d "script/e2e/$arg" && "$arg" != */E2E* ]]; then
+        if [[ "$arg" == "all" ]]; then
+            TESTS+=("${DEFAULT_TESTS[@]}")
+        elif [[ -d "script/e2e/$arg" && "$arg" != */E2E* ]]; then
             while IFS= read -r sol; do
                 TESTS+=("$(basename "$(dirname "$sol")")")
             done < <(find "script/e2e/$arg" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)

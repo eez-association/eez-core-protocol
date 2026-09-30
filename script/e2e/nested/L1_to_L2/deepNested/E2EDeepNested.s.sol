@@ -14,7 +14,7 @@ import {
 } from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../src/interfaces/IEEZL2.sol";

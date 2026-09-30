@@ -18,7 +18,7 @@ import {FlashLoanBridgeExecutor} from "../../../../../src/periphery/defiMock/Fla
 import {FlashLoanersNFT} from "../../../../../src/periphery/defiMock/FlashLoanersNFT.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {_deployBridge} from "../../../../DeployBridge.s.sol";
+import {_computeBridgeAddress, _deployBridge} from "../../../../DeployBridge.s.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
     output,
@@ -313,6 +313,31 @@ abstract contract FlashLoanEnv is Script {
 //    3. Deploy2 (L1)  — FlashLoan pool (funded), executorL2 proxy, executorL1.
 // ═══════════════════════════════════════════════════════════════════════
 
+/// @dev A previous partial run can leave the twin deployed on just one chain.
+///      Reuse a compatible bridge without resetting its state or existing admin.
+function _ensureFlashLoanBridge(
+    bytes32 salt,
+    address manager,
+    uint64 rollupId,
+    address admin
+)
+    returns (address deployed)
+{
+    deployed = _computeBridgeAddress(salt);
+    if (deployed.code.length == 0) deployed = _deployBridge(salt);
+
+    Bridge bridge = Bridge(deployed);
+    if (address(bridge.manager()) == address(0)) {
+        bridge.initialize(manager, rollupId, admin);
+    } else {
+        require(address(bridge.manager()) == manager, "flash-loan bridge manager mismatch");
+        require(bridge.rollupId() == rollupId, "flash-loan bridge rollup mismatch");
+    }
+    // Both twins use the same CREATE2 address for cross-chain authentication.
+    address canonical = bridge.canonicalBridgeAddress();
+    require(canonical == address(0) || canonical == deployed, "flash-loan bridge canonical address mismatch");
+}
+
 /// Env: ROLLUPS
 /// Outputs: TOKEN, BRIDGE, BRIDGE_SALT
 contract Deploy is Script {
@@ -322,11 +347,10 @@ contract Deploy is Script {
         vm.startBroadcast();
         TestToken token = new TestToken();
 
-        // Salt keyed on the fresh token address — unique per run, so reruns through the
-        // shared keyless CREATE2 factory never collide with an earlier bridge.
+        // Salt keyed on the token address. A failed plan can repeat this address;
+        // reuse compatible bridge twins left by an earlier partial deployment.
         bytes32 salt = keccak256(abi.encodePacked("e2e-flash-loan", address(token)));
-        address bridge = _deployBridge(salt);
-        Bridge(bridge).initialize(rollupsAddr, MAINNET_ROLLUP_ID, msg.sender);
+        address bridge = _ensureFlashLoanBridge(salt, rollupsAddr, MAINNET_ROLLUP_ID, msg.sender);
 
         output("TOKEN", address(token));
         output("BRIDGE", bridge);
@@ -345,9 +369,8 @@ contract DeployL2 is Script, FlashLoanActions {
         bytes32 salt = vm.envBytes32("BRIDGE_SALT");
 
         vm.startBroadcast();
-        address bridge = _deployBridge(salt);
+        address bridge = _ensureFlashLoanBridge(salt, managerAddr, L2_ROLLUP_ID, msg.sender);
         require(bridge == bridgeL1, "bridge address mismatch across chains");
-        Bridge(bridge).initialize(managerAddr, L2_ROLLUP_ID, msg.sender);
 
         // Config args unused on the L2 side — claimAndBridgeBack takes everything as parameters.
         FlashLoanBridgeExecutor executorL2 = new FlashLoanBridgeExecutor(

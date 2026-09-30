@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {deployRollup} from "../deployment/RollupDeployment.sol";
+
 import {Base} from "./Base.t.sol";
 import {EEZ, ProofSystemBatchPerVerificationEntries} from "../src/EEZ.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
@@ -16,6 +18,7 @@ import {
 import {EEZBase} from "../src/base/EEZBase.sol";
 import {IMetaCrossChainReceiver} from "../src/interfaces/IMetaCrossChainReceiver.sol";
 import {Counter, CounterAndProxy, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 /// @notice Simple target contract for testing
 contract TestTarget {
@@ -85,6 +88,22 @@ contract MetaLookupCaller is IMetaCrossChainReceiver {
     function executeMetaCrossChainTransactions() external override {
         hookRan = true;
         (callSuccess, callReturnData) = proxyAddr.call(proxyCallData);
+    }
+}
+
+/// @notice Changes the stored root during registration to test the creation event.
+contract RegistrationRootUpdater {
+    EEZ internal immutable registry;
+    bytes32 internal immutable registrationRoot;
+
+    constructor(EEZ _registry, bytes32 _registrationRoot) {
+        registry = _registry;
+        registrationRoot = _registrationRoot;
+    }
+
+    function rollupContractRegistered(uint64 rollupId, address) external {
+        require(msg.sender == address(registry));
+        registry.setRoot(rollupId, registrationRoot);
     }
 }
 
@@ -627,6 +646,10 @@ contract EEZTest is Base {
         entries[0] = _shellEntry(r1.id, deltas);
         entries[0].rollingHash = _hEntryBegin(deltas, bytes32(0));
 
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.L2ExecutionPerformed(uint64(r1.id), keccak256("s1"), 3 ether);
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.L2ExecutionPerformed(uint64(r2.id), keccak256("s2"), 2 ether);
         rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, entries, _emptyStaticEntries(), 1, 0));
 
         assertEq(_getRollupEtherBalance(r1.id), 3 ether);
@@ -863,6 +886,32 @@ contract EEZTest is Base {
         assertEq(address(rollups).balance, 0.5 ether, "booked balance == physical balance");
     }
 
+    function test_NestedCallResultsReuseEntryAndCallNumbers() public {
+        RollupHandle memory r = _makeRollup(bytes32(0));
+        uint64 rid = uint64(r.id);
+        _fundRollup(rid, 2 ether);
+        TestTarget sink = new TestTarget();
+        (ExecutionEntry[] memory entries,) = _nestedOutflowEntry(rid, address(sink), -1.5 ether);
+
+        vm.recordLogs();
+        _postBatchAutoTransient(r, entries);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 results;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter != address(rollups) || logs[i].topics.length == 0) continue;
+            if (logs[i].topics[0] != EEZ.CallResult.selector) continue;
+            assertEq(uint256(logs[i].topics[1]), 0, "both calls share entry index");
+            assertEq(uint256(logs[i].topics[2]), 0, "both frames start call numbering at zero");
+            (bool success, bytes memory returnData) = abi.decode(logs[i].data, (bool, bytes));
+            assertTrue(success);
+            if (results == 0) assertEq(returnData, ""); // nested sink call finishes first
+            if (results == 1) assertEq(returnData, abi.encode(uint256(2 ether))); // parent finishes second
+            results++;
+        }
+        assertEq(results, 2);
+    }
+
     /// @notice Soundness: the delta a per-frame local would have accepted (−0.5, nested outflow
     ///         dropped) must now be REJECTED, otherwise EEZ would book 1 ether it no longer holds.
     function test_NestedOutflow_DroppedDeltaRejected() public {
@@ -955,7 +1004,7 @@ contract EEZTest is Base {
 
     /// @notice Providing more top-level calls than the entry's `rollingHash` accounts for diverges
     ///         the hash (every call folds CALL_BEGIN/END), surfacing as `RollingHashMismatch`. The
-    ///         old dedicated `UnconsumedL2ToL1Calls` error is gone — `_processNCalls` runs the WHOLE
+    ///         old dedicated `UnconsumedL2ToL1Calls` error is gone — `_processL2ToL1Calls` runs the WHOLE
     ///         array and completeness is enforced structurally by the rolling hash.
     function test_UnconsumedCalls_Reverts() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
@@ -990,7 +1039,7 @@ contract EEZTest is Base {
         psList[0] = address(ps);
         bytes32[] memory vks = new bytes32[](1);
         vks[0] = DEFAULT_VK;
-        Rollup r = new Rollup(address(rollups), alice, 1, psList, vks);
+        Rollup r = deployRollup(address(rollups), alice, 1, psList, vks);
         vm.expectEmit(true, true, true, true);
         // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so this fresh rollup lands at id 1.
         emit EEZ.RollupCreated(1, address(r), keccak256("init"));
@@ -998,13 +1047,73 @@ contract EEZTest is Base {
         rollups.registerRollup(address(r), keccak256("init"));
     }
 
+    function test_Event_RollupCreatedUsesRootAfterCallback() public {
+        bytes32 inputRoot = bytes32(uint256(1));
+        bytes32 storedRoot = bytes32(uint256(99));
+        RegistrationRootUpdater r = new RegistrationRootUpdater(rollups, storedRoot);
+
+        vm.expectEmit(true, false, false, true, address(rollups));
+        emit EEZ.RootUpdated(1, storedRoot);
+        vm.expectEmit(true, true, false, true, address(rollups));
+        emit EEZ.RollupCreated(1, address(r), storedRoot);
+        uint64 rollupId = rollups.registerRollup(address(r), inputRoot);
+
+        assertEq(rollupId, 1);
+        assertEq(_getRollupState(rollupId), storedRoot);
+    }
+
     function test_Event_BatchPosted() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, bytes32(0), keccak256("s"));
-        vm.recordLogs();
+        bytes32[] memory entryHashes = new bytes32[](1);
+        entryHashes[0] = keccak256(abi.encode(entries[0]));
+        bytes32[] memory emptyHashes = new bytes32[](0);
+        bytes32[] memory customDataHashes = new bytes32[](1);
+        customDataHashes[0] = keccak256(abi.encode(uint64(r.id), bytes("")));
+        bytes32 sharedPublicInput = keccak256(
+            abi.encodePacked(
+                abi.encode(entryHashes),
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                keccak256(bytes("")),
+                abi.encode(customDataHashes),
+                address(0)
+            )
+        );
+        bytes32 acc = keccak256(abi.encode(bytes32(0), uint64(r.id), DEFAULT_VK));
+        ps.setExpectedPublicInputsHash(keccak256(abi.encodePacked(sharedPublicInput, acc)));
+
+        uint64[] memory rollupIds = new uint64[](1);
+        rollupIds[0] = uint64(r.id);
+        vm.expectEmit(false, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(sharedPublicInput, rollupIds);
         _postBatchAutoTransient(r, entries);
-        assertTrue(_findLog(vm.getRecordedLogs(), EEZ.BatchPosted.selector));
+    }
+
+    function test_Event_BatchPosted_MultipleRollupsWithoutEntries() public {
+        RollupHandle memory r1 = _makeRollup(bytes32(0));
+        RollupHandle memory r2 = _makeRollup(bytes32(0));
+        uint64[] memory rollupIds = new uint64[](2);
+        rollupIds[0] = uint64(r1.id);
+        rollupIds[1] = uint64(r2.id);
+        bytes32[] memory customDataHashes = new bytes32[](2);
+        customDataHashes[0] = keccak256(abi.encode(rollupIds[0], bytes("")));
+        customDataHashes[1] = keccak256(abi.encode(rollupIds[1], bytes("")));
+        bytes32[] memory emptyHashes = new bytes32[](0);
+        bytes32 sharedPublicInput = keccak256(
+            abi.encodePacked(
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                abi.encode(emptyHashes),
+                keccak256(bytes("")),
+                abi.encode(customDataHashes),
+                address(0)
+            )
+        );
+        vm.expectEmit(false, false, false, true, address(rollups));
+        emit EEZ.BatchPosted(sharedPublicInput, rollupIds);
+        rollups.postAndVerifyBatch(_twoRollupBatch(r1.id, r2.id, _emptyEntries(), _emptyStaticEntries(), 0, 0));
     }
 
     function test_Event_RootUpdated_OnEscape() public {

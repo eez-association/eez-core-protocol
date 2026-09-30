@@ -175,24 +175,29 @@ real on the chain that owns the read state. Split by where the read fires:
   value instead). The chain that owns the state executes the read for real: that is
   what `isStatic: true` on `L2ToL1Call` exists for — put the read in the destination
   entry's `l2ToL1Calls[]` (or the reentrant frame's own sub-array when it fires inside
-  a nested frame) and `_processNCalls` dispatches it via STATICCALL through the
+  a nested frame) and `_processL2ToL1Calls` dispatches it via STATICCALL through the
   reader's source proxy into the live contract, folding
   `CALL_BEGIN(staticCcHash)` / `CALL_END(success, realRetData)`.
 - **Top-level from L2** (outside any execution, reading L1): the reader's chain
-  resolves it from the `staticEntries` pool (same-block gate, matched by hash alone),
+  resolves it from the `staticEntries` pool (same-block gate, matched by hash and live `entryIndex`),
   and the read still executes for real on L1 — the L2 user tx maps to its usual
   zero-hash L2Tx entry, whose `l2ToL1Calls[0]` is the `isStatic: true` read.
 - **Top-level from L1 reading L2** — the ONLY view-only case: L2 executes NOTHING (no
   delivery exists for it). The read resolves from the routed rollup's
   `staticEntryQueue` on L1 (match = key + `destinationRollupId` + every root pin
-  live; no block gate — the pins bound staleness), and the L2-side truth is the pins
-  plus asserting the real producer's live value where it is set.
+  live), and requires `lastVerifiedBlock(destRid) == block.number`. Matching roots
+  do not extend validity beyond the verification block. The L2-side truth is checked
+  against the pinned state and the real producer's value.
 
-The cross-chain tie for every static read is digest equality: both the reader-side key
-and the destination-side executed call fold the SAME `crossChainCallHash` preimage —
-`isStatic = true`, source = the reader contract at ITS chain's rollup id, `value = 0`,
-`callGas = 0` always (static keys never fold gas, even under `USE_GAS_LEFT`) — plus
-identical result bytes, which must come from the real contract's live state (rule 3).
+For each static read, correlate the source/target address and rollup pairs, calldata,
+static mode, and exact result bytes from the real producer (rule 3). Call-hash equality
+also requires matching gas inputs: L1 static keys and delivered-call `CALL_BEGIN`
+folds on both chains use `callGas = 0`; outgoing L2 static keys use
+`uint64(gasleft())` sampled after proxy authorization/storage reads when
+`USE_GAS_LEFT` is enabled, and zero otherwise. This applies to both top-level and
+nested static lookups. The gas-independent fixtures can compare these hashes directly;
+observed-gas integrations must correlate the call fields while accounting for the
+site-specific gas value. See the [core hash matrix](../../../docs/CORE_PROTOCOL_SPEC.md#c-action-hash-computation).
 
 Authoring notes specific to static scenarios:
 
@@ -206,8 +211,10 @@ Authoring notes specific to static scenarios:
   standard no-tx query: an eth_call through the proxy impersonating the READER
   (`vm.prank(address(reader))` — forge never broadcasts static calls), resolving the
   SAME entry the trigger uses. Exercise it in local `Execute` only (same block): the
-  entry matches just until the next tx that moves the pinned root — possibly later in
-  the SAME block — so a deferred `VerifyNetwork` must never re-issue it.
+  entry requires both current-block verification and matching root pins. A root change
+  or queue replacement can invalidate it within that block, and the block gate rejects
+  it in later blocks even if the roots still match. A deferred `VerifyNetwork` must
+  therefore verify persisted evidence rather than re-issue the read.
 - **Eventless sides are verified from calldata, not events.** Static resolution emits
   no events and a posted L1 `staticEntries` batch emits nothing per-entry either.
   Export `EXPECTED_*_HASHES` only for sides that actually have `ExecutionEntry`s
@@ -228,6 +235,72 @@ Authoring notes specific to static scenarios:
   An empty `EXPECTED_L2_HASHES` alone only skips the L2 checks — it proves nothing.
 - **A sub-call-less static entry needs `rollingHash == 0`** (the untagged static
   accumulator seeds at zero and an empty sub-array is always compared).
+
+### Static read → write → read scenarios
+
+Each scenario runs one source transaction without reloading tables between reads:
+
+| Source | Scenario | Proxy calls in the trigger | Calls executed on the destination |
+| --- | --- | --- | --- |
+| L1 | `static/L1_to_L2/staticReadWrite` | read 0 → increment 1 → read 1 | One L2 increment delivery; static reads are L1 lookups. |
+| L2 | `static/L2_to_L1/staticReadWriteL2` | read 0 → increment 1 → read 1 | Three L1 calls in one zero-hash L2Tx entry. |
+| L1 | `static/L1_to_L2/staticReadX2Write` | read 0 → read 0 → increment 1 → read 1 → read 1 | One L2 increment delivery; static reads are L1 lookups. |
+| L2 | `static/L2_to_L1/staticReadX2WriteL2` | read 0 → read 0 → increment 1 → read 1 → read 1 | Five L1 calls in one zero-hash L2Tx entry. |
+
+All four use two static rows: before and after the increment. L1 rows pin the
+pre/post L2 roots; L2 rows pin `expectedEntryIndex` 0 and 1. The future row is first
+so matching must check the context. The X2 variants reuse each row twice and check
+that static reads do not advance the cursor.
+
+Each scenario file contains its target counter, trigger, `Actions`, deployment,
+execution and `ComputeExpected` contracts. Assertions check the observed read values,
+the real destination increment, and one mutable consumption. L1-originating cases
+also verify that static reads produce no L2 delivery or loaded entry.
+
+```bash
+bash script/e2e/run/local-parallel.sh staticReadWrite staticReadWriteL2
+bash script/e2e/run/local-parallel.sh staticReadX2Write staticReadX2WriteL2
+```
+
+### Static read → local write → read with callbacks
+
+**Status: NOT LIVE YET in staged or parallel network testing.** These four scenarios
+are validated locally only and excluded from automatic `all` / `all:N` runs and the
+local default set. Their `E2E_EXCLUDE_FROM_ALL` markers control this exclusion.
+The explicit command below is for local development; names and category selections
+remain available and do not imply live readiness.
+
+These scenarios cover candidate retries without a mutable EEZ call between reads.
+Each scenario file contains its reader, remote quote producer, and both chains'
+entry builders. One `reader.run()` sets its local rate to `1 → 2 → 1` and reads the same
+remote `quote()` after each write. The quote calls back to the reader's `rate()` and
+returns that rate directly; all three results (`1 → 2 → 1`) are asserted individually inside the
+actual reader transaction and persisted for inspection. `run()` returns no data; there is no aggregate result to interpret.
+
+| Resolver under test | Scenario | Trigger and paired execution |
+| --- | --- | --- |
+| L1 top-level | `static/L1_to_L2/staticLocalWrite` | Direct L1 reader call; two static rows with identical live root pins. Real L2 quote results come from fork-only prediction with the source callback values. No L2 delivery; the quote key is asserted absent from mined L2 tables/events. |
+| L2 top-level | `static/L2_to_L1/staticLocalWriteL2` | Direct L2 reader call; two static rows at cursor 0. One L1 zero-hash L2Tx entry executes the three real quotes and resolves their static callbacks. |
+| L1 nested | `static/L2_to_L1/nestedStaticLocalWriteL1` | One L2 proxy call to the L1 reader. One L1 zero-hash L2Tx entry runs the reader with two sibling quote rows. The same L2 source entry executes all three real quotes, with callback rows keyed to their firing positions. |
+| L2 nested | `static/L1_to_L2/nestedStaticLocalWriteL2` | One L1 proxy call to the L2 reader. One L2 delivery runs the reader with two sibling quote rows. The L1 source entry executes the three real quotes, with callback rows keyed to their firing positions. |
+
+The reader-side rows have equal lookup keys and distinct callback hashes. The second
+read must reject the first candidate before selecting the second; the third must reuse
+the first. No reload occurs between reads. L2 asserts cursor 0 for top-level reads and
+exactly one mutable consumption for nested cases; L1 checks the expected root transition
+(or unchanged root for top-level L1 reads). Expected tables and L1 fold steps are built
+from the same call preimages used by both executions.
+
+The nested scenario suffix names the chain where the retry is tested; its directory
+names the mutable trigger direction. Local E2Es use `AcceptAllProofSystem`, so success
+establishes paired execution and table consistency, not production circuit acceptance.
+
+```bash
+bash script/e2e/run/local-parallel.sh staticLocalWrite staticLocalWriteL2 nestedStaticLocalWriteL1 nestedStaticLocalWriteL2
+```
+
+Protocol rules, candidate construction and failure handling:
+[STATIC_ENTRY §4.4](../../docs/STATIC_ENTRY.md#44-local-writes-between-identical-static-reads).
 
 ## Authoring rules (the audit checklist)
 

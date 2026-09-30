@@ -8,13 +8,14 @@ import {EEZL2} from "../../../../../src/L2/EEZL2.sol";
 import {RollupUpdate, ExecutionEntry, StaticExecutionEntry} from "../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../src/interfaces/IEEZL2.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
     output,
+    CHEATS,
     getOrCreateProxy,
     crossChainCallHash,
     noStaticEntries,
@@ -30,22 +31,26 @@ import {
 //  Bridge scenario — L1→L2 with ETH value transfer, two-sided
 //
 //  L1 side (Execute):
-//    BridgeSender.bridge{value: BRIDGE_AMOUNT}() → L2_PROXY.call{value: BRIDGE_AMOUNT}("")
-//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by BRIDGE_AMOUNT
+//    BridgeSender.bridge{value: bridgeAmount()}() → L2_PROXY.call{value: bridgeAmount()}("")
+//    → EEZ.executeCrossChainCall consumes the L1 entry; manager balance grows by bridgeAmount()
 //    (the etherDelta on the RollupUpdate records the cross-chain effect on L2's view).
 //
 //  L2 side (ExecuteL2):
-//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: BRIDGE_AMOUNT}(...)
-//    → _processNCalls forwards through the source proxy into BridgeReceiver, which
-//    accepts the ETH via receive(). After: BridgeReceiver.balance == BRIDGE_AMOUNT.
+//    SYSTEM_ADDRESS calls managerL2.executeIncomingCrossChainCall{value: bridgeAmount()}(...)
+//    → _processIncomingCalls forwards through the source proxy into BridgeReceiver, which
+//    accepts the ETH via receive(). After: BridgeReceiver.balance == bridgeAmount().
 // ═══════════════════════════════════════════════════════════════════════
 
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
-// Same amount on both bridge scenarios: this deposit is exactly the escrow that
-// bridgeL2's release draws on, and it stays small enough for a parallel worker
-// funded with the default 0.1 ETH to run the trigger tx (value + gas).
-uint256 constant BRIDGE_AMOUNT = 0.001 ether;
+
+// Defaults to the 0.00001 ETH that bridgeL2 releases. Override the L1-to-L2
+// deposit per run with E2E_BRIDGE_AMOUNT_WEI; bridgeL2's amount is unchanged.
+// All script-side transaction fields and expected tables use the same value.
+function bridgeAmount() view returns (uint256 amount) {
+    amount = CHEATS.envOr("E2E_BRIDGE_AMOUNT_WEI", uint256(0.00001 ether));
+    require(amount > 0 && amount <= uint256(uint192(type(int192).max)), "invalid bridge amount");
+}
 
 /// @notice Minimal user contract: receives a value-bearing call and forwards it to the L2 proxy.
 contract BridgeSender {
@@ -69,17 +74,17 @@ contract BridgeReceiver {
 }
 
 abstract contract BridgeActions {
-    function _callHash(address l2Destination, address sender) internal pure returns (bytes32) {
-        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, BRIDGE_AMOUNT, "");
+    function _callHash(address l2Destination, address sender) internal view returns (bytes32) {
+        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, bridgeAmount(), "");
     }
 
-    function _l1Entries(address l2Destination, address sender) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address l2Destination, address sender) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
             rollupId: L2_ROLLUP_ID,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
-            etherDelta: int192(int256(BRIDGE_AMOUNT))
+            etherDelta: int192(int256(bridgeAmount()))
         });
 
         bytes32 proxyEntryHash = _callHash(l2Destination, sender);
@@ -103,7 +108,7 @@ abstract contract BridgeActions {
         address sender
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -114,7 +119,7 @@ abstract contract BridgeActions {
             sourceAddress: sender,
             sourceRollupId: MAINNET_ROLLUP_ID,
             targetAddress: l2Destination,
-            value: BRIDGE_AMOUNT,
+            value: bridgeAmount(),
             data: ""
         });
 
@@ -179,7 +184,7 @@ contract ExecuteL2 is Script, BridgeActions {
         address senderAddr = vm.envAddress("BRIDGE_SENDER");
 
         vm.startBroadcast();
-        EEZL2(managerAddr).executeIncomingCrossChainCall{value: BRIDGE_AMOUNT}(
+        EEZL2(managerAddr).executeIncomingCrossChainCall{value: bridgeAmount()}(
             _l2Entries(l2DestAddr, senderAddr), noL2StaticEntries()
         );
 
@@ -189,7 +194,7 @@ contract ExecuteL2 is Script, BridgeActions {
     }
 }
 
-/// @title Execute — local mode: postAndVerifyBatch tx + bridge{value: BRIDGE_AMOUNT}() tx from the EOA.
+/// @title Execute — local mode: postAndVerifyBatch tx + bridge{value: bridgeAmount()}() tx from the EOA.
 ///        The runner mines both in one block (execute_l1_same_block), satisfying the
 ///        same-block consumption gate.
 contract Execute is Script, BridgeActions {
@@ -206,7 +211,7 @@ contract Execute is Script, BridgeActions {
                     proofSystemAddr, L2_ROLLUP_ID, _l1Entries(l2DestAddr, senderAddr), noStaticEntries()
                 )
             );
-        BridgeSender(senderAddr).bridge{value: BRIDGE_AMOUNT}();
+        BridgeSender(senderAddr).bridge{value: bridgeAmount()}();
         console.log("done");
         vm.stopBroadcast();
     }
@@ -217,7 +222,7 @@ contract ExecuteNetwork is Script {
     function run() external view {
         address target = vm.envAddress("BRIDGE_SENDER");
         console.log("TARGET=%s", target);
-        console.log("VALUE=%s", BRIDGE_AMOUNT);
+        console.log("VALUE=%s", bridgeAmount());
         console.log("CALLDATA=%s", vm.toString(abi.encodeWithSelector(BridgeSender.bridge.selector)));
     }
 }

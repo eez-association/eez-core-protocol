@@ -11,7 +11,7 @@ import {
 } from "../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
-    StaticExecutionEntry as L2StaticExecutionEntry,
+    StaticExecutionEntryL2 as L2StaticExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../src/interfaces/IEEZL2.sol";
@@ -274,6 +274,7 @@ abstract contract ComputeExpectedBase is Script {
     }
 
     function _logStaticLookup(uint256 idx, L2StaticExecutionEntry memory sc) internal view {
+        console.log("      expectedEntryIndex=%s", sc.expectedEntryIndex);
         console.log("  [%s] TOP-LEVEL STATIC proxyEntryHash=%s", idx, vm.toString(sc.proxyEntryHash));
         console.log(
             "      success=%s  subCalls=%s", sc.success ? "true" : "false", vm.toString(sc.incomingCalls.length)

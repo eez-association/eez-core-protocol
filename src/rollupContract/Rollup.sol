@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
+import {IEEZRegistry} from "../interfaces/IEEZRegistry.sol";
 import {IRollupContract} from "../interfaces/IRollup.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-
-/// @notice Minimal interface against the central EEZ registry — only the calls this
-///         per-rollup contract needs. Kept inline (rather than imported from `IEEZ`)
-///         to keep `Rollup.sol` decoupled from the cross-chain execution model.
-interface IEEZRegistry {
-    function setRoot(uint64 rollupId, bytes32 newRoot) external;
-}
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 /// @title Rollup
 /// @notice Reference per-rollup management contract. Holds proof system membership, vkeys,
-///         threshold, and ownership for a single rollup. Anyone can deploy this; its current
+///         threshold, and ownership for a single rollup. Anyone can deploy a proxy; its current
 ///         owner registers it via `EEZ.registerRollup` — the registry never deploys it on the user's
 ///         behalf.
 /// @dev The rollupId is provided by the registry via the `rollupContractRegistered` callback
-///      (only callable by `ROLLUPS`). Stored internally and passed back when this contract
-///      calls into the registry (`setRoot(rid, root)`), so the registry doesn't need a
+///      (only callable by `EEZContract`). Stored internally and passed back when this contract
+///      calls into the registry (`setRoot(rollupId, root)`), so the registry doesn't need a
 ///      reverse lookup from contract address to rollupId.
-contract Rollup is IRollupContract, Ownable {
+contract Rollup is IRollupContract, OwnableUpgradeable {
+    // ──────────────────────────────────────────────
+    //  Immutables
+    // ──────────────────────────────────────────────
+
     /// @notice The central EEZ registry this rollup is registered with
-    address public immutable ROLLUPS;
+    address public immutable EEZContract;
+
+    // ──────────────────────────────────────────────
+    //  Storage
+    // ──────────────────────────────────────────────
 
     /// @notice The rollupId this contract manages. Written once on registration.
     uint64 public rollupId;
@@ -37,18 +39,50 @@ contract Rollup is IRollupContract, Ownable {
     /// @notice Per-proof-system verification key. `bytes32(0)` = not allowed.
     mapping(address proofSystem => bytes32 vkey) public verificationKey;
 
+    // ──────────────────────────────────────────────
+    //  Events
+    // ──────────────────────────────────────────────
+
+    /// @notice Emitted when a proof system is added with its initial verification key.
     event ProofSystemAdded(address indexed proofSystem, bytes32 verificationKey);
+
+    /// @notice Emitted when a proof system is removed from the allowed set.
     event ProofSystemRemoved(address indexed proofSystem);
+
+    /// @notice Emitted when an allowed proof system receives a replacement verification key.
     event VerificationKeyUpdated(address indexed proofSystem, bytes32 newVerificationKey);
+
+    /// @notice Emitted when the threshold is initialized or updated.
     event ThresholdChanged(uint256 newThreshold);
+
+    /// @notice Emitted after the registry accepts an owner-requested root replacement.
     event RootEscape(bytes32 newRoot);
 
+    // ──────────────────────────────────────────────
+    //  Errors
+    // ──────────────────────────────────────────────
+
+    /// @notice The registration callback was called by an address other than EEZContract.
     error NotEEZRegistry();
+
+    /// @notice The EEZ contract address is zero.
+    error InvalidEEZContract();
+
+    /// @notice A verification key is zero, or initial array lengths differ.
     error InvalidConfig();
+
+    /// @notice A registration callback was received after a rollup ID was already assigned.
     error AlreadyRegistered();
+
+    /// @notice The account registering this manager is not its current owner.
     error UnauthorizedRegistrantAccount(address registrant);
+
+    /// @notice An attempt was made to add a proof system that already has a nonzero key.
     error ProofSystemAlreadyAllowed(address proofSystem);
+
+    /// @notice A submitted proof system has no key, is zero, or breaks strictly increasing address order.
     error ProofSystemNotAllowed(address proofSystem);
+
     /// @notice A management op (`removeProofSystem` / `updateVerificationKey`) targeted a
     ///         proof system that isn't currently added (zero vkey).
     error ProofSystemNotAdded(address proofSystem);
@@ -61,34 +95,38 @@ contract Rollup is IRollupContract, Ownable {
     ///         is unavailable (≥ current block or older than the last 256 blocks → 0).
     error BlockHashUnavailable(uint64 blockNumber);
 
-    /// @param rollupsRegistry The central EEZ contract
-    /// @param _owner Initial owner
-    /// @param _threshold Initial threshold — owner picks any value (no upper bound against
-    ///        the initial PS list).
-    /// @param proofSystems Initial proof system addresses — any contract conforming to
-    ///        `IProofSystem`. There is no central registry; the rollup owner is responsible
-    ///        for vetting each proof system before adding it.
-    /// @param vkeys Initial verification keys (parallel to proofSystems; non-zero, no duplicates)
-    constructor(
-        address rollupsRegistry,
-        address _owner,
-        uint256 _threshold,
+    // ──────────────────────────────────────────────
+    //  Constructor and initialization
+    // ──────────────────────────────────────────────
+
+    /// @notice Binds the implementation to EEZ and disables implementation initialization.
+    /// @param _EEZContract The central EEZ proxy; preserve this address on upgrades.
+    constructor(address _EEZContract) {
+        if (_EEZContract == address(0)) revert InvalidEEZContract();
+        EEZContract = _EEZContract;
+        _disableInitializers();
+    }
+
+    /// @notice Initializes proxy storage once; pass this call to the proxy constructor.
+    /// @param initialOwner Nonzero owner authorized to manage the rollup.
+    /// @param initialThreshold Initial minimum proof-system count, with no upper bound.
+    /// @param proofSystems Initial proof-system addresses; duplicates are rejected.
+    /// @param vkeys Nonzero verification keys parallel to proofSystems.
+    function initialize(
+        address initialOwner,
+        uint256 initialThreshold,
         address[] memory proofSystems,
         bytes32[] memory vkeys
     )
-        Ownable(_owner)
+        external
+        initializer
     {
-        if (rollupsRegistry == address(0)) revert InvalidConfig();
+        __Ownable_init(initialOwner);
         if (proofSystems.length != vkeys.length) revert InvalidConfig();
-
-        ROLLUPS = rollupsRegistry;
-        threshold = _threshold;
+        _setThreshold(initialThreshold);
 
         for (uint256 i = 0; i < proofSystems.length; i++) {
-            address ps = proofSystems[i];
-            if (vkeys[i] == bytes32(0)) revert InvalidConfig();
-            if (verificationKey[ps] != bytes32(0)) revert ProofSystemAlreadyAllowed(ps);
-            verificationKey[ps] = vkeys[i];
+            _addProofSystem(proofSystems[i], vkeys[i]);
         }
     }
 
@@ -103,6 +141,8 @@ contract Rollup is IRollupContract, Ownable {
     ///      proofSystem subset for THIS rollup is a subset of this manager's allowed set,
     ///      and whose size is at least the manager's threshold. Implication: the (rid × ps)
     ///      verificationKeysPerRollup the registry sees is uniformly non-zero.
+    /// @param proofSystems Allowed proof-system addresses in strictly increasing order, meeting the threshold.
+    /// @return vkeys Nonzero verification keys in the same order as proofSystems.
     function checkProofSystemsAndGetVkeys(address[] calldata proofSystems)
         external
         view
@@ -131,10 +171,10 @@ contract Rollup is IRollupContract, Ownable {
     ///         exact L1 view.
     /// @dev Reference impl returns ABI-encoded `(timestamp, blockHash)` with timestamp 0: a
     ///      past block's timestamp can't be recovered on-chain (only `block.timestamp` of the
-    ///      current block is available), so it's read off-chain from the header instead. A real
-    ///      rollup can override this via handoff to commit any view its circuit expects.
+    ///      current block is available), so it's read off-chain from the header instead.
     /// @param blockNumber L1 block to bind. 0 = no block context (empty blob);
     ///        type(uint64).max = latest context (current timestamp + last block header).
+    /// @return customData Empty bytes for zero; otherwise ABI-encoded (timestamp, blockHash).
     function getCustomData(uint64 blockNumber) external view returns (bytes memory customData) {
         // 0 is the "no L1 context" sentinel — bind an empty blob.
         if (blockNumber == 0) return "";
@@ -159,7 +199,7 @@ contract Rollup is IRollupContract, Ownable {
     /// @param _rollupId Id the registry assigned to this rollup; stored for later `setRoot` calls.
     /// @param registrant Original caller of `EEZ.registerRollup`, forwarded by the registry.
     function rollupContractRegistered(uint64 _rollupId, address registrant) external {
-        if (msg.sender != ROLLUPS) revert NotEEZRegistry();
+        if (msg.sender != EEZContract) revert NotEEZRegistry();
         if (rollupId != 0) revert AlreadyRegistered();
         if (registrant != owner()) revert UnauthorizedRegistrantAccount(registrant);
         rollupId = _rollupId;
@@ -180,16 +220,16 @@ contract Rollup is IRollupContract, Ownable {
 
     /// @notice Adds a proof system to this rollup's allowed set. The owner is responsible
     ///         for verifying that `proofSystem` is a contract conforming to `IProofSystem`.
+    /// @param proofSystem Address to add; it must not already have a verification key.
+    /// @param vkey Nonzero verification key for the proof system.
     function addProofSystem(address proofSystem, bytes32 vkey) external onlyOwner {
-        if (vkey == bytes32(0)) revert InvalidConfig();
-        if (verificationKey[proofSystem] != bytes32(0)) revert ProofSystemAlreadyAllowed(proofSystem);
-        verificationKey[proofSystem] = vkey;
-        emit ProofSystemAdded(proofSystem, vkey);
+        _addProofSystem(proofSystem, vkey);
     }
 
     /// @notice Removes a proof system. Owner is responsible for ensuring the remaining set
     ///         can still meet `threshold`; otherwise the rollup will be locked until more
     ///         PSes are added or `setThreshold` is lowered.
+    /// @param proofSystem Currently allowed proof system to remove.
     function removeProofSystem(address proofSystem) external onlyOwner {
         if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAdded(proofSystem);
         delete verificationKey[proofSystem];
@@ -197,6 +237,8 @@ contract Rollup is IRollupContract, Ownable {
     }
 
     /// @notice Rotates the verification key for an already-allowed proof system
+    /// @param proofSystem Currently allowed proof system whose key is replaced.
+    /// @param newVkey Nonzero replacement verification key.
     function updateVerificationKey(address proofSystem, bytes32 newVkey) external onlyOwner {
         if (newVkey == bytes32(0)) revert InvalidConfig();
         if (verificationKey[proofSystem] == bytes32(0)) revert ProofSystemNotAdded(proofSystem);
@@ -207,20 +249,42 @@ contract Rollup is IRollupContract, Ownable {
     /// @notice Updates the threshold. Any value is accepted, including values above the
     ///         current PS count (locks the rollup) or zero (any batch passes the threshold
     ///         check). Owner is responsible for picking a sane value.
+    /// @param newThreshold Minimum number of distinct allowed proof systems required per batch.
     function setThreshold(uint256 newThreshold) external onlyOwner {
-        threshold = newThreshold;
-        emit ThresholdChanged(newThreshold);
+        _setThreshold(newThreshold);
     }
 
     /// @notice Owner escape hatch — directly sets the rollup's root via the central
     ///         registry. Single state-mutating call from this contract back into EEZ.
     /// @dev Passes `rollupId` explicitly so the registry doesn't need a reverse lookup. The
     ///      registry validates `msg.sender == rollups[rollupId].rollupContract` and reverts
-    ///      `RollupBatchActiveThisBlock` if `lastVerifiedBlock(rid) == block.number` (i.e.,
+    ///      `RollupBatchActiveThisBlock` if `lastVerifiedBlock(rollupId) == block.number` (i.e.,
     ///      a postAndVerifyBatch has touched this rollup in the current block) — the escape hatch
     ///      is locked out for the rest of the block once a verified state transition lands.
+    /// @param newRoot Replacement state root for this rollup.
     function setRoot(bytes32 newRoot) external onlyOwner {
-        IEEZRegistry(ROLLUPS).setRoot(rollupId, newRoot);
+        IEEZRegistry(EEZContract).setRoot(rollupId, newRoot);
         emit RootEscape(newRoot);
+    }
+
+    // ──────────────────────────────────────────────
+    //  Shared configuration helpers
+    // ──────────────────────────────────────────────
+
+    /// @dev Stores a nonzero key for a previously unconfigured proof system and emits ProofSystemAdded.
+    /// @param proofSystem Address to add; address validity and interface conformance are not checked here.
+    /// @param vkey Nonzero verification key for the proof system.
+    function _addProofSystem(address proofSystem, bytes32 vkey) internal {
+        if (vkey == bytes32(0)) revert InvalidConfig();
+        if (verificationKey[proofSystem] != bytes32(0)) revert ProofSystemAlreadyAllowed(proofSystem);
+        verificationKey[proofSystem] = vkey;
+        emit ProofSystemAdded(proofSystem, vkey);
+    }
+
+    /// @dev Stores the threshold without range checks and emits ThresholdChanged.
+    /// @param newThreshold Minimum proof-system count; zero and values above the allowed set size are accepted.
+    function _setThreshold(uint256 newThreshold) internal {
+        threshold = newThreshold;
+        emit ThresholdChanged(newThreshold);
     }
 }

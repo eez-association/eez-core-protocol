@@ -42,6 +42,7 @@
 #
 # Flags (funding flags as in network-parallel.sh):
 #   --direct / --fresh / --fund <eth> / --floor <eth>
+#   Funding target: 0.001 ETH/worker/chain; floor: FUND_ETH / 2 (0.0005 ETH).
 #   --workers <n>    send workers (default 80)
 #   --no-verify      stop after the monitor phase (verify later with --verify-only)
 #   --verify-only <run-dir>  run/re-run only the verify phase of a previous run
@@ -110,7 +111,7 @@ for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2; do
 done
 
 # ══ DEFAULTS — edit here ══════════════════════════════════════════════════════
-DEFAULT_FUND_ETH=0.1
+DEFAULT_FUND_ETH=0.001
 DEFAULT_SOURCE_PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # anvil #2
 # ══════════════════════════════════════════════════════════════════════════════
 

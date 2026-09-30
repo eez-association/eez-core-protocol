@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {BaseL2} from "./BaseL2.t.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
-import {CrossChainCall, ExecutionEntry, StaticExecutionEntry} from "../src/interfaces/IEEZL2.sol";
+import {CrossChainCall, ExecutionEntry, StaticExecutionEntryL2} from "../src/interfaces/IEEZL2.sol";
 
 /// @title GasProbeTest
 /// @notice Validates the callGas observation technique the test harnesses rely on: `callGas`
@@ -20,7 +20,7 @@ contract GasProbeTest is BaseL2 {
         super.setUp();
         // The shared fixture runs with `useGasLeft = false`; this suite validates the observed-gas
         // keying itself, so it replaces the manager with a `useGasLeft = true` deployment.
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, true);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, true, SYSTEM_ADDRESS);
         proxyAddr = manager.createCrossChainProxy(remoteTarget, REMOTE_ROLLUP_ID);
         vm.deal(caller, 10 ether);
     }
@@ -57,7 +57,7 @@ contract GasProbeTest is BaseL2 {
     }
 
     function _loadStatic(bytes32 hash, bytes memory result, bool success) internal {
-        StaticExecutionEntry[] memory rows = new StaticExecutionEntry[](1);
+        StaticExecutionEntryL2[] memory rows = new StaticExecutionEntryL2[](1);
         rows[0].proxyEntryHash = hash;
         rows[0].incomingCalls = new CrossChainCall[](0);
         rows[0].success = success;
@@ -69,7 +69,7 @@ contract GasProbeTest is BaseL2 {
     ///      `EntryNotFound(hash, callGas)` too, so the same two-probe recipe recovers the gas a
     ///      later identical STATICCALL will fold.
     function _probeStatic(bytes memory data) internal returns (bytes32 hash, uint64 g) {
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
         for (uint256 i = 0; i < 2; i++) {
             vm.prank(caller);
             (bool ok, bytes memory err) = proxyAddr.staticcall{gas: CALL_GAS}(data);
@@ -123,7 +123,7 @@ contract GasProbeTest is BaseL2 {
     }
 
     function test_StaticGasDisabledKeepsZeroGasKey() public {
-        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false);
+        manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false, SYSTEM_ADDRESS);
         proxyAddr = manager.createCrossChainProxy(remoteTarget, REMOTE_ROLLUP_ID);
         bytes memory data = hex"12345678";
         bytes32 hash = _ccHash(true, caller, TEST_ROLLUP_ID, remoteTarget, REMOTE_ROLLUP_ID, 0, data);

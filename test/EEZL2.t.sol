@@ -10,7 +10,7 @@ import {
     ExecutionEntry,
     CrossChainCall,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry
+    StaticExecutionEntryL2
 } from "../src/interfaces/IEEZL2.sol";
 import {Counter, CounterAndProxy, SafeCounterAndProxy} from "./mocks/CounterContracts.sol";
 import {BaseL2} from "./BaseL2.t.sol";
@@ -66,7 +66,7 @@ contract EEZL2Test is BaseL2 {
 
     function test_LoadExecutionTable_RevertsIfNotSystem() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
-        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
+        StaticExecutionEntryL2[] memory noStatic = new StaticExecutionEntryL2[](0);
         vm.expectRevert(EEZL2.Unauthorized.selector);
         manager.loadExecutionTable(entries, noStatic);
         vm.prank(address(0xBEEF));
@@ -76,7 +76,7 @@ contract EEZL2Test is BaseL2 {
 
     function test_LoadExecutionTable_SystemCanLoadEmpty() public {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
-        StaticExecutionEntry[] memory noStatic = new StaticExecutionEntry[](0);
+        StaticExecutionEntryL2[] memory noStatic = new StaticExecutionEntryL2[](0);
         vm.prank(SYSTEM_ADDRESS);
         manager.loadExecutionTable(entries, noStatic);
         assertEq(manager.entryIndex(), 0);
@@ -123,7 +123,7 @@ contract EEZL2Test is BaseL2 {
         for (uint256 i = 0; i < 3; i++) {
             entries[i] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
         }
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         for (uint256 i = 0; i < 3; i++) {
             (bool success,) = proxy.call{gas: CALL_GAS}(callData);
@@ -225,7 +225,7 @@ contract EEZL2Test is BaseL2 {
     function test_ExecuteCrossChainCall_RevertsExecutionNotFound() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
 
-        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntry[](0));
+        _loadEntries(new ExecutionEntry[](0), new StaticExecutionEntryL2[](0));
 
         bytes memory callData = abi.encodeCall(L2TestTarget.setValue, (42));
         vm.expectRevert(EEZL2.EntryNotFound.selector);
@@ -260,7 +260,7 @@ contract EEZL2Test is BaseL2 {
         entries[0].success = false;
         entries[0].returnData = payload;
 
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         uint256 idxBefore = manager.entryIndex();
 
@@ -420,7 +420,7 @@ contract EEZL2Test is BaseL2 {
     // NOTE: a reverting top-level cross-chain call is now a normal `ExecutionEntry { success: false }`
     // (run, verified, then reverted with `returnData` — see `test_RevertedLookup_TopLevel_Reverts`);
     // reverting REENTRANT calls are `success == false` `ExpectedOutgoingCrossChainCall`s, and a top-level
-    // reverting READ is a `StaticExecutionEntry`. There is no separate `failed` flag any more.
+    // reverting READ is a `StaticExecutionEntryL2`. There is no separate `failed` flag any more.
 
     function test_ExecuteCrossChainCall_ConsumesInFifoOrder() public {
         address proxy = manager.createCrossChainProxy(address(target), REMOTE_ROLLUP_ID);
@@ -438,7 +438,7 @@ contract EEZL2Test is BaseL2 {
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
         entries[0] = _buildSimpleEntry(crossChainCallHash, cc, abi.encode(uint256(111)), rollingHash);
         entries[1] = _buildSimpleEntry(crossChainCallHash, cc, abi.encode(uint256(222)), rollingHash);
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         (bool s1, bytes memory r1) = proxy.call{gas: CALL_GAS}(callData);
         assertTrue(s1);
@@ -625,7 +625,7 @@ contract EEZL2Test is BaseL2 {
         entries[1] = _buildNoCalls(hash2, "");
 
         vm.recordLogs();
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         (bool found,) = _findExecutionTableLoadedLog(logs);
@@ -636,7 +636,7 @@ contract EEZL2Test is BaseL2 {
         ExecutionEntry[] memory entries = new ExecutionEntry[](0);
 
         vm.recordLogs();
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         (bool found,) = _findExecutionTableLoadedLog(logs);
@@ -692,7 +692,7 @@ contract EEZL2Test is BaseL2 {
         ExecutionEntry[] memory entries = new ExecutionEntry[](2);
         entries[0] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
         entries[1] = _buildSimpleEntry(crossChainCallHash, cc, "", rollingHash);
-        _loadEntries(entries, new StaticExecutionEntry[](0));
+        _loadEntries(entries, new StaticExecutionEntryL2[](0));
 
         vm.recordLogs();
         (bool s1,) = proxy.call{gas: CALL_GAS}(callData);

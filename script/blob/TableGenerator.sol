@@ -11,10 +11,10 @@ import {
 import {
     ExecutionEntry as L2ExecutionEntry,
     ExpectedOutgoingCrossChainCall,
-    StaticExecutionEntry as L2StaticExecutionEntry
+    StaticExecutionEntryL2 as L2StaticExecutionEntry
 } from "../../src/interfaces/IEEZL2.sol";
 import {TestHashes} from "../../test/TestHashes.sol";
-import {ScenarioStore, CallNode, TxSpec} from "./ScenarioStore.sol";
+import {ScenarioStore, CallNode, TxSpec, RevertRegion} from "./ScenarioStore.sol";
 import {CallShapes} from "./CallShapes.sol";
 import {UNIT_KIND_ORIGIN_GROUP, UNIT_KIND_INBOUND, NO_NODE, blobGenesisRoot} from "./BlobConstants.sol";
 
@@ -96,22 +96,47 @@ contract TableGenerator is TestHashes {
     }
 
     mapping(uint64 => Ctx) internal _ctx;
+
+    struct StaticFrame {
+        bool pool;
+        uint256 index;
+        uint256 unit;
+        bytes32 hash;
+    }
+    mapping(uint64 => StaticFrame[]) internal _staticFrames;
+    uint64 internal _origin;
+
     mapping(uint64 => uint256) internal _openOriginUnit; // chainId → unitIdx + 1 (0 = none), reset per tx
     uint256 internal _txCursor; // transaction being walked (stamped into each new unit's tag)
 
-    // region (Snapshot … Revert) state — v1 supports one region at a time
-    bool internal _regionActive;
-    uint64 internal _regionHost; // executing chain when the Snapshot appeared
-    bool internal _regionBranched; // host had an open entry → hash branch
-    bytes32 internal _regionSavedHash;
-    bool internal _regionIsRootLevel;
-    uint256 internal _regionNonce; // keys span tracking per region (mappings can't be cleared)
-    mapping(bytes32 => bool) internal _regionArraySeen; // per-array span tracking
-    mapping(bytes32 => uint256) internal _regionSpanStart;
-    // ledger snapshot for L1-origin root-level regions (entries chain, then roll back)
-    uint64[] internal _regionLedgerIds;
-    mapping(uint64 => bool) internal _regionLedgerSaved;
-    mapping(uint64 => bytes32) internal _regionLedgerVal;
+    struct RollbackScope {
+        uint256 id;
+        uint64 host;
+        uint64 otherNatural;
+        bool branched;
+        bytes32 savedHash;
+        bool rootLevel;
+        uint256 savedCursor;
+        uint256 endNode;
+    }
+
+    struct RollbackArray {
+        uint64 chain;
+        uint256 unit;
+        uint256 entry;
+        uint256 frame;
+        uint256 start;
+        uint256 count;
+    }
+    RollbackScope[] internal _scopes;
+    RevertRegion[] internal _regions;
+    uint256 internal _scopeNonce;
+    mapping(uint256 => RollbackArray[]) internal _scopeArrays;
+    mapping(bytes32 => uint256) internal _scopeArrayIndex;
+    mapping(uint256 => uint64[]) internal _savedLedgerIds;
+    mapping(uint256 => mapping(uint64 => bool)) internal _ledgerSaved;
+    mapping(uint256 => mapping(uint64 => bytes32)) internal _savedLedger;
+    mapping(uint64 => uint256) internal _originCursor;
 
     // ──────────────────────────────────────────────
     //  Public API
@@ -130,6 +155,10 @@ contract TableGenerator is TestHashes {
         _generated = true;
         _store = store;
         _gasByNode = gasByNode;
+        RevertRegion[] memory regions = store.getRegions();
+        for (uint256 i; i < regions.length; i++) {
+            _regions.push(regions[i]);
+        }
 
         uint256 txN = store.txCount();
         for (uint256 t = 0; t < txN; t++) {
@@ -188,6 +217,8 @@ contract TableGenerator is TestHashes {
         TxSpec memory txSpec = _store.getTx(t);
         _txCursor = t;
         uint64 origin = txSpec.originChain;
+        _origin = origin;
+        _originCursor[origin] = 0;
         bool l2Origin = origin != L1_CHAIN;
         if (l2Origin) _touchRollupGlobal(origin);
 
@@ -211,22 +242,15 @@ contract TableGenerator is TestHashes {
             _sealL1Header(l1HostIdx);
         }
 
-        uint256 regionEnd = type(uint256).max;
         for (uint256 i = 0; i < txSpec.rootCalls.length; i++) {
             CallNode memory node = _store.getNode(txSpec.rootCalls[i]);
-            if (node.revertSpan > 0) {
-                _openRegion(origin, true);
-                regionEnd = i + node.revertSpan - 1;
-            }
+            _openRegions(txSpec.rootCalls[i], origin, true);
             if (node.isStatic) {
                 _rootStatic(origin, node, t);
             } else {
                 _rootCall(t, origin, txSpec.rootCalls[i], node);
             }
-            if (regionEnd == i) {
-                _closeRegion();
-                regionEnd = type(uint256).max;
-            }
+            _closeRegions(txSpec.rootCalls[i]);
         }
 
         if (l2Origin) {
@@ -295,6 +319,7 @@ contract TableGenerator is TestHashes {
             sealed_.success = node.success;
             sealed_.returnData = node.returnData;
             _ctx[origin].active = false;
+            if (node.success) _originCursor[origin] = entryPos + 1;
         }
     }
 
@@ -312,13 +337,13 @@ contract TableGenerator is TestHashes {
             if (!_ctx[L1_CHAIN].active) revert GeneratorInvariant("call into L1 with no host", nodeId);
             _appendCall(L1_CHAIN, node);
             _foldCallBegin(L1_CHAIN, callHash);
-            _walkChildren(node);
+            _walkExecution(node);
             _foldCallEnd(L1_CHAIN, node.success, node.returnData);
         } else if (_ctx[dest].active) {
             // Callback into an already-executing chain: lands at its insertion point.
             _appendCall(dest, node);
             _foldCallBegin(dest, callHash);
-            _walkChildren(node);
+            _walkExecution(node);
             _foldCallEnd(dest, node.success, node.returnData);
         } else {
             // Inbound delivery: a fresh unit whose single entry is driven by
@@ -327,7 +352,7 @@ contract TableGenerator is TestHashes {
             uint256 unitIdx = _newUnit(dest, UNIT_KIND_INBOUND, nodeId);
             L2ExecutionEntry storage entry = _unitEntries[unitIdx].push();
             entry.proxyEntryHash = callHash;
-            uint16 marker = (_regionActive && dest != _regionHost) ? 1 : 0;
+            uint16 marker = _needsRollback(dest) ? 1 : 0;
             entry.incomingCalls.push(CallShapes.toL2Call(node, marker));
 
             Ctx storage ctx = _ctx[dest];
@@ -339,7 +364,7 @@ contract TableGenerator is TestHashes {
             _clearFrames(ctx);
 
             _foldCallBegin(dest, callHash);
-            _walkChildren(node);
+            _walkExecution(node);
             _foldCallEnd(dest, node.success, node.returnData);
 
             L2ExecutionEntry storage sealed_ = _unitEntries[unitIdx][0];
@@ -350,27 +375,26 @@ contract TableGenerator is TestHashes {
         }
     }
 
+    function _walkExecution(CallNode memory node) internal {
+        if (!node.success) _openRollback(node.toChain, node.fromChain, false, NO_NODE);
+        _walkChildren(node);
+        if (!node.success) _closeRollback();
+    }
+
     /// @notice Walks a node's children: each mutable child opens a reentrant row on the
     ///         executing chain (the caller side) and recurses; static children become
     ///         STATIC rows / destination-array reads. Handles region brackets.
     function _walkChildren(CallNode memory node) internal {
         uint64 execChain = node.toChain;
-        uint256 regionEnd = type(uint256).max;
         for (uint256 i = 0; i < node.children.length; i++) {
             CallNode memory child = _store.getNode(node.children[i]);
-            if (child.revertSpan > 0) {
-                _openRegion(execChain, false);
-                regionEnd = i + child.revertSpan - 1;
-            }
+            _openRegions(node.children[i], execChain, false);
             if (child.isStatic) {
                 _reentrantStatic(execChain, node.children[i], child);
             } else {
                 _reentrantCall(execChain, node.children[i], child);
             }
-            if (regionEnd == i) {
-                _closeRegion();
-                regionEnd = type(uint256).max;
-            }
+            _closeRegions(node.children[i]);
         }
     }
 
@@ -415,112 +439,182 @@ contract TableGenerator is TestHashes {
     ///         targets L1), it is additionally evaluated there via STATICCALL — an
     ///         `isStatic` row with real CALL_BEGIN/CALL_END folds, its sub-reads
     ///         matched as STATIC rows at that exact execution point.
-    function _rootStatic(uint64 origin, CallNode memory node, uint256 t) internal {
-        bytes32 callHash = _destCallHash(node);
-        _touchRollupGlobal(node.toChain);
-        bytes32 subHash = bytes32(0); // untagged accumulator over the sub-read array
-        if (origin == L1_CHAIN) {
-            StaticExecutionEntry storage staticEntry = _l1Statics.push();
-            _l1StaticTxIdx.push(t);
-            staticEntry.proxyEntryHash = callHash;
-            staticEntry.destinationRollupId = node.toChain;
-            for (uint256 i = 0; i < node.children.length; i++) {
-                CallNode memory sub = _store.getNode(node.children[i]);
-                staticEntry.l2ToL1Calls.push(CallShapes.toL1Call(sub, 0));
-                subHash = _hStatic(subHash, sub.success, sub.returnData);
-            }
-            staticEntry.rollingHash = subHash;
-            staticEntry.success = node.success;
-            staticEntry.returnData = node.returnData;
-            staticEntry.expectedRoots
-                .push(ExpectedRootPerRollup({rollupId: node.toChain, root: _ledgerGet(node.toChain)}));
-        } else {
-            uint256 unitIdx = _originUnit(origin);
-            L2StaticExecutionEntry storage staticEntry = _unitStatics[unitIdx].push();
-            staticEntry.proxyEntryHash = callHash;
-            for (uint256 i = 0; i < node.children.length; i++) {
-                CallNode memory sub = _store.getNode(node.children[i]);
-                staticEntry.incomingCalls.push(CallShapes.toL2Call(sub, 0));
-                subHash = _hStatic(subHash, sub.success, sub.returnData);
-            }
-            staticEntry.rollingHash = subHash;
-            staticEntry.success = node.success;
-            staticEntry.returnData = node.returnData;
+    function _rootStatic(uint64, CallNode memory node, uint256) internal {
+        _staticCall(node);
+    }
 
-            if (node.toChain == L1_CHAIN || _ctx[node.toChain].active) {
-                // Destination executing: the read really runs there.
-                _appendCall(node.toChain, node);
-                _foldCallBegin(node.toChain, callHash);
-                for (uint256 i = 0; i < node.children.length; i++) {
-                    CallNode memory sub = _store.getNode(node.children[i]);
-                    bytes32 key = keccak256(abi.encodePacked(_destCallHash(sub), _ctx[node.toChain].liveHash));
-                    uint256 rowIdx = _pushRow(node.toChain, key);
-                    _sealRow(node.toChain, rowIdx, bytes32(0), sub.success, sub.returnData);
+    function _reentrantStatic(uint64, uint256, CallNode memory node) internal {
+        _staticCall(node);
+    }
+
+    /// @dev Static nesting does not open a mutable context. Each chain records
+    /// callbacks in its innermost pending static row, using an untagged hash.
+    function _staticCall(CallNode memory node) internal {
+        uint64 source = node.fromChain;
+        uint64 dest = node.toChain;
+        bytes32 callHash = _destCallHash(node);
+        bool hasLookup = _ctx[source].active || source == _origin;
+        if (hasLookup) {
+            StaticFrame memory frame;
+            if (_ctx[source].active) {
+                frame.index = _pushRow(source, keccak256(abi.encodePacked(callHash, _ctx[source].liveHash)));
+            } else {
+                frame.pool = true;
+                if (source == L1_CHAIN) {
+                    frame.index = _l1Statics.length;
+                    StaticExecutionEntry storage row = _l1Statics.push();
+                    _l1StaticTxIdx.push(_txCursor);
+                    row.proxyEntryHash = callHash;
+                    row.destinationRollupId = dest;
+                    uint64[] memory pins = new uint64[](_store.nodeCount() * 2 + 2);
+                    uint256 count = _staticPins(node, pins, 0);
+                    for (uint256 i; i < count; i++) {
+                        row.expectedRoots.push(ExpectedRootPerRollup(pins[i], _ledgerGet(pins[i])));
+                    }
+                } else {
+                    frame.unit = _originUnit(source);
+                    frame.index = _unitStatics[frame.unit].length;
+                    L2StaticExecutionEntry storage row = _unitStatics[frame.unit].push();
+                    row.proxyEntryHash = callHash;
+                    row.expectedEntryIndex = _originCursor[source];
                 }
-                _foldCallEnd(node.toChain, node.success, node.returnData);
+            }
+            _staticFrames[source].push(frame);
+        }
+        bool callback = _staticFrames[dest].length > 0;
+        bool executing = _ctx[dest].active;
+        if (callback) {
+            _appendStaticCallback(dest, node);
+        } else if (executing) {
+            _appendCall(dest, node);
+            _foldCallBegin(dest, callHash);
+        }
+        for (uint256 i; i < node.children.length; i++) {
+            _staticCall(_store.getNode(node.children[i]));
+        }
+        if (!callback && executing) _foldCallEnd(dest, node.success, node.returnData);
+        if (hasLookup) {
+            StaticFrame memory frame = _staticFrames[source][_staticFrames[source].length - 1];
+            _staticFrames[source].pop();
+            if (!frame.pool) {
+                _sealRow(source, frame.index, frame.hash, node.success, node.returnData);
+            } else if (source == L1_CHAIN) {
+                StaticExecutionEntry storage row = _l1Statics[frame.index];
+                row.rollingHash = frame.hash;
+                row.success = node.success;
+                row.returnData = node.returnData;
+            } else {
+                L2StaticExecutionEntry storage row = _unitStatics[frame.unit][frame.index];
+                row.rollingHash = frame.hash;
+                row.success = node.success;
+                row.returnData = node.returnData;
             }
         }
     }
 
-    /// @notice Static read fired from an executing chain: a STATIC-kind row in the
-    ///         host's unified table (host hash untouched); if the destination chain is
-    ///         itself executing, the read also lands in its arrays as an `isStatic`
-    ///         call (evaluated at that exact execution point).
-    function _reentrantStatic(uint64 execChain, uint256 nodeId, CallNode memory node) internal {
-        if (node.fromChain != execChain) {
-            revert GeneratorInvariant("static child fromChain != executing chain", nodeId);
+    function _appendStaticCallback(uint64 chain, CallNode memory node) internal {
+        StaticFrame storage frame = _staticFrames[chain][_staticFrames[chain].length - 1];
+        Ctx storage ctx = _ctx[chain];
+        if (chain == L1_CHAIN) {
+            if (frame.pool) {
+                _l1Statics[frame.index].l2ToL1Calls.push(CallShapes.toL1Call(node, 0));
+            } else {
+                _l1Entries[ctx.hostEntry].expectedL1ToL2Calls[frame.index].l2ToL1Calls
+                    .push(CallShapes.toL1Call(node, 0));
+            }
+        } else {
+            if (frame.pool) {
+                _unitStatics[frame.unit][frame.index].incomingCalls.push(CallShapes.toL2Call(node, 0));
+            } else {
+                _unitEntries[ctx.hostUnit][ctx.hostEntry].expectedOutgoingCalls[frame.index].incomingCalls
+                    .push(CallShapes.toL2Call(node, 0));
+            }
         }
-        Ctx storage ctx = _ctx[execChain];
-        if (!ctx.active) revert GeneratorInvariant("reentrant static with no host", nodeId);
+        frame.hash = _hStatic(frame.hash, node.success, node.returnData);
+    }
 
-        bytes32 callHash = _destCallHash(node); // folds isStatic = true
-        bytes32 key = keccak256(abi.encodePacked(callHash, ctx.liveHash));
-        uint256 rowIdx = _pushRow(execChain, key);
-        _sealRow(execChain, rowIdx, bytes32(0), node.success, node.returnData);
-
-        if (node.toChain == L1_CHAIN || _ctx[node.toChain].active) {
-            // Destination executing: the read is evaluated there via STATICCALL.
-            _appendCall(node.toChain, node);
-            _foldCallBegin(node.toChain, callHash);
-            _foldCallEnd(node.toChain, node.success, node.returnData);
+    function _staticPins(CallNode memory node, uint64[] memory pins, uint256 count) internal returns (uint256) {
+        uint64[2] memory chains = [node.fromChain, node.toChain];
+        for (uint256 c; c < 2; c++) {
+            uint64 rid = chains[c];
+            if (rid == L1_CHAIN) continue;
+            _touchRollupGlobal(rid);
+            uint256 i;
+            while (i < count && pins[i] < rid) i++;
+            if (i < count && pins[i] == rid) continue;
+            for (uint256 j = count; j > i; j--) {
+                pins[j] = pins[j - 1];
+            }
+            pins[i] = rid;
+            count++;
         }
-        // Destination idle: the read resolves against its settled state — nothing to record.
+        for (uint256 i; i < node.children.length; i++) {
+            count = _staticPins(_store.getNode(node.children[i]), pins, count);
+        }
+        return count;
     }
 
     // ──────────────────────────────────────────────
     //  Regions (Snapshot … Revert)
     // ──────────────────────────────────────────────
 
-    function _openRegion(uint64 hostChain, bool rootLevel) internal {
-        if (_regionActive) revert GeneratorInvariant("nested region", NO_NODE);
-        _regionActive = true;
-        _regionNonce++;
-        _regionHost = hostChain;
-        _regionIsRootLevel = rootLevel;
-        _regionBranched = _ctx[hostChain].active;
-        if (_regionBranched) {
-            // The host's own EVM revert undoes its folds natively.
-            _regionSavedHash = _ctx[hostChain].liveHash;
+    function _openRegions(uint256 nodeId, uint64 host, bool rootLevel) internal {
+        for (uint256 i; i < _regions.length; i++) {
+            if (_regions[i].firstNode == nodeId) {
+                _openRollback(host, type(uint64).max, rootLevel, _regions[i].lastNode);
+            }
         }
     }
 
-    function _closeRegion() internal {
-        if (_regionBranched) {
-            _ctx[_regionHost].liveHash = _regionSavedHash;
-        }
-        if (_regionIsRootLevel && _regionHost == L1_CHAIN) {
-            // The driver's revert rolls back the in-region consumptions on L1 —
-            // restore the fabricated ledger to the region-start roots.
-            for (uint256 i = 0; i < _regionLedgerIds.length; i++) {
-                uint64 rid = _regionLedgerIds[i];
-                _ledger[rid] = _regionLedgerVal[rid];
-                _regionLedgerSaved[rid] = false;
+    function _closeRegions(uint256 nodeId) internal {
+        while (_scopes.length > 0 && _scopes[_scopes.length - 1].endNode == nodeId) _closeRollback();
+    }
+
+    function _openRollback(uint64 host, uint64 otherNatural, bool rootLevel, uint256 endNode) internal {
+        _scopes.push(
+            RollbackScope({
+                id: ++_scopeNonce,
+                host: host,
+                otherNatural: otherNatural,
+                branched: _ctx[host].active,
+                savedHash: _ctx[host].liveHash,
+                rootLevel: rootLevel,
+                savedCursor: _originCursor[host],
+                endNode: endNode
+            })
+        );
+    }
+
+    function _closeRollback() internal {
+        RollbackScope memory scope = _scopes[_scopes.length - 1];
+        // Assign outer spans after inner spans. If both start at the same call,
+        // an already reverted prefix can be omitted from the outer rollback.
+        RollbackArray[] storage arrays = _scopeArrays[scope.id];
+        for (uint256 i; i < arrays.length; i++) {
+            RollbackArray memory a = arrays[i];
+            uint256 end = a.start + a.count;
+            while (a.start < end && _marker(a) > 0) a.start += _marker(a);
+            if (a.start < end) {
+                if (end - a.start > type(uint16).max) revert GeneratorInvariant("rollback span too large", NO_NODE);
+                _assignMarker(a, uint16(end - a.start));
             }
-            delete _regionLedgerIds;
         }
-        _regionActive = false;
-        _regionBranched = false;
-        _regionIsRootLevel = false;
+        if (scope.branched) _ctx[scope.host].liveHash = scope.savedHash;
+        if (scope.rootLevel) {
+            _originCursor[scope.host] = scope.savedCursor;
+            uint64[] storage ids = _savedLedgerIds[scope.id];
+            for (uint256 i; i < ids.length; i++) {
+                _ledger[ids[i]] = _savedLedger[scope.id][ids[i]];
+            }
+        }
+        _scopes.pop();
+    }
+
+    function _needsRollback(uint64 chain) internal view returns (bool) {
+        for (uint256 i; i < _scopes.length; i++) {
+            if (chain != _scopes[i].host && chain != _scopes[i].otherNatural) return true;
+        }
+        return false;
     }
 
     // ──────────────────────────────────────────────
@@ -553,7 +647,9 @@ contract TableGenerator is TestHashes {
             }
         }
 
-        _prescanChildren(node.children, entryIdx, origin, suppressEther);
+        _prescanChildren(
+            node.children, entryIdx, origin, suppressEther || (!node.success && !(isRoot && origin == L1_CHAIN))
+        );
     }
 
     function _prescanChildren(uint256[] memory children, uint256 entryIdx, uint64 origin, bool suppressEther) internal {
@@ -669,10 +765,13 @@ contract TableGenerator is TestHashes {
     }
 
     function _ledgerSet(uint64 rid, bytes32 root) internal {
-        if (_regionActive && _regionIsRootLevel && _regionHost == L1_CHAIN && !_regionLedgerSaved[rid]) {
-            _regionLedgerSaved[rid] = true;
-            _regionLedgerVal[rid] = _ledger[rid];
-            _regionLedgerIds.push(rid);
+        for (uint256 i; i < _scopes.length; i++) {
+            RollbackScope storage scope = _scopes[i];
+            if (scope.rootLevel && scope.host == L1_CHAIN && !_ledgerSaved[scope.id][rid]) {
+                _ledgerSaved[scope.id][rid] = true;
+                _savedLedger[scope.id][rid] = _ledger[rid];
+                _savedLedgerIds[scope.id].push(rid);
+            }
         }
         _ledger[rid] = root;
     }
@@ -708,7 +807,6 @@ contract TableGenerator is TestHashes {
     ///         applies region span markers when `chain` is not the region host.
     function _appendCall(uint64 chain, CallNode memory node) internal {
         Ctx storage ctx = _ctx[chain];
-        bytes32 arrayKey;
         uint256 newIdx;
         uint256 frame = ctx.frameRows.length == 0 ? NO_NODE : ctx.frameRows[ctx.frameRows.length - 1];
 
@@ -731,45 +829,42 @@ contract TableGenerator is TestHashes {
                 newIdx = e2.expectedOutgoingCalls[frame].incomingCalls.length - 1;
             }
         }
-        arrayKey = keccak256(abi.encodePacked(_regionNonce, chain, ctx.hostIsL1, ctx.hostUnit, ctx.hostEntry, frame));
-
-        if (_regionActive && chain != _regionHost) {
-            // In-region appends to one array are contiguous (a region is a contiguous
-            // message range): the first one starts the span, later ones extend it.
-            if (!_regionArraySeen[arrayKey]) {
-                _regionArraySeen[arrayKey] = true;
-                _regionSpanStart[arrayKey] = newIdx;
-                _setMarker(chain, frame, newIdx, 1);
+        for (uint256 i; i < _scopes.length; i++) {
+            RollbackScope storage scope = _scopes[i];
+            if (chain == scope.host || chain == scope.otherNatural) continue;
+            bytes32 key = keccak256(abi.encode(scope.id, chain, ctx.hostUnit, ctx.hostEntry, frame));
+            uint256 index = _scopeArrayIndex[key];
+            if (index == 0) {
+                _scopeArrays[scope.id].push(RollbackArray(chain, ctx.hostUnit, ctx.hostEntry, frame, newIdx, 1));
+                _scopeArrayIndex[key] = _scopeArrays[scope.id].length;
             } else {
-                uint256 start = _regionSpanStart[arrayKey];
-                _bumpMarker(chain, frame, start);
+                _scopeArrays[scope.id][index - 1].count++;
             }
         }
     }
 
-    function _setMarker(uint64 chain, uint256 frame, uint256 idx, uint16 marker) internal {
-        Ctx storage ctx = _ctx[chain];
-        if (ctx.hostIsL1) {
-            ExecutionEntry storage entry = _l1Entries[ctx.hostEntry];
-            if (frame == NO_NODE) entry.l2ToL1Calls[idx].revertNextNCalls = marker;
-            else entry.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls = marker;
-        } else {
-            L2ExecutionEntry storage e2 = _unitEntries[ctx.hostUnit][ctx.hostEntry];
-            if (frame == NO_NODE) e2.incomingCalls[idx].revertNextNCalls = marker;
-            else e2.expectedOutgoingCalls[frame].incomingCalls[idx].revertNextNCalls = marker;
+    function _marker(RollbackArray memory a) internal view returns (uint16) {
+        if (a.chain == L1_CHAIN) {
+            ExecutionEntry storage entry = _l1Entries[a.entry];
+            return a.frame == NO_NODE
+                ? entry.l2ToL1Calls[a.start].revertNextNCalls
+                : entry.expectedL1ToL2Calls[a.frame].l2ToL1Calls[a.start].revertNextNCalls;
         }
+        L2ExecutionEntry storage entry = _unitEntries[a.unit][a.entry];
+        return a.frame == NO_NODE
+            ? entry.incomingCalls[a.start].revertNextNCalls
+            : entry.expectedOutgoingCalls[a.frame].incomingCalls[a.start].revertNextNCalls;
     }
 
-    function _bumpMarker(uint64 chain, uint256 frame, uint256 idx) internal {
-        Ctx storage ctx = _ctx[chain];
-        if (ctx.hostIsL1) {
-            ExecutionEntry storage entry = _l1Entries[ctx.hostEntry];
-            if (frame == NO_NODE) entry.l2ToL1Calls[idx].revertNextNCalls++;
-            else entry.expectedL1ToL2Calls[frame].l2ToL1Calls[idx].revertNextNCalls++;
+    function _assignMarker(RollbackArray memory a, uint16 marker) internal {
+        if (a.chain == L1_CHAIN) {
+            ExecutionEntry storage entry = _l1Entries[a.entry];
+            if (a.frame == NO_NODE) entry.l2ToL1Calls[a.start].revertNextNCalls = marker;
+            else entry.expectedL1ToL2Calls[a.frame].l2ToL1Calls[a.start].revertNextNCalls = marker;
         } else {
-            L2ExecutionEntry storage e2 = _unitEntries[ctx.hostUnit][ctx.hostEntry];
-            if (frame == NO_NODE) e2.incomingCalls[idx].revertNextNCalls++;
-            else e2.expectedOutgoingCalls[frame].incomingCalls[idx].revertNextNCalls++;
+            L2ExecutionEntry storage entry = _unitEntries[a.unit][a.entry];
+            if (a.frame == NO_NODE) entry.incomingCalls[a.start].revertNextNCalls = marker;
+            else entry.expectedOutgoingCalls[a.frame].incomingCalls[a.start].revertNextNCalls = marker;
         }
     }
 

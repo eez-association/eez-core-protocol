@@ -148,20 +148,16 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo "====== Verify L1 (SKIP: no L1 block or no EXPECTED_L1_[CALL_]HASHES printed) ======"
     fi
 
-    # ── Content-addressed L1 check for entries without a usable event ──
-    # A success=false entry unwinds its events with its revert and a top-level static
-    # entry never emits one: match the posted postAndVerifyBatch calldata instead
-    # (the same verifier network mode uses). Entries already matched by events above
-    # are not re-compared; the static table always goes through here.
-    _L1_EVENTLESS=true
-    [[ -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]] && _L1_EVENTLESS=false
-    [[ -n "$EXPECTED_L1_HASHES" && "$EXPECTED_L1_HASHES" != "[]" ]] && _L1_EVENTLESS=false
-    _CD_TABLE="0x"; $_L1_EVENTLESS && _CD_TABLE="$EXPECTED_L1_TABLE"
-    if [[ -n "$L1_BLOCK" && ( "$_CD_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ) ]]; then
+    # ── Compare all expected L1 content with the posted batch ──
+    # Completion logs no longer carry call counts. Compare the arrays themselves,
+    # replay expected hash steps when available, and require a distinct completion
+    # for each committing posted entry. Reverting/static entries retain their
+    # input checks even though their receipt events are absent.
+    if [[ -n "$L1_BLOCK" && ( "$EXPECTED_L1_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ) ]]; then
         echo ""
         echo "====== Verify L1 Posted Batch Calldata (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L1 CALLDATA" inline verify_l1_calldata "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$_CD_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE"
+        run_verify_step "L1 CALLDATA" inline verify_l1_calldata "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE"
     fi
 
     # ── Verify L2 ExecutionTableLoaded entries ──

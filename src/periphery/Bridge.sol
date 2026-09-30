@@ -9,20 +9,19 @@ import {IEEZ} from "../interfaces/IEEZ.sol";
 import {WrappedToken} from "./WrappedToken.sol";
 
 /// @title Bridge
-/// @notice Periphery contract for bridging ETH and ERC20 tokens between rollups
+/// @notice TEST-ONLY periphery for exercising cross-rollup ETH/ERC20 flows; outside the protocol audit scope.
 /// @dev No constructor args — deployed via CREATE2 at the same address on every chain.
 ///      Chain-specific config (manager, rollupId, admin) is set via initialize().
 ///      Uses a lock-and-mint model: native tokens are locked on the source chain,
 ///      and a WrappedToken is minted on the destination. Burning wrapped tokens
 ///      releases the native tokens on the origin chain.
 ///
-///      Security model: the inbound function (receiveTokens) validates that
-///      msg.sender is the expected CrossChainProxy for this bridge. The execution table
-///      (ZK-proven entries) provides the primary security guarantee.
-///
-///      ILLUSTRATIVE EXAMPLE — not production-hardened. Known, intentional simplifications:
-///      no fee-on-transfer token accounting, single initialize() with no chain/deployment-context
-///      binding, and no re-deployment authorization. Harden before any production use.
+///      This is a testing fixture, not a supported production bridge or an audit target.
+///      receiveTokens authenticates the expected proxy; tests supply the remote execution
+///      assumptions. This does not establish a general asset-origin/backing policy.
+///      Intentional fixture limits: nominal token amounts (no fee-on-transfer accounting),
+///      first-caller initialization without deployment-context binding, and one remote bridge
+///      address. These are test assumptions, not production remediation requirements.
 contract Bridge {
     using SafeERC20 for IERC20;
 
@@ -45,11 +44,11 @@ contract Bridge {
     uint64 public rollupId;
 
     /// @notice Admin address that can set the canonical bridge address
-    /// @dev Currently used for testing. Decentralized deployment strategy TBD.
+    /// @dev Test configuration only; no production deployment policy is specified.
     address public admin;
 
     /// @notice Override for the bridge's canonical address (used for cross-chain proxy lookups)
-    /// @dev Currently used for testing. Decentralized deployment strategy TBD.
+    /// @dev Test configuration only; no production deployment policy is specified.
     address public canonicalBridgeAddress;
 
     /// @notice Mapping: wrappedSalt => wrappedToken address
@@ -89,8 +88,10 @@ contract Bridge {
     //  Events
     // ──────────────────────────────────────────────
 
+    /// @dev Declared for the test API but not emitted by initialize(); do not reconstruct setup from this log.
     event Initialized(address indexed manager, uint64 rollupId, address indexed admin);
     event CanonicalBridgeAddressSet(address indexed addr);
+    /// @dev The legacy field name `sender` currently carries destinationAddress (the recipient).
     event EtherBridged(address indexed sender, uint64 indexed rollupId, uint256 amount);
     event TokensBridged(address indexed token, address indexed sender, uint64 indexed rollupId, uint256 amount);
     event TokensReleased(address indexed token, address indexed to, uint256 amount);
@@ -122,7 +123,7 @@ contract Bridge {
 
     /// @notice Set the canonical bridge address used for cross-chain proxy lookups
     /// @dev Use this when the Bridge is deployed at a different address on this chain
-    ///      than on the counterpart chains. Decentralized deployment strategy TBD.
+    ///      than on the counterpart chains in a test fixture.
     function setCanonicalBridgeAddress(address bridgeAddress) external onlyAdmin {
         canonicalBridgeAddress = bridgeAddress;
         emit CanonicalBridgeAddressSet(bridgeAddress);
@@ -297,7 +298,8 @@ contract Bridge {
         }
     }
 
-    /// @dev Reads token metadata (name, symbol, decimals) with safe fallbacks.
+    /// @dev Test helper: fallback covers reverting getters, not successful malformed ABI returns
+    ///      (for example bytes32 name/symbol). Amounts are nominal and are not decimals-scaled.
     function _getSafeTokenMetadata(address token)
         internal
         view

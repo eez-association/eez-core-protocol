@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {BlobTranslator} from "../../script/blob/BlobTranslator.sol";
 import {BlobMessage, Msg, MsgList} from "../../script/blob/BlobMessages.sol";
 import {BlobCodec} from "../../script/blob/BlobCodec.sol";
+import {TableStitcher} from "../../script/blob/TableStitcher.sol";
 import {BlobPacking} from "../../script/blob/BlobPacking.sol";
 
 /// @title BlobTranslatorTest
@@ -129,5 +130,49 @@ contract BlobTranslatorTest is Test {
         assertEq(t.sidecar.regionSizes[0], 1, "region spans one call");
         assertEq(t.sidecar.chainOps.length, 1, "one chain op");
         assertEq(t.sidecar.callGasKeys.length, 1, "tx2's L2A-sourced call");
+    }
+
+    function test_rejectStaticOutcomeDisagreeingWithLookup() public {
+        MsgList memory l = Msg.list(5);
+        Msg.push(l, Msg.initiate(L1, "read"));
+        Msg.push(l, Msg.staticCall(L2A, DRIVER_L1, ACTOR_A, "quote"));
+        Msg.push(l, Msg.returnSuccess("quoted-rate"));
+        Msg.push(l, Msg.finish());
+        Msg.push(l, Msg.closeBlobStream());
+        BlobTranslator.Tables memory t = tr.messagesToTables(Msg.done(l));
+        t.sidecar.staticSubResults[0].returnData = "different-rate";
+        vm.expectPartialRevert(TableStitcher.RoundTripMismatch.selector);
+        tr.messagesFromTables(t);
+    }
+
+    function test_rejectStaticCallbackGasTampering() public {
+        MsgList memory l = Msg.list(7);
+        Msg.push(l, Msg.initiate(L1, "read"));
+        Msg.push(l, Msg.staticCall(L2A, DRIVER_L1, ACTOR_A, "quote"));
+        Msg.push(l, Msg.staticCall(L1, ACTOR_A, ACTOR_C, "rate"));
+        Msg.push(l, Msg.returnSuccess("rate"));
+        Msg.push(l, Msg.returnSuccess("quote"));
+        Msg.push(l, Msg.finish());
+        Msg.push(l, Msg.closeBlobStream());
+        BlobTranslator.Tables memory t = tr.messagesToTables(Msg.done(l));
+        t.sidecar.statics[1].gas = 1;
+        vm.expectPartialRevert(TableStitcher.RoundTripMismatch.selector);
+        tr.messagesFromTables(t);
+    }
+
+    function test_rejectMissingRollbackMarker() public {
+        MsgList memory l = Msg.list(7);
+        Msg.push(l, Msg.initiate(L2A, "rollback"));
+        Msg.push(l, Msg.snapshot());
+        Msg.push(l, Msg.call(L1, DRIVER_A, ACTOR_C, 0, "write"));
+        Msg.push(l, Msg.returnSuccess("ok"));
+        Msg.push(l, Msg.revertMarker());
+        Msg.push(l, Msg.finish());
+        Msg.push(l, Msg.closeBlobStream());
+        BlobTranslator.Tables memory t = tr.messagesToTables(Msg.done(l));
+        assertEq(t.l1Entries[0].l2ToL1Calls[0].revertNextNCalls, 1);
+        t.l1Entries[0].l2ToL1Calls[0].revertNextNCalls = 0;
+        vm.expectPartialRevert(TableStitcher.RoundTripMismatch.selector);
+        tr.messagesFromTables(t);
     }
 }

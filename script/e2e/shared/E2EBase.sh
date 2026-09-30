@@ -55,6 +55,7 @@ deploy_infra() {
     local l2_rpc="${3:-}"
     local l2_rollup_id="${4:-1}"
     local system_address="${5:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
+    local recovery_address="${6:-$system_address}"
 
     echo ""
     echo "====== Deploy EEZ (L1) ======"
@@ -73,7 +74,7 @@ deploy_infra() {
         echo "====== Deploy EEZL2 (L2) ======"
         output=$(forge script script/e2e/shared/DeployInfra.s.sol:DeployManagerL2 \
             --rpc-url "$l2_rpc" --broadcast --private-key "$pk" \
-            --sig "run(uint64,address)" "$l2_rollup_id" "$system_address" 2>&1)
+            --sig "run(uint64,address,address)" "$l2_rollup_id" "$system_address" "$recovery_address" 2>&1)
         MANAGER_L2=$(extract "$output" "MANAGER_L2")
         echo "MANAGER_L2=$MANAGER_L2"
     fi
@@ -402,9 +403,10 @@ verify_l1_batch() { _run_verifier VerifyL1BatchInRange "$1" "run(uint256,uint256
 verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(uint256,uint256,address,bytes32[],bytes)" "$2" "$3" "$4" "$5" "${6:-0x}"; }
 
 # Usage: verify_l1_calldata RPC BLOCK ROLLUPS EXPECTED_TABLE EXPECTED_STEPS EXPECTED_STATIC_TABLE
-# Content-addressed L1 check for entries that leave no usable event: a
-# success=false entry unwinds its events with its revert and a top-level static
-# entry never emits one. Lists the settlement txs of BLOCK
+# L1 input and completion check. A success=false entry unwinds its events with
+# its revert and a top-level static entry never emits one; committing entries
+# must have distinct completions matching the actual posted hashes.
+# Lists the settlement txs of BLOCK
 # (VerifyL1SettlementTxsInRange) and decodes each one's postAndVerifyBatch
 # calldata (VerifyL1BatchCalldata, pinned at BLOCK) until one holds the expected
 # entries and static entries. Fills VERIFY_OUT; rc 1 when none matched.

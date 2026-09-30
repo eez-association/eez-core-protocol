@@ -193,7 +193,7 @@ contract IntegrationTest is IntegrationBase {
     //
     //  Flow:
     //    1. Alice calls A' on L2 -> managerL2.executeCrossChainCall
-    //    2. L2 entry consumed -> _processNCalls(1)
+    //    2. L2 entry consumed -> _processIncomingCalls(1)
     //    3. calls[0]: A'.executeOnBehalf(A, incrementProxy)
     //    4. A.incrementProxy() -> A calls B'
     //    5. B' -> rollups.executeCrossChainCall -> L1 entry consumed -> returns abi.encode(1)
@@ -316,7 +316,7 @@ contract IntegrationTest is IntegrationBase {
     //
     //  Flow:
     //    1. Alice calls D' on L1 -> rollups.executeCrossChainCall
-    //    2. L1 entry consumed -> _processNCalls(1)
+    //    2. L1 entry consumed -> _processL2ToL1Calls(1)
     //    3. calls[0]: proxy.executeOnBehalf(counterAndProxyL2, incrementProxy)
     //    4. D.incrementProxy() -> D calls C'
     //    5. C' -> managerL2.executeCrossChainCall -> L2 entry consumed -> returns abi.encode(1)

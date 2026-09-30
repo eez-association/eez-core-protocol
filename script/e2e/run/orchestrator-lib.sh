@@ -110,6 +110,7 @@ _job_prepared() {  # $1=job dir → 0 when the job may be sent / verified
 # ── Expand args into a flat job list ──
 # Each arg is <target>[:count]; target = scenario name, category/direction dir
 # (e.g. one_way, multi_call/L2_to_L1), or "all".
+# all[:count] skips scenarios marked E2E_EXCLUDE_FROM_ALL; explicit selections remain available.
 expand_jobs() {
     JOB_NAMES=(); JOB_SOLS=()
     _add_jobs() {  # $1=sol $2=count
@@ -124,8 +125,13 @@ expand_jobs() {
         count=1; [[ "$arg" == *:* ]] && count="${arg##*:}"
         [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 ]] || { echo "Bad count in '$arg'"; exit 1; }
         if [[ "$scen" == "all" ]]; then
-            while IFS= read -r sol; do _add_jobs "$sol" "$count"; done \
-                < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
+            while IFS= read -r sol; do
+                if grep -q '^// E2E_EXCLUDE_FROM_ALL:' "$sol"; then
+                    echo "SKIP $sol: NOT LIVE YET (excluded from all)" >&2
+                    continue
+                fi
+                _add_jobs "$sol" "$count"
+            done < <(find script/e2e -mindepth 3 -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)
         elif [[ -d "script/e2e/$scen" ]]; then
             while IFS= read -r sol; do _add_jobs "$sol" "$count"; done \
                 < <(find "script/e2e/$scen" -name 'E2E*.s.sol' -not -path '*/shared/*' | sort)

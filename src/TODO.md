@@ -1,18 +1,12 @@
 # TODO
 
-## Design
-
-- [ ] **Beacon proxies for `CrossChainProxy`.** Today proxy logic can never change without
-      changing every proxy address. A beacon keeps addresses stable but adds ~2.7k gas per call
-      and needs an upgrade owner; break-even ≈ 70 calls per proxy. Decide.
-
 ## Gas
 
 - [ ] **Meta-hook entries through the transient serializer.** `_transientEntries` /
-      `_transientStaticEntries` go to storage and back within one tx: 534k vs 122k for the same
-      entry inline. Extend `ExpectedL1ToL2CallTransient` to whole entries and point the four read
+      `_transientStaticEntries` go to storage and back within one tx. Extend
+      `ExpectedL1ToL2CallTransient` to whole entries and point the four read
       sites at it. Same for L2 `executeIncomingCrossChainCall` (`loadExecutionTable` stays storage).
-      Win ~300–400k per meta-hook batch.
+      Benchmark the savings per meta-hook batch against inline execution.
 - [ ] **Look up reentrant rows without copying the whole table.** Every nested call copies
       `expectedL1ToL2Calls` to memory before scanning. Scan the keys in place and copy only the match
       (nested CALL and STATICCALL; immediate, meta-hook and persistent tables — transient rows are
@@ -20,14 +14,7 @@
       storage-layout change. Benchmark deep nesting (copying is quadratic today), gas and bytecode.
       Do after the item above.
 
-## BenchMark 
-- [ ] **Benchmark queue replacement cleanup (L1/L2).** Each new batch pays to `delete` the previous
-      table's nested arrays and bytes. Measure large-old/small-new batches first (net refunds and
-      peak gas — refunds do not replenish gas mid-execution), then compare direct overwrite,
-      generation-indexed storage, bounded cleanup and table limits, counting retained-state growth.
-      Any overwrite must drop stale tails and reset cursors, and L1 must invalidate old queues before
-      immediate execution/hooks; just removing `delete` would append to old queues. Note that array
-      assignment still clears shortened nested arrays.
+## Benchmarks
 
 - [ ] **Benchmark execution log payloads (L1/L2).** Events carry full return data; L2 also logs the
       whole loaded table. Set payload budgets; use hashes/IDs where full data is unnecessary.
@@ -35,25 +22,25 @@
 ## Observability
 
 - [ ] **Identify execution events clearly.** Immediate entries report index zero, nested call
-      indices repeat, and `BatchPosted` carries only a rollup count. Consider batch IDs, real entry
+      indices repeat, and `BatchPosted` carries a shared public-input hash and rollup IDs. Consider batch IDs, real entry
       indices and frame IDs, and distinguish proof acceptance, committed execution, deliberate
       rollback and omitted work. Reverted frames erase their own logs, so keep the surviving
       rollback-summary events distinct from committed target calls.
 
 ## Bytecode
 
-EEZ runtime 23,825 B of the 24,576 B EIP-170 limit (751 B headroom, 2026-09-08); EEZL2 13,594 B.
-Initcode is not a concern (25.3 KB of 49 KB). The compiler is already fully tuned for size
+EEZ runtime 23,857 B of the 24,576 B EIP-170 limit (719 B headroom); EEZL2 13,932 B.
+EEZ creation bytecode is 25,533 B, below the 49,152 B initcode limit. The compiler is tuned for size
 (`optimizer_runs = 1`, via-IR), so savings need config or source changes.
 
-Where the bytes go (measured 2026-08-27 by emptying each region; regions share helpers, so the
-deltas overlap):
+Remeasure the per-region figures below before estimating savings for the current build.
+Regions share helpers, so the deltas overlap:
 
 | Region | Bytes |
 |---|---|
 | `postAndVerifyBatch` subsystem (validation 1,814 · verify 1,901 · vkeys 610 · save remainder 518 · transient pushes 393) | 9,681 |
-| `_processNCalls` | 1,721 |
-| Embedded `CrossChainProxy` creation code (data block) | 1,365 |
+| `_processL2ToL1Calls` | 1,721 |
+| Embedded `CrossChainProxy` creation code (data block) | 1,458 |
 | `ExpectedL1ToL2CallTransient` serializer | 1,140 |
 | Nested path (`_consumeNestedCall`, `_resolveNestedReentrant`, `_getExpectedL1toL2Calls`) | 1,122 |
 | Consume/match (`_consumeAndExecuteEntry`, `_findMatchingEntry`, `_entryMatches`) | 1,094 |
@@ -67,20 +54,15 @@ deltas overlap):
 The dominant cost is ABI machinery for the nested batch calldata struct: decoding, per-entry
 `abi.encode` hashing, and full struct copies into storage / transient tables.
 
-- [ ] **Drop CBOR metadata — 107 B, config only.** In `foundry.toml` `[profile.default]`:
+- [ ] **Drop CBOR metadata — measure the savings.** In `foundry.toml` `[profile.default]`:
       `bytecode_hash = "none"`, `cbor_metadata = false`. Explorers lose the embedded IPFS source
-      hash; verification by compiler settings still works.
+      hash; verification by compiler settings still works. Check the proxy init-code hash impact.
 
-- [ ] **Stop embedding the proxy initcode — ~1.3 KB on EEZ and on EEZL2.** The runtime carries the
-      1,365 B `CrossChainProxy` creation code only for `new CrossChainProxy{salt}(...)`. Instead,
-      deploy one template proxy in the manager constructor and CREATE2 a 30 B stub
-      (`PUSH20 template; EXTCODECOPY; RETURN` — `abi.encodePacked(0x73, template, hex"803b805f5f843c5ff3")`)
-      that copies its code. Same deployer and salt, so only the `PROXY_INIT_CODE_HASH` value changes
-      (nothing off-chain hardcodes it; update the CREATE2 section of `CORE_PROTOCOL_SPEC.md` and
-      CLAUDE.md). The template is an unregistered proxy (`UnauthorizedProxy`) — add a test. Deploy gas
-      per proxy stays about the same; manager deployment costs one extra proxy deploy.
+- [ ] **Stop embedding the proxy initcode.** Move `CrossChainProxy` creation code into
+      a separate helper so EEZ and EEZL2 no longer embed it. Preserve proxy behavior and
+      measure bytecode savings and deployment gas.
 
-- [ ] **Move batch validation + proof verification to an external library — 3.5–4 KB.**
+- [ ] **Move batch validation + proof verification to an external library — estimated 3.5–4 KB.**
       `_validateBatchStructure`, `_verifyProofSystemBatch`, `_getVerificationKeysPerRollup` are
       self-contained `view` logic over the calldata batch (`rollups` passes as a storage pointer).
       Cost: one extra deployment plus a DELEGATECALL per post. Use when the two above are not enough.

@@ -9,6 +9,7 @@ interface IFlashLoanReceiver {
     function onFlashLoan(address token, uint256 amount) external;
 }
 
+/// @notice Test-only periphery fixture; outside the protocol audit scope, not for production.
 contract FlashLoan is ReentrancyGuard {
     using SafeERC20 for IERC20;
 

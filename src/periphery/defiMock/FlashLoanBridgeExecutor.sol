@@ -7,6 +7,7 @@ import {IFlashLoanReceiver, FlashLoan} from "./FlashLoan.sol";
 import {FlashLoanersNFT} from "./FlashLoanersNFT.sol";
 import {Bridge} from "../Bridge.sol";
 
+/// @notice Test-only periphery fixture; outside the protocol audit scope, not for production.
 contract FlashLoanBridgeExecutor is IFlashLoanReceiver {
     using SafeERC20 for IERC20;
 

@@ -54,7 +54,7 @@ struct CrossChainCall {
 ///          then everything reverts with `returnData`, rolling their state back.
 struct ExpectedOutgoingCrossChainCall {
     bytes32 expectedOutgoingHash; // position key: keccak256(crossChainCallHash, expectedRollingHash)
-    CrossChainCall[] incomingCalls; // the reentrant frame's own sub-calls, run to completion
+    CrossChainCall[] incomingCalls; // this frame's sub-calls; a failed _hasEnoughCallGas check stops the array and marks the rolling hash
     bytes32 revertedOrStaticRollingHash; // expected rolling hash of the frame's sub-calls for static reads / reverted calls; must be bytes32(0) for a successful call (checked on-chain)
     bool success; // indicates whether the reentrant call returns or reverts
     bytes returnData; // pre-computed return value (revert payload when !success)
@@ -63,7 +63,7 @@ struct ExpectedOutgoingCrossChainCall {
 /// @notice A pre-computed TOP-LEVEL execution entry. When `success` is true the top-level call returns
 ///         `returnData` (`executeCrossChainCall`); when false the entry is run, verified, then reverted with
 ///         `returnData` so all of its state effects roll back (the caller may try/catch). A top-level
-///         STATICCALL is a `StaticExecutionEntry` instead. A `bytes32(0)` `proxyEntryHash` is unreachable
+///         STATICCALL is a `StaticExecutionEntryL2` instead. A `bytes32(0)` `proxyEntryHash` is unreachable
 ///         on L2 — there is no zero-hash consumption path (`executeL2Txs` is L1-only).
 /// @dev `expectedOutgoingCalls[]` is the entry's SINGLE reentrant table: every reentrant call fired
 ///      anywhere during the entry resolves against it — including one fired by a sub-call inside a
@@ -83,11 +83,12 @@ struct ExecutionEntry {
 ///         `staticCrossChainCall` OUTSIDE any execution, from the `staticEntries` pool.
 ///         Reverting top-level reads land here (`success == false`); state-changing top-level
 ///         calls are `ExecutionEntry`s.
-/// @dev Field order mirrors `ExecutionEntry`; no reentrant table (a reentrant read re-enters the pool
-///      as ANOTHER `StaticExecutionEntry`). Match: `proxyEntryHash` alone, same block as load only
-///      (no pins on L2 — the block gate bounds staleness).
+/// @dev No reentrant table (a reentrant read re-enters the pool as another `StaticExecutionEntryL2`).
+///      Match: `proxyEntryHash` + `expectedEntryIndex == entryIndex`, same block as load only.
+///      The cursor pins manager-observed execution progress; local writes may leave it unchanged.
 ///      Referenced proxies must already be deployed (CREATE2 is unavailable inside a STATICCALL frame).
-struct StaticExecutionEntry {
+struct StaticExecutionEntryL2 {
+    uint256 expectedEntryIndex; // expected live next-entry cursor in the currently loaded table
     bytes32 proxyEntryHash; // inbound proxy-entry call hash (crossChainCallHash); mirrors `ExecutionEntry.proxyEntryHash`
     CrossChainCall[] incomingCalls; // incoming calls to be executed read-only via STATICCALL, run in order (no reentrant frames)
     bytes32 rollingHash; // expected rolling hash, which contains all calls and their return/revert values (untagged static schema: keccak(prev, success, retData))

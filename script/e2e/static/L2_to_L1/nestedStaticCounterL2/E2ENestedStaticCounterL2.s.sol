@@ -57,7 +57,7 @@ import {
 //  L1 view (Execute): 1 zero-hash L2Tx entry — l2ToL1Calls[0] runs
 //  CAP.incrementProxy(); its readerL2 reentry resolves from
 //  expectedL1ToL2Calls[0] (cached 1), and that frame's OWN sub-array carries
-//  the reader's static read with isStatic = true — `_processNCalls` EXECUTES
+//  the reader's static read with isStatic = true — `_processL2ToL1Calls` EXECUTES
 //  it for REAL (STATICCALL through readerProxyL1 into the live CounterL1)
 //  inside the NESTED frame, folding the same staticCcHash digest the L2
 //  STATIC row keys on, with the real returndata.
