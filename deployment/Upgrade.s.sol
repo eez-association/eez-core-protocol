@@ -5,6 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 import {ITransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {EEZ} from "../src/EEZ.sol";
+import {EEZL2} from "../src/L2/EEZL2.sol";
 import {Rollup} from "../src/rollupContract/Rollup.sol";
 
 /// @notice Upgrade to an already deployed, storage-compatible implementation.
@@ -41,6 +42,19 @@ contract UpgradeEEZ is UpgradeBase {
 contract UpgradeRollup is UpgradeBase {
     function run(address proxy, address implementation, bytes calldata data) external {
         require(Rollup(proxy).EEZContract() == Rollup(implementation).EEZContract(), "Registry mismatch");
+        _upgrade(proxy, implementation, data);
+    }
+}
+
+contract UpgradeEEZL2 is UpgradeBase {
+    function run(address proxy, address implementation, bytes calldata data) external {
+        EEZL2 current = EEZL2(proxy);
+        EEZL2 next = EEZL2(implementation);
+        require(current.ROLLUP_ID() == next.ROLLUP_ID(), "Rollup ID mismatch");
+        require(current.SYSTEM_ADDRESS() == next.SYSTEM_ADDRESS(), "System address mismatch");
+        require(current.USE_GAS_LEFT() == next.USE_GAS_LEFT(), "Gas mode mismatch");
+        require(current.RECOVERY_ADDRESS() == next.RECOVERY_ADDRESS(), "Recovery mismatch");
+        require(current.PROXY_INIT_CODE_HASH() == next.PROXY_INIT_CODE_HASH(), "Cross-chain proxy bytecode mismatch");
         _upgrade(proxy, implementation, data);
     }
 }

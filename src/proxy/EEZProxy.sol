@@ -3,8 +3,8 @@ pragma solidity 0.8.34;
 
 import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
-/// @notice Transparent proxy for EEZ, whose initial persistent state is entirely zero.
-/// @dev EEZ has no initializer: its recovery address and proxy bytecode hash are implementation
+/// @notice Transparent proxy for EEZ and EEZL2, whose initial persistent state is entirely zero.
+/// @dev Both managers have no initializer: their configuration and proxy bytecode hash are implementation
 ///      immutables. Explicitly allow empty initialization data under OpenZeppelin v5.6.1.
 contract EEZProxy is TransparentUpgradeableProxy {
     constructor(

@@ -12,17 +12,17 @@ import {ECDSAProofSystem} from "../src/proofSystems/ECDSAProofSystem.sol";
 abstract contract DeploymentBase is Script {
     bytes32 internal constant ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
 
-    function _deployEEZ(address recovery, address upgradeOwner) internal returns (EEZ eez) {
+    function _deployEEZ(address recovery, address upgradeOwner) internal returns (EEZ EEZContract) {
         require(recovery != address(0) && upgradeOwner != address(0), "Zero address");
         EEZ implementation = new EEZ(recovery);
-        eez = EEZ(address(new EEZProxy(address(implementation), upgradeOwner)));
+        EEZContract = EEZ(address(new EEZProxy(address(implementation), upgradeOwner)));
         console.log("EEZ_IMPLEMENTATION", address(implementation));
-        console.log("EEZ_PROXY", address(eez));
-        console.log("EEZ_PROXY_ADMIN", _admin(address(eez)));
+        console.log("EEZ_PROXY", address(EEZContract));
+        console.log("EEZ_PROXY_ADMIN", _admin(address(EEZContract)));
     }
 
     function _deployRollup(
-        address eez,
+        address EEZContract,
         address owner,
         address upgradeOwner,
         uint256 threshold,
@@ -32,7 +32,7 @@ abstract contract DeploymentBase is Script {
         internal
         returns (Rollup rollup)
     {
-        require(eez.code.length != 0, "EEZ has no code");
+        require(EEZContract.code.length != 0, "EEZ has no code");
         require(owner != address(0) && upgradeOwner != address(0), "Zero address");
         require(proofSystems.length == vkeys.length, "Proof system/key length mismatch");
         for (uint256 i; i < proofSystems.length; ++i) {
@@ -40,12 +40,32 @@ abstract contract DeploymentBase is Script {
             require(vkeys[i] != bytes32(0), "Zero verification key");
         }
         // The implementation is locked; initialize operational state atomically in the proxy.
-        Rollup implementation = new Rollup(eez);
+        Rollup implementation = new Rollup(EEZContract);
         bytes memory data = abi.encodeCall(Rollup.initialize, (owner, threshold, proofSystems, vkeys));
         rollup = Rollup(address(new TransparentUpgradeableProxy(address(implementation), upgradeOwner, data)));
         console.log("ROLLUP_IMPLEMENTATION", address(implementation));
         console.log("ROLLUP_PROXY", address(rollup));
         console.log("ROLLUP_PROXY_ADMIN", _admin(address(rollup)));
+    }
+
+    function _deployL2(
+        uint64 rollupId,
+        address systemAddress,
+        bool useGasLeft,
+        address recoveryAddress,
+        address upgradeOwner
+    )
+        internal
+        returns (EEZL2 EEZContractL2)
+    {
+        require(rollupId != 0 && systemAddress != address(0), "Invalid L2 configuration");
+        require(recoveryAddress != address(0) && upgradeOwner != address(0), "Zero address");
+        EEZL2 implementation = new EEZL2(rollupId, systemAddress, useGasLeft, recoveryAddress);
+        EEZContractL2 = EEZL2(address(new EEZProxy(address(implementation), upgradeOwner)));
+        console.log("EEZ_L2_IMPLEMENTATION", address(implementation));
+        console.log("EEZ_L2_PROXY", address(EEZContractL2));
+        console.log("EEZ_L2_PROXY_ADMIN", _admin(address(EEZContractL2)));
+        console.log("L2_RECOVERY_ADDRESS", EEZContractL2.RECOVERY_ADDRESS());
     }
 
     function _admin(address proxy) internal view returns (address) {
@@ -67,21 +87,21 @@ contract DeployL1 is DeploymentBase {
         bytes32 initialRoot
     )
         external
-        returns (EEZ eez, Rollup rollup, ECDSAProofSystem proofSystem, uint64 rollupId)
+        returns (EEZ EEZContract, Rollup rollup, ECDSAProofSystem proofSystem, uint64 rollupId)
     {
         require(proofOwner != address(0) && proofSigner != address(0), "Zero proof owner/signer");
         require(vkey != bytes32(0), "Zero verification key");
         vm.startBroadcast();
         (, address broadcaster,) = vm.readCallers();
         require(broadcaster == rollupOwner, "Broadcast as rollup owner");
-        eez = _deployEEZ(recovery, eezUpgradeOwner);
+        EEZContract = _deployEEZ(recovery, eezUpgradeOwner);
         proofSystem = new ECDSAProofSystem(proofOwner, proofSigner);
         address[] memory systems = new address[](1);
         systems[0] = address(proofSystem);
         bytes32[] memory keys = new bytes32[](1);
         keys[0] = vkey;
-        rollup = _deployRollup(address(eez), rollupOwner, rollupUpgradeOwner, 1, systems, keys);
-        rollupId = eez.registerRollup(address(rollup), initialRoot);
+        rollup = _deployRollup(address(EEZContract), rollupOwner, rollupUpgradeOwner, 1, systems, keys);
+        rollupId = EEZContract.registerRollup(address(rollup), initialRoot);
         vm.stopBroadcast();
         console.log("ECDSA_PROOF_SYSTEM", address(proofSystem));
         console.log("ROLLUP_ID", uint256(rollupId));
@@ -89,9 +109,9 @@ contract DeployL1 is DeploymentBase {
 }
 
 contract DeployEEZ is DeploymentBase {
-    function run(address recovery, address upgradeOwner) external returns (EEZ eez) {
+    function run(address recovery, address upgradeOwner) external returns (EEZ EEZContract) {
         vm.startBroadcast();
-        eez = _deployEEZ(recovery, upgradeOwner);
+        EEZContract = _deployEEZ(recovery, upgradeOwner);
         vm.stopBroadcast();
     }
 }
@@ -99,7 +119,7 @@ contract DeployEEZ is DeploymentBase {
 /// @notice Deploy an unregistered rollup with arbitrary proof systems and threshold.
 contract DeployRollup is DeploymentBase {
     function run(
-        address eez,
+        address EEZContract,
         address owner,
         address upgradeOwner,
         uint256 threshold,
@@ -110,20 +130,20 @@ contract DeployRollup is DeploymentBase {
         returns (Rollup rollup)
     {
         vm.startBroadcast();
-        rollup = _deployRollup(eez, owner, upgradeOwner, threshold, proofSystems, vkeys);
+        rollup = _deployRollup(EEZContract, owner, upgradeOwner, threshold, proofSystems, vkeys);
         vm.stopBroadcast();
     }
 }
 
 contract RegisterRollup is Script {
-    function run(address eez, address rollup, bytes32 initialRoot) external returns (uint64 rollupId) {
-        require(eez.code.length != 0 && rollup.code.length != 0, "Contract has no code");
-        require(Rollup(rollup).EEZContract() == eez, "Wrong registry");
+    function run(address EEZContract, address rollup, bytes32 initialRoot) external returns (uint64 rollupId) {
+        require(EEZContract.code.length != 0 && rollup.code.length != 0, "Contract has no code");
+        require(Rollup(rollup).EEZContract() == EEZContract, "Wrong registry");
         require(Rollup(rollup).rollupId() == 0, "Already registered");
         vm.startBroadcast();
         (, address broadcaster,) = vm.readCallers();
         require(broadcaster == Rollup(rollup).owner(), "Broadcast as rollup owner");
-        rollupId = EEZ(eez).registerRollup(rollup, initialRoot);
+        rollupId = EEZ(EEZContract).registerRollup(rollup, initialRoot);
         vm.stopBroadcast();
         console.log("ROLLUP_ID", uint256(rollupId));
     }
@@ -140,21 +160,19 @@ contract DeployProofSystem is Script {
 }
 
 /// @notice Run on the L2 RPC after registering the rollup on L1.
-contract DeployL2 is Script {
+contract DeployL2 is DeploymentBase {
     function run(
         uint64 rollupId,
         address systemAddress,
         bool useGasLeft,
-        address recoveryAddress
+        address recoveryAddress,
+        address upgradeOwner
     )
         external
-        returns (EEZL2 manager)
+        returns (EEZL2 EEZContractL2)
     {
-        require(rollupId != 0 && systemAddress != address(0), "Invalid L2 configuration");
         vm.startBroadcast();
-        manager = new EEZL2(rollupId, systemAddress, useGasLeft, recoveryAddress);
+        EEZContractL2 = _deployL2(rollupId, systemAddress, useGasLeft, recoveryAddress, upgradeOwner);
         vm.stopBroadcast();
-        console.log("EEZ_L2", address(manager));
-        console.log("L2_RECOVERY_ADDRESS", manager.RECOVERY_ADDRESS());
     }
 }

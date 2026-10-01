@@ -17,11 +17,14 @@ forge script deployment/Deploy.s.sol:DeployL1 \
   "$RECOVERY_ADDRESS" "$EEZ_UPGRADE_OWNER" "$ROLLUP_OWNER" "$ROLLUP_UPGRADE_OWNER" \
   "$PROOF_OWNER" "$PROOF_SIGNER" "$VKEY" "$INITIAL_ROOT"
 
-# L2: use the ROLLUP_ID printed by L1. EEZL2 is not upgradeable.
+# L2: use the ROLLUP_ID printed by L1. EEZL2 is deployed behind a transparent upgradeable proxy.
 forge script deployment/Deploy.s.sol:DeployL2 \
   --rpc-url "$L2_RPC" --private-key "$PRIVATE_KEY" --broadcast \
-  --sig 'run(uint64,address,bool,address)' "$ROLLUP_ID" "$SYSTEM_ADDRESS" "$USE_GAS_LEFT" "$L2_RECOVERY_ADDRESS"
+  --sig 'run(uint64,address,bool,address,address)' "$ROLLUP_ID" "$SYSTEM_ADDRESS" "$USE_GAS_LEFT" "$L2_RECOVERY_ADDRESS" "$L2_UPGRADE_OWNER"
 ```
+
+`L2_UPGRADE_OWNER` owns the L2 ProxyAdmin. Use the printed `EEZ_L2_PROXY` address in integrations.
+The script also prints `EEZ_L2_IMPLEMENTATION` and `EEZ_L2_PROXY_ADMIN`.
 
 `SYSTEM_ADDRESS` loads L2 execution tables and receives outgoing call value; `USE_GAS_LEFT` selects observed-gas hashing. `L2_RECOVERY_ADDRESS` is a separate nonzero immutable recipient for ETH swept from prefunded proxies. Set it to the system address explicitly if both recipients should coincide.
 
@@ -73,6 +76,22 @@ forge script deployment/Upgrade.s.sol:UpgradeRollup \
   --rpc-url "$L1_RPC" --private-key "$PRIVATE_KEY" --broadcast \
   --sig 'run(address,address,bytes)' "$ROLLUP_PROXY" "$NEW_ROLLUP_IMPLEMENTATION" 0x
 ```
+
+For L2, deploy the replacement with the same immutable configuration, then run as `L2_UPGRADE_OWNER`:
+
+```bash
+forge create src/L2/EEZL2.sol:EEZL2 \
+  --rpc-url "$L2_RPC" --private-key "$PRIVATE_KEY" --broadcast \
+  --constructor-args "$ROLLUP_ID" "$SYSTEM_ADDRESS" "$USE_GAS_LEFT" "$L2_RECOVERY_ADDRESS"
+forge script deployment/Upgrade.s.sol:UpgradeEEZL2 \
+  --rpc-url "$L2_RPC" --private-key "$PRIVATE_KEY" --broadcast \
+  --sig 'run(address,address,bytes)' "$EEZ_L2_PROXY" "$NEW_EEZ_L2_IMPLEMENTATION" 0x
+```
+
+The L2 upgrade script checks the rollup ID, system address, gas mode, recovery recipient,
+and cross-chain proxy bytecode hash. Storage compatibility still requires review.
+Existing direct deployments cannot be converted in place; a new proxy has its own state
+and deterministic cross-chain proxy addresses.
 
 ## Signing keys
 
