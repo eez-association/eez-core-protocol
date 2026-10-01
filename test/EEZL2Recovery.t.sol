@@ -14,7 +14,7 @@ contract EEZL2RecoveryTest is BaseL2 {
     address internal constant RECOVERY = address(0xCAFE);
     address internal constant REMOTE = address(0xBEEF);
 
-    function setUp() public override {
+    function setUp() public virtual override {
         manager = new EEZL2(TEST_ROLLUP_ID, SYSTEM_ADDRESS, false, RECOVERY);
     }
 
