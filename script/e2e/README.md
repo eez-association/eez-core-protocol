@@ -1,8 +1,15 @@
 # E2E Tests — Setup & Running
 
 Cross-chain scenarios under `script/e2e/<category>/<direction>/<scenario>/`.
-Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`; directions:
+Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`, `static`; directions:
 `L1_to_L2`, `L2_to_L1`.
+
+The predeployed-proxy static round-trip scenarios `topLevelStaticReentrantCounter`
+and `topLevelStaticReentrantCounterL2` are ready and included in automatic `all` runs.
+The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
+`topLevelStaticReentrantMissingProxyL2` are **NOT READY** and excluded from automatic
+`all` runs pending live staged validation. Explicit selections remain available.
+See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
 to writing and auditing scenarios, see [BUILD_AND_REVIEW_E2E_TESTS.md](BUILD_AND_REVIEW_E2E_TESTS.md).
