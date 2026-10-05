@@ -5,9 +5,9 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {EEZ} from "../src/EEZ.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
-import {VerifyHelpers} from "../script/e2e/shared/Verify.s.sol";
+import {VerifyHelpers} from "../script/e2e/scenarios/shared/Verify.s.sol";
 import {ExecutionEntry as L2Entry, ExpectedOutgoingCrossChainCall} from "../src/interfaces/IEEZL2.sol";
-import {DecodeExecutions} from "../script/DecodeExecutions.s.sol";
+import {DecodeExecutions} from "../script/tools/DecodeExecutions.s.sol";
 
 contract EventSummaryHarness is DecodeExecutions {
     function summary(Vm.EthGetLogs[] memory logs) external pure returns (string memory) {

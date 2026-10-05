@@ -20,10 +20,13 @@ Shared machinery lives in `src/base/` (`EEZBase.sol`, `CrossChainProxy.sol`); pe
 ## Build & Test
 
 ```bash
-forge build          # Compile contracts
-forge test           # Run all tests
-forge fmt            # Format code
+forge build                         # Compile contracts
+FOUNDRY_ISOLATE=false forge test     # Run the unit and integration suite
+forge fmt                           # Format code
 ```
+
+Use `FOUNDRY_ISOLATE=false` only for the unit/integration test command: transient-storage tests need calls to share one transaction.
+Keep `--isolate` for E2E execution and gas benchmarks that require separate transactions; do not set a global override.
 
 ## Deployment
 

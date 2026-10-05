@@ -8,6 +8,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IEEZ} from "../interfaces/IEEZ.sol";
 import {WrappedToken} from "./WrappedToken.sol";
 
+/// @dev Shared mint/burn ABI implemented by both legacy and EEZ bridge tokens.
+interface IBridgeToken {
+    function mint(address to, uint256 amount) external;
+    function burn(address from, uint256 amount) external;
+}
+
 /// @title Bridge
 /// @notice TEST-ONLY periphery for exercising cross-rollup ETH/ERC20 flows; outside the protocol audit scope.
 /// @dev No constructor args — deployed via CREATE2 at the same address on every chain.
@@ -109,6 +115,11 @@ contract Bridge {
     /// @param _rollupId This chain's rollup ID (0 = L1 mainnet)
     /// @param _admin The admin address that can set the canonical bridge address
     function initialize(address _manager, uint64 _rollupId, address _admin) external {
+        _initialize(_manager, _rollupId, _admin);
+    }
+
+    /// @dev Shared by the legacy initializer and constructor-initialized deployments.
+    function _initialize(address _manager, uint64 _rollupId, address _admin) internal {
         if (address(manager) != address(0)) revert AlreadyInitialized();
         if (_manager == address(0)) revert ZeroAddress();
         if (_admin == address(0)) revert ZeroAddress();
@@ -162,7 +173,7 @@ contract Bridge {
         bytes memory payload;
         if (info.originalToken != address(0)) {
             // Wrapped token: burn and trace back to original
-            WrappedToken(token).burn(msg.sender, amount);
+            IBridgeToken(token).burn(msg.sender, amount);
             payload =
                 _receiveTokensPayload(token, info.originalToken, info.originalRollupId, destinationAddress, amount);
         } else {
@@ -232,7 +243,7 @@ contract Bridge {
         } else {
             // Token is foreign → mint wrapped tokens
             address wrapped = _getOrDeployWrapped(originalToken, originalRollupId, name, symbol, tokenDecimals);
-            WrappedToken(wrapped).mint(to, amount);
+            IBridgeToken(wrapped).mint(to, amount);
             emit WrappedTokensMinted(wrapped, to, amount);
         }
     }
@@ -280,14 +291,28 @@ contract Bridge {
         if (wrappedAddr != address(0)) return wrappedAddr;
 
         // First bridge for this token — deploy a new WrappedToken via CREATE2
-        WrappedToken wrapped = new WrappedToken{salt: salt}(name, symbol, tokenDecimals, address(this));
+        address wrapped = _deployWrappedToken(salt, name, symbol, tokenDecimals);
 
         // Register in both lookup directions: salt → address and address → origin info
-        wrappedAddr = address(wrapped);
+        wrappedAddr = wrapped;
         wrappedTokens[salt] = wrappedAddr;
         wrappedTokenInfo[wrappedAddr] = TokenInfo(originalToken, originalRollupId);
 
         emit WrappedTokenDeployed(wrappedAddr, originalToken, originalRollupId);
+    }
+
+    /// @dev Token creation policy; specialized bridges can deploy compatible EEZ tokens.
+    function _deployWrappedToken(
+        bytes32 salt,
+        string calldata name,
+        string calldata symbol,
+        uint8 tokenDecimals
+    )
+        internal
+        virtual
+        returns (address)
+    {
+        return address(new WrappedToken{salt: salt}(name, symbol, tokenDecimals, address(this)));
     }
 
     /// @dev Ensures a CrossChainProxy exists for (addr, rollupId), creating it if needed.

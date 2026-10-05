@@ -1,8 +1,17 @@
 # E2E Tests — Setup & Running
 
-Cross-chain scenarios under `script/e2e/<category>/<direction>/<scenario>/`.
-Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`; directions:
+Cross-chain scenarios under `script/e2e/scenarios/<category>/<direction>/<scenario>/`.
+Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`, `static`; directions:
 `L1_to_L2`, `L2_to_L1`.
+
+The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
+`topLevelStaticReentrantCounterL2` are included in automatic `all` / default runs.
+Their live triggers remained unmined on 2026-10-05; the runner reports disappeared
+transactions in its final summary instead of excluding these scenarios.
+The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
+`topLevelStaticReentrantMissingProxyL2` remain **NOT READY** and excluded from
+`all` pending live validation. Explicit selections remain available.
+See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
 to writing and auditing scenarios, see [BUILD_AND_REVIEW_E2E_TESTS.md](BUILD_AND_REVIEW_E2E_TESTS.md).
@@ -25,11 +34,46 @@ never become later system deliveries.
 `staticLocalWriteL2`, `nestedStaticLocalWriteL1`, and `nestedStaticLocalWriteL2`
 have passed local Anvil runs only. They are not validated for live staged or
 parallel network testing. They are excluded from `all` / `all:N` discovery in
-`network-staged.sh` and `network-parallel.sh`, from `network-sequential.sh all`,
+`staged.sh` and `parallel.sh`, from `sequential.sh all`,
 and from the local parallel runner's default / `all` set. Each scenario carries
 an `E2E_EXCLUDE_FROM_ALL` marker; remove it only when the scenario is ready.
 Explicit names and category selections still include them; use explicit local
 runs for development. See the [scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
+
+## Script layout
+
+```text
+script/
+  e2e/
+    scenarios/      one_way/, multi_call/, multi_tx/, nested/, reentrant/, revert/, static/
+      shared/       Solidity deployment, verification and scenario helpers
+    run/network/    setup.sh, staged.sh, sequential.sh, parallel.sh, load-testing.sh
+    run/local/      parallel.sh
+    lib/            shared shell helpers, composer discovery, staged recovery
+    tests/          setup regression tests
+    COMMANDS.md     command examples
+  tools/            block/trace decoding and explorer verification
+  DeployBridge.s.sol  shared deployment utility used beyond E2E
+```
+
+Start with `run/network/setup.sh`, then `run/network/staged.sh counter:1`.
+`lib/network-scenario.sh` is the internal single-scenario worker; `sequential.sh` shares one wallet;
+`parallel.sh` runs complete scenarios on separate wallets; `staged.sh` separates
+preparation, sending and verification and supports resume. `load-testing.sh` measures
+transaction submission/receipts without cross-chain settlement verification.
+Local runners own their Anvil chains. Tools and libraries are separate from
+these entry points because they have different jobs.
+
+The old flat script paths have moved; examples below use the new paths.
+Wallet pool, faucet, MultiSend cache and lock files remain in `script/e2e/run/`
+so existing funding identities and locks continue to be used. Run artifacts
+remain in their existing `tmp/` directories.
+
+Run the network configuration and setup regression tests with:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s script/e2e/tests -v
+```
 
 ## Prerequisites
 
@@ -39,50 +83,116 @@ bash, `forge build` clean. Network mode also needs a test-only key (see step 1).
 ## Local mode (no setup)
 
 ```bash
-bash script/e2e/run/local-parallel.sh              # everything
-bash script/e2e/run/local-parallel.sh one_way      # one category
-bash script/e2e/run/local-parallel.sh counter bridge
+bash script/e2e/run/local/parallel.sh              # everything
+bash script/e2e/run/local/parallel.sh one_way      # one category
+bash script/e2e/run/local/parallel.sh counter bridge
 ```
 
 ## Network mode
 
-### 1. Create `chain.env` in the repo root (gitignored — holds your key)
+### 1. Configure endpoints and credentials
+
+Use exported variables or an optional `chain.env` in the repo root (gitignored).
+`DEVNET_ENV=<file>` explicitly selects another file. Discovery uses Bash,
+`curl`, `jq`, and `bc`. Python 3 is still used by setup balance calculations and
+the remaining setup regression tests. Fresh network runs call `eez_composerInfo` once on `L1_FRONT` and check
+both chain RPC IDs before funding or deployment. A metadata failure, malformed
+response, or chain mismatch stops the run. Other endpoints are not queried for
+composer metadata.
+
+Discovery runs once at startup of the batch/setup script and exports the resolved
+values to its workers. Keep URLs and credentials in the optional env file; avoid
+writing discovered addresses back to it, since they can change after a reset.
+Staged runs save their resolved network in the run directory for later resume.
 
 ```bash
 L1_RPC=https://l1-rpc.example.net                     # L1 read/deploy RPC
-L1_FRONT=http://x.x.x.x:18999                         # L1→L2 trigger txs ONLY
+L1_FRONT=http://x.x.x.x:18999                         # L1→L2 triggers and composer metadata
 L2_RPC=http://x.x.x.x:18688                           # L2 read/deploy RPC
 L2_FRONT=http://x.x.x.x:18998                         # L2→L1 trigger txs ONLY
-ROLLUPS=0x...                                         # EEZ — L1 rollup registry
-MANAGER_L2=0x4200000000000000000000000000000000000007 # EEZL2 genesis predeploy
 PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # private key to use in testing (example: anvil #2)
 ```
 
-Endpoints/addresses come from the devnet operator. Verify the manager with
+`SOURCE_PK` is also accepted when `PK` is unset. You do not need `ROLLUPS` or
+`MANAGER_L2` in this file: the E2E runners discover them automatically. Existing
+address entries are replaced in memory when starting a fresh run.
+
+From the repository root, run your existing tests directly:
+
+```bash
+bash script/e2e/run/network/staged.sh counter:1
+# Select another connection/key file:
+DEVNET_ENV=chain.env2 bash script/e2e/run/network/staged.sh counter:1
+# The sequential runner also loads chain.env and discovers addresses:
+bash script/e2e/run/network/sequential.sh counter
+```
+
+Endpoints and keys remain operator configuration. Deployment addresses and chain
+IDs come from the composer; stale addresses in an env file are replaced:
+
+| Response field | Exported variable |
+| --- | --- |
+| `eezContracts.eezRegistryAddress` | `ROLLUPS` |
+| `eezContracts.eezRollupManagerAddress` | `EEZ_ROLLUP_MANAGER` |
+| `eezContracts.eezL2Address` | `MANAGER_L2` |
+| `supportedNetworks.eezL1`, `eezL2` | `EXPECTED_L1_CHAIN_ID`, `EXPECTED_L2_CHAIN_ID` |
+| `version` | `COMPOSER_VERSION` |
+
+Inspect the response without signing or sending transactions:
+
+```bash
+bash script/e2e/lib/composer-info.sh --l1-front https://eez.dev/composer/l1
+# Load endpoints/keys and discover addresses for manual commands:
+source script/e2e/lib/network-config.sh
+load_network_config
+```
+
+The latest live checks on 2026-10-02 confirmed that both composer fronts on
+`eez.asuscomm.com` and `eez.dev` answer `eez_composerInfo` with matching metadata
+within each environment. Discovery uses only `L1_FRONT`.
+The response contains no endpoint URLs, keys, or EEZ rollup IDs. Ethereum chain
+IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` still defaults to 1).
+
+Staged resume/verify uses the saved run network snapshot rather than rediscovering
+a potentially different deployment. The single-scenario runner (`lib/network-scenario.sh`) loads `chain.env` (or
+`DEVNET_ENV`) before applying CLI overrides and discovery.
+Fully explicit address arguments on the single-scenario runner remain supported
+for workers and historical deployments; these bypass env-file loading and discovery.
+Decoder invocations discover missing addresses through an exported `L1_FRONT`,
+or accept explicit `--rollups` and `--manager-l2` addresses.
+
+Verify the manager with
 `cast call $MANAGER_L2 "ROLLUP_ID()(uint256)" --rpc-url $L2_RPC`.
 
 **Key hygiene:** prefer a fresh throwaway key (`cast wallet new`) — well-known anvil
 keys may be shared with devnet actors (notably #0: composer/system), and the nonce
 races show up as triggers held forever.
 
-### 2. Fund the wallet (every devnet reset — genesis leaves it at 0)
+### 2. Fund the source wallet on L1
 
 ```bash
-source chain.env
+source script/e2e/lib/network-config.sh
+load_network_config
 ADDR=$(cast wallet address --private-key $PK)
 ANVIL2=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # devnet faucet
 cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L1_RPC
-cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L2_RPC
 ```
 
-(Only needed for the sequential runner — the parallel orchestrator funds itself.)
+The source wallet funds the runners; setup below supplies its L2 balance.
 
-### 3. Prepare the network (once per reset; idempotent)
+### 3. Set up the network (once per reset)
+
+Setup bridges ETH from L1 to the same source wallet on L2, waits for delivery,
+and ensures CREATE2 factories exist on both chains. It uses `SOURCE_PK`
+(falling back to `PK`); only L1 needs funds to start.
 
 ```bash
-source chain.env
-bash script/e2e/run/prepare-network.sh --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" --l2-rpc "$L2_RPC" --pk "$PK" --rollups "$ROLLUPS"
+# Top up the source wallet to 1.1 ETH on L2:
+DEVNET_ENV=chain.env2 bash script/e2e/run/network/setup.sh 1.1
 ```
+
+`1.1` is the target L2 balance, not the amount sent; only the missing ETH is
+bridged. Without arguments, setup uses `chain.env` and a 0.1 ETH target.
 
 ### 4. Check the deployment is alive
 
@@ -98,10 +208,10 @@ cast logs --rpc-url "$L1_RPC" --from-block $((LATEST-100)) --to-block $LATEST --
 ### 5. Run — sequential set-runner
 
 ```bash
-bash script/e2e/run/network-sequential.sh one_way              # category
-bash script/e2e/run/network-sequential.sh counter bridge       # scenarios
-bash script/e2e/run/network-sequential.sh all                  # everything
-DEVNET_ENV=other.env bash script/e2e/run/network-sequential.sh one_way
+bash script/e2e/run/network/sequential.sh one_way              # category
+bash script/e2e/run/network/sequential.sh counter bridge       # scenarios
+bash script/e2e/run/network/sequential.sh all                  # everything
+DEVNET_ENV=other.env bash script/e2e/run/network/sequential.sh one_way
 ```
 
 Sequential because all scenarios share the `chain.env` nonce. Logs:
@@ -113,22 +223,22 @@ Every job gets its own ephemeral wallet, so scenarios run concurrently — inclu
 the same scenario N times (load testing):
 
 ```bash
-bash script/e2e/run/network-parallel.sh counter:10            # counter 10x
-bash script/e2e/run/network-parallel.sh counter:5 bridge:3    # mixed
-bash script/e2e/run/network-parallel.sh all                   # each once
-bash script/e2e/run/network-parallel.sh one_way:2 nested      # categories too
+bash script/e2e/run/network/parallel.sh counter:10            # counter 10x
+bash script/e2e/run/network/parallel.sh counter:5 bridge:3    # mixed
+bash script/e2e/run/network/parallel.sh all                   # each once
+bash script/e2e/run/network/parallel.sh one_way:2 nested      # categories too
 ```
 
 Self-funding: `faucet.txt` (in `script/e2e/run/`, gitignored) is the orchestrator's faucet —
 created on first run, topped up from anvil #2 when short; workers get `FUND_ETH`
-(default 0.1) per chain via async nonce-sequenced txs; a `flock` serializes
+(default 0.001 ETH) per chain via MultiSend top-ups; a `flock` serializes
 concurrent instances.
 
 Flags: `--direct` funds workers straight from the source key (anvil #2, or
 `SOURCE_PK`) with no faucet account; `--fund <eth>` sets the per-worker amount:
 
 ```bash
-bash script/e2e/run/network-parallel.sh --direct --fund 0.05 counter:10
+bash script/e2e/run/network/parallel.sh --direct --fund 0.05 counter:10
 ```
 
 Env knobs: `MAX_PARALLEL` (default 100), `FUND_ETH`, `SOURCE_PK`,
@@ -145,14 +255,17 @@ Caveats:
   `L1_CALLDATA_TIMEOUT` (default 180 s for L2 triggers; 60 s for L1 triggers, whose
   candidate set is known up front) before failing the posted-calldata check.
 
-### Manual single scenario
+### Run one scenario
+
+Use the same batch entry points with one selected case:
 
 ```bash
-source chain.env
-bash script/e2e/run/network.sh script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol \
-  --l1-rpc $L1_RPC --l1-front $L1_FRONT --l2-rpc $L2_RPC --l2-front $L2_FRONT \
-  --pk $PK --rollups $ROLLUPS --manager-l2 $MANAGER_L2
+bash script/e2e/run/network/staged.sh counter:1
+MAX_PARALLEL=1 bash script/e2e/run/local/parallel.sh counter
 ```
+
+The runners call their internal workers in `lib/`; no separate public single-case
+command is needed. See [COMMANDS.md](COMMANDS.md) for more run examples.
 
 Timeouts (env, seconds): `RECEIPT_TIMEOUT` 300 (the set-runners raise it to 420).
 Verification fails fast where the protocol allows it: an L1 trigger's batch can only be
@@ -294,11 +407,11 @@ Backward compatibility with older event ABIs is outside the current scope.
 
 ## Load test one deployment
 
-Use [network-load.sh] to deploy a scenario once and send thousands of transactions through the same contract setup:
+Use [`load-testing.sh`](run/network/load-testing.sh) to deploy a scenario once and send thousands of transactions through the same contract setup:
 
 ```bash
-bash script/e2e/run/network-load.sh --workers 20 --txs-per-wallet 500 counter
-bash script/e2e/run/network-load.sh --workers 50 --txs-per-wallet 100 nestedCounter
+bash script/e2e/run/network/load-testing.sh --workers 20 --txs-per-wallet 500 counter
+bash script/e2e/run/network/load-testing.sh --workers 50 --txs-per-wallet 100 nestedCounter
 ```
 
 Funding matches the staged and parallel runners: wallets below **0.0005 ETH**
