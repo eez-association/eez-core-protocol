@@ -23,7 +23,7 @@ _recovery_lookup_once() {
         echo '{}'
     else
         [[ "$SCENARIO" != original_wins_pool_failure ]] || return 1
-        if [[ "$SCENARIO" == held ]]; then
+        if [[ "$SCENARIO" != missing && "$SCENARIO" != missing_low ]]; then
             jq -nc --arg h "$ORIGINAL" '{($h):{hash:$h,blockNumber:null}}'
         else echo '{}'; fi
     fi
@@ -35,7 +35,7 @@ _recovery_rpc() {
             [[ "$SCENARIO" != original_wins_fee_failure ]] || return 1
             if [[ "$3" == *true* ]]; then
                 jq -nc --arg h "${NONCE_OWNER:-0xffff}" --arg s "$SENDER" '{transactions:[{hash:$h,from:$s,nonce:"0x0"}]}'
-            elif [[ "$SCENARIO" == fee_reject || "$SCENARIO" == lost_response ]]; then
+            elif [[ "$SCENARIO" == fee_reject || "$SCENARIO" == lost_response || "$SCENARIO" == funds_reject || "$SCENARIO" == send_unknown || "$SCENARIO" == missing_low ]]; then
                 echo '{"baseFeePerGas":"0xc8","number":"0x10"}'
             else echo '{"baseFeePerGas":"0x32","number":"0x10"}'; fi ;;
         eth_gasPrice) echo '"0x64"' ;;
@@ -98,19 +98,21 @@ class RecoveryTests(unittest.TestCase):
             files = {str(p.relative_to(root)): p.read_text() for p in root.rglob("*") if p.is_file()}
             return result, files, json.loads(files.get("sent.replacements.json", "[]"))
 
-    def test_missing_resends_once_across_resume_then_stops(self):
+    def test_missing_is_marked_without_resending_including_resume(self):
         result, files, entries = self.run_recovery(actions='''
 _recover_pending pending.csv front
 _recover_pending pending.csv front --reconcile-only
 _recover_pending pending.csv front
 _recovery_all_stopped pending.csv || exit 9
 ''')
-        self.assertEqual(files["sends"].count("send"), 1)
-        self.assertEqual(entries[0]["missing_resends"], 1)
+        self.assertNotIn("sends", files)
+        self.assertTrue(entries[0]["disappeared"])
         self.assertIn("disappeared tx", entries[0]["stop_retry"])
-        self.assertIn("RECOVERY job [L1]", result.stdout)
+        self.assertIn("DISAPPEARED TESTS (1 transaction(s))", result.stdout)
+        self.assertIn("DISAPPEARED", result.stdout)
+        self.assertIn("Tx: " + self.hash, result.stdout)
 
-    def test_old_runner_rebroadcast_consumes_allowance(self):
+    def test_missing_does_not_require_previous_resend_history(self):
         _, files, entries = self.run_recovery(actions='''
 echo "[trigger][L1] job=job hash=$ORIGINAL not visible in pool/front; rebroadcasting same nonce=0" > recovery.log
 _recover_pending pending.csv front
@@ -123,13 +125,13 @@ _recover_pending pending.csv front
         self.assertEqual(files["sends"].count("send"), 2)
         self.assertEqual(entries[0]["fee_bumps"], 2)
         self.assertIn("two fee increases rejected", entries[0]["stop_retry"])
-        self.assertEqual(entries[0]["missing_resends"], 0)
+        self.assertFalse(entries[0].get("disappeared", False))
         self.assertEqual(len(entries[0]["variants"]), 3)
 
-    def test_low_fees_take_priority_over_missing_and_lost_response_is_reconciled(self):
+    def test_visible_low_fees_and_lost_response_are_reconciled(self):
         _, files, entries = self.run_recovery("lost_response")
         self.assertEqual(entries[0]["fee_bumps"], 1)
-        self.assertEqual(entries[0]["missing_resends"], 0)
+        self.assertFalse(entries[0].get("disappeared", False))
         self.assertNotIn("stop_retry", entries[0])
         self.assertNotEqual(entries[0]["current"], self.hash)
         self.assertEqual(files["jobs/job/txs.txt"].strip(), entries[0]["current"])
@@ -228,10 +230,23 @@ _recover_pending deploy-pending-wave1.csv direct
 _recover_pending deploy-pending-wave1.csv direct
 ''')
         entries = json.loads(files["deploy-sent-wave1.replacements.json"])
-        self.assertEqual(files["sends"].count("send"), 1)
+        self.assertNotIn("sends", files)
         self.assertNotIn("front1", files["calls"])
         self.assertEqual(files["jobs/job/deploytxs-wave1.txt"].strip(), "L1 " + self.raw)
         self.assertIn("disappeared tx", entries[0]["stop_retry"])
+
+    def test_missing_does_not_trigger_fee_replacement(self):
+        _, files, entries = self.run_recovery("missing_low")
+        self.assertNotIn("sends", files)
+        self.assertNotIn("eth_gasPrice", files["calls"])
+        self.assertTrue(entries[0]["disappeared"])
+
+    def test_disappeared_summary_tracks_late_mining(self):
+        result, files, entries = self.run_recovery(actions="_recover_pending pending.csv front\nSCENARIO=partial_receipt_failure\n_recover_pending pending.csv front --reconcile-only\n")
+        self.assertNotIn("sends", files)
+        self.assertEqual(files["pending.csv"], "")
+        self.assertTrue(entries[0]["disappeared"])
+        self.assertIn("MINED LATER", result.stdout)
 
     def test_fees_round_up_ten_percent_and_cover_current_market(self):
         result = subprocess.run(["bash", "-c", 'source "$1"; _recovery_fees 2 100 10 0 0 0; _recovery_fees 0 101 101 200 250 0',

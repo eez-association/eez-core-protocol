@@ -241,9 +241,10 @@ Authoring notes specific to static scenarios:
 
 ### One static round trip in either direction
 
-The predeployed-proxy scenarios are ready and included in automatic `all` / default
-runs. The two `MissingProxy` scenarios are **NOT READY** pending live staged
-validation and carry `E2E_EXCLUDE_FROM_ALL` markers. Explicit names remain selectable.
+The two predeployed-proxy scenarios are included in automatic `all` / default
+runs. Their live non-mining failures are reported by the runner. The two
+`MissingProxy` scenarios remain **NOT READY** and carry `E2E_EXCLUDE_FROM_ALL`
+markers pending live validation. Explicit names remain selectable.
 
 | Trigger chain | Scenario | Static call tree | Settlement |
 | --- | --- | --- | --- |

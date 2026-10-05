@@ -373,8 +373,11 @@ plan_job_deploys() {
 }
 
 # ── Strip forge execution traces ──
+# Preserve unindented errors and their context: Forge RPC/fork failures often
+# happen before any console logs. sed also succeeds when every line is a trace,
+# so diagnostic printing cannot abort a runner using set -euo pipefail.
 strip_traces() {
-    grep -v '├─\|└─\|│ \|→ new\|\[staticcall\]\|\[Return\]\|\[Stop\]\|\[Revert\]\|::run(' | sed -n '/^  /p'
+    sed -E '/^[[:space:]]*(├─|└─|│|\[[0-9]+\].*::run\()/d'
 }
 
 # ── Verify-step wrappers around script/e2e/scenarios/shared/Verify.s.sol ──

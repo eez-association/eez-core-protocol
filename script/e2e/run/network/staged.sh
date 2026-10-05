@@ -28,7 +28,7 @@
 #   4. send     — SEND_WORKERS curl-only workers publish the pre-signed raw txs
 #                 fire-and-forget and record job,chain,txhash in sent.csv.
 #   5. monitor  — batch-poll receipts per chain until everything is mined;
-#                 every 120s inspect pool/fees and recover stuck transactions.
+#                 every 60s inspect pool/fees and recover stuck transactions.
 #                 Results in mined.csv; MAX_MONITOR_WAIT bounds waiting (300s maximum).
 #   6. verify   — per mined job, capped at VERIFY_PARALLEL (deliberately low —
 #                 this is the expensive part and it is in no hurry): the
@@ -59,7 +59,7 @@
 #
 # Env knobs:
 #   PREPARE_MODE      plan (default) | waves | classic — see phase 2 above
-#   DEPLOY_MINE_TIMEOUT  seconds between deploy recovery checks (default 120)
+#   DEPLOY_MINE_TIMEOUT  seconds between deploy recovery checks (default 60)
 #   PREPARE_PARALLEL  concurrent prepare jobs (default 40)
 #   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / wave / finish /
 #                     classic) may run before its job is dropped (default 300)
@@ -72,7 +72,7 @@
 #                     SEND_PAUSE=0.5 → 10 tx/s
 #   VERIFY_PARALLEL   concurrent verify jobs (default 8)
 #   Receipt polling is fixed at 3 seconds on both chains.
-#   MINE_TIMEOUT      seconds between trigger recovery checks (default 120)
+#   MINE_TIMEOUT      seconds between trigger recovery checks (default 60)
 #   MAX_MONITOR_WAIT  total wait limit per monitor (seconds; default/max 300)
 #   E2E_TRIGGER_GAS   trigger gas limit, passed through to network.sh (default
 #                     1000000; a scenario's GAS output takes precedence)
@@ -130,8 +130,8 @@ VERIFY_PARALLEL="${VERIFY_PARALLEL:-8}"
 # Receipt progress uses one fixed cadence on both chains.
 POLL_INTERVAL=3
 DEPLOY_POLL_INTERVAL=3
-MINE_TIMEOUT="${MINE_TIMEOUT:-120}"
-DEPLOY_MINE_TIMEOUT="${DEPLOY_MINE_TIMEOUT:-120}"
+MINE_TIMEOUT="${MINE_TIMEOUT:-60}"
+DEPLOY_MINE_TIMEOUT="${DEPLOY_MINE_TIMEOUT:-60}"
 MAX_MONITOR_WAIT="${MAX_MONITOR_WAIT:-300}"
 for _timeout in MINE_TIMEOUT DEPLOY_MINE_TIMEOUT MAX_MONITOR_WAIT; do
     [[ "${!_timeout}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid $_timeout: use positive whole seconds"; exit 1; }
@@ -376,7 +376,9 @@ _monitor_files() {
     _reconcile_replacements "$3" "$5" || return 1
     local start checkpoint left interval="${6:-3}" now elapsed delay remaining phase tick_start
     [[ "$5" == direct ]] && phase=deploy || phase=trigger
-    start=$(date +%s); checkpoint=$((start + $4))
+    local first_check="$4"
+    (( first_check <= 60 )) || first_check=60
+    start=$(date +%s); checkpoint=$((start + first_check))
     while true; do
         tick_start=$(date +%s)
         _poll_pending_once "$3" "$2" "$5" || return 1
@@ -402,7 +404,7 @@ _monitor_files() {
             return 1
         fi
         if (( now >= checkpoint )); then
-            echo "[$phase] ${4}s recovery checkpoint: checking pool, fees, balance and nonces"
+            echo "[$phase] status check: marking disappeared transactions; checking visible transactions"
             _recover_pending "$3" "$5" || return 1
             now=$(date +%s); checkpoint=$((now + $4))
             continue  # Poll any recovered hash immediately, then resume normal timing.

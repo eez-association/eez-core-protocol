@@ -30,7 +30,7 @@ import {
     HashStep
 } from "../../../shared/E2EHelpers.sol";
 
-// Ready: included in automatic all/default runs.
+// Included in automatic all/default runs; the runner reports live non-mining failures.
 // L2 reader.increment() -> STATIC L1 forwarder.counter() -> L1 callback helper -> STATIC L2 producer.counter().
 // L2: load an empty mutable table + one static row, then trigger in the SAME block.
 // The row executes its callback through the L2 source proxy of the L1 callback helper.

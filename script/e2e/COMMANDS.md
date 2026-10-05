@@ -1,5 +1,7 @@
 # Useful testing commands
 
+To fund the source wallet on L2 from L1, follow [network setup](README.md#3-set-up-the-network-once-per-reset).
+
 Before launching a suite containing `bridgeL2`, run the L1→L2 bridge E2E once
 and wait for it to pass. It deposits **0.00001 ETH by default** into rollup escrow
 and verifies delivery to L2. Use the same `DEVNET_ENV` for this command and the
@@ -9,9 +11,6 @@ subsequent suite.
 # Default deposit: 0.00001 ETH
 DEVNET_ENV=chain.env bash script/e2e/run/network/staged.sh bridge:1
 
-# Custom deposit: change 0.00002 to the amount of ETH you want to bridge
-DEVNET_ENV=chain.env E2E_BRIDGE_AMOUNT_WEI=$(cast to-wei 0.00002) \
-  bash script/e2e/run/network/staged.sh bridge:1
 ```
 
 `E2E_BRIDGE_AMOUNT_WEI` changes only the L1→L2 `bridge` scenario. Each `bridgeL2`
@@ -125,7 +124,7 @@ bash script/e2e/run/network/staged.sh counter:1 revertCounter:1
 # Smoke test
 bash script/e2e/run/network/staged.sh counter:2
 
-DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=120 bash script/e2e/run/network/staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
+DEVNET_ENV=chain.env2 PREPARE_PARALLEL=200 VERIFY_PARALLEL=30 MINE_TIMEOUT=60 bash script/e2e/run/network/staged.sh counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
 
 # The 770-job load mix through the staged runner no verify
 PREPARE_PARALLEL=200 bash script/e2e/run/network/staged.sh --no-verify counter:100 counterL2:100 nestedCounter:50 nestedCounterL2:50 multi-call-nested:50 multi-call-nestedL2:50 multi-call-twice:50 multi-call-twiceL2:50 counter-multi-tx:50 reentrant:20 revertCounter:50 revertCounterL2:50 revertFromOtherChain:50 revertFromOtherChainL2:50
@@ -155,13 +154,15 @@ Deployment and trigger progress uses one line: `L1: mined/total | L2: mined/tota
 Receipt polling is fixed at **3 seconds**. The front is queried first for triggers;
 unresolved hashes are also checked on the source-chain RPC. Deployments use direct RPCs.
 
-Recovery runs every **120 seconds** (`MINE_TIMEOUT` / `DEPLOY_MINE_TIMEOUT`).
+Recovery runs every **60 seconds** (`MINE_TIMEOUT` / `DEPLOY_MINE_TIMEOUT`).
 It reconciles all saved mined attempts before querying the pool or fee oracles:
 
-- Missing transactions with adequate fees are reported as **disappeared tx** and
-  rebroadcast once through the original endpoint. Continued absence stops recovery
-  for that job. A front may hide held transactions; absence is not proof of a drop.
-- Low fees take priority over disappearance. At most **two fee increases** retain
+- At the one-minute check, a transaction with no receipt and absent from both
+  front/source transaction lookups is marked **DISAPPEARED**, without resending it.
+  These tests appear together in a clean **DISAPPEARED TESTS** table at the end of
+  the log, with the chain and full transaction hash. A front may hide held transactions;
+  the label reports lookup absence. RPC failures are reported separately.
+- Visible transactions with low fees allow at most **two fee increases**, retaining
   the same nonce, payload, value, gas limit and access list. The fee cap and tip
   increase by at least **10%**, rounded up, and cover current estimates. Explicit
   fee rejection refreshes estimates and retries immediately within that budget.
@@ -183,7 +184,7 @@ transactions retain their specific failure category. RPC calls and recovery alre
 in progress may delay the final report beyond the nominal deadline.
 
 ```bash
-# Five-minute maximum; inspect recovery every two minutes.
+# Five-minute maximum; check transaction status after one minute.
 bash script/e2e/run/network/staged.sh counter:10 counterL2:10
 
 # Shorter monitor limit.
@@ -197,9 +198,8 @@ transactions which eventually mined after recovery.
 
 `recovery.log` records decisions. `sent.replacements.json` and
 `deploy-sent*.replacements.json` persist retry budgets and every signed attempt
-before submission. Resume does not reset those budgets. Previous runner logs are
-used to recognize an already-used disappearance resend. Saved older attempts can
-still win; their receipts repair CSVs and per-job signed bytes. Verification-only
+before submission. Resume does not reset those budgets or terminal disappearance
+results. Saved older attempts can still win; their receipts repair CSVs and per-job signed bytes. Verification-only
 reconciles receipts without broadcasting. Recovery remains Bash using `curl`, `jq`,
 `cast` and `bc`; its offline regression tests use Python to drive mocked RPCs.
 
@@ -210,8 +210,8 @@ saved in `<run-dir>/devnet.env` and `--resume` / `--verify-only` reload them, so
 Defaults: `PREPARE_PARALLEL=40`, `PREPARE_JOB_TIMEOUT=300` (a prepare launch past
 it is killed and its job dropped, the run continues), `SEND_WORKERS=80`
 (`--workers`), `VERIFY_PARALLEL=8`, fixed 3-second receipt polling,
-`MAX_MONITOR_WAIT=300`, `MINE_TIMEOUT=120`,
-`DEPLOY_MINE_TIMEOUT=120`; funding flags/env are the same as
+`MAX_MONITOR_WAIT=300`, `MINE_TIMEOUT=60`,
+`DEPLOY_MINE_TIMEOUT=60`; funding flags/env are the same as
 `parallel.sh` (both source `orchestrator.sh`; the two chains are
 funded concurrently, every `fundUpTo` chunk fired at once and mined with one
 receipt pass). `counter-multi-tx` jobs can FAIL with a "composer split the

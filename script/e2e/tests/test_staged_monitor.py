@@ -37,7 +37,7 @@ sleep() { echo $(( $(cat clock) + $1 )) > clock; }
 _poll_delay() { echo 1; }
 _reconcile_replacements() { return "${RECONCILE_RC:-0}"; }
 _recovery_all_stopped() { [[ "${REJECTED:-0}" == 1 ]]; }
-_recover_pending() { [[ "${3:-}" == --expire ]] && echo expired >> expiry || echo accepted >> recoveries; }
+_recover_pending() { if [[ "${3:-}" == --expire ]]; then echo expired >> expiry; else echo accepted >> recoveries; date +%s >> checkpoints; fi; }
 _batch_receipts() {
     local hash
     echo "$1" >> lookups
@@ -53,7 +53,7 @@ _batch_receipts() {
 if [[ "${ALREADY_MINED:-0}" == 1 ]]; then
     echo 'job1,L1,0xaaa,16,0x1' > mined.csv
 fi
-_monitor_files sent.csv mined.csv pending.csv 2 "$MODE" 1
+_monitor_files sent.csv mined.csv pending.csv "${RECOVERY_INTERVAL:-2}" "$MODE" 1
 """
             env = {"PATH": os.environ["PATH"], "TEST_ROOT": directory,
                    "MODE": mode, "MAX_MONITOR_WAIT": "5", **{k: str(v) for k, v in settings.items()}}
@@ -81,6 +81,11 @@ _monitor_files sent.csv mined.csv pending.csv 2 "$MODE" 1
         self.assertEqual(files["recoveries"].count("accepted"), 2)
         self.assertEqual(files["expiry"].strip(), "expired")
         self.assertEqual(files["pending.csv"], files["sent.csv"])
+
+    def test_first_status_check_is_at_one_minute_even_with_longer_interval(self):
+        result, files = self.run_monitor(MINE_AT=999, MAX_MONITOR_WAIT=65, RECOVERY_INTERVAL=120)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(files["checkpoints"].splitlines(), ["60"])
 
     def test_source_receipts_complete_when_front_hides_them(self):
         result, files = self.run_monitor(HIDE_FRONT=1)

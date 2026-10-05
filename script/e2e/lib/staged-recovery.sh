@@ -137,7 +137,7 @@ _recovery_sign() {  # tx JSON, private key, fee cap, tip -> signed replacement
     printf '%s\n' "$raw"
 }
 _recovery_stop() {
-    _rec_entry=$(jq --arg reason "$*" '.stop_retry=$reason' <<< "$_rec_entry") || return 1
+    _rec_entry=$(jq --arg reason "$*" '.stop_retry=$reason | if ($reason|startswith("disappeared tx:")) then .disappeared=true else . end' <<< "$_rec_entry") || return 1
     _recovery_save || return 1
     _recovery_log "job=$_rec_job hash=$(jq -r .current <<< "$_rec_entry") FAILED: $*"
 }
@@ -210,14 +210,6 @@ _recovery_one() {
         '[.[] | select(.job==$j and .chain==$c and .stop_retry!=null)][0].stop_retry // empty' "$_rec_journal")
     if [[ -n "$reason" ]]; then _recovery_stop "job blocked: $reason"; return $?; fi
     hash=$(jq -r .current <<< "$_rec_entry")
-    # Honor rebroadcasts made by the old runner when migrating an existing run.
-    if jq -e '.missing_resends==null' <<< "$_rec_entry" >/dev/null; then
-        local previous=0
-        if grep -Fq "job=$_rec_job hash=$hash not visible in pool/front; rebroadcasting" "$_rec_root/recovery.log" 2>/dev/null ||
-           grep -Fq "job=$_rec_job hash=$hash not visible in transaction lookup; rebroadcasting" "$_rec_root/recovery.log" 2>/dev/null; then previous=1; fi
-        _rec_entry=$(jq --argjson n "$previous" '.missing_resends=$n' <<< "$_rec_entry")
-        _recovery_save || return 1
-    fi
     for h in "$hash" "${aliases[@]}"; do
         if jq -e --arg h "$h" 'has($h)' "$_rec_work/pool" >/dev/null; then
             [[ "$hash" == "$h" ]] || _recovery_adopt "$h" || return 1
@@ -230,6 +222,14 @@ _recovery_one() {
             break
         fi
     done
+    if ! $held; then
+        _recovery_stop 'disappeared tx: no receipt and not visible in front/source RPC; no resend'
+        return $?
+    fi
+    if ! $_rec_fees_ready; then
+        _recovery_fee_snapshot || { _recovery_stop 'RPC status error: fee lookup failed after one status recheck'; return $?; }
+        _rec_fees_ready=true
+    fi
     raw=$(jq -r '.variants[.current]' <<< "$_rec_entry")
     tx=$(_recovery_decode "$raw") || return 1
     sender=$(jq -r .signer <<< "$tx"); kind=$(cast to-dec "$(jq -r .type <<< "$tx")") || return 1
@@ -287,9 +287,6 @@ _recovery_one() {
     if [[ "$low" == 1 ]] && (( $(jq -r '.fee_bumps // 0' <<< "$_rec_entry") >= 2 )); then
         _recovery_stop 'low fees: two fee increases exhausted'; return $?
     fi
-    if [[ "$low" == 0 ]] && (( $(jq -r '.missing_resends // 0' <<< "$_rec_entry") >= 1 )); then
-        _recovery_stop 'disappeared tx: absent again after one resend (front may hide held transactions)'; return $?
-    fi
     # Close the receipt race before spending a retry. Each read has one recheck.
     local url
     for url in "${_rec_urls[@]}"; do
@@ -308,9 +305,6 @@ _recovery_one() {
         _rec_entry=$( { printf '%s\n' "$_rec_entry"; printf '%s' "$raw" | jq -Rs .; } | jq -s --arg h "$newhash" \
             '.[0].variants[$h]=.[1] | .[0] | .fee_bumps=((.fee_bumps // 0)+1)') || return 1
         _recovery_log "job=$_rec_job fee increase $(jq -r .fee_bumps <<< "$_rec_entry")/2 nonce=$nonce cap=$cap->$newcap tip=$tip->$newtip hash=$newhash"
-    else
-        _rec_entry=$(jq '.missing_resends=1' <<< "$_rec_entry")
-        _recovery_log "job=$_rec_job disappeared tx hash=$hash; resend 1/1 with same nonce=$nonce (lookup absence does not prove a front dropped it)"
     fi
     _recovery_save || return 1  # Counters and candidates survive a crash/lost response.
     confirmed=$(_recovery_rpc "$_rec_submit" eth_sendRawTransaction "[\"$raw\"]") || rc=$?
@@ -357,7 +351,7 @@ _recover_pending() {  # pending.csv, direct|front, optional --reconcile-only|--e
     local _rec_pending="$1" _rec_mode="$2" _rec_reconcile=false _rec_expired=false
     local _rec_root _rec_sent _rec_mined _rec_journal _rec_phase _rec_work _rec_chain _rec_job
     local _rec_rpc _rec_submit _rec_urls=() _rec_base _rec_price _rec_tip hash c _rec_error receipt_rc=0
-    local option="${3:-}" only_chain="${4:-}" result=0
+    local option="${3:-}" only_chain="${4:-}" result=0 _rec_fees_ready=false
     [[ "$option" != --reconcile-only ]] || _rec_reconcile=true
     [[ "$option" != --expire ]] || _rec_expired=true
     [[ -s "$_rec_pending" ]] || return 0
@@ -380,7 +374,7 @@ _recover_pending() {  # pending.csv, direct|front, optional --reconcile-only|--e
         _rec_rpc="$L1_RPC"; [[ "$_rec_chain" != L2 ]] || _rec_rpc="$L2_RPC"
         _rec_submit="$_rec_rpc"; [[ "$_rec_mode" != front ]] || _rec_submit=$(_front_rpc "$_rec_chain")
         _rec_urls=("$_rec_submit"); [[ "$_rec_rpc" == "$_rec_submit" ]] || _rec_urls+=("$_rec_rpc")
-        _rec_error=''; receipt_rc=0
+        _rec_error=''; receipt_rc=0; _rec_fees_ready=false
         if [[ "$option" == --rpc-error ]]; then
             printf '{}\n' > "$_rec_work/receipts"
             _rec_error='RPC status error: receipt polling failed after one status recheck'
@@ -398,8 +392,7 @@ _recover_pending() {  # pending.csv, direct|front, optional --reconcile-only|--e
             $_rec_reconcile && continue
             if (( receipt_rc != 0 )); then _rec_error='RPC status error: receipt lookup failed after one status recheck'
             elif ! awk -F, -v c="$_rec_chain" '$2==c {found=1} END {exit !found}' "$_rec_pending"; then continue
-            elif ! _recovery_collect eth_getTransactionByHash "$_rec_work/pool"; then _rec_error='RPC status error: pool lookup failed after one status recheck'
-            elif ! _recovery_fee_snapshot; then _rec_error='RPC status error: fee lookup failed after one status recheck'; fi
+            elif ! _recovery_collect eth_getTransactionByHash "$_rec_work/pool"; then _rec_error='RPC status error: pool lookup failed after one status recheck'; fi
         fi
         while IFS=, read -r _rec_job c hash; do
             [[ "$c" == "$_rec_chain" ]] || continue
@@ -422,18 +415,40 @@ _recovery_all_stopped() {
             .job==$row[0] and .chain==$row[1] and .stop_retry!=null))' "$1" >/dev/null
 }
 _recovery_report() {
-    local journal entry job chain hash reason missing fees mined
+    local journal entry job chain hash reason fees mined status row
+    local disappeared=() other=()
     for journal in "$1"/sent.replacements.json "$1"/deploy-sent*.replacements.json; do
         [[ -s "$journal" ]] || continue
         mined="${journal%.replacements.json}.csv"; mined="${mined/sent/mined}"
         while IFS= read -r entry; do
             job=$(jq -r .job <<< "$entry"); chain=$(jq -r .chain <<< "$entry"); hash=$(jq -r .current <<< "$entry")
             reason=$(jq -r '.stop_retry // "awaiting receipt"' <<< "$entry")
-            missing=$(jq -r '.missing_resends // 0' <<< "$entry"); fees=$(jq -r '.fee_bumps // 0' <<< "$entry")
-            if [[ -f "$mined" ]] && awk -F, -v c="$chain" -v h="$hash" '$2==c && $3==h {found=1} END {exit !found}' "$mined"; then
-                reason='mined (see verification result)'
+            fees=$(jq -r '.fee_bumps // 0' <<< "$entry")
+            status=''
+            if [[ -f "$mined" ]]; then
+                status=$(awk -F, -v c="$chain" -v h="$hash" '$2==c && $3==h {print $5; exit}' "$mined")
             fi
-            printf '  RECOVERY %s [%s] hash=%s: %s; disappeared/resends=%s/1 fee-increases=%s/2\n' "$job" "$chain" "$hash" "$reason" "$missing" "$fees"
-        done < <(jq -c '.[] | select(.stop_retry!=null or (.missing_resends // 0)>0 or (.fee_bumps // 0)>0)' "$journal")
+            if jq -e '.disappeared==true or ((.stop_retry // "")|startswith("disappeared tx:"))' <<< "$entry" >/dev/null; then
+                reason=DISAPPEARED
+                [[ -z "$status" ]] || reason='MINED LATER'
+                [[ "$status" != 0x0 ]] || reason='MINED LATER (reverted)'
+                row=$(printf '  %-44s %-5s %s\n    Tx: %s' "$job" "$chain" "$reason" "$hash")
+                disappeared+=("$row")
+            else
+                [[ -z "$status" ]] || reason='mined (see verification result)'
+                row=$(printf '  %s [%s]\n    Result: %s\n    Tx: %s\n    Fee increases: %s/2' "$job" "$chain" "$reason" "$hash" "$fees")
+                other+=("$row")
+            fi
+        done < <(jq -c '.[] | select(.disappeared==true or .stop_retry!=null or (.fee_bumps // 0)>0)' "$journal")
     done
+    if (( ${#other[@]} > 0 )); then
+        printf '\nRECOVERY RESULTS\n'
+        printf '%s\n' "${other[@]}"
+    fi
+    printf '\nDISAPPEARED TESTS (%s transaction(s))\n' "${#disappeared[@]}"
+    if (( ${#disappeared[@]} == 0 )); then printf '  None\n'
+    else
+        printf '  %-44s %-5s %s\n' TEST CHAIN RESULT
+        printf '%s\n' "${disappeared[@]}"
+    fi
 }

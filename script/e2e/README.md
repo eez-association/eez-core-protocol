@@ -4,11 +4,13 @@ Cross-chain scenarios under `script/e2e/scenarios/<category>/<direction>/<scenar
 Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`, `static`; directions:
 `L1_to_L2`, `L2_to_L1`.
 
-The predeployed-proxy static round-trip scenarios `topLevelStaticReentrantCounter`
-and `topLevelStaticReentrantCounterL2` are ready and included in automatic `all` runs.
+The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
+`topLevelStaticReentrantCounterL2` are included in automatic `all` / default runs.
+Their live triggers remained unmined on 2026-10-05; the runner reports disappeared
+transactions in its final summary instead of excluding these scenarios.
 The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
-`topLevelStaticReentrantMissingProxyL2` are **NOT READY** and excluded from automatic
-`all` runs pending live staged validation. Explicit selections remain available.
+`topLevelStaticReentrantMissingProxyL2` remain **NOT READY** and excluded from
+`all` pending live validation. Explicit selections remain available.
 See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
@@ -166,7 +168,7 @@ Verify the manager with
 keys may be shared with devnet actors (notably #0: composer/system), and the nonce
 races show up as triggers held forever.
 
-### 2. Fund the wallet (every devnet reset — genesis leaves it at 0)
+### 2. Fund the source wallet on L1
 
 ```bash
 source script/e2e/lib/network-config.sh
@@ -174,23 +176,23 @@ load_network_config
 ADDR=$(cast wallet address --private-key $PK)
 ANVIL2=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # devnet faucet
 cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L1_RPC
-cast send $ADDR --value 10ether --private-key $ANVIL2 --rpc-url $L2_RPC
 ```
 
-(Only needed for the sequential runner — the parallel orchestrator funds itself.)
+The source wallet funds the runners; setup below supplies its L2 balance.
 
 ### 3. Set up the network (once per reset)
 
-The single setup command reads `chain.env`, discovers addresses once, bridges
-only the missing amount to the requested L2 balance (default 0.1 ETH), and ensures
-CREATE2 factories exist on both chains. The source wallet needs L1 funds first.
-The old separate preparation script has been folded into this command.
+Setup bridges ETH from L1 to the same source wallet on L2, waits for delivery,
+and ensures CREATE2 factories exist on both chains. It uses `SOURCE_PK`
+(falling back to `PK`); only L1 needs funds to start.
 
 ```bash
-bash script/e2e/run/network/setup.sh
-# Another target balance and environment file:
-bash script/e2e/run/network/setup.sh 0.2 chain.env2
+# Top up the source wallet to 1.1 ETH on L2:
+DEVNET_ENV=chain.env2 bash script/e2e/run/network/setup.sh 1.1
 ```
+
+`1.1` is the target L2 balance, not the amount sent; only the missing ETH is
+bridged. Without arguments, setup uses `chain.env` and a 0.1 ETH target.
 
 ### 4. Check the deployment is alive
 

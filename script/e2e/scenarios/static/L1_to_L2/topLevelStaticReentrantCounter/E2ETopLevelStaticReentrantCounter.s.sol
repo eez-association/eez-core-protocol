@@ -31,7 +31,7 @@ import {
     immediateSingleRollupBatch
 } from "../../../shared/E2EHelpers.sol";
 
-// Ready: included in automatic all/default runs.
+// Included in automatic all/default runs; the runner reports live non-mining failures.
 
 // Top-level static lookup: L1 reader -> L2 view forwarder -> L2 callback helper -> STATIC L1 Counter.counter().
 // The L2 forwarder implements counter() as a view function, so both cross-chain
