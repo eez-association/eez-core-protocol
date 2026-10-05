@@ -3,23 +3,96 @@ pragma solidity 0.8.34;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {MiniUniswapFactory} from "./MiniUniswapFactory.sol";
 import {MiniUniswapPair} from "./MiniUniswapPair.sol";
 import {MiniPermit2} from "./MiniPermit2.sol";
 
-/// @notice Test-only router for direct ERC20/ERC20 swaps. No ETH or multihop support.
-contract MiniUniswapRouter {
+interface IWrappedNative is IERC20 {
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
+}
+
+/// @notice Test-only router for direct token/token and native/token swaps. No multihop support.
+contract MiniUniswapRouter is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
 
     MiniUniswapFactory public immutable factory;
     MiniPermit2 public immutable permit2;
+    IWrappedNative public immutable wrappedNative;
 
-    constructor(address factory_, address permit2_) {
+    constructor(address factory_, address permit2_, address wrappedNative_) {
         require(factory_ != address(0) && permit2_ != address(0), "Zero dependency");
         factory = MiniUniswapFactory(factory_);
         permit2 = MiniPermit2(permit2_);
+        // Zero keeps native swaps disabled for existing token-only fixtures.
+        require(wrappedNative_ == address(0) || wrappedNative_.code.length > 0, "Missing wrapper");
+        wrappedNative = IWrappedNative(wrappedNative_);
+    }
+
+    receive() external payable {
+        require(msg.sender == address(wrappedNative), "Wrapper only");
+    }
+
+    /// @notice Wrap msg.value and swap it for tokens using the existing pair.
+    function swapNativeForToken(
+        address token,
+        uint256 minimum,
+        address to,
+        uint256 deadline
+    )
+        external
+        payable
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        _check(deadline, to);
+        require(to != address(this), "Invalid recipient");
+        MiniUniswapPair pair = _nativePair(token);
+        (uint256 reserveIn, uint256 reserveOut) = _reserves(pair, address(wrappedNative));
+        amountOut = getAmountOut(msg.value, reserveIn, reserveOut);
+        require(amountOut >= minimum, "Insufficient output");
+
+        wrappedNative.deposit{value: msg.value}();
+        IERC20(address(wrappedNative)).safeTransfer(address(pair), msg.value);
+        if (token == pair.token0()) pair.swap(amountOut, 0, to);
+        else pair.swap(0, amountOut, to);
+    }
+
+    /// @notice Swap tokens approved through MiniPermit2, unwrap, and pay native value.
+    function swapTokenForNative(
+        address token,
+        uint256 amount,
+        uint256 minimum,
+        address to,
+        uint256 deadline
+    )
+        external
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        _check(deadline, to);
+        require(to != address(this), "Invalid recipient");
+        MiniUniswapPair pair = _nativePair(token);
+        (uint256 reserveIn, uint256 reserveOut) = _reserves(pair, token);
+        amountOut = getAmountOut(amount, reserveIn, reserveOut);
+        require(amountOut >= minimum, "Insufficient output");
+
+        permit2.transferFrom(msg.sender, address(pair), amount.toUint160(), token);
+        if (address(wrappedNative) == pair.token0()) pair.swap(amountOut, 0, address(this));
+        else pair.swap(0, amountOut, address(this));
+        wrappedNative.withdraw(amountOut);
+        (bool success,) = to.call{value: amountOut}("");
+        require(success, "Native transfer failed");
+    }
+
+    function _nativePair(address token) private view returns (MiniUniswapPair) {
+        require(address(wrappedNative) != address(0), "Native swaps disabled");
+        address pair = factory.getPair(token, address(wrappedNative));
+        require(pair != address(0), "Pair missing");
+        return MiniUniswapPair(pair);
     }
 
     function addLiquidity(

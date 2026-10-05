@@ -1,6 +1,6 @@
 # E2E File Structure (flatten model)
 
-Authoritative layout rules for every `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol`.
+Authoritative layout rules for every `script/e2e/scenarios/<category>/<direction>/<scenario>/E2E<Name>.s.sol`.
 
 Categories: `one_way`, `multi_call`, `multi_tx` (one user tx per consumption; network mode
 fires all triggers without waiting via an `NUM_TXS=N` ExecuteNetwork output — the runner
@@ -14,7 +14,7 @@ generic (`Deploy`, `Execute`, …); the file name disambiguates.
 
 ## Single file, multiple contracts
 
-All test logic lives in one `.sol` file. The runners (`run/local.sh` / `run/network.sh`)
+All test logic lives in one `.sol` file. The runners (`lib/local-scenario.sh` / `lib/network-scenario.sh`)
 discover contracts by name and route them to the right chain.
 
 Contract order inside the file (top to bottom):
@@ -110,7 +110,7 @@ Machine-parsed lines (the runners route verification on their presence):
   (`_printL1Table` / `_printL2Table`); these switch ON all field-level checks.
 - `ABSENT_L2_HASHES=[…]` — terminal-revert scenarios only (entries that must NOT load).
 
-## Verification contracts (`script/e2e/shared/Verify.s.sol`)
+## Verification contracts (`script/e2e/scenarios/shared/Verify.s.sol`)
 
 `[, table]` marks an optional trailing `bytes expectedTable` blob (empty = hash-only checks):
 

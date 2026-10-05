@@ -31,6 +31,16 @@ contract GasCost is GasFixture {
     /// @notice Poster for meta-prefix batches (deployed here, outside any measured window).
     NoopMetaReceiver internal noopMetaReceiver = new NoopMetaReceiver();
 
+    ArrayStore internal seededPeer;
+    ArrayStore internal unseeded;
+
+    function setUp() public override {
+        super.setUp();
+        seededPeer = new ArrayStore();
+        seededPeer.fill(2);
+        unseeded = new ArrayStore();
+    }
+
     /// @notice Steady-state post of one rS entry of the given shape. Caller ensures the queue
     ///         already holds one same-shape entry (the "previous block") so it overwrites retained
     ///         non-zero originals. Colds slots first. Entries are built before the measured
@@ -470,40 +480,30 @@ contract GasCost is GasFixture {
     //  colds them. This is why the measurements cool explicitly.
     // ══════════════════════════════════════════════════════════════════════════
 
-    // Toolchain probe for this particular array rewrite: compare a cooled in-test seed with
-    // the fixture seeded in setUp. This does not establish that vm.cool resets every aspect
-    // of a transaction. The primary suites use --isolate and GasMeter for that separation.
-    function test_Doc_CooledArrayRewriteMatchesSeeded() public {
-        // COMMITTED: `seeded` had a.fill(2) run in setUp. All three measured calls below go
-        // through a stack variable so the call sites are identical.
-        ArrayStore committedStore = seeded;
-        committedStore.fill(2); // warm up current values inside this tx
-        vm.cool(address(committedStore));
-        uint256 g = gasleft();
-        committedStore.fill(2); // delete + re-push over non-zero slots
-        uint256 committedSteady = g - gasleft();
+    // Compare fixtures with identical committed originals. Cooling access lists does
+    // not make a contract filled inside this test equivalent to one seeded in setUp.
+    function test_Doc_CooledCommittedArrayRewritesMatch() public {
+        uint256 first = _measureArrayFill(seeded);
+        uint256 second = _measureArrayFill(seededPeer);
+        uint256 zeroInit = _measureArrayFill(unseeded);
 
-        // IN-TEST: deployed and filled inside this tx, then cooled → must price like COMMITTED.
-        ArrayStore inTest = new ArrayStore();
-        inTest.fill(2);
-        vm.cool(address(inTest));
-        g = gasleft();
-        inTest.fill(2);
-        uint256 inTestSteady = g - gasleft();
-
-        // ZERO-INIT: deployed, cooled, then filled for the FIRST time — slots genuinely zero,
-        // so each push pays SSTORE_SET (20k).
-        ArrayStore virgin = new ArrayStore();
-        vm.cool(address(virgin));
-        g = gasleft();
-        virgin.fill(2);
-        uint256 zeroInit = g - gasleft();
-
-        console.log("array_fill2_committed_steady", committedSteady);
-        console.log("array_fill2_intest_steady   ", inTestSteady);
+        console.log("array_fill2_committed_steady", first);
+        console.log("array_fill2_committed_peer  ", second);
         console.log("array_fill2_zero_init       ", zeroInit);
-        assertApproxEqAbs(inTestSteady, committedSteady, 500, "cool must price in-test state like committed state");
-        assertLt(committedSteady, zeroInit, "zero-init (SSTORE_SET) must cost more than a steady rewrite");
+        assertApproxEqAbs(first, second, 500, "identical committed arrays must have comparable rewrite costs");
+        assertLt(first, zeroInit, "zero-init (SSTORE_SET) must cost more than a steady rewrite");
+        assertEq(seeded.a(0), 7);
+        assertEq(seeded.a(1), 7);
+        assertEq(seededPeer.a(0), 7);
+        assertEq(seededPeer.a(1), 7);
+        assertEq(unseeded.a(0), 7);
+        assertEq(unseeded.a(1), 7);
+    }
+
+    function _measureArrayFill(ArrayStore store) private returns (uint256) {
+        vm.cool(address(store));
+        store.fill(2);
+        return vm.lastCallGas().gasTotalUsed;
     }
 
     // Proves the incremental steady numbers are genuinely steady: rS was seeded FULL in setUp

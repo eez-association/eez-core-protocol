@@ -5,7 +5,7 @@ allowed-tools: Read, Write, Edit, Bash
 
 # Skill: create-e2e-test
 
-Generate a new `script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
+Generate a new `script/e2e/scenarios/<category>/<direction>/<scenario>/E2E<Name>.s.sol` that exercises the flatten execution model end-to-end (local anvils or configured devnet).
 
 ## The authoritative guide
 
@@ -16,14 +16,14 @@ Supplementary references (subordinate to the guide):
 - `.claude/skills/create-e2e-test/rules/e2e-structure.md` — file/contract layout details, runner routing, the ComputeExpected output protocol, verifier contracts.
 - `.claude/skills/create-e2e-test/rules/entry-construction.md` — entry-table construction conventions and the pattern index of living scenario references.
 - `script/e2e/README.md` — setup and running (local/network modes, runners).
-- `src/EEZ.sol`, `src/L2/EEZL2.sol`, `src/base/EEZBase.sol` — the on-chain ground truth for every hash computed off-chain; `script/e2e/shared/E2EHelpers.sol` mirrors them exactly (`crossChainCallHash*`, `RollingHashBuilder`, `expectedL1toL2Hash`). Always use the helpers — never hand-roll a keccak.
+- `src/EEZ.sol`, `src/L2/EEZL2.sol`, `src/base/EEZBase.sol` — the on-chain ground truth for every hash computed off-chain; `script/e2e/scenarios/shared/E2EHelpers.sol` mirrors them exactly (`crossChainCallHash*`, `RollingHashBuilder`, `expectedL1toL2Hash`). Always use the helpers — never hand-roll a keccak.
 
 ## Workflow
 
 1. Read the guide (above), then the closest existing scenario as a template — pick it from the guide's living references or the pattern index in `rules/entry-construction.md`.
 2. Design the tables on paper first, following the guide's "Deriving the tables from the real transaction": the trigger, every frame opening/closing, which entries live on which chain, every rolling-hash fold. Do not write Solidity until the tables are on paper.
 3. Write the scenario following the guide's file anatomy and authoring rules (one shared `Actions` abstract, `Deploy*`/`Execute*`/`ComputeExpected` contracts, header ASCII call-flow schema).
-4. Verify: `forge build` clean, then `bash script/e2e/run/local.sh <path to E2E<Name>.s.sol>` must be green (use unique `L1_PORT`/`L2_PORT` when other runs may be live). Diagnose failures with `script/e2e/shared/decode-block.sh` against `forge script <SOL>:ComputeExpected`, and the error table in `.claude/commands/run-e2e.md`.
+4. Verify: `forge build` clean, then `bash script/e2e/lib/local-scenario.sh <path to E2E<Name>.s.sol>` must be green (use unique `L1_PORT`/`L2_PORT` when other runs may be live). Diagnose failures with `script/tools/decode-block.sh` against `forge script <SOL>:ComputeExpected`, and the error table in `.claude/commands/run-e2e.md`.
 
 ## After the test passes
 

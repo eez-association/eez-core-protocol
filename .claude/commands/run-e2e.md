@@ -7,25 +7,25 @@ description: Run all e2e tests against the devnet and summarize results
 Runs every e2e scenario in `script/e2e/` and reports pass/fail.
 
 - **Local mode runs in parallel by default** — each scenario gets its own anvil pair on unique ports + chain IDs (so forge `broadcast/<basename>/<chainId>/` dirs and deployer nonces don't collide).
-- **Network mode is sequential with a shared key** (`run/network-sequential.sh` — the shared deployer nonce makes parallel runs unsafe) **or parallel with per-worker wallets** (`script/e2e/run/network-parallel.sh` — a faucet account funds one throwaway wallet per job, removing the nonce constraint; logs in `tmp/e2e-parallel-net/<ts>/`).
+- **Network mode is sequential with a shared key** (`run/network/sequential.sh` — the shared deployer nonce makes parallel runs unsafe) **or parallel with per-worker wallets** (`script/e2e/run/network/parallel.sh` — a faucet account funds one throwaway wallet per job, removing the nonce constraint; logs in `tmp/e2e-parallel-net/<ts>/`).
 
 ## Preconditions
 
-- Network mode: `chain.env` in repo root (gitignored) provides `L1_RPC`, `L1_FRONT`, `L2_RPC`, `L2_FRONT`, `ROLLUPS`, `MANAGER_L2`, `PK` — see the template + liveness pre-flight in `script/e2e/README.md`. If absent, ask the user to supply it.
+- Network mode: `chain.env` in repo root (gitignored) provides `L1_RPC`, `L1_FRONT`, `L2_RPC`, `L2_FRONT`, and `PK`/`SOURCE_PK`; EEZ addresses come from composer discovery — see the template + liveness pre-flight in `script/e2e/README.md`. If absent, ask the user to supply it.
 - Both chains must be producing blocks (not stuck at block 0). A quick `cast block-number` sanity check catches dead RPCs.
-- CREATE2 factory deployed on both chains (use `script/e2e/run/prepare-network.sh` if uncertain).
+- CREATE2 factory deployed on both chains (use `script/e2e/run/network/setup.sh` if uncertain).
 
 ## How to run
 
 - **Local — all scenarios in parallel (default):**
-  `bash script/e2e/run/local-parallel.sh`
-  Forks one `run/local.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Args may be scenario names, categories, or category/direction paths: `bash script/e2e/run/local-parallel.sh one_way multi-call-twice`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
+  `bash script/e2e/run/local/parallel.sh`
+  Forks one `lib/local-scenario.sh` per scenario with unique `L1_PORT`/`L2_PORT`/`L1_CHAIN_ID`/`L2_CHAIN_ID`. Cap concurrency with `MAX_PARALLEL=N`. Args may be scenario names, categories, or category/direction paths: `bash script/e2e/run/local/parallel.sh one_way multi-call-twice`. Per-scenario logs land in `tmp/e2e-parallel/<scenario>.log`; passes also copied to `tmp/e2e-success/`, failures to `tmp/e2e-failures/`.
 - **Local — single scenario:**
-  `bash script/e2e/run/local.sh script/e2e/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
+  `bash script/e2e/lib/local-scenario.sh script/e2e/scenarios/<category>/<direction>/<scenario>/E2E<Name>.s.sol` — spins up two anvils (defaults: 8545/8546). Override with `L1_PORT`/`L2_PORT`; optionally `L1_CHAIN_ID`/`L2_CHAIN_ID` to override anvil's default chain id (31337) so broadcast dirs don't collide with concurrent runs.
 - **Network — set of scenarios (sequential, the intended entry point):**
-  `bash script/e2e/run/network-sequential.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs with a shared key — use `run/network-parallel.sh` for parallel network runs.
+  `bash script/e2e/run/network/sequential.sh all` (or a category / `category/direction` / scenario names; `DEVNET_ENV=other.env` for another devnet). Logs land in `tmp/e2e-network/<scenario>.log`. Never parallelize network runs with a shared key — use `run/network/parallel.sh` for parallel network runs.
 - **Network — single scenario:**
-  `bash script/e2e/run/network.sh <sol> --l1-rpc … --l1-front … --l2-rpc … --l2-front … --pk … --rollups … --manager-l2 …` — user-tx-then-composer flow with content-scan settlement discovery.
+  `bash script/e2e/lib/network-scenario.sh <sol> --l1-rpc … --l1-front … --l2-rpc … --l2-front … --pk … --rollups … --manager-l2 …` — user-tx-then-composer flow with content-scan settlement discovery.
 
 ## Ordered test list (simplest → most complex)
 
@@ -75,10 +75,10 @@ Common flatten-model errors (decode any selector with `cast 4byte <sel>` or grep
 | `0xa296e78c` | `ImmediateCountStrandsLeadingL2Tx` | A leading zero-hash entry was left out of `immediateEntryCount` — use `immediateSingleRollupBatch`, which auto-counts it. |
 | `0x29c3b7ee` | `NotSelf` | `executeInContextAndRevert` invoked by someone other than the manager itself (must be `address(this)` self-call). |
 
-On failure, `bash script/e2e/shared/decode-block.sh --l1-block <N> ...` dumps the actual execution table for comparison with `forge script <SOL>:ComputeExpected`.
+On failure, `bash script/tools/decode-block.sh --l1-block <N> ...` dumps the actual execution table for comparison with `forge script <SOL>:ComputeExpected`.
 
 ## Output directories
 
 - `tmp/e2e-success/` — successful local runs
 - `tmp/e2e-failures/` — raw forge output + diagnostics for failed local runs
-- `tmp/e2e-network/` — per-scenario network-mode logs (`run/network-sequential.sh`)
+- `tmp/e2e-network/` — per-scenario network-mode logs (`run/network/sequential.sh`)

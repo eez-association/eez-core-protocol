@@ -32,7 +32,7 @@ contract MiniUniswapTest is Test {
         tokenB = new MiniToken("Token B", "B");
         factory = new MiniUniswapFactory();
         permit2 = new MiniPermit2();
-        router = new MiniUniswapRouter(address(factory), address(permit2));
+        router = new MiniUniswapRouter(address(factory), address(permit2), address(0));
         tokenA.mint(alice, 10_000e18);
         tokenB.mint(alice, 10_000e18);
         tokenA.mint(bob, 1_000e18);

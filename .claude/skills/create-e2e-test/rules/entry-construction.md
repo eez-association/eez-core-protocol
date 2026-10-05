@@ -7,7 +7,7 @@ and those owners win whenever this file disagrees:
 - **Struct shapes**: `src/interfaces/IEEZ.sol` (L1) and `src/interfaces/IEEZL2.sol` (L2).
   Import from there; never re-declare.
 - **Hash formulas + rolling-hash schema**: `docs/CORE_PROTOCOL_SPEC.md` §C.5 and §E;
-  the off-chain mirror is `script/e2e/shared/E2EHelpers.sol` (`crossChainCallHash`,
+  the off-chain mirror is `script/e2e/scenarios/shared/E2EHelpers.sol` (`crossChainCallHash`,
   `crossChainCallHashL2Out`, `crossChainCallHashStatic`, `RollingHashBuilder`,
   `expectedL1toL2Hash`). Always use the helpers — never hand-roll a keccak.
 - **Entry semantics** (consumption, forward-scan, immediate vs deferred, revert cases):
@@ -85,20 +85,20 @@ NOTE in a green run as a bug.
 
 | Pattern | Scenario |
 |---|---|
-| Simplest L1→L2, precomputed return | `script/e2e/one_way/L1_to_L2/counter/E2ECounter.s.sol` |
-| Simplest L2→L1 (zero-hash L1 entry) | `script/e2e/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol` |
-| Value transfer + etherDelta | `script/e2e/one_way/L1_to_L2/bridge/E2EBridge.s.sol` |
-| Same key consumed twice | `script/e2e/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-twiceL2`) |
-| Same key, one user tx PER consumption (fire-and-forget burst on devnet) | `script/e2e/multi_tx/L1_to_L2/counter-multi-tx/E2ECounterMultiTx.s.sol` |
-| Different keys sequentially | `script/e2e/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-two-diffL2`) |
-| Reentrant frame (success row) | `script/e2e/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol` |
-| Two nesting levels | `script/e2e/nested/L1_to_L2/deepNested/E2EDeepNested.s.sol` |
-| Reverting reentrant row (`success: false`) | `script/e2e/revert/L1_to_L2/nestedCallRevert/E2ENestedCallRevert.s.sol` |
-| Forced revert (`revertNextNCalls`, minimal direct span) | `script/e2e/revert/L2_to_L1/revertFromOtherChainL2/E2ERevertFromOtherChainL2.s.sol` |
-| Natural destination revert as a lookup (no L2 delivery; try/catch on the source) | `script/e2e/revert/L1_to_L2/revertCounter/E2ERevertCounter.s.sol` |
-| Cascading multi-hop reentrancy | `script/e2e/reentrant/L1_to_L2/reentrant/E2EReentrant.s.sol` |
-| Periphery composite (Bridge lock/mint round trip, CREATE2 same-address deploys, L2 outgoing leg) | `script/e2e/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol` |
-| Top-level static read L1→L2 (the ONLY view-only case; ComputeExpected exports just `EXPECTED_L1_STATIC_TABLE`) | `script/e2e/static/L1_to_L2/topLevelStaticCounter/E2ETopLevelStaticCounter.s.sol` |
-| Top-level static read L2→L1 (pool + REAL `isStatic` execution on L1) | `script/e2e/static/L2_to_L1/staticCounterL2/E2EStaticCounterL2.s.sol` |
-| Nested static read (STATIC-kind row + REAL `isStatic` call in the source entry) | `script/e2e/static/L1_to_L2/nestedStaticCounter/E2ENestedStaticCounter.s.sol` |
-| Nested static read at depth 2 (read inside the reentrant frame's own sub-array) | `script/e2e/static/L2_to_L1/nestedStaticCounterL2/E2ENestedStaticCounterL2.s.sol` |
+| Simplest L1→L2, precomputed return | `script/e2e/scenarios/one_way/L1_to_L2/counter/E2ECounter.s.sol` |
+| Simplest L2→L1 (zero-hash L1 entry) | `script/e2e/scenarios/one_way/L2_to_L1/counterL2/E2ECounterL2.s.sol` |
+| Value transfer + etherDelta | `script/e2e/scenarios/one_way/L1_to_L2/bridge/E2EBridge.s.sol` |
+| Same key consumed twice | `script/e2e/scenarios/multi_call/L1_to_L2/multi-call-twice/E2EMultiCallTwice.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-twiceL2`) |
+| Same key, one user tx PER consumption (fire-and-forget burst on devnet) | `script/e2e/scenarios/multi_tx/L1_to_L2/counter-multi-tx/E2ECounterMultiTx.s.sol` |
+| Different keys sequentially | `script/e2e/scenarios/multi_call/L1_to_L2/multi-call-two-diff/E2EMultiCallTwoDiff.s.sol` (mirror: `multi_call/L2_to_L1/multi-call-two-diffL2`) |
+| Reentrant frame (success row) | `script/e2e/scenarios/nested/L1_to_L2/nestedCounter/E2ENestedCounter.s.sol` |
+| Two nesting levels | `script/e2e/scenarios/nested/L1_to_L2/deepNested/E2EDeepNested.s.sol` |
+| Reverting reentrant row (`success: false`) | `script/e2e/scenarios/revert/L1_to_L2/nestedCallRevert/E2ENestedCallRevert.s.sol` |
+| Forced revert (`revertNextNCalls`, minimal direct span) | `script/e2e/scenarios/revert/L2_to_L1/revertFromOtherChainL2/E2ERevertFromOtherChainL2.s.sol` |
+| Natural destination revert as a lookup (no L2 delivery; try/catch on the source) | `script/e2e/scenarios/revert/L1_to_L2/revertCounter/E2ERevertCounter.s.sol` |
+| Cascading multi-hop reentrancy | `script/e2e/scenarios/reentrant/L1_to_L2/reentrant/E2EReentrant.s.sol` |
+| Periphery composite (Bridge lock/mint round trip, CREATE2 same-address deploys, L2 outgoing leg) | `script/e2e/scenarios/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol` |
+| Top-level static read L1→L2 (the ONLY view-only case; ComputeExpected exports just `EXPECTED_L1_STATIC_TABLE`) | `script/e2e/scenarios/static/L1_to_L2/topLevelStaticCounter/E2ETopLevelStaticCounter.s.sol` |
+| Top-level static read L2→L1 (pool + REAL `isStatic` execution on L1) | `script/e2e/scenarios/static/L2_to_L1/staticCounterL2/E2EStaticCounterL2.s.sol` |
+| Nested static read (STATIC-kind row + REAL `isStatic` call in the source entry) | `script/e2e/scenarios/static/L1_to_L2/nestedStaticCounter/E2ENestedStaticCounter.s.sol` |
+| Nested static read at depth 2 (read inside the reentrant frame's own sub-array) | `script/e2e/scenarios/static/L2_to_L1/nestedStaticCounterL2/E2ENestedStaticCounterL2.s.sol` |

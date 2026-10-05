@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {Bridge} from "../src/periphery/Bridge.sol";
 import {CREATE2_FACTORY, _computeBridgeAddress, _deployBridge} from "../script/DeployBridge.s.sol";
-import {_ensureFlashLoanBridge} from "../script/e2e/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol";
+import {_ensureFlashLoanBridge} from "../script/e2e/scenarios/nested/L1_to_L2/flash-loan/E2EFlashLoan.s.sol";
 
 // Same salt + init-code calldata layout as the keyless CREATE2 factory.
 contract FlashLoanTestFactory {
