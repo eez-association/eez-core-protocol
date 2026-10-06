@@ -28,7 +28,7 @@ Each type's exact byte layout is defined inline with the type in §2.
 
 These conventions apply across the per-type layouts in §2:
 
-* All scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64`/`u128`/`u256`
+* All message scalar values are **little-endian, fixed-width**: `u8`/`u16`/`u32`/`u64`/`u128`/`u256`
   as written, `bool` is one byte, `address` is 20 bytes.
 * A `bytes` field is encoded as **protobuf** encodes its own `bytes` fields — a
   [varint](https://protobuf.dev/programming-guides/encoding/#varints) length, then
@@ -99,7 +99,8 @@ FinishCrossRollupTransaction                     # stack: []
 
 ## 2. Message types
 
-A rollup id is encoded only when it can't be inferred.
+A rollup id is encoded only when it can't be inferred. Naming a rollup does not
+establish its approval; readers MUST check the batch's rollup list (§5.2).
 
 Each row gives the complete field layout in wire order; §2.1–2.8 add the prose.
 
@@ -384,38 +385,64 @@ The logical byte stream (§1) is not written into a blob verbatim. An EIP-4844 b
 scalar — below the field modulus `r` (`2^254 < r < 2^255`). A raw 32-byte value can exceed
 `r`, so arbitrary bytes cannot be stored directly.
 
-Each field element carries **31 bytes of stream data**, and its **last (32nd) byte is
-unused and MUST be zero**. Elements are read as **little-endian** scalars, like every
-scalar in this format (§1.1), so the zero byte is the most significant one — every
-element is `< 2^248 < r` regardless of its 31 data bytes.
+EIP-4844 field elements are serialized **big-endian**: serialized offset `0` is
+the most significant byte. The consensus specification's
+[`bytes_to_bls_field`](https://github.com/ethereum/consensus-specs/blob/v1.4.0/specs/deneb/polynomial-commitments.md#bytes_to_bls_field)
+interprets these bytes as an integer and requires it to be below `r`. This is separate
+from the **little-endian** encoding of message scalar values within the logical stream (§1.1).
 
-**Physical byte order.** Blob bytes are read from the **least significant byte to the
-most significant byte** of each field element: stream byte `k` sits at byte
-significance `k`, and the unused zero byte is the last one read. This is not just the
-§1.1 scalar convention — it is the *physical* layout of stream data in the element.
+Each field element carries **31 bytes of stream data**. Its **first serialized byte
+(offset `0`, the most significant byte) MUST be zero**, keeping every element
+`< 2^248 < r`. This format's zero-byte requirement is stricter than EIP-4844's scalar
+validity check: some valid BLS12-381 scalars have a nonzero first byte and are rejected
+by this format.
+
+**Stream-to-element mapping.** For a 31-byte stream chunk `s[0..30]`, define the
+integer `v = sum(s[k] * 2^(8*k), k=0..30)` and serialize `v` as 32 big-endian bytes.
+Thus stream byte `k` occupies serialized offset `31-k`, and the physical layout is:
+
+```text
+serialized offset:  0     1      2     ...   30     31
+serialized byte:   00   s[30]  s[29]   ...  s[1]   s[0]
+```
+
+For example, the 31-byte stream chunk `80 01 02 ... 1e` becomes the following
+32-byte element (hex, in serialized order):
+
+```text
+001e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020180
+```
 
 * **Capacity:** `4096 × 31 = 126,976` useful bytes per blob.
-* **Read:** for each element, read its 31 data bytes from least significant to most
-  significant and drop the 32nd (most significant, zero) byte; concatenate the chunks of
-  all elements of all blobs in order, and parse the version byte and messages (§1) from
-  the result. A `CloseBlobStream` (§2.1) is evaluated against this *decoded* stream.
+* **Write:** zero-pad the logical blob portion to a multiple of the blob capacity,
+  split it into 31-byte chunks, and encode each chunk using the mapping above.
+  Elements and blobs retain their stream order.
+* **Read:** require serialized offset `0` of every element to be zero, then recover
+  each chunk by reading offsets `31, 30, ..., 1` in that order. Concatenate the chunks
+  of all elements of all blobs in order, and parse the version byte and messages (§1)
+  from the result. A `CloseBlobStream` (§2.1) is evaluated against this *decoded* stream.
 * The trailing `callData` (§1.1) has no field-element constraint — raw bytes, appended to
   the recovered stream as-is.
 
 ---
 
-## 5. Validity — a malformed stream is rejected whole
+## 5. Validity and reader checks
 
-A blob stream is either **entirely valid or entirely invalid**. If *any* condition below is
-violated at *any* point, the **whole stream is rejected** — every blob of the batch and the
-trailing `callData`, not just the offending blob or the suffix after the violation. 
-In practice this check falls on the **prover**: a valid proof simply cannot be produced
-over a malformed stream, so publishing one is equivalent to publishing nothing.
+### 5.1 Format checks
 
-The stream is valid iff **all** of the following hold:
+If any condition below is violated, readers MUST reject the **whole stream**, including
+all blobs and trailing `callData`. Provers implementing this format MUST enforce these
+conditions. L1 checks proofs over the data's hashes but does not read the stream;
+each rollup chooses its own verifiers. Acceptance on L1 therefore does not guarantee
+that the stream follows this format.
 
-1. **Encoding layer (§4).** Every field element of every blob has its last (32nd) byte
-   zero — a valid BLS12-381 scalar.
+A correctly formatted stream satisfies all conditions below. Before applying its
+operations, readers MUST also check whose approval it has (§5.2) and what actually
+took effect (§5.3).
+
+1. **Encoding layer (§4).** Every field element of every blob has its first serialized
+   byte (offset `0`, most significant) zero. This guarantees a valid BLS12-381 scalar
+   and enforces this format's stricter 31-byte data layout.
 2. **Version and stream close.** The first byte of the stream is a known protocol
    version (§6) — for this spec, `00`. If the batch contains one or more blobs,
    `CloseBlobStream` (`1`) appears exactly once, in the blob portion. If the batch
@@ -446,6 +473,43 @@ The stream is valid iff **all** of the following hold:
 8. **Minimal encodings — NOT enforced.** An honest encoder always emits the shortest form, but
    the verifier does not assert it: non-minimal encodings still decode and do not
    invalidate the stream. Consequence: raw stream bytes are not canonical.
+
+### 5.2 Which rollups approved the stream
+
+Readers MUST match the stream to the successful batch that published it and its
+`BatchPosted(sharedPublicInput, rollupIds)` event from the expected EEZ contract.
+Use that batch's selected blobs and `callData`, and check them against its hashes.
+Identify the event by chain, contract, transaction and log position; the same
+`sharedPublicInput` can appear more than once.
+
+Every nonzero rollup ID in the stream MUST appear in `BatchPosted.rollupIds`.
+This includes `rollup_id`, `to_rollup`, and IDs inferred from the context stack.
+Otherwise, readers MUST reject the stream. ID zero means L1 where an L1 endpoint
+is supported; it is not a rollup requiring inclusion in this list.
+
+A batch approved only for rollup A cannot speak for rollup B, even if its messages
+name B. The hashes bind the approved bytes; the event identifies whose verifiers
+approved them.
+
+### 5.3 What actually took effect
+
+`BatchPosted` does not mean every published operation executed. Readers rebuilding
+settled state MUST match operations to their execution entries and L1 outcomes:
+
+* `L2TxSkipped(entryIndex, revertData)` means the entry at that original index in
+  `batch.entries` did not take effect.
+* Pending entries may never execute. Unused immediate entries are discarded, and
+  later verification replaces a rollup's queues, even within the same block.
+  No skip event does not mean an entry succeeded.
+* `L2ExecutionPerformed(rollupId, newRoot, etherBalance)` records an applied update.
+  Use events from successful execution only; a revert removes its updates and events.
+
+Keep pending work separate from settled state. Match events using the batch inputs
+and execution order, accounting for queue replacement; entry indices can repeat.
+If the match is unclear, inspect or replay the execution before applying the operation.
+The rebuilt root MUST match L1's `rollups[rollupId].root` at the same point in history,
+including registration and direct root changes. Undo affected changes if L1 history
+changes. Resolve any mismatch before building further execution entries.
 
 ---
 

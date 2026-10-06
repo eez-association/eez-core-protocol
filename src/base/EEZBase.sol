@@ -141,6 +141,9 @@ abstract contract EEZBase is IEEZ {
     /// @notice Error when `executeInContextAndRevert` reverts with an unexpected error
     error UnexpectedContextRevert(bytes revertData);
 
+    /// @notice A forwarded cross-chain call cannot target this EEZ manager.
+    error EEZDestinationForbidden();
+
     /// @notice Error when a static sub-call targets an un-deployed proxy
     /// @dev STATICCALL to a codeless address returns `(true, "")`; prover could pre-hash that.
     error StaticCallProxyNotDeployed(address sourceProxy);
@@ -394,6 +397,12 @@ abstract contract EEZBase is IEEZ {
                 keccak256(abi.encodePacked(_rollupRootsHash, rollupUpdates[i].rollupId, rollupUpdates[i].currentRoot));
         }
         _rollingHash = keccak256(abi.encodePacked(_rollupRootsHash, proxyEntryHash));
+    }
+
+    /// @notice Rejects calls that would re-enter this manager with a proxy's authorized identity.
+    /// @param destination Local destination of the forwarded cross-chain call.
+    function _validateCallDestination(address destination) internal view {
+        if (destination == address(this)) revert EEZDestinationForbidden();
     }
 
     /// @notice Checks the estimated gas budget to protect users from composer underfunding,

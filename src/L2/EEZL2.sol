@@ -571,6 +571,9 @@ contract EEZL2 is EEZBase {
     /// @param calls Ordered incoming calls for this entry, nested frame, or force-revert span.
     function _processIncomingCalls(CrossChainCall[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
+            // Reject this manager as a destination to prevent re-entry with an authorized proxy's identity.
+            _validateCallDestination(calls[i].targetAddress);
+
             uint256 revertNextNCalls = calls[i].revertNextNCalls;
 
             if (revertNextNCalls == 0) {
@@ -751,6 +754,9 @@ contract EEZL2 is EEZBase {
     function _processStaticIncomingCalls(CrossChainCall[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             CrossChainCall memory cc = calls[i];
+
+            // Reject this manager as a destination to prevent re-entry with an authorized proxy's identity.
+            _validateCallDestination(cc.targetAddress);
 
             // Dispatch is read-only unconditionally, so the declared flag and value must agree,
             // and a revert span is meaningless (nothing to roll back).

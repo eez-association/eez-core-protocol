@@ -1362,6 +1362,8 @@ issuance/burning rule is enforced by the Solidity manager.
 
 Within one queue generation, successful consumption advances the destination rollup's cursor beyond the selected entry. A reverted consumption restores the cursor and can be retried. Each new verification resets that rollup's active bounds and cursor. Skipped entries are not executed, and later entries must still match their live root pins.
 
+**Roots prevent execution replay.** Roots commit to block history and advancing transaction nonces. Every successful entry must advance at least one pinned root, and manager updates must never restore old roots. These rollup/prover requirements keep consumed entries ineligible after re-posting, even with `bindMsgSenderInPublicInput == false`; queue cursors alone do not.
+
 ### H.4 Rolling Hash Integrity
 
 At entry validation, before clearing transient state:
