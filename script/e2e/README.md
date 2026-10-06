@@ -182,9 +182,8 @@ The source wallet funds the runners; setup below supplies its L2 balance.
 
 ### 3. Set up the network (once per reset)
 
-Setup bridges ETH from L1 to the same source wallet on L2, waits for delivery,
-and ensures CREATE2 factories exist on both chains. It uses `SOURCE_PK`
-(falling back to `PK`); only L1 needs funds to start.
+Setup bridges ETH to the same wallet on L2 and waits for delivery, using
+`SOURCE_PK` (fallback: `PK`). Only L1 needs funds initially.
 
 ```bash
 # Top up the source wallet to 1.1 ETH on L2:
@@ -193,6 +192,8 @@ DEVNET_ENV=chain.env2 bash script/e2e/run/network/setup.sh 1.1
 
 `1.1` is the target L2 balance, not the amount sent; only the missing ETH is
 bridged. Without arguments, setup uses `chain.env` and a 0.1 ETH target.
+No CREATE2 factory or keyless-signer funding is needed. `flash-loan` deploys and
+links separate L1/L2 Bridges; L2 wrapped tokens still use CREATE2 internally.
 
 ### 4. Check the deployment is alive
 
@@ -209,13 +210,19 @@ cast logs --rpc-url "$L1_RPC" --from-block $((LATEST-100)) --to-block $LATEST --
 
 ```bash
 bash script/e2e/run/network/sequential.sh one_way              # category
+bash script/e2e/run/network/sequential.sh counter              # single scenario
 bash script/e2e/run/network/sequential.sh counter bridge       # scenarios
 bash script/e2e/run/network/sequential.sh all                  # everything
 DEVNET_ENV=other.env bash script/e2e/run/network/sequential.sh one_way
 ```
 
-Sequential because all scenarios share the `chain.env` nonce. Logs:
-`tmp/e2e-network/<scenario>.log`; exits 1 on any failure.
+Scenarios run sequentially from `PK` (fallback: `SOURCE_PK`), which needs gas on
+both chains. Each deploys fresh contracts and sends its trigger, without funding
+worker wallets or a faucet. Staged/parallel `--direct` still funds worker wallets.
+
+Progress, trigger hashes and receipt-wait updates stream to the terminal and
+`tmp/e2e-network/<scenario>.log`. Receipt timeout defaults to 420 seconds;
+any failure exits 1.
 
 ### 5b. Run — PARALLEL orchestrator (per-worker wallets)
 

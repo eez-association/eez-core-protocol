@@ -788,7 +788,7 @@ function computeCrossChainCallHash(
 }
 ```
 
-Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
+Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/scenarios/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
 
 Apart from L2 inbound binding, which uses `incomingCalls[0].gas`, `callGas` is `0` (`ZERO_CALL_GAS`) except calls **leaving an L2** (`EEZL2.executeCrossChainCall` and `staticCrossChainCall` — top-level and nested matching), where the folded value depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
 
@@ -973,7 +973,7 @@ The sites differ only in the `callGas` value they fold:
 
 Under `useGasLeft = false`, outgoing hashes fold `0`; inbound binding still uses `incomingCalls[0].gas`. See §B.1 for the rationale and the `callGas` ⇄ `CrossChainCall.gas` relationship.
 
-Off-chain tooling (`script/e2e/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
+Off-chain tooling (`script/e2e/scenarios/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
 
 ### C.1 Hash from `executeCrossChainCall` (L1)
 

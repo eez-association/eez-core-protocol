@@ -894,8 +894,13 @@ _send_raw_tx() {
 # cross-chain front HOLDS but the composer never bundles.
 _poll_receipt() {
     local rpc="$1" tx_hash="$2" deadline="$3"
-    local receipt
+    local receipt now next_progress=0
     while [[ $(date +%s) -lt $deadline ]]; do
+        now=$(date +%s)
+        if (( now >= next_progress )); then
+            echo "Waiting for receipt: $tx_hash ($((deadline - now))s remaining)" >&2
+            next_progress=$((now + 15))
+        fi
         receipt=$(curl -s --max-time 10 -X POST "$rpc" -H 'Content-Type: application/json' \
             -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$tx_hash\"],\"id\":1}" \
             | jq -c '.result // empty' 2>/dev/null)
@@ -914,6 +919,8 @@ publish_user_tx() {
     local rpc="$1"
     local tx_hash receipt block_number status
     tx_hash=$(_send_raw_tx "$rpc" "$RLP_ENCODED_TX") || return 1
+    TX_HASH="$tx_hash"
+    echo "submitted tx: $tx_hash"
     receipt=$(_poll_receipt "$rpc" "$tx_hash" $(( $(date +%s) + ${RECEIPT_TIMEOUT:-300} ))) || return 1
 
     block_number=$(echo "$receipt" | jq -r '.blockNumber // empty')

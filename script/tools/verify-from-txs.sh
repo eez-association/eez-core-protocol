@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # verify-from-txs.sh — trace txs, collect every contract they touch, and verify
-# those contracts on a Blockscout explorer using this repo's compiled artifacts.
+# those contracts on Blockscout or mainnet Etherscan using this repo's artifacts.
 #
 # Usage:
+#   verify-from-txs.sh -m -E chain.env2 [-n] <txhash> [<txhash>...]
+#   MAINNET_PROVIDER=<rpc-url> ETHERSCAN_API_KEY=<key> verify-from-txs.sh -m [-n] <txhash> [...]
 #   verify-from-txs.sh -r <rpc-url> -e <explorer-base-url> [-n] <txhash> [<txhash>...]
 #   verify-from-txs.sh -r <rpc-url> -e <explorer-base-url> -f <file-with-txhashes>
 #
+#   -m  Ethereum mainnet / Etherscan; RPC defaults to MAINNET_PROVIDER.
+#       Export ETHERSCAN_API_KEY for submissions (not needed with -n).
+#   -E  Source and export variables from a shell env file (path relative to cwd).
+#       File values override inherited variables; -r overrides MAINNET_PROVIDER.
 #   -r  RPC endpoint of the chain the txs live on (must support debug_traceTransaction)
 #   -e  Blockscout API base URL — the BACKEND, not the frontend (verifier API =
 #       <base>/api). On the devnet: L1 http://host:34556, L2 http://host:34560
@@ -23,9 +29,11 @@
 set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-RPC="" EXPLORER="" TXFILE="" DRY=false
-while getopts "r:e:f:n" opt; do
+RPC="" EXPLORER="" TXFILE="" ENV_FILE="" DRY=false MAINNET=false
+while getopts "mE:r:e:f:n" opt; do
     case $opt in
+        m) MAINNET=true ;;
+        E) ENV_FILE=$OPTARG ;;
         r) RPC=$OPTARG ;;
         e) EXPLORER=${OPTARG%/} ;;
         f) TXFILE=$OPTARG ;;
@@ -35,9 +43,56 @@ while getopts "r:e:f:n" opt; do
 done
 shift $((OPTIND - 1))
 TXS=("$@")
-[[ -n "$TXFILE" ]] && while read -r t; do [[ -n "$t" ]] && TXS+=("$t"); done < "$TXFILE"
-if [[ -z "$RPC" || -z "$EXPLORER" || ${#TXS[@]} -eq 0 ]]; then
-    grep '^#' "$0" | head -20; exit 2
+if [[ -n "$ENV_FILE" ]]; then
+    [[ -f "$ENV_FILE" && -r "$ENV_FILE" ]] || {
+        echo "ERROR: cannot read env file: $ENV_FILE" >&2; exit 2;
+    }
+    # Resolve bare filenames against cwd instead of Bash's source PATH lookup.
+    [[ "$ENV_FILE" == /* ]] || ENV_FILE="./$ENV_FILE"
+    env_allexport=false
+    [[ $- == *a* ]] && env_allexport=true
+    set -a
+    source "$ENV_FILE" || { echo "ERROR: failed to load env file: $ENV_FILE" >&2; exit 2; }
+    $env_allexport || set +a
+fi
+if [[ -n "$TXFILE" ]]; then
+    [[ -r "$TXFILE" ]] || { echo "ERROR: cannot read tx file: $TXFILE" >&2; exit 2; }
+    while IFS= read -r t || [[ -n "$t" ]]; do
+        [[ -n "$t" ]] && TXS+=("$t")
+    done < "$TXFILE"
+fi
+if $MAINNET; then
+    RPC=${RPC:-${MAINNET_PROVIDER:-}}
+fi
+if [[ ${#TXS[@]} -eq 0 ]]; then
+    echo "ERROR: supply at least one transaction hash, or use -f <file>." >&2
+    exit 2
+fi
+if [[ -z "$RPC" ]]; then
+    if $MAINNET; then
+        echo "ERROR: MAINNET_PROVIDER is empty or not exported. Export it, or pass -r <rpc-url>." >&2
+        echo "To load an env file, pass -E chain.env2 (or -E .env)." >&2
+    else
+        echo "ERROR: supply the RPC endpoint with -r <rpc-url>." >&2
+    fi
+    exit 2
+fi
+if ! $MAINNET && ! $DRY && [[ -z "$EXPLORER" ]]; then
+    echo "ERROR: supply the Blockscout backend with -e <url>, or use -m for mainnet Etherscan." >&2
+    exit 2
+fi
+if $MAINNET; then
+    if ! $DRY && [[ -z "${ETHERSCAN_API_KEY:-}" ]]; then
+        echo "ERROR: supply ETHERSCAN_API_KEY via -E <env-file> or export it (or use -n)." >&2
+        exit 2
+    fi
+    chain_id=$(cast chain-id --rpc-url "$RPC" 2>/dev/null) || {
+        echo "ERROR: cannot read the RPC chain ID." >&2; exit 1;
+    }
+    [[ "$chain_id" == "1" ]] || {
+        echo "ERROR: -m requires Ethereum mainnet (chain ID 1); RPC returned $chain_id." >&2
+        exit 1
+    }
 fi
 
 WORK=$(mktemp -d)
@@ -48,10 +103,14 @@ mkdir -p "$WORK/codes"
 echo "== Tracing ${#TXS[@]} tx =="
 for tx in "${TXS[@]}"; do
     trace=$(cast rpc debug_traceTransaction "$tx" '{"tracer":"callTracer"}' --rpc-url "$RPC" 2>/dev/null) || {
-        echo "WARN: trace failed for $tx"; continue; }
+        echo "WARN: trace failed for $tx (check the network and RPC tracing support)." >&2; continue; }
     echo "$trace" | jq -r '[recurse(.calls[]?) | .to // empty] | .[]'
 done | tr 'A-F' 'a-f' | sort -u > "$WORK/addrs.txt"
 echo "unique call targets: $(wc -l < "$WORK/addrs.txt")"
+if [[ ! -s "$WORK/addrs.txt" ]]; then
+    echo "ERROR: no call targets found; cannot identify contracts." >&2
+    exit 1
+fi
 
 # ── 2. keep only addresses with code; group by codehash ──
 : > "$WORK/contracts.txt"
@@ -67,7 +126,10 @@ done < "$WORK/addrs.txt"
 echo "with code: $(wc -l < "$WORK/contracts.txt") ($(awk '{print $2}' "$WORK/contracts.txt" | sort -u | wc -l) unique codes)"
 
 # ── 3. identify each unique code against the repo's forge artifacts ──
-(cd "$REPO_ROOT" && forge build >/dev/null 2>&1)
+(cd "$REPO_ROOT" && forge build >/dev/null 2>&1) || {
+    echo "ERROR: forge build failed; run forge build to inspect the errors." >&2
+    exit 1
+}
 python3 - "$REPO_ROOT" "$WORK" <<'PYEOF' > "$WORK/matches.txt"
 import json, glob, os, sys
 root, work = sys.argv[1], sys.argv[2]
@@ -164,11 +226,12 @@ $DRY && exit 0
 known_constructor_args() { # $1=addr $2=path:Name ; echoes ABI-encoded args or nothing
     case "${2##*:}" in
         EEZL2)
-            local rid sys ugl
+            local rid sys ugl recovery
             rid=$(cast call "$1" "ROLLUP_ID()(uint64)" --rpc-url "$RPC" 2>/dev/null) || return 0
             sys=$(cast call "$1" "SYSTEM_ADDRESS()(address)" --rpc-url "$RPC" 2>/dev/null) || return 0
             ugl=$(cast call "$1" "USE_GAS_LEFT()(bool)" --rpc-url "$RPC" 2>/dev/null) || return 0
-            cast abi-encode "constructor(uint64,address,bool)" "$rid" "$sys" "$ugl" 2>/dev/null
+            recovery=$(cast call "$1" "RECOVERY_ADDRESS()(address)" --rpc-url "$RPC" 2>/dev/null) || return 0
+            cast abi-encode "constructor(uint64,address,bool,address)" "$rid" "$sys" "$ugl" "$recovery" 2>/dev/null
             ;;
     esac
 }
@@ -178,20 +241,25 @@ known_constructor_args() { # $1=addr $2=path:Name ; echoes ABI-encoded args or n
 # auxdata): Blockscout's own matcher handles nested metadata regions and
 # accepts these as partial matches.
 verify_via_api() { # $1=addr $2=target ; returns 0 once the explorer confirms
-    local art ver sj
+    local art ver sj autodetect attempt
     art="$REPO_ROOT/out/$(basename "${2%%:*}")/${2##*:}.json"
     ver=$(jq -r '.metadata.compiler.version // empty' "$art" 2>/dev/null)
     [[ -z "$ver" ]] && return 1
     sj="$WORK/stdjson-$1.json"
     (cd "$REPO_ROOT" && forge verify-contract "$1" "$2" --show-standard-json-input > "$sj" 2>/dev/null) || return 1
-    curl -sf --max-time 30 -X POST "$EXPLORER/api/v2/smart-contracts/$1/verification/via/standard-input" \
-        -F "compiler_version=v$ver" \
-        -F "contract_name=$2" \
-        -F "autodetect_constructor_args=true" \
-        -F "files[0]=@$sj;type=application/json" >/dev/null || return 1
-    for _ in 1 2 3 4 5 6 7 8; do
-        sleep 5
-        [[ "$(curl -sf --max-time 10 "$EXPLORER/api/v2/smart-contracts/$1" | jq -r '.is_verified // false' 2>/dev/null)" == "true" ]] && return 0
+    # Genesis predeploys have no creation transaction to autodetect args from.
+    # Retry without autodetection if the normal submission is rejected or never
+    # verifies. A successful POST only queues work; confirm the explorer state.
+    for autodetect in true false; do
+        curl -sf --max-time 30 -X POST "$EXPLORER/api/v2/smart-contracts/$1/verification/via/standard-input" \
+            -F "compiler_version=v$ver" \
+            -F "contract_name=$2" \
+            -F "autodetect_constructor_args=$autodetect" \
+            -F "files[0]=@$sj;type=application/json" >/dev/null || continue
+        for attempt in 1 2 3 4 5 6 7 8; do
+            sleep 5
+            [[ "$(curl -sf --max-time 10 "$EXPLORER/api/v2/smart-contracts/$1" | jq -r '.is_verified // false' 2>/dev/null)" == "true" ]] && return 0
+        done
     done
     return 1
 }
@@ -203,6 +271,32 @@ PASS=0; SKIP=0; FAIL=0
 while read -r addr target kind; do
     if [[ "$target" == "NO_MATCH" ]]; then
         echo "SKIP  $addr  (no artifact match)"; SKIP=$((SKIP+1)); continue
+    fi
+    if $MAINNET; then
+        # Forge handles Etherscan's already-verified check and polls with --watch.
+        # The API key is inherited from the environment, not placed in arguments.
+        kargs=$(known_constructor_args "$addr" "$target")
+        verified=false
+        if out=$(cd "$REPO_ROOT" && forge verify-contract "$addr" "$target" \
+            --verifier etherscan --chain 1 --rpc-url "$RPC" \
+            --guess-constructor-args --watch 2>&1); then
+            verified=true
+        elif [[ -n "$kargs" ]] && out=$(cd "$REPO_ROOT" && forge verify-contract "$addr" "$target" \
+            --verifier etherscan --chain 1 --rpc-url "$RPC" \
+            --constructor-args "$kargs" --watch 2>&1); then
+            verified=true
+        elif out=$(cd "$REPO_ROOT" && forge verify-contract "$addr" "$target" \
+            --verifier etherscan --chain 1 --rpc-url "$RPC" --watch 2>&1); then
+            verified=true
+        fi
+        if $verified; then
+            echo "OK    $addr  $target (Etherscan verified/already verified)"; PASS=$((PASS+1))
+        else
+            echo "FAIL  $addr  $target"
+            echo "$out" | grep -iE "error|fail" | head -2 | sed 's/^/      /'
+            FAIL=$((FAIL+1))
+        fi
+        continue
     fi
     already=$(curl -sf --max-time 10 "$EXPLORER/api/v2/smart-contracts/$addr" | jq -r '.is_verified // false' 2>/dev/null)
     if [[ "$already" == "true" ]]; then
@@ -225,7 +319,7 @@ while read -r addr target kind; do
     confirmed=$(curl -sf --max-time 10 "$EXPLORER/api/v2/smart-contracts/$addr" | jq -r '.is_verified // false' 2>/dev/null)
     via=""
     if [[ "$confirmed" != "true" ]] && verify_via_api "$addr" "$target"; then
-        confirmed=true; via=" (direct API, partial match)"
+        confirmed=true; via=" (direct API)"
     fi
     if [[ "$confirmed" == "true" ]]; then
         echo "OK    $addr  $target$via"; PASS=$((PASS+1))
@@ -237,3 +331,5 @@ while read -r addr target kind; do
 done < "$WORK/matches.txt"
 echo ""
 echo "verified/already: $PASS   failed: $FAIL   skipped: $SKIP"
+
+[[ "$FAIL" -eq 0 ]]

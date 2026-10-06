@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fund the source wallet on L2, then prepare the network factories.
+# Fund the source wallet on L2. E2E scenarios deploy their own contracts.
 # Usage: bash script/e2e/run/network/setup.sh [L2-target-ETH] [env-file] (default: 0.1, chain.env)
 # Override the environment file with DEVNET_ENV=other.env.
 set -euo pipefail
@@ -11,7 +11,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     exit 0
 fi
 [[ $# -le 2 ]] || { echo "Expected an ETH amount and optional env file" >&2; exit 1; }
-for tool in cast forge python3 timeout; do
+for tool in cast python3 timeout; do
     command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }
 done
 ENV_FILE="${2:-${DEVNET_ENV:-chain.env}}"
@@ -96,12 +96,6 @@ if [[ "$MISSING" != 0 ]]; then
 else
     log "L2 target already reached; skipping bridge."
 fi
-# Shared factory helper; funding and discovery already completed above.
-source "$(dirname "$0")/../../lib/E2EBase.sh"
-log "Ensuring CREATE2 factory on L1..."
-ensure_create2_factory "$L1_RPC" "L1" "$SETUP_PK"
-log "Ensuring CREATE2 factory on L2..."
-ensure_create2_factory "$L2_RPC" "L2" "$SETUP_PK"
 log "Network ready. Next run these in order (wait for bridge:1 to pass):"
 printf 'DEVNET_ENV=%q bash script/e2e/run/network/staged.sh bridge:1\n' "$ENV_FILE"
 printf 'DEVNET_ENV=%q bash script/e2e/run/network/staged.sh all\n' "$ENV_FILE"

@@ -5,7 +5,12 @@ import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
-import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../../src/interfaces/IEEZ.sol";
+import {
+    RollupUpdate,
+    L2ToL1Call,
+    ExecutionEntry,
+    StaticExecutionEntry
+} from "../../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     CrossChainCall,
@@ -18,7 +23,6 @@ import {FlashLoanBridgeExecutor} from "../../../../../../src/periphery/defiMock/
 import {FlashLoanersNFT} from "../../../../../../src/periphery/defiMock/FlashLoanersNFT.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {_computeBridgeAddress, _deployBridge} from "../../../../../DeployBridge.s.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
     output,
@@ -59,9 +63,8 @@ import {
 //             NFT, then bridgeTokens(wrapped) burns the 10k and makes the
 //             outgoing return call, matched against expectedOutgoingCalls[0].
 //
-//  The Bridge is CREATE2-deployed at the SAME address on both chains
-//  (fresh salt per run), so `_bridgeAddress()` proxy lookups line up
-//  without setCanonicalBridgeAddress.
+//  Each Bridge is deployed with CREATE and configured with the remote Bridge
+//  address for routing and caller authentication. No external factory is needed.
 //
 //  Final state: L1 pool = 10k, bridgeL1 escrow = 0, executorL1 = 0;
 //  L2 wrapped supply = 0 (minted then burned), NFT #1 owned by executorL2.
@@ -70,10 +73,10 @@ import {
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
-/// @notice Every address the scenario's calls fold into a hash. `bridge` is the
-///         same CREATE2 address on both chains.
+/// @notice Every address the scenario's calls fold into a hash, including both Bridges.
 struct FlashLoanAddrs {
-    address bridge;
+    address bridgeL1;
+    address bridgeL2;
     address token;
     address executorL1;
     address executorL2;
@@ -120,7 +123,7 @@ abstract contract FlashLoanActions {
     function _claimData(FlashLoanAddrs memory a) internal pure returns (bytes memory) {
         return abi.encodeCall(
             FlashLoanBridgeExecutor.claimAndBridgeBack,
-            (a.wrappedTokenL2, a.nftL2, a.bridge, MAINNET_ROLLUP_ID, a.executorL1)
+            (a.wrappedTokenL2, a.nftL2, a.bridgeL2, MAINNET_ROLLUP_ID, a.executorL1)
         );
     }
 
@@ -134,9 +137,9 @@ abstract contract FlashLoanActions {
 
     // ── Cross-chain call hashes ──
 
-    /// Entry-0 key on both sides: bridgeL1 → bridgeL2 (same address) forward receiveTokens.
+    /// Entry-0 key on both sides: bridgeL1 → bridgeL2 forward receiveTokens.
     function _fwdHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(false, a.bridge, MAINNET_ROLLUP_ID, a.bridge, L2_ROLLUP_ID, 0, _fwdReceiveData(a));
+        return crossChainCallHash(false, a.bridgeL1, MAINNET_ROLLUP_ID, a.bridgeL2, L2_ROLLUP_ID, 0, _fwdReceiveData(a));
     }
 
     /// Entry-1 key on both sides: executorL1 → executorL2 claimAndBridgeBack.
@@ -146,13 +149,13 @@ abstract contract FlashLoanActions {
 
     /// Return leg as folded on L1 (entry 1's top-level l2ToL1Call): bridgeL2 → bridgeL1.
     function _retHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(false, a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
+        return crossChainCallHash(false, a.bridgeL2, L2_ROLLUP_ID, a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     /// Return leg as folded on L2 (the call LEAVES the L2, so it keys with the
     /// L2-outgoing hash; same digest under useGasLeft = false).
     function _retHashL2Out(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(a.bridge, L2_ROLLUP_ID, a.bridge, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
+        return crossChainCallHashL2Out(a.bridgeL2, L2_ROLLUP_ID, a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     // ── Tables ──
@@ -180,9 +183,9 @@ abstract contract FlashLoanActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: a.bridge,
+            sourceAddress: a.bridgeL2,
             sourceRollupId: L2_ROLLUP_ID,
-            targetAddress: a.bridge,
+            targetAddress: a.bridgeL1,
             value: 0,
             data: _retReceiveData(a)
         });
@@ -230,9 +233,9 @@ abstract contract FlashLoanActions {
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
-            sourceAddress: a.bridge,
+            sourceAddress: a.bridgeL1,
             sourceRollupId: MAINNET_ROLLUP_ID,
-            targetAddress: a.bridge,
+            targetAddress: a.bridgeL2,
             value: 0,
             data: _fwdReceiveData(a)
         });
@@ -295,7 +298,8 @@ abstract contract FlashLoanActions {
 abstract contract FlashLoanEnv is Script {
     function _envAddrs() internal view returns (FlashLoanAddrs memory) {
         return FlashLoanAddrs({
-            bridge: vm.envAddress("BRIDGE"),
+            bridgeL1: vm.envAddress("BRIDGE_L1"),
+            bridgeL2: vm.envAddress("BRIDGE_L2"),
             token: vm.envAddress("TOKEN"),
             executorL1: vm.envAddress("EXECUTOR_L1"),
             executorL2: vm.envAddress("EXECUTOR_L2"),
@@ -307,39 +311,15 @@ abstract contract FlashLoanEnv is Script {
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Deploys — three-phase order:
-//    1. Deploy (L1)   — TestToken + Bridge (CREATE2, fresh salt per run).
-//    2. DeployL2 (L2) — Bridge twin (same salt/address), executorL2,
+//    1. Deploy (L1)   — TestToken + Bridge.
+//    2. DeployL2 (L2) — Bridge configured with its L1 counterpart, executorL2,
 //                       pre-computed WrappedToken address, FlashLoanersNFT.
-//    3. Deploy2 (L1)  — FlashLoan pool (funded), executorL2 proxy, executorL1.
+//    3. Deploy2 (L1)  — Configure the L2 counterpart; deploy the funded pool,
+//                       executorL2 proxy and executorL1.
 // ═══════════════════════════════════════════════════════════════════════
 
-/// @dev A previous partial run can leave the twin deployed on just one chain.
-///      Reuse a compatible bridge without resetting its state or existing admin.
-function _ensureFlashLoanBridge(
-    bytes32 salt,
-    address manager,
-    uint64 rollupId,
-    address admin
-)
-    returns (address deployed)
-{
-    deployed = _computeBridgeAddress(salt);
-    if (deployed.code.length == 0) deployed = _deployBridge(salt);
-
-    Bridge bridge = Bridge(deployed);
-    if (address(bridge.manager()) == address(0)) {
-        bridge.initialize(manager, rollupId, admin);
-    } else {
-        require(address(bridge.manager()) == manager, "flash-loan bridge manager mismatch");
-        require(bridge.rollupId() == rollupId, "flash-loan bridge rollup mismatch");
-    }
-    // Both twins use the same CREATE2 address for cross-chain authentication.
-    address canonical = bridge.canonicalBridgeAddress();
-    require(canonical == address(0) || canonical == deployed, "flash-loan bridge canonical address mismatch");
-}
-
 /// Env: ROLLUPS
-/// Outputs: TOKEN, BRIDGE, BRIDGE_SALT
+/// Outputs: TOKEN, BRIDGE_L1
 contract Deploy is Script {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
@@ -347,30 +327,31 @@ contract Deploy is Script {
         vm.startBroadcast();
         TestToken token = new TestToken();
 
-        // Salt keyed on the token address. A failed plan can repeat this address;
-        // reuse compatible bridge twins left by an earlier partial deployment.
-        bytes32 salt = keccak256(abi.encodePacked("e2e-flash-loan", address(token)));
-        address bridge = _ensureFlashLoanBridge(salt, rollupsAddr, MAINNET_ROLLUP_ID, msg.sender);
+        // Read the broadcast wallet even when PrepareJob calls this script.
+        (, address admin,) = vm.readCallers();
+        Bridge bridge = new Bridge();
+        bridge.initialize(rollupsAddr, MAINNET_ROLLUP_ID, admin);
 
         output("TOKEN", address(token));
-        output("BRIDGE", bridge);
-        output("BRIDGE_SALT", salt);
+        output("BRIDGE_L1", address(bridge));
         vm.stopBroadcast();
     }
 }
 
-/// Env: MANAGER_L2, TOKEN, BRIDGE, BRIDGE_SALT
-/// Outputs: EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2 (no code until the forward leg), FLASH_LOANERS_NFT
+/// Env: MANAGER_L2, TOKEN, BRIDGE_L1
+/// Outputs: BRIDGE_L2, EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2 (no code until the forward leg), FLASH_LOANERS_NFT
 contract DeployL2 is Script, FlashLoanActions {
     function run() external {
         address managerAddr = vm.envAddress("MANAGER_L2");
         address tokenAddr = vm.envAddress("TOKEN");
-        address bridgeL1 = vm.envAddress("BRIDGE");
-        bytes32 salt = vm.envBytes32("BRIDGE_SALT");
+        address bridgeL1 = vm.envAddress("BRIDGE_L1");
 
         vm.startBroadcast();
-        address bridge = _ensureFlashLoanBridge(salt, managerAddr, L2_ROLLUP_ID, msg.sender);
-        require(bridge == bridgeL1, "bridge address mismatch across chains");
+        (, address admin,) = vm.readCallers();
+        Bridge deployedBridge = new Bridge();
+        deployedBridge.initialize(managerAddr, L2_ROLLUP_ID, admin);
+        deployedBridge.setCanonicalBridgeAddress(bridgeL1);
+        address bridge = address(deployedBridge);
 
         // Config args unused on the L2 side — claimAndBridgeBack takes everything as parameters.
         FlashLoanBridgeExecutor executorL2 = new FlashLoanBridgeExecutor(
@@ -391,6 +372,7 @@ contract DeployL2 is Script, FlashLoanActions {
 
         FlashLoanersNFT nft = new FlashLoanersNFT(wrappedTokenL2);
 
+        output("BRIDGE_L2", bridge);
         output("EXECUTOR_L2", address(executorL2));
         output("PREDICTED_WRAPPED_TOKEN_L2", wrappedTokenL2);
         output("FLASH_LOANERS_NFT", address(nft));
@@ -398,18 +380,20 @@ contract DeployL2 is Script, FlashLoanActions {
     }
 }
 
-/// Env: ROLLUPS, TOKEN, BRIDGE, EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
+/// Env: ROLLUPS, TOKEN, BRIDGE_L1, BRIDGE_L2, EXECUTOR_L2, PREDICTED_WRAPPED_TOKEN_L2, FLASH_LOANERS_NFT
 /// Outputs: FLASH_LOAN_POOL, EXECUTOR_L1
 contract Deploy2 is Script, FlashLoanActions {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
         address tokenAddr = vm.envAddress("TOKEN");
-        address bridgeAddr = vm.envAddress("BRIDGE");
+        address bridgeAddr = vm.envAddress("BRIDGE_L1");
+        address bridgeL2Addr = vm.envAddress("BRIDGE_L2");
         address executorL2Addr = vm.envAddress("EXECUTOR_L2");
         address wrappedTokenL2 = vm.envAddress("PREDICTED_WRAPPED_TOKEN_L2");
         address nftAddr = vm.envAddress("FLASH_LOANERS_NFT");
 
         vm.startBroadcast();
+        Bridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
         FlashLoan pool = new FlashLoan();
         IERC20(tokenAddr).transfer(address(pool), AMOUNT);
 
@@ -423,7 +407,7 @@ contract Deploy2 is Script, FlashLoanActions {
             executorL2Addr,
             wrappedTokenL2,
             nftAddr,
-            bridgeAddr,
+            bridgeL2Addr,
             L2_ROLLUP_ID,
             tokenAddr
         );
@@ -487,7 +471,7 @@ contract Execute is FlashLoanEnv, FlashLoanActions {
         console.log("done");
         console.log("pool balance=%s (expected %s)", IERC20(a.token).balanceOf(poolAddr), AMOUNT);
         console.log("executorL1 balance=%s (expected 0)", IERC20(a.token).balanceOf(a.executorL1));
-        console.log("bridge escrow=%s (expected 0)", IERC20(a.token).balanceOf(a.bridge));
+        console.log("bridge escrow=%s (expected 0)", IERC20(a.token).balanceOf(a.bridgeL1));
         vm.stopBroadcast();
     }
 }
@@ -507,7 +491,8 @@ contract ExecuteNetwork is Script {
 
 contract ComputeExpected is ComputeExpectedBase, FlashLoanEnv, FlashLoanActions {
     function _name(address addr) internal view override returns (string memory) {
-        if (addr == vm.envAddress("BRIDGE")) return "Bridge(L1/L2)";
+        if (addr == vm.envAddress("BRIDGE_L1")) return "Bridge(L1)";
+        if (addr == vm.envAddress("BRIDGE_L2")) return "Bridge(L2)";
         if (addr == vm.envAddress("TOKEN")) return "TestToken";
         if (addr == vm.envAddress("EXECUTOR_L1")) return "ExecutorL1";
         if (addr == vm.envAddress("EXECUTOR_L2")) return "ExecutorL2";
