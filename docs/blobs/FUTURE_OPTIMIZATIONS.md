@@ -32,13 +32,16 @@ values (zero, round ether amounts) compress to a few bytes.
 
 ## 3. Dense blob packing (254 bits per field element)
 
-V1 stores 31 bytes per field element and zeroes the 32nd (most significant) byte —
+V1 stores 31 bytes per field element and zeroes the first serialized byte
+(offset `0`, most significant) —
 `4096 × 31 = 126,976` useful bytes per blob. Since the BLS12-381 modulus satisfies
 `2^254 < r < 2^255`, an element can safely carry **254 bits** (top two bits clear), not
 just 248:
 
-* **Data elements** carry 31 bytes **plus the low 6 bits of the 32nd byte** — top two
-  bits clear — so each represents a full 32 bytes of logical data.
+* **Data elements** carry 31 bytes **plus the low 6 bits of the most significant
+  byte** (serialized offset `0`) — top two bits clear — so each represents a full
+  32 bytes of logical data. As in §4 of the current format, logical bytes are assigned
+  from least to most significant: the 32nd logical byte supplies these extra bits.
 * The **two deferred high bits** per data element are collected in order. Across the
   4064 data elements that is `2 × 4064 = 8,128` bits (1,016 bytes), packed (same 254-bit
   scheme) into the **last 32 field elements** of the blob — an exact fit:
@@ -46,8 +49,9 @@ just 248:
 * **Capacity:** `(4096 − 32) × 32 = 130,048` useful bytes per blob — **+3,072 bytes
   (~2.4%)** over v1.
 * **Read:** decode the 32 tail elements to recover the deferred bits, restore each data
-  element's full 32nd byte (in-place low 6 bits + its two deferred bits), concatenate all
-  data elements in order, and parse the stream from the result.
+  element's full 32nd logical byte (in-place low 6 bits + its two deferred bits), read
+  each element from least to most significant, concatenate all data elements in order,
+  and parse the stream from the result.
 
 ## Canonicality note
 

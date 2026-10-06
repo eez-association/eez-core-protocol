@@ -9,6 +9,8 @@ import {BlobPacking} from "../../script/blob/BlobPacking.sol";
 /// @notice Byte-layer tests of the message codec (wire encoding, §5 validity) and the
 ///         §4 field-element packing — independent of the table translation.
 contract BlobCodecTest is Test {
+    uint256 constant BLS_MODULUS = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
+
     uint64 constant L1 = 0;
     uint64 constant L2A = 1;
     uint64 constant L2B = 2;
@@ -127,6 +129,38 @@ contract BlobCodecTest is Test {
         bytes32[][] memory blobs = BlobPacking.pack(blobPortion);
         assertEq(blobs.length, 2, "stream should need two blobs");
         _assertMsgsEq(BlobCodec.decode(BlobPacking.unpack(blobs), tail), msgs);
+    }
+
+    // Fixed serialized vectors test each direction independently of the other codec.
+    function test_packing_serializedByteVector() public pure {
+        bytes memory stream = hex"800102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1eaabb";
+        bytes32[][] memory blobs = BlobPacking.pack(stream);
+        assertEq(blobs.length, 1);
+        assertEq(blobs[0].length, 4096);
+        assertEq(blobs[0][0], hex"001e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020180");
+        assertEq(blobs[0][1], hex"000000000000000000000000000000000000000000000000000000000000bbaa");
+        for (uint256 e = 2; e < blobs[0].length; e++) {
+            assertEq(blobs[0][e], bytes32(0), "unused elements must be zero");
+        }
+    }
+
+    function test_unpacking_serializedByteVector() public pure {
+        bytes32[][] memory blobs = new bytes32[][](1);
+        blobs[0] = new bytes32[](4096);
+        blobs[0][0] = hex"001e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020180";
+        blobs[0][1] = hex"000000000000000000000000000000000000000000000000000000000000bbaa";
+        bytes memory expected = new bytes(126_976);
+        bytes memory prefix = hex"800102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1eaabb";
+        for (uint256 i = 0; i < prefix.length; i++) {
+            expected[i] = prefix[i];
+        }
+        assertEq(BlobPacking.unpack(blobs), expected);
+    }
+
+    function test_packing_maximumChunkIsBelowBlsModulus() public pure {
+        bytes32[][] memory blobs = BlobPacking.pack(hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assertEq(blobs[0][0], hex"00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assertLt(uint256(blobs[0][0]), BLS_MODULUS);
     }
 
     function test_packing_fieldElementsAreValidScalars() public pure {
@@ -377,11 +411,22 @@ contract BlobCodecTest is Test {
         this.decodeExternal(p, t);
     }
 
-    function test_reject_invalidFieldElement() public {
+    function test_reject_validScalarOutsidePackingFormat() public {
         bytes32[][] memory blobs = new bytes32[][](1);
         blobs[0] = new bytes32[](BlobPacking.FIELD_ELEMENTS_PER_BLOB);
-        blobs[0][5] = bytes32(uint256(1) << 248); // non-zero MSB — not a valid scalar
+        blobs[0][5] = bytes32(uint256(1) << 248); // Valid BLS scalar, outside the 31-byte format.
+        assertLt(uint256(blobs[0][5]), BLS_MODULUS);
         vm.expectRevert(abi.encodeWithSelector(BlobPacking.InvalidFieldElement.selector, 0, 5));
+        this.unpackExternal(blobs);
+    }
+
+    function test_reject_trailingZeroDoesNotEnsureValidScalar() public {
+        bytes32[][] memory blobs = new bytes32[][](1);
+        blobs[0] = new bytes32[](4096);
+        // The former prose allowed this serialized element: a 0x74-leading chunk || 0x00.
+        blobs[0][0] = hex"7400000000000000000000000000000000000000000000000000000000000000";
+        assertGe(uint256(blobs[0][0]), BLS_MODULUS);
+        vm.expectRevert(abi.encodeWithSelector(BlobPacking.InvalidFieldElement.selector, 0, 0));
         this.unpackExternal(blobs);
     }
 
