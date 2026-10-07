@@ -14,6 +14,9 @@ import {ICrossChainProxy} from "../interfaces/ICrossChainProxy.sol";
 ///      itself with the `staticCheck()` selector (via executeOnBehalf) reaches the detector rather
 ///      than a cross-chain call; this is acceptable.
 contract CrossChainProxy {
+    /// @notice Manager-directed calls cannot target the EEZ manager itself.
+    error EEZDestinationForbidden();
+
     // ──────────────────────────────────────────────
     //  Immutables
     // ──────────────────────────────────────────────
@@ -69,6 +72,9 @@ contract CrossChainProxy {
         if (msg.sender == EEZ && msg.sig == ICrossChainProxy.executeOnBehalf.selector) {
             (address destination, uint64 callGas, bytes memory data) =
                 abi.decode(msg.data[4:], (address, uint64, bytes));
+
+            // EEZ proxy cannot re-enter EEZ with executeOnBehalf
+            if (destination == EEZ) revert EEZDestinationForbidden();
 
             // Cap gas at the target, leaving proxy overhead outside the cap; zero means uncapped.
             // A manager STATICCALL keeps this CALL and its descendants in static context.

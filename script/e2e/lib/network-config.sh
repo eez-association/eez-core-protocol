@@ -28,6 +28,7 @@ load_network_env() {
         echo "Missing environment file: $env_file" >&2; return 1
     fi
     export L1_RPC L2_RPC L1_FRONT L2_FRONT
+    export EEZ_POST_BATCHER="${EEZ_POST_BATCHER:-}"
     if [[ -z "${PK:-}" && -n "${SOURCE_PK:-}" ]]; then
         export PK="$SOURCE_PK"
     fi
@@ -40,7 +41,7 @@ load_network_config() {
     load_network_env "${1:-}" || return 1
     if [[ -n "$snapshot" && -f "$snapshot/devnet.env" ]]; then
         source "$snapshot/devnet.env" || return 1
-        export ROLLUPS MANAGER_L2
+        export ROLLUPS MANAGER_L2 EEZ_POST_BATCHER
     else
         load_composer_info || return 1
     fi

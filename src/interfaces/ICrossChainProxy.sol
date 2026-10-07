@@ -7,7 +7,7 @@ interface ICrossChainProxy {
     /// @dev The proxy dispatches this ABI only for its EEZ manager. It bubbles raw return or revert
     ///      data; callers that need return bytes must use a low-level call. Other callers enter
     ///      the cross-chain fallback path even when they use this selector.
-    /// @param destination Address to call on the proxy's chain.
+    /// @param destination Address to call on the proxy's chain; must not be its EEZ manager.
     /// @param callGas Gas cap at the destination; zero forwards the gas available under EVM call rules.
     /// @param data Calldata passed to the destination.
     function executeOnBehalf(address destination, uint64 callGas, bytes calldata data) external payable;

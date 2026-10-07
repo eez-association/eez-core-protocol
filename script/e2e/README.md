@@ -365,8 +365,12 @@ there is no Python settlement collector.
 - **L2 calls**: `IncomingCrossChainCallExecuted` fields must re-hash to the emitted
   call hash and match the expected inbound call.
 
-The calldata verifier currently accepts direct `postAndVerifyBatch` transaction
-inputs. It reads completion logs from the pinned settlement block: the protocol
+The verifier accepts `postAndVerifyBatch` calls to `ROLLUPS` or a batcher whose
+`eez()` returns `ROLLUPS` at the settlement block. Optional `EEZ_POST_BATCHER`
+restricts the batcher address without bypassing that check. Missing calldata
+matches fail verification; `postBatch(batch,bool)` is unsupported.
+
+It reads completion logs from the pinned settlement block: the protocol
 requires deferred consumption in the posting block. Each scenario's expected
 `success=true` entries are expected to commit; a queued but unused or skipped entry
 does not satisfy this check. Reverting entries and static reads retain their input
