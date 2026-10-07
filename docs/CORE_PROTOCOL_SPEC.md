@@ -131,7 +131,7 @@ struct ExecutionEntry {
 }
 ```
 
-A top-level entry carries a `success` flag. When `success == true`, the entry runs, verifies, and the top-level call returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. Because the revert also rolls back the cursor advance, a `success == false` entry is re-callable; the forward-scan consumption (§D.1) reaches past it once a later successful consumption advances beyond it. A top-level reverting *read* is a `StaticExecutionEntry` instead.
+A top-level entry carries a `success` flag. When `success == true`, the entry runs, verifies, and the top-level call returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. Because the revert also rolls back the cursor advance, a `success == false` entry is re-callable; a later top-level call can skip it when its validation hash no longer matches (§D.1). A top-level reverting *read* is a `StaticExecutionEntry` instead.
 
 #### Prover constraints
 
@@ -148,6 +148,7 @@ L2:
 
 Both sides:
 - SUCCESS rows of the unified reentrant table carry `revertedOrStaticRollingHash == bytes32(0)` — the field is only read on the STATIC / REVERTED paths. *(Defensive check at resolution: `SuccessRowWithRevertedOrStaticHash`.)*
+- **Top-level mutable alternatives per key.** Each eligible candidate executes in a revertible self-call. Hash mismatches retry; the first validated outcome is terminal. Builders/provers must bind alternatives to their callbacks, outcome and state/value transitions and reject ambiguous incompatible outcomes that both validate. Budget for discarded attempts and self-call overhead. Nested mutable alternatives, exact gas equivalence and production node/prover support are not established by local retry tests. L1 zero-hash L2Tx consumption and L2 incoming system delivery remain sequential.
 - **Static alternatives per key.** Static reads change neither `_rollingHash` nor the cursor. Multiple rows may share a key: lookup tries each candidate until its callback-result hash matches. Builders must provide/prove the required alternatives and reject incompatible outcomes when multiple candidates can validate; the first hash-valid row wins. *Circuit / builder rule.* See [STATIC_ENTRY §4.4](STATIC_ENTRY.md#44-local-writes-between-identical-static-reads) for all four local-write cases, candidate construction, retry outcomes and E2E evidence. Do not deduplicate static rows by key alone; skipped candidates execute local callback validation but do not create additional logical remote frames.
 - Static sub-calls carry `revertNextNCalls == 0` — static resolution has no state to roll back. *(Defensive check in `_processStaticL2ToL1Calls`: `StaticCallWithRevertSpan`.)*
 - Tables contain exactly the rows/entries the simulated trace resolves; anything beyond is inert padding. *Circuit-only.*
@@ -442,7 +443,7 @@ _entryEtherDelta = int256(msg.value);        // top-level: SET — a fresh entry
 return _consumeAndExecuteEntry(destRid, crossChainCallHash);
 ```
 
-`_consumeAndExecuteEntry` routes to the rollup's queue — the transient stream (global cursor) while a batch is mid-flight, otherwise the persistent per-rollup queue. Consumption is a **forward scan** for the first fully-matching entry (§D.1); if the scan reaches the end with no match, it reverts `ExecutionNotFound`. There is no reverted-top-level fallback structure: a top-level reverting call is a normal `ExecutionEntry` with `success == false`.
+`_consumeAndExecuteEntry` routes to the rollup's queue — the transient stream (global cursor) while a batch is mid-flight, otherwise the persistent per-rollup queue. Consumption forward-scans eligible candidates (§D.1), executing each in a self-call and retrying rolling-hash mismatches. No eligible candidate yields `ExecutionNotFound`; all eligible candidates mismatching yields `RollingHashMismatch`. There is no reverted-top-level fallback structure: a top-level reverting call is a normal `ExecutionEntry` with `success == false`.
 
 **Revert conditions**: `UnauthorizedProxy`, `ExecutionNotInCurrentBlock(rollupId)`, `ExecutionNotFound`, `RollingHashMismatch`, `EtherDeltaMismatch`, `InsufficientRollupBalance`, `RootMismatch(rollupId)`, `ReentrantDestinationNotVerified(rollupId)` (reentrant path only), `StaticCallWithValue` (a flat call flagged `isStatic` but carrying non-zero `value` — a STATICCALL cannot transfer ETH, so it is rejected rather than silently dropping the value), `RevertSpanOutOfBounds`, plus a `success == false` entry's own `returnData` revert. A destination's natural revert does NOT propagate — the proxy `.call` captures `(false, retData)` into the rolling hash via `CALL_END`.
 
@@ -585,34 +586,32 @@ function entryQueueIndex(uint64 _rollupId) external view returns (uint256);
 ##### `_consumeAndExecuteEntry(uint64 destRid, bytes32 crossChainCallHash) → bytes`
 
 ```
-if (_transientEntriesLength != 0):
-    idx = _findMatchingEntry(_transientEntries, _transientEntryIndex, _transientEntriesLength, crossChainCallHash, destRid)
-    _transientEntryIndex = idx + 1
-    entry = _transientEntries[idx]
-else:
-    rec = verificationByRollup[destRid]
-    idx = _findMatchingEntry(rec.entryQueue, rec.entryQueueIndex, rec.entryQueueLength, crossChainCallHash, destRid)
-    rec.entryQueueIndex = uint64(idx + 1)
-    entry = rec.entryQueue[idx]
-    _currentEntryRollupId = destRid       // the queue _getExpectedL1toL2Calls() reads
-
-emit ExecutionConsumed(crossChainCallHash, destRid, idx)
-
-_currentEntryIndex = idx
-_executeEntry(entry)
-
-_currentEntryRollupId = 0                 // load-bearing: the immediate L2Tx path relies on 0
-_currentEntryIndex = 0                    // hygiene/symmetry
-return entry.returnData
+select active queue, starting cursor and active length
+for each eligible candidate from the starting cursor:
+    try self._attemptExecuteEntry(destRid, index):
+        advance cursor and set active entry pointers
+        emit consumption; execute callbacks and validate hash/accounting
+        clear execution state and pointers
+    catch reason:
+        if nonzero call identity and exact RollingHashMismatch(): retry
+        otherwise: bubble reason
+    deliver cached success/revert outcome outside the catch
+if any candidate mismatched: revert RollingHashMismatch()
+otherwise: revert ExecutionNotFound()
 ```
 
-`_findMatchingEntry(queue, startIndex, hash, destRid)` forward-scans from the cursor for the **first** entry where `_entryMatches` holds, reverting `ExecutionNotFound` at the end of the queue. `_entryMatches(entry, hash, destRid)` requires all of:
+The self-call is restricted to `msg.sender == address(this)`. Rejected attempts roll
+back their state, value transfers, cursor changes and logs. A validated application
+revert is terminal even if its payload resembles a protocol error. Zero-hash L2Tx
+entries remain sequential, so their first eligible attempt is terminal.
+
+`_entryMatches(entry, hash, destRid)` requires all of:
 
 - `entry.proxyEntryHash == crossChainCallHash` (identity),
 - `entry.destinationRollupId == destRid` (routing — load-bearing in the transient branch, whose cursor is global across rollups; holds by construction in the persistent branch),
 - every `entry.rollupUpdates[i].currentRoot` equals the live `rollups[rid].root` (state preconditions — a stale entry is a *non-match*, skipped rather than reverted on).
 
-Skipping intervening non-matches lets a top-level call pass stale-state entries or failed entries whose hashes no longer match. A failed entry that still matches is retried, because its revert restored the cursor. A skipped entry simply never executes — anything depending on it later fails its own `currentRoot` check.
+Identity/routing/root non-matches are skipped without execution. Eligible top-level candidates execute speculatively; a hash mismatch rolls back the attempt and permits another candidate. The first validated outcome is terminal, including a cached revert. Attempts spend gas even when their state effects are rolled back.
 
 Inside an active `postAndVerifyBatch`, `_transientEntriesLength != 0` routes **all** consumption through the transient stream with the global `_transientEntryIndex`. Per-rollup queues are populated only at step 7 of `postAndVerifyBatch`.
 
@@ -788,7 +787,7 @@ function computeCrossChainCallHash(
 }
 ```
 
-Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
+Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/scenarios/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
 
 Apart from L2 inbound binding, which uses `incomingCalls[0].gas`, `callGas` is `0` (`ZERO_CALL_GAS`) except calls **leaving an L2** (`EEZL2.executeCrossChainCall` and `staticCrossChainCall` — top-level and nested matching), where the folded value depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
 
@@ -880,9 +879,9 @@ Same shape as L1, with these differences:
 2. **`sourceRollupId`** in the call hash is `ROLLUP_ID` (this L2's ID), not `MAINNET_ROLLUP_ID`; `targetRollupId` is `proxyInfo.originalRollupId` (the proxied counterparty — L1 or another L2).
 3. **ETH burn**: if `msg.value > 0`, the manager forwards it to `SYSTEM_ADDRESS` immediately (before hashing). Failure reverts `EtherTransferFailed`. There is no `_entryEtherDelta` accounting on L2.
 4. Block gate is the single `lastLoadBlock != block.number → ExecutionNotInCurrentBlock` check (no per-rollup routing).
-5. **Miss error**: a top-level scan that reaches the end of `entries` reverts `EntryNotFound(crossChainCallHash, callGas)` — NOT L1's `ExecutionNotFound`. A static miss (`staticCrossChainCall`, nested or top-level) reverts the same error with the static-kind hash. The two-field payload is deliberate: it hands the builder both the key that was searched for and the `callGas` that went into it, which is what makes observed-gas keying debuggable (see `test/GasProbe.t.sol`).
+5. **Miss error**: a top-level scan with no eligible candidate reverts `EntryNotFound(crossChainCallHash, callGas)` — NOT L1's `ExecutionNotFound`. A static miss (`staticCrossChainCall`, nested or top-level) reverts the same error with the static-kind hash. The two-field payload is deliberate: it hands the builder both the key that was searched for and the `callGas` that went into it, which is what makes observed-gas keying debuggable (see `test/GasProbe.t.sol`).
 
-Top-level consumption is `_consumeAndExecute(crossChainCallHash, callGas)`: forward-scan `entries` from `entryIndex` for the first `proxyEntryHash` match (`_findMatchingEntry` — hash alone, no state pins on L2), advance `entryIndex = idx + 1`, emit `ExecutionConsumed(crossChainCallHash, idx)`, run `_executeEntry`, return `entry.returnData`. Reentrant calls route to `_consumeNestedCall(crossChainCallHash)` (§B.1 — same algorithm, no proxy-protection check). There is no reverted-top-level fallback structure — a top-level reverting call is an `ExecutionEntry` with `success == false`.
+Top-level consumption is `_consumeAndExecute(crossChainCallHash, callGas)`: forward-scan from `entryIndex` below `entriesLength` by `proxyEntryHash` (no state pins on L2). Each eligible candidate runs through self-only `_attemptExecuteEntry(index)`, which advances the cursor, emits consumption and validates execution. A rolling-hash mismatch rolls that attempt back and continues; other errors bubble. All eligible candidates mismatching yields `RollingHashMismatch`; no eligible candidate yields `EntryNotFound(crossChainCallHash, callGas)`. Cached outcomes are delivered outside the catch so a validated application revert is terminal. Reentrant calls still use first-match `_consumeNestedCall(crossChainCallHash)`; system incoming delivery executes entry zero directly.
 
 The proxy-driven call emits `CrossChainCallExecuted` — the six-field L2 overload carrying the extra `callGas` field, with a different topic0 from L1's five-field form.
 
@@ -973,7 +972,7 @@ The sites differ only in the `callGas` value they fold:
 
 Under `useGasLeft = false`, outgoing hashes fold `0`; inbound binding still uses `incomingCalls[0].gas`. See §B.1 for the rationale and the `callGas` ⇄ `CrossChainCall.gas` relationship.
 
-Off-chain tooling (`script/e2e/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
+Off-chain tooling (`script/e2e/scenarios/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
 
 ### C.1 Hash from `executeCrossChainCall` (L1)
 
@@ -1022,7 +1021,7 @@ Each executed flat call folds its own identity hash into `CALL_BEGIN` (§E): `co
 
 ### D.1 Forward-Scan Entry Consumption
 
-Entries in `verificationByRollup[rid].entryQueue` (or `_transientEntries` during `postAndVerifyBatch`) are consumed via the rollup's `entryQueueIndex` (or the global `_transientEntryIndex` during the transient phase — per-rollup cursors stay untouched then). Consumption is a **forward scan** from the cursor to the first entry satisfying the full match predicate (`_entryMatches`):
+Entries in `verificationByRollup[rid].entryQueue` (or `_transientEntries` during `postAndVerifyBatch`) are consumed via the rollup's `entryQueueIndex` (or the global `_transientEntryIndex` during the transient phase — per-rollup cursors stay untouched then). Consumption is a **forward scan** from the cursor through candidates satisfying the full match predicate (`_entryMatches`):
 
 ```
 entry.proxyEntryHash      == crossChainCallHash        // identity
@@ -1030,7 +1029,7 @@ entry.destinationRollupId == destRid                   // routing
 every rollupUpdates[i].currentRoot == live root         // state preconditions
 ```
 
-The cursor is then set to `matchIndex + 1`. A non-matching entry (wrong hash, wrong routing, stale state) is **skipped**, not reverted on; the scan reverts `ExecutionNotFound` only at the end of the queue. A consumed entry with `success == false` runs, verifies, then reverts with its `returnData` — rolling back the cursor advance — so it is re-callable and only drops out of reach once a later successful consumption advances past it. There is no swap-and-pop.
+Each eligible candidate runs in a self-call that advances the cursor to `matchIndex + 1`. A hash mismatch rolls the attempt back before continuing the scan. Other errors remain terminal. The first validated `success == false` outcome is delivered outside the catch, reverting with `returnData` and undoing consumption. Successful consumption commits the selected cursor. Non-matching entries do not execute; no eligible match yields `ExecutionNotFound`, while exhausted hash-mismatching candidates yield `RollingHashMismatch`. Zero-hash L2Tx entries do not retry candidates. There is no swap-and-pop.
 
 Cross-rollup independence: a stuck cursor on one rollup does not block consumption on another — each rollup's queue advances on its own. (During the transient phase the cursor is global, which is why `destinationRollupId == destRid` is load-bearing there.)
 
@@ -1362,6 +1361,8 @@ issuance/burning rule is enforced by the Solidity manager.
 
 Within one queue generation, successful consumption advances the destination rollup's cursor beyond the selected entry. A reverted consumption restores the cursor and can be retried. Each new verification resets that rollup's active bounds and cursor. Skipped entries are not executed, and later entries must still match their live root pins.
 
+**Roots prevent execution replay.** Roots commit to block history and advancing transaction nonces. Every successful entry must advance at least one pinned root, and manager updates must never restore old roots. These rollup/prover requirements keep consumed entries ineligible after re-posting, even with `bindMsgSenderInPublicInput == false`; queue cursors alone do not.
+
 ### H.4 Rolling Hash Integrity
 
 At entry validation, before clearing transient state:
@@ -1481,7 +1482,7 @@ A misbehaving destination contract that suppresses the static context would stil
 
 ### I.8 Forward Scan — No Wrong-Entry Consumption
 
-`_consumeAndExecuteEntry` advances the cursor only past an entry that fully matches — identity (`proxyEntryHash`), routing (`destinationRollupId`), and live state preconditions. A builder error or a hook error that triggers an unexpected call either skips forward to a genuine match or reverts `ExecutionNotFound` cleanly at the end of the queue. A `success == false` entry's post-verification revert rolls its cursor advance back, so the table state remains coherent across reverts within a single `postAndVerifyBatch`.
+`_consumeAndExecuteEntry` advances the cursor only past an entry that fully matches — identity (`proxyEntryHash`), routing (`destinationRollupId`), and live state preconditions. Eligible candidates must also pass execution validation in an isolated self-call. An unexpected call either reaches a validated candidate, reverts `ExecutionNotFound` if none is eligible, or reverts `RollingHashMismatch` if every eligible candidate mismatches. A `success == false` entry's post-verification revert rolls its cursor advance back, so the table state remains coherent across reverts within a single `postAndVerifyBatch`.
 
 ### I.9 Rolling Hash as Integrity Backbone
 

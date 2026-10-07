@@ -63,6 +63,7 @@ if [[ "$_CLI_ROLLUPS" != true || "$_CLI_MANAGER_L2" != true ]]; then
     load_network_env "${DEVNET_ENV:-}" || exit 1
 fi
 source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/settlement-target.sh"
 
 SOL="$1"; shift || { echo "Usage: network-scenario.sh <E2E.s.sol> --l1-rpc <RPC> --l2-rpc <RPC> --pk <PK> --rollups <ROLLUPS> --manager-l2 <ADDR>"; exit 1; }
 # Accept paths recorded by staged runs before scenarios/ was introduced.
@@ -78,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --rpc)          export RPC="$2"; export L1_RPC="$2"; shift 2;;
         --pk)           export PK="$2"; shift 2;;
         --rollups)      export ROLLUPS="$2"; shift 2;;
+        --eez-post-batcher) export EEZ_POST_BATCHER="$2"; shift 2;;
         --l1-rpc)       export L1_RPC="$2"; export RPC="$2"; shift 2;;
         --l2-rpc)       export L2_RPC="$2"; shift 2;;
         --manager-l2)   export MANAGER_L2="$2"; shift 2;;
@@ -601,7 +603,7 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
     _CD_DEADLINE=$(( $(date +%s) + ${L1_CALLDATA_TIMEOUT:-$_CD_DEFAULT_TIMEOUT} ))
     _CALLDATA_OK=false
     _LAST_FAIL=""
-    _REJECTED=""   # memo of non-registry candidates: skip silently on re-scan iterations
+    _REJECTED=""   # memo of rejected candidates: skip silently on re-scan iterations
     # Multi-tx triggers mined in different blocks are settled by different batches:
     # accept PARTIAL matches per candidate and require the union of matched
     # expected-entry indices over the trigger blocks' settlement txs to cover the
@@ -635,12 +637,12 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
             _BATCH_TO=""; _BATCH_BLOCK=""
             read -r _BATCH_TO _BATCH_BLOCK < <(_cand_meta "$_TX") || true
             [[ -z "$_BATCH_BLOCK" ]] && continue
-            if [[ "$_BATCH_TO" != "$(echo "$ROLLUPS" | tr '[:upper:]' '[:lower:]')" ]]; then
-                # consumption happened outside postAndVerifyBatch (e.g. a separate proxy tx)
-                echo "NOTE: candidate $_TX targets ${_BATCH_TO:-<unknown>} (not the registry) - skipped"
+            if ! _TARGET_CHECK=$(verify_settlement_target "$RPC" "$_BATCH_BLOCK" "$_BATCH_TO" "$ROLLUPS"); then
+                echo "NOTE: candidate $_TX rejected: $_TARGET_CHECK"
                 _REJECTED="$_REJECTED,$_TX"
                 continue
             fi
+            [[ -z "$_TARGET_CHECK" ]] || echo "NOTE: $_TARGET_CHECK"
             if BATCH_VERIFY=$(forge script script/e2e/scenarios/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" \
                 --fork-block-number "$((_BATCH_BLOCK))" \
@@ -709,17 +711,13 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
             FAILED=true
             [[ -n "$_LAST_FAIL" ]] && echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
             echo "L1 BATCH CALLDATA VERIFICATION FAILED (matched $(( $(tr -cd ',' <<< "$_CD_MATCHED" | wc -c) - 1 )) of ${_CD_EXPECTED:-?} expected entries across the trigger blocks' settlement txs)"
-        elif [[ "${_L1_CONTRACT:-}" == "VerifyL1SettlementTxsInRange" ]]; then
-            # Root-agnostic path: the calldata content match is the ONLY check that
-            # pins our entries to a settlement — not finding one is a failure.
-            FAILED=true
-            [[ -n "$_LAST_FAIL" ]] && echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
-            echo "L1 BATCH CALLDATA VERIFICATION FAILED (no candidate settlement tx contained the expected entries)"
-        elif [[ -z "$_LAST_FAIL" ]]; then
-            echo "NOTE: no comparable settlement tx (non-registry target or missing input) - skipping calldata comparison"
         else
+            # Both trigger directions require a posted-content match. Missing input
+            # or a rejected destination must not silently skip this check.
             FAILED=true
-            echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30
+            if [[ -n "$_LAST_FAIL" ]]; then
+                echo "$_LAST_FAIL" | grep -E "FAIL|NOTE|Error|call\[" | head -30 || true
+            fi
             echo "L1 BATCH CALLDATA VERIFICATION FAILED (no candidate settlement tx contained the expected entries)"
         fi
     fi

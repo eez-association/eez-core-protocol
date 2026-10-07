@@ -9,10 +9,11 @@
 #   bash script/e2e/run/network/sequential.sh all                # every scenario
 #
 # Endpoint URLs and PK come from the environment or optional chain.env
-# (override with DEVNET_ENV=<file>). Addresses come from L2 eez_composerInfo.
+# (override with DEVNET_ENV=<file>). Addresses come from L1_FRONT eez_composerInfo.
 # Required settings: L1_RPC L1_FRONT L2_RPC L2_FRONT PK.
 #
-# Per-scenario logs: tmp/e2e-network/<scenario>.log. Exit 1 if any scenario fails.
+# Stream progress and save per-scenario logs in tmp/e2e-network/<scenario>.log.
+# Exit 1 if any scenario or its log stream fails.
 
 set -uo pipefail
 
@@ -62,15 +63,15 @@ for sol in "${SOLS[@]}"; do
         continue
     fi
     echo "════════════ RUNNING $name ($sol) ════════════"
+    echo "Log: tmp/e2e-network/$name.log"
     if RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}" bash script/e2e/lib/network-scenario.sh "$sol" \
         --l1-rpc "$L1_RPC" --l1-front "$L1_FRONT" \
         --l2-rpc "$L2_RPC" --l2-front "$L2_FRONT" \
         --pk "$PK" --rollups "$ROLLUPS" --manager-l2 "$MANAGER_L2" \
-        > "tmp/e2e-network/$name.log" 2>&1; then
+        2>&1 | tee "tmp/e2e-network/$name.log"; then
         PASS=$((PASS+1)); echo "RESULT $name: PASS"
     else
         FAIL=$((FAIL+1)); FAILED_LIST+=("$name"); echo "RESULT $name: FAIL"
-        grep -E "DEPLOY FAILED|ERROR|VERIFICATION FAILED|missing" "tmp/e2e-network/$name.log" | head -3
         echo "  full log: tmp/e2e-network/$name.log"
     fi
 done

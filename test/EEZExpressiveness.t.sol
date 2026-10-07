@@ -85,8 +85,7 @@ contract GasSensitiveStaticRead {
     }
 }
 
-/// @notice Characterization tests: these assert current representational limitations,
-///         not desired support or acceptance by a production prover.
+/// @notice Local runtime support and remaining-limit tests, not production proof acceptance.
 contract EEZExpressivenessL2Test is BaseL2 {
     uint256 public rate;
 
@@ -146,7 +145,7 @@ contract EEZExpressivenessL2Test is BaseL2 {
         assertEq(manager.entryIndex(), 0);
     }
 
-    function test_TopLevelRevertedCallCannotReachSuccessCandidateAfterLocalWrite() public {
+    function test_TopLevelRevertedCallRetriesAfterLocalWrite() public {
         address gate = address(new RemoteRateGate());
         address proxy = manager.createCrossChainProxy(gate, REMOTE_ROLLUP_ID);
         bytes memory data = abi.encodeCall(RemoteRateGate.run, ());
@@ -171,16 +170,9 @@ contract EEZExpressivenessL2Test is BaseL2 {
 
         rate = 2;
         (ok, result) = proxy.call(data);
-        assertFalse(ok, "matching reverted row blocks the success candidate");
-        assertEq(result, abi.encodeWithSelector(EEZBase.RollingHashMismatch.selector));
-        assertEq(manager.entryIndex(), 0);
-
-        // The success candidate itself is valid for rate 2. Removing the earlier row
-        // makes it reachable, but a table reload cannot happen inside the original flow.
-        _loadSingle(entries[1]);
-        (ok, result) = proxy.call(data);
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(2)));
+        assertEq(manager.entryIndex(), 2);
     }
 
     function test_NestedRevertedCallCannotReachSuccessCandidateAfterLocalWrite() public {
@@ -225,7 +217,7 @@ contract EEZExpressivenessL2Test is BaseL2 {
         assertEq(caller.rate(), 2);
     }
 
-    function test_ParentRevertMakesSuccessfulCallRetryReuseOldRow() public {
+    function test_ParentRevertAllowsSuccessfulCallRetryAfterLocalWrite() public {
         address remote = address(new RemoteRateEcho());
         bytes memory data = abi.encodeCall(RemoteRateEcho.run, ());
         rate = 1;
@@ -254,12 +246,9 @@ contract EEZExpressivenessL2Test is BaseL2 {
         assertEq(manager.entryIndex(), 0, "parent revert undoes a successful consumption");
         rate = 2;
         (ok, result) = proxy.call(data);
-        assertFalse(ok);
-        assertEq(result, abi.encodeWithSelector(EEZBase.RollingHashMismatch.selector));
-        _loadSingle(entries[1]);
-        (ok, result) = proxy.call(data);
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(2)));
+        assertEq(manager.entryIndex(), 2);
     }
 
     function expensiveRate() external view returns (uint256) {
@@ -276,7 +265,7 @@ contract EEZExpressivenessL2Test is BaseL2 {
         uint256 beforeGas = gasleft();
         (bool ok, bytes memory result) = address(this).staticcall(abi.encodeCall(this.expensiveRate, ()));
         uint64 callbackGas = uint64(beforeGas - gasleft() + 20_000);
-        uint64 quoteGas = callbackGas + 60_000;
+        uint64 quoteGas = callbackGas + 100_000; // dispatch + EIP-150 headroom; still less than two callbacks
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(1)));
 
@@ -405,7 +394,7 @@ contract EEZExpressivenessL1Test is Base {
         assertEq(_getRollupState(r.id), bytes32(0));
     }
 
-    function test_TopLevelRevertedCallCannotReachSuccessCandidateAfterLocalWrite() public {
+    function test_TopLevelRevertedCallRetriesAfterLocalWrite() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         address gate = address(new RemoteRateGate());
         address proxy = rollups.createCrossChainProxy(gate, uint64(r.id));
@@ -435,16 +424,9 @@ contract EEZExpressivenessL1Test is Base {
         assertEq(_getRollupState(r.id), bytes32(0));
         rate = 2;
         (ok, result) = proxy.call(data);
-        assertFalse(ok);
-        assertEq(result, abi.encodeWithSelector(EEZBase.RollingHashMismatch.selector));
-        assertEq(_getRollupState(r.id), bytes32(0));
-
-        ExecutionEntry[] memory replacement = new ExecutionEntry[](1);
-        replacement[0] = entries[1];
-        _postBatchOne(r, replacement, _emptyStaticEntries(), 0, 0);
-        (ok, result) = proxy.call(data);
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(2)));
+        assertEq(_getRollupState(r.id), entries[1].rollupUpdates[0].newRoot);
     }
 
     function test_NestedRevertedCallCannotReachSuccessCandidateAfterLocalWrite() public {
@@ -483,7 +465,7 @@ contract EEZExpressivenessL1Test is Base {
         assertEq(caller.rate(), 2);
     }
 
-    function test_ParentRevertMakesSuccessfulCallRetryReuseOldRow() public {
+    function test_ParentRevertAllowsSuccessfulCallRetryAfterLocalWrite() public {
         RollupHandle memory r = _makeRollup(bytes32(0));
         address remote = address(new RemoteRateEcho());
         address proxy = rollups.createCrossChainProxy(remote, uint64(r.id));
@@ -510,13 +492,8 @@ contract EEZExpressivenessL1Test is Base {
         assertEq(_getRollupState(r.id), bytes32(0), "parent revert restores the original root");
         rate = 2;
         (ok, result) = proxy.call(data);
-        assertFalse(ok);
-        assertEq(result, abi.encodeWithSelector(EEZBase.RollingHashMismatch.selector));
-        ExecutionEntry[] memory replacement = new ExecutionEntry[](1);
-        replacement[0] = entries[1];
-        _postBatchOne(r, replacement, _emptyStaticEntries(), 0, 0);
-        (ok, result) = proxy.call(data);
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(2)));
+        assertEq(_getRollupState(r.id), entries[1].rollupUpdates[0].newRoot);
     }
 }

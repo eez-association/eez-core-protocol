@@ -295,28 +295,32 @@ Networks without the method (-32601 / no answer) keep today's range scans;
 `eez_…: unrecognised response shape: {…}` and falls back — pin the exact keys
 in `eez_settlement_by_l2_block` / `eez_l2_ranges_by_l1_block` once seen.
 
-## Verify contracts on the devnet explorer from tx hashes
+## Verify contracts from tx hashes
 
-`script/tools/verify-from-txs.sh` traces the given txs (callTracer), collects
-every call target with code, dedupes by runtime codehash, matches each unique code
-against the repo's `out/` artifacts (immutables masked; falls back to a compare that
-ignores the trailing solc metadata hash), then submits the matches with
-`forge verify-contract --verifier blockscout`.
+`script/tools/verify-from-txs.sh` traces transactions, matches contracts to local
+artifacts, and verifies them on Etherscan (`-m`, mainnet only) or Blockscout.
+The RPC must support `debug_traceTransaction` with `callTracer`.
+
+For mainnet, export `MAINNET_PROVIDER` and `ETHERSCAN_API_KEY`, or load them with
+`-E <env-file>` (relative to your current directory; overrides exported values).
+No env file loads automatically. `-r` overrides the RPC; `-n` traces and matches
+without submitting or requiring an API key. Use `-f hashes.txt` to read tx hashes
+from a file.
 
 ```bash
-# L1 (RPC 19545, Blockscout BACKEND 34556 — the browsable frontend 34557 cannot verify)
-bash script/tools/verify-from-txs.sh -r http://83.52.86.125:19545 -e http://83.52.86.125:34556 <txhash> [...]
+# Mainnet / Etherscan (add -n for a dry run)
+bash script/tools/verify-from-txs.sh -m -E chain.env2 <txhash>
 
-# L2 (RPC 19546, backend 34560; frontend 34561), hashes from a file
+# Devnet L1 / Blockscout (use the backend, not the frontend)
+bash script/tools/verify-from-txs.sh -r http://83.52.86.125:19545 -e http://83.52.86.125:34556 <txhash>
+
+# Devnet L2 / Blockscout, hashes from a file
 bash script/tools/verify-from-txs.sh -r http://83.52.86.125:19546 -e http://83.52.86.125:34560 -f hashes.txt
-
-# Dry run: trace + identify only, no submissions
-bash script/tools/verify-from-txs.sh -n -r <rpc> -e <api> <txhash>
 ```
 
-Contracts whose deployed bytecode no longer matches the working tree (e.g. EEZ after
-local bytecode changes) are reported as NO_MATCH — verify those from the commit that
-deployed them.
+Blockscout verification includes a fallback for genesis predeploys, whose bytecode
+must already be indexed. `NO_MATCH` means no local artifact matches; retry from
+the commit that deployed the contract.
 
 ## Caveats
 

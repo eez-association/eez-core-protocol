@@ -35,6 +35,18 @@ bash -c 'printf "%s\n" "$ROLLUPS" "$MANAGER_L2" "$PK" "$L1_RPC" "$L2_RPC"'
                                                        "fake-key", "l1", "l2"])
         self.assertIn("ROLLUPS=stale", self.env_file.read_text())
 
+    def test_batcher_setting_from_env_file_is_exported_to_workers(self):
+        batcher = "0x" + "b" * 40
+        with self.env_file.open("a") as f:
+            f.write(f"\nEEZ_POST_BATCHER={batcher}\n")
+        result = self.run_bash('''
+source "$1"
+load_network_config "$2" || exit 1
+bash -c 'printf "%s" "$EEZ_POST_BATCHER"'
+''', E2E / "lib/network-config.sh", self.env_file)
+        self.assert_ok(result)
+        self.assertEqual(result.stdout, batcher)
+
     def test_each_chain_mismatch_stops_without_exporting_configuration(self):
         for url in ("l1", "l2"):
             with self.subTest(url=url):
