@@ -119,7 +119,7 @@ abstract contract EEZBase is IEEZ {
     error UnauthorizedProxy();
 
     /// @notice Error when a self-call-only entry point (`executeInContextAndRevert`,
-    ///         L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
+    ///         `_attemptExecuteEntry`, L1's `_attemptExecuteImmediateL2Txs`) is called by an external address
     error NotSelf();
 
     /// @notice Error when no matching execution entry exists for the call hash
@@ -322,6 +322,18 @@ abstract contract EEZBase is IEEZ {
             rollingHash := mload(ptr)
             reentrantConsumed := mload(add(ptr, 32))
         }
+    }
+
+    /// @notice Deliver an already validated candidate's cached outcome.
+    /// @dev Called outside the candidate self-call's catch: arbitrary application revert data,
+    ///      including RollingHashMismatch(), must never trigger another validation attempt.
+    function _returnOrRevert(bool success, bytes memory returnData) internal pure returns (bytes memory) {
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+        return returnData;
     }
 
     /// @notice Content-addressed position key for a row of the unified reentrant table (L1's
