@@ -60,6 +60,7 @@ cast() {
     if [[ "$1" != rpc ]]; then "$REAL_CAST" "$@"; return; fi
     case "$3:$4" in
         front2:eth_getTransactionReceipt) cat "$RUN_DIR/l2.json" ;;
+        direct2:eth_getTransactionReceipt) cat "$RUN_DIR/l2.json" ;;
         direct2:eez_getSettlementByL2Block) cat "$RUN_DIR/correlation.json" ;;
         10:--rpc-url) [[ "$5:$6" == direct2:eez_getCrossChainTransaction ]] || return 94; cat "$RUN_DIR/composer.json" ;;
         direct1:eth_getTransactionReceipt)
@@ -98,7 +99,8 @@ cast() {
             elif [[ "$*" == *eth_getBlockByNumber* ]]; then
                 echo '{"hash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}'
             elif [[ "$*" == *eth_getTransactionReceipt* ]]; then
-                if [[ "$*" == *front2* ]]; then
+                if [[ "${HIDE_FRONT_RECEIPT:-0}" == 1 && "$*" == *front2* ]]; then echo null; return; fi
+                if [[ "$*" == *front2* || "$*" == *direct2* ]]; then
                     jq -n --arg hash "$(cat "$RUN_DIR/deploy-l1-via-l2.hash")" --arg owner "$WALLET" '{status:"0x1",transactionHash:$hash,from:$owner,to:"0x4444444444444444444444444444444444444444",blockNumber:"0x20",blockHash:"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}'
                 else
                     echo '{"status":"0x1","transactionHash":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","blockNumber":"0x64","blockHash":"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}'
@@ -165,6 +167,38 @@ class AuditRegressions(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("reconcile", result.stderr)
             self.assertFalse((Path(d) / "calls").exists())
+
+    def test_status_uses_direct_receipt_when_front_is_missing_or_unavailable(self):
+        for front in ("echo null", "return 42"):
+            with self.subTest(front=front), tempfile.TemporaryDirectory() as d:
+                self.fixture(Path(d))
+                mock = STATUS_MOCK.replace(
+                    'front2:eth_getTransactionReceipt) cat "$RUN_DIR/l2.json" ;;',
+                    f'front2:eth_getTransactionReceipt) {front} ;;')
+                result = self.run_shell(d, mock, "status")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Verified:", result.stdout)
+                self.assertTrue((Path(d) / "trigger.receipt.json").exists())
+
+    def test_status_rejects_reverted_direct_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            files = self.fixture(Path(d))
+            files["l2.json"]["status"] = "0x0"
+            (Path(d) / "l2.json").write_text(json.dumps(files["l2.json"]))
+            mock = STATUS_MOCK.replace(
+                'front2:eth_getTransactionReceipt) cat "$RUN_DIR/l2.json" ;;',
+                'front2:eth_getTransactionReceipt) echo null ;;')
+            result = self.run_shell(d, mock, "status")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("L2 trigger reverted", result.stderr)
+            self.assertNotIn("Verified:", result.stdout)
+
+    def test_create2_path_uses_direct_receipt_when_front_hides_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.run_shell(d, CREATE2_MOCK, "HIDE_FRONT_RECEIPT=1\ndeploy_l1_via_l2")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((Path(d) / "deploy-l1.done").exists())
+            self.assertEqual((Path(d) / "calls").read_text().splitlines(), ["SEND front2"])
 
     def test_unmined_trigger_uses_composer_lifecycle(self):
         cases = [

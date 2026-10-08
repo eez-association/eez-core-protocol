@@ -122,8 +122,9 @@ The cross-chain trigger follows `script/e2e/lib/E2EBase.sh`:
   are checked before sending.
 - A local copy of the E2E `_send_raw_tx` helper submits **only to `L2_FRONT`**. No direct
   L2 RPC fallback is used. `L1_FRONT` supplies composer metadata, not this trigger.
-- `status` looks up the L2 receipt through `L2_FRONT`. It reports pending if the
-  composer has not included the transaction; it never automatically resends it.
+- `status` looks up the L2 receipt through `L2_FRONT`, falling back to `L2_RPC`
+  when the front has no receipt or is unavailable. The remote deployment wait
+  uses the same fallback. Receipt lookups never resend transactions.
 
 The default gas-cost budget is 0.002 ETH per transaction, configurable with
 `BALANCER_MAX_FEE_WEI`. Both deployments and the trigger bind that budget to the

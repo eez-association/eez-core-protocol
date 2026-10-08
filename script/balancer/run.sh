@@ -228,7 +228,7 @@ deploy_l1_via_l2() {
         echo "L1 CREATE2 deployment submitted through L2_FRONT: $hash"
     fi
     hash=$(cat "$RUN_DIR/deploy-l1-via-l2.hash")
-    receipt=$(wait_receipt "$L2_FRONT" "$hash")
+    receipt=$(wait_receipt "$L2_FRONT" "$hash" "$L2_RPC")
     [[ $(jq -r '.status' <<< "$receipt") == 0x1 && $(jq -r '.transactionHash' <<< "$receipt") == "$hash" ]] || fail 'Remote deployment reverted or receipt mismatched'
     [[ $(jq -r '.to | ascii_downcase' <<< "$receipt") == "${proxy,,}" ]] || fail 'Wrong remote deployment target'
     [[ $(jq -r '.from | ascii_downcase' <<< "$receipt") == "${WALLET,,}" ]] || fail 'Wrong remote deployment sender'
@@ -274,9 +274,15 @@ validate_signed() {
     [[ $(cast to-dec "$(jq -r '.gasPrice' <<< "$signed")") == "$price" ]] || fail 'Signed gas price mismatch'
 }
 wait_receipt() {
-    local rpc=$1 hash=$2 receipt deadline=$((SECONDS + ${RECEIPT_TIMEOUT:-180}))
+    local rpc=$1 hash=$2 fallback=${3:-} receipt deadline=$((SECONDS + ${RECEIPT_TIMEOUT:-180}))
     while (( SECONDS < deadline )); do
-        receipt=$(cast rpc --rpc-timeout 10 --rpc-url "$rpc" eth_getTransactionReceipt "$hash" 2>/dev/null) || return 1
+        receipt=$(cast rpc --rpc-timeout 10 --rpc-url "$rpc" eth_getTransactionReceipt "$hash" 2>/dev/null) || {
+            [[ -n "$fallback" ]] || return 1
+            receipt=null
+        }
+        if [[ "$receipt" == null && -n "$fallback" && "$fallback" != "$rpc" ]]; then
+            receipt=$(cast rpc --rpc-timeout 10 --rpc-url "$fallback" eth_getTransactionReceipt "$hash" 2>/dev/null) || return 1
+        fi
         if [[ "$receipt" != null ]]; then printf '%s\n' "$receipt"; return 0; fi
         sleep 2
     done
@@ -348,7 +354,10 @@ status() {
     [[ -f "$RUN_DIR/trigger.hash" ]] || { echo 'No trigger recorded.'; return; }
     local hash receipt executor borrower event amount token_id settlement wrapped topic zero
     hash=$(cat "$RUN_DIR/trigger.hash"); executor=$(field executor); borrower=$(field borrower)
-    receipt=$(cast rpc --rpc-url "$L2_FRONT" eth_getTransactionReceipt "$hash" 2>/dev/null)
+    receipt=$(cast rpc --rpc-url "$L2_FRONT" eth_getTransactionReceipt "$hash" 2>/dev/null) || receipt=null
+    if [[ "$receipt" == null && "$L2_RPC" != "$L2_FRONT" ]]; then
+        receipt=$(cast rpc --rpc-url "$L2_RPC" eth_getTransactionReceipt "$hash" 2>/dev/null) || receipt=null
+    fi
     if [[ "$receipt" == null ]]; then
         local details
         if ! details=$(cast rpc --rpc-timeout 10 --rpc-url "$L2_RPC" eez_getCrossChainTransaction "$hash" 2>/dev/null) || [[ "$details" == null ]]; then
