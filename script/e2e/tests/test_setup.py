@@ -36,10 +36,7 @@ bash "$1" 0.1 "$2"
         self.assertIn("RPC l1 eth_chainId", log)
         self.assertIn("RPC l2 eth_chainId", log)
         self.assertNotIn("UNEXPECTED", log)
-        factory_lines = [line for line in log.splitlines() if "0x4e59b44847b379578588920cA78FbF26c0B4956C" in line]
-        self.assertEqual(len(factory_lines), 2)
-        self.assertIn("--rpc-url l1", factory_lines[0])
-        self.assertIn("--rpc-url l2", factory_lines[1])
+        self.assertNotIn("0x4e59b44847b379578588920cA78FbF26c0B4956C", log)
         self.assertIn("ROLLUPS=stale", self.env_file.read_text())
         return log
 
@@ -55,10 +52,10 @@ bash "$1" 0.1 "$2"
         self.assertIn("disagrees", result.stderr)
         self.assertNotIn("UNEXPECTED", self.calls.read_text())
 
-    def test_funded_wallet_skips_bridge_and_checks_both_factories(self):
+    def test_funded_wallet_skips_bridge_and_factory_setup(self):
         self.assertNotIn("SEND", self.run_setup(100))
 
-    def test_bridges_only_deficit_once_before_checking_factories(self):
+    def test_bridges_only_deficit_without_factory_setup(self):
         log = self.run_setup(40)
         sends = [line for line in log.splitlines() if line.startswith("SEND")]
         self.assertEqual(len(sends), 1)

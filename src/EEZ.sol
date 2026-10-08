@@ -1142,6 +1142,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @param calls Ordered L2-to-L1 calls for this entry, nested frame, or force-revert span.
     function _processL2ToL1Calls(L2ToL1Call[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
+            // Reject this manager as a destination to prevent re-entry with an authorized proxy's identity.
+            _validateCallDestination(calls[i].targetAddress);
+
             uint256 revertNextNCalls = calls[i].revertNextNCalls;
 
             if (revertNextNCalls == 0) {
@@ -1485,6 +1488,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     function _processStaticL2ToL1Calls(L2ToL1Call[] memory calls) internal view returns (bytes32 computedHash) {
         for (uint256 i = 0; i < calls.length; i++) {
             L2ToL1Call memory l2ToL1Call = calls[i];
+
+            // Reject this manager as a destination to prevent re-entry with an authorized proxy's identity.
+            _validateCallDestination(l2ToL1Call.targetAddress);
 
             // Dispatch is read-only unconditionally, so the declared flag and value must agree,
             // and a revert span is meaningless (nothing to roll back).

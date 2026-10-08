@@ -788,7 +788,7 @@ function computeCrossChainCallHash(
 }
 ```
 
-Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
+Field order is `isStatic` → FROM (source pair) → TO (target pair) → `value` → `callGas` → `data`. `isStatic` makes a read-only call hash distinctly from an otherwise-identical state-changing one. Off-chain tooling mirrors this via `crossChainCallHash` in `script/e2e/scenarios/shared/E2EHelpers.sol` (`abi.encode` left-pads integers to 32 bytes, so uint256 rollupIds produce identical bytes to the contract's uint64 fields).
 
 Apart from L2 inbound binding, which uses `incomingCalls[0].gas`, `callGas` is `0` (`ZERO_CALL_GAS`) except calls **leaving an L2** (`EEZL2.executeCrossChainCall` and `staticCrossChainCall` — top-level and nested matching), where the folded value depends on the constructor flag `useGasLeft` (immutable `USE_GAS_LEFT`):
 
@@ -973,7 +973,7 @@ The sites differ only in the `callGas` value they fold:
 
 Under `useGasLeft = false`, outgoing hashes fold `0`; inbound binding still uses `incomingCalls[0].gas`. See §B.1 for the rationale and the `callGas` ⇄ `CrossChainCall.gas` relationship.
 
-Off-chain tooling (`script/e2e/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
+Off-chain tooling (`script/e2e/scenarios/shared/E2EHelpers.sol`): `crossChainCallHash` / `crossChainCallHashStatic` fold `callGas = 0`; `crossChainCallHashL2Out` keys L2-outgoing calls.
 
 ### C.1 Hash from `executeCrossChainCall` (L1)
 
@@ -1361,6 +1361,8 @@ issuance/burning rule is enforced by the Solidity manager.
 ### H.3 Forward-Scan Consumption
 
 Within one queue generation, successful consumption advances the destination rollup's cursor beyond the selected entry. A reverted consumption restores the cursor and can be retried. Each new verification resets that rollup's active bounds and cursor. Skipped entries are not executed, and later entries must still match their live root pins.
+
+**Roots prevent execution replay.** Roots commit to block history and advancing transaction nonces. Every successful entry must advance at least one pinned root, and manager updates must never restore old roots. These rollup/prover requirements keep consumed entries ineligible after re-posting, even with `bindMsgSenderInPublicInput == false`; queue cursors alone do not.
 
 ### H.4 Rolling Hash Integrity
 

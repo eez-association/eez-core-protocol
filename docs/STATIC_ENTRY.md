@@ -287,10 +287,10 @@ This covers four execution paths:
 
 | Resolver path | Shared candidate context | E2E scenario |
 | --- | --- | --- |
-| L1 top-level | `proxyEntryHash`, `destinationRollupId`, live `expectedRoots` | [staticLocalWrite](../script/e2e/static/L1_to_L2/staticLocalWrite/E2EStaticLocalWrite.s.sol) |
-| L2 top-level | `proxyEntryHash`, `expectedEntryIndex = 0` | [staticLocalWriteL2](../script/e2e/static/L2_to_L1/staticLocalWriteL2/E2EStaticLocalWriteL2.s.sol) |
-| L1 nested | `expectedL1toL2Hash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL1](../script/e2e/static/L2_to_L1/nestedStaticLocalWriteL1/E2ENestedStaticLocalWriteL1.s.sol) |
-| L2 nested | `expectedOutgoingHash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL2](../script/e2e/static/L1_to_L2/nestedStaticLocalWriteL2/E2ENestedStaticLocalWriteL2.s.sol) |
+| L1 top-level | `proxyEntryHash`, `destinationRollupId`, live `expectedRoots` | [staticLocalWrite](../script/e2e/scenarios/static/L1_to_L2/staticLocalWrite/E2EStaticLocalWrite.s.sol) |
+| L2 top-level | `proxyEntryHash`, `expectedEntryIndex = 0` | [staticLocalWriteL2](../script/e2e/scenarios/static/L2_to_L1/staticLocalWriteL2/E2EStaticLocalWriteL2.s.sol) |
+| L1 nested | `expectedL1toL2Hash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL1](../script/e2e/scenarios/static/L2_to_L1/nestedStaticLocalWriteL1/E2ENestedStaticLocalWriteL1.s.sol) |
+| L2 nested | `expectedOutgoingHash = keccak256(staticCallHash, hostHash)`; both rows at/after the cursor | [nestedStaticLocalWriteL2](../script/e2e/scenarios/static/L1_to_L2/nestedStaticLocalWriteL2/E2ENestedStaticLocalWriteL2.s.sol) |
 
 #### Builder and prover handling
 

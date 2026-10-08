@@ -40,23 +40,19 @@ export RPC="$L1_RPC"
 export MANAGER_L2
 export L2_RPC
 
-# 3. CREATE2 factories
-ensure_create2_factory "$L1_RPC" "L1" "$PK"
-ensure_create2_factory "$L2_RPC" "L2" "$PK"
-
-# 4. Deploy app contracts
+# 3. Deploy app contracts
 echo ""
 echo "====== Deploy App ======"
 deploy_contracts "$SOL" "$L1_RPC" "$L2_RPC" "$PK"
 
-# 5. For L2-starting tests: create signed raw tx (RLP_ENCODED_TX)
+# 4. For L2-starting tests: create signed raw tx (RLP_ENCODED_TX)
 if grep -q 'contract ExecuteNetworkL2 ' "$SOL"; then
     echo ""
     echo "====== Create Signed Transaction ======"
     build_trigger_txs "$SOL" local
 fi
 
-# 6. Execute (L2 first, then L1) — each is optional based on contract presence
+# 5. Execute (L2 first, then L1) — each is optional based on contract presence
 FAILED=false
 L2_BLOCK=""
 L1_BLOCK=""
@@ -111,11 +107,11 @@ else
     echo "====== Execute L1 (skipped — no contract Execute) ======"
 fi
 
-# 7. Decode events (only for chains that ran)
+# 6. Decode events (only for chains that ran)
 [[ -n "$L2_BLOCK" ]] && decode_block "$L2_RPC" "$L2_BLOCK" "$MANAGER_L2" "L2 "
 [[ -n "$L1_BLOCK" ]] && decode_block "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "L1 "
 
-# 8. Verify on-chain events match expected hashes from ComputeExpected.
+# 7. Verify on-chain events match expected hashes from ComputeExpected.
 #    Asserts the cryptographic tie between off-chain prediction and on-chain reality.
 #    Skipped (with a notice) if the scenario has no ComputeExpected contract.
 if grep -q 'contract ComputeExpected ' "$SOL"; then
