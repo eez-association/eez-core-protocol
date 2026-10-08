@@ -93,6 +93,26 @@ and cross-chain proxy bytecode hash. Storage compatibility still requires review
 Existing direct deployments cannot be converted in place; a new proxy has its own state
 and deterministic cross-chain proxy addresses.
 
+## Mainnet upgrade to 9744950
+
+Run from the repository root. Replace the placeholders locally; no env file is needed.
+The owner must control both ProxyAdmins and have gas funds on both chains.
+
+```bash
+bash deployment/upgrade-mainnet.sh \
+  --l1-rpc '<Ethereum mainnet RPC>' \
+  --l2-rpc '<L2 RPC for chain 696990>' \
+  --l1-manager '<L1 manager proxy address>' \
+  --l2-manager '<L2 manager proxy address>' \
+  --owner '<ProxyAdmin owner address>'
+```
+
+This simulates only. To upgrade, stop composer submissions, drain pending work,
+then rerun with `--broadcast --traffic-paused`. The runner privately prompts for
+an **0x-prefixed private key**, or uses exported `UPGRADE_PRIVATE_KEY`.
+Keep traffic paused until both upgrades verify. If interrupted, preserve and reuse
+`tmp-mainnet-upgrade-9744950/`; inspect receipts before retrying.
+
 ## Signing keys
 
 ### Recommended: import into an encrypted keystore (non-interactive)
