@@ -8,6 +8,8 @@ Smart contracts to manage synchronous rollups on Ethereum.
 
 Sync Rollups enables synchronous composability between based rollups sharing the same L1 sequencer. State transitions are pre-computed off-chain and verified on-chain by a configurable set of proof systems, enabling atomic cross-rollup calls (e.g. cross-rollup flash loans) within a single L1 block.
 
+Proofs authorize entries subject to execution checks; L1 execution determines settlement order. Deferred entries in different rollup queues can execute in either order when their checks pass. See the core protocol's [Settlement Model](docs/CORE_PROTOCOL_SPEC.md#settlement-model).
+
 Two sides:
 
 - **`src/EEZ.sol`** (L1) — registry + execution manager: per-rollup state roots and ETH accounting, multi-prover batch verification (`postAndVerifyBatch`), per-rollup execution queues, flat sequential call execution with rolling-hash integrity.
