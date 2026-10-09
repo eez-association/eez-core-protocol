@@ -312,10 +312,10 @@ from a file.
 bash script/tools/verify-from-txs.sh -m -E chain.env2 <txhash>
 
 # Devnet L1 / Blockscout (use the backend, not the frontend)
-bash script/tools/verify-from-txs.sh -r http://83.52.86.125:19545 -e http://83.52.86.125:34556 <txhash>
+bash script/tools/verify-from-txs.sh -r https://l1-rpc.example.net -e https://l1-explorer.example.net <txhash>
 
 # Devnet L2 / Blockscout, hashes from a file
-bash script/tools/verify-from-txs.sh -r http://83.52.86.125:19546 -e http://83.52.86.125:34560 -f hashes.txt
+bash script/tools/verify-from-txs.sh -r https://l2-rpc.example.net -e https://l2-explorer.example.net -f hashes.txt
 ```
 
 Blockscout verification includes a fallback for genesis predeploys, whose bytecode

@@ -9,8 +9,17 @@ The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
 Their live triggers remained unmined on 2026-10-05; the runner reports disappeared
 transactions in its final summary instead of excluding these scenarios.
 The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
-`topLevelStaticReentrantMissingProxyL2` remain **NOT READY** and excluded from
-`all` pending live validation. Explicit selections remain available.
+`topLevelStaticReentrantMissingProxyL2` are expected-rejection tests in the
+**staged network runner**. They pass only when `eez_getCrossChainTransaction`
+on `L2_RPC` reports the matching hash as terminal with `SimulationFailed` and
+an exact `executor: static callback source proxy ... is not deployed on chain ...;
+it must exist before the read` error, and neither source nor front RPC has a
+receipt. Null responses, timeouts, other errors, and mined transactions do not
+pass. Evidence is saved in each job's `composer-rejection-<hash>.json` and
+`expected-rejections.csv`; verification checks it again against live RPCs.
+`--resend` does not resend these negative tests. Local Anvil tests still exercise
+catch/create/retry recovery. These scenarios remain excluded from `all`; select
+them explicitly. Other network runners retain their successful-execution checks.
 See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
@@ -141,14 +150,14 @@ IDs come from the composer; stale addresses in an env file are replaced:
 Inspect the response without signing or sending transactions:
 
 ```bash
-bash script/e2e/lib/composer-info.sh --l1-front https://eez.dev/composer/l1
+bash script/e2e/lib/composer-info.sh --l1-front https://composer.example.net/l1
 # Load endpoints/keys and discover addresses for manual commands:
 source script/e2e/lib/network-config.sh
 load_network_config
 ```
 
-The latest live checks on 2026-10-02 confirmed that both composer fronts on
-`eez.asuscomm.com` and `eez.dev` answer `eez_composerInfo` with matching metadata
+The latest live checks on 2026-10-02 confirmed that both composer fronts in
+the checked environments answer `eez_composerInfo` with matching metadata
 within each environment. Discovery uses only `L1_FRONT`.
 The response contains no endpoint URLs, keys, or EEZ rollup IDs. Ethereum chain
 IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` still defaults to 1).

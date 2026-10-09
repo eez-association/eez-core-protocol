@@ -52,8 +52,8 @@ function parseArgs() {
     l2Rpc: "",
     rollups: "",    // auto-discovered from trace
     managerL2: "",  // auto-discovered from trace
-    l1Explorer: "https://l1.eez.dev",
-    l2Explorer: "https://l2.eez.dev",
+    l1Explorer: "https://l1-explorer.example.net",
+    l2Explorer: "https://l2-explorer.example.net",
     noExplorer: false,
     json: false,
   };

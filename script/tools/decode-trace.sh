@@ -40,8 +40,8 @@ TX_HASH=""
 LABELS_FILE=""
 NO_EXPLORER=false
 FULL_ONLY=false
-L1_EXPLORER="https://l1.eez.dev"
-L2_EXPLORER="https://l2.eez.dev"
+L1_EXPLORER="https://l1-explorer.example.net"
+L2_EXPLORER="https://l2-explorer.example.net"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

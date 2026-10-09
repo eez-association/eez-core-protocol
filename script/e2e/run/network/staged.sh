@@ -306,6 +306,72 @@ _reconcile_replacements() {  # only runs when this phase has saved attempts
     _recover_pending "$pending" "$2" --reconcile-only
 }
 
+# These two network scenarios intentionally fail composer simulation. Local
+# Anvil tests still exercise the contract's catch/create/retry behavior.
+_expects_missing_proxy_rejection() {
+    case "$1" in
+        */topLevelStaticReentrantMissingProxy/E2ETopLevelStaticReentrantMissingProxy.s.sol|*/topLevelStaticReentrantMissingProxyL2/E2ETopLevelStaticReentrantMissingProxyL2.s.sol) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_check_missing_proxy_rejection() {  # chain, hash, evidence file
+    local chain="$1" hash="$2" evidence="$3" details rpc receipt direct
+    [[ "$chain" == L1 || "$chain" == L2 ]] || return 1
+    details=$(cast rpc --rpc-timeout 10 --rpc-url "$L2_RPC" eez_getCrossChainTransaction "$hash" 2>/dev/null) || return 1
+    printf '%s\n' "$details" > "$evidence" || return 1
+    jq -e --arg hash "$hash" '
+        .hash == $hash and .lifecycle == "terminal" and
+        .ownership.state == "terminal" and .ownership.reason == "SimulationFailed" and
+        ((.ownership.rejection.error // "") | test("^executor: static callback source proxy 0x[0-9a-fA-F]{40} is not deployed on chain [0-9]+; it must exist before the read$"))
+    ' <<< "$details" >/dev/null 2>&1 || return 1
+    # A mined transaction (including a revert) is not an expected rejection.
+    [[ "$chain" == L2 ]] && direct="$L2_RPC" || direct="$L1_RPC"
+    for rpc in "$direct" "$(_front_rpc "$chain")"; do
+        receipt=$(cast rpc --rpc-timeout 10 --rpc-url "$rpc" eth_getTransactionReceipt "$hash" 2>/dev/null) || return 1
+        [[ "$receipt" == null ]] || return 1
+    done
+}
+
+_poll_expected_rejections() {  # pending.csv (trigger phase only)
+    local pending="$1" root name chain hash sol evidence
+    root=$(dirname "$pending")
+    [[ -f "$root/jobs.csv" ]] || return 0
+    while IFS=, read -r name chain hash; do
+        sol=$(awk -F, -v name="$name" '$1==name {print $2; exit}' "$root/jobs.csv")
+        _expects_missing_proxy_rejection "$sol" || continue
+        evidence="$root/jobs/$name/composer-rejection-$hash.json"
+        if _check_missing_proxy_rejection "$chain" "$hash" "$evidence"; then
+            if ! grep -qxF "$name,$chain,$hash" "$root/expected-rejections.csv" 2>/dev/null; then
+                printf '%s,%s,%s\n' "$name" "$chain" "$hash" >> "$root/expected-rejections.csv" || return 1
+            fi
+            awk -F, -v n="$name" -v c="$chain" -v h="$hash" \
+                '!($1==n && $2==c && $3==h)' "$pending" > "$pending.tmp" && mv "$pending.tmp" "$pending" || return 1
+            echo "EXPECTED REJECTION $name: $hash (static callback source proxy missing)"
+        fi
+    done < <(cat "$pending")
+}
+
+_verify_expected_rejection() {  # job name; always recheck live evidence
+    local name="$1" job chain hash count=0
+    while IFS=, read -r job chain hash; do
+        [[ "$job" == "$name" ]] || continue
+        count=$((count+1))
+        if [[ -f "$RUN_DIR/mined.csv" ]] && awk -F, -v c="$chain" -v h="$hash" \
+            '$2==c && $3==h {found=1} END {exit !found}' "$RUN_DIR/mined.csv"; then
+            echo "FAIL: $hash already has a recorded receipt"
+            return 1
+        fi
+        _check_missing_proxy_rejection "$chain" "$hash" "$RUN_DIR/jobs/$name/composer-rejection-$hash.json" || {
+            echo "FAIL: $hash is not a confirmed missing-proxy rejection (or has a receipt)"
+            return 1
+        }
+        echo "Expected composer rejection: $hash"
+    done < "$RUN_DIR/sent.csv"
+    [[ "$count" == 1 ]] || { echo "FAIL: expected exactly one sent trigger, found $count"; return 1; }
+    echo '====== Done ====== (expected missing-proxy rejection)'
+}
+
 # Keep routine receipt polling in Bash. Recovery may change a pending hash;
 # the next sweep records its receipt using the same CSV format as before.
 _remove_mined() {
@@ -348,7 +414,8 @@ _poll_pending_once() {
             _recover_pending "$pend" "$mode" --rpc-error "$chain" || return 1
         fi
     done
-    _remove_mined "$pend" "$mined"
+    _remove_mined "$pend" "$mined" || return 1
+    if [[ "$mode" == front ]]; then _poll_expected_rejections "$pend"; fi
 }
 
 _chain_counts() {  # one progress line for both chains
@@ -358,7 +425,7 @@ _chain_counts() {  # one progress line for both chains
         sent=$(awk -F, -v c="$chain" '$2==c {n++} END {print n+0}' "$2")
         if [[ -n "${3:-}" ]]; then
             pending=$(awk -F, -v c="$chain" '$2==c {n++} END {print n+0}' "$3")
-            printf ' %s: %s/%s mined (%s pending)' "$chain" "$((sent-pending))" "$sent" "$pending"
+            printf ' %s: %s/%s resolved (%s pending)' "$chain" "$((sent-pending))" "$sent" "$pending"
         else printf ' %s: %s sent' "$chain" "$sent"; fi
         [[ "$chain" != L1 ]] || printf ' |'
     done
@@ -608,6 +675,10 @@ _read_plan_inputs() {
 #  Verify phase (also the whole of --verify-only)
 # ══════════════════════════════════════════════
 _verify_launch() {  # $1=job name $2=sol $3=pk — one job's network.sh verify stage, log in its dir
+    if _expects_missing_proxy_rejection "$2"; then
+        _verify_expected_rejection "$1" > "$RUN_DIR/jobs/$1/verify.log" 2>&1
+        return $?
+    fi
     E2E_STAGE=verify E2E_JOB_DIR="$RUN_DIR/jobs/$1" E2E_SNAPSHOT="$RUN_DIR/snapshot.env" \
         E2E_L1TX_CACHE="$RUN_DIR/l1tx-cache" \
         bash script/e2e/lib/network-scenario.sh "$2" \
@@ -668,9 +739,9 @@ verify_phase() {
             PRE_FAILED+=("$name (nothing sent)"); continue
         elif (( sent_n < ${want_n:-1} )); then   # a send failure mid-job is an orchestration failure, not a protocol one
             PRE_FAILED+=("$name (partial send: $sent_n of ${want_n:-1} trigger tx(s) went out - see send-failed.log)"); continue
-        elif [[ -f "$RUN_DIR/pending.csv" ]] && grep -q "^$name," "$RUN_DIR/pending.csv"; then
+        elif ! _expects_missing_proxy_rejection "$sol" && [[ -f "$RUN_DIR/pending.csv" ]] && grep -q "^$name," "$RUN_DIR/pending.csv"; then
             PRE_FAILED+=("$name (trigger tx never mined - see pending.csv)"); continue
-        elif [[ "${SKIP_VERIFIED:-0}" == "1" ]] && grep -q "^====== Done ======" "$dir/verify.log" 2>/dev/null; then
+        elif ! _expects_missing_proxy_rejection "$sol" && [[ "${SKIP_VERIFIED:-0}" == "1" ]] && grep -q "^====== Done ======" "$dir/verify.log" 2>/dev/null; then
             SKIPPED_OK=$((SKIPPED_OK+1)); continue   # already passed in an earlier verify pass
         fi
         while (( $(jobs -rp | wc -l) >= VERIFY_PARALLEL )); do sleep 2; done
@@ -842,7 +913,7 @@ while IFS=, read -r _name _sol; do
     # in mined.csv) is put back on the send list — its raw txs are unchanged and their
     # nonces unused. The old hashes are archived per attempt; their rows leave
     # sent.csv so the monitor does not wait on them again.
-    if $RESEND && [[ -s "$_jd/txs.txt" ]] && ! grep -qFf "$_jd/txs.txt" "$RUN_DIR/mined.csv" 2>/dev/null; then
+    if $RESEND && ! _expects_missing_proxy_rejection "$_sol" && [[ -s "$_jd/txs.txt" ]] && ! grep -qFf "$_jd/txs.txt" "$RUN_DIR/mined.csv" 2>/dev/null; then
         mv "$_jd/txs.txt" "$_jd/txs.txt.attempt$ATTEMPT"
         [[ -f "$RUN_DIR/sent.csv.attempt$ATTEMPT" ]] || cp "$RUN_DIR/sent.csv" "$RUN_DIR/sent.csv.attempt$ATTEMPT"
         grep -v "^$_name," "$RUN_DIR/sent.csv" > "$RUN_DIR/sent.csv.tmp" || true

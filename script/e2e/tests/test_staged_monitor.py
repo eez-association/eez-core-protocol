@@ -17,7 +17,8 @@ def function(name):
 
 
 FUNCTIONS = "\n".join(function(name) for name in (
-    "_remove_mined", "_poll_pending_once", "_chain_counts", "_monitor_files"))
+    "_expects_missing_proxy_rejection", "_check_missing_proxy_rejection",
+    "_poll_expected_rejections", "_remove_mined", "_poll_pending_once", "_chain_counts", "_monitor_files"))
 DEFAULT = re.search(r'^MAX_MONITOR_WAIT=.*$', RUNNER, re.M).group()
 
 
@@ -114,7 +115,7 @@ _monitor_files sent.csv mined.csv pending.csv "${RECOVERY_INTERVAL:-2}" "$MODE" 
     def test_both_chains_share_one_progress_line(self):
         result, _ = self.run_monitor()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("[trigger] L1: 1/1 mined (0 pending) | L2: 1/1 mined (0 pending)", result.stdout)
+        self.assertIn("[trigger] L1: 1/1 resolved (0 pending) | L2: 1/1 resolved (0 pending)", result.stdout)
 
     def test_rejected_transactions_stop_without_rebroadcast(self):
         result, files = self.run_monitor(MINE_AT=999, REJECTED=1)
