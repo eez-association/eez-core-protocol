@@ -116,7 +116,7 @@ bash script/e2e/run/network/staged.sh all:1
 PREPARE_PARALLEL=200 bash script/e2e/run/network/staged.sh --no-verify all:5
 bash script/e2e/run/network/load-testing.sh --workers 50 --txs-per-wallet 100 --window 10 counter
 
-# Current automatic selection: 34 of 40 scenarios (six carry exclusion markers)
+# Automatic selection omits scenarios carrying E2E_EXCLUDE_FROM_ALL
 bash script/e2e/run/network/staged.sh all:1
 
 # One scenario, or a few

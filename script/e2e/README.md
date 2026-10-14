@@ -97,7 +97,7 @@ helpers. Network mode needs a test-only key (see step 1).
 ## Local mode (no setup)
 
 ```bash
-bash script/e2e/run/local/parallel.sh              # default selection (34 scenarios; six explicitly excluded)
+bash script/e2e/run/local/parallel.sh              # default selection (omits E2E_EXCLUDE_FROM_ALL scenarios)
 bash script/e2e/run/local/parallel.sh one_way      # one category
 bash script/e2e/run/local/parallel.sh counter bridge
 ```
@@ -225,7 +225,7 @@ cast logs --rpc-url "$L1_RPC" --from-block $((LATEST-100)) --to-block $LATEST --
 bash script/e2e/run/network/sequential.sh one_way              # category
 bash script/e2e/run/network/sequential.sh counter              # single scenario
 bash script/e2e/run/network/sequential.sh counter bridge       # scenarios
-bash script/e2e/run/network/sequential.sh all                  # default selection (34 scenarios; six explicitly excluded)
+bash script/e2e/run/network/sequential.sh all                  # default selection (omits E2E_EXCLUDE_FROM_ALL scenarios)
 DEVNET_ENV=other.env bash script/e2e/run/network/sequential.sh one_way
 ```
 
