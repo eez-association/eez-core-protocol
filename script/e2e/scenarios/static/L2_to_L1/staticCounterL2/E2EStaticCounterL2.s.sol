@@ -308,6 +308,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticCounterL2Actions {
         console.log("EXPECTED_L2_HASHES=[]");
         console.log("");
         console.log("=== EXPECTED L2 STATIC POOL (1 entry, no events) ===");
+        _printL2StaticTable(_staticEntries(counterL1Addr, readerL2Addr));
         _logStaticLookup(0, _staticEntries(counterL1Addr, readerL2Addr)[0]);
     }
 }

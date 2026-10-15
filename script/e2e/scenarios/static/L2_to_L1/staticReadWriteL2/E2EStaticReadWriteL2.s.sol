@@ -262,6 +262,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticReadWriteL2Actions {
         _printL2Table(l2);
         _logL2Entry(0, l2[0]);
         StaticExecutionEntryL2[] memory statics = _l2Statics(counter, reader);
+        _printL2StaticTable(statics);
         for (uint256 i; i < statics.length; i++) {
             _logStaticLookup(i, statics[i]);
         }

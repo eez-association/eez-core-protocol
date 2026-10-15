@@ -52,6 +52,18 @@ an `E2E_EXCLUDE_FROM_ALL` marker; remove it only when the scenario is ready.
 Explicit names and category selections still include them; use explicit local
 runs for development. See the [scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
 
+Network verification uses exact composer transaction links by default, including
+full L2 static-table checks. See [transaction roles and compatibility modes](RPC.md#eez_getcrosschaintransaction)
+and [saved verification evidence](RUNNER_GUIDE.md#exact-transaction-links).
+
+The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
+validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
+and default local runs; named scenarios and category selections remain available.
+
+### L2 trigger fees
+
+Follow the mandatory [L2 trigger quote and recovery rules](RPC.md#eez_quotefee).
+
 ## Script layout
 
 ```text
@@ -63,7 +75,9 @@ script/
     run/local/      parallel.sh
     lib/            shared shell helpers, composer discovery, staged recovery
     tests/          network configuration, evidence, settlement and recovery regression tests
-    COMMANDS.md     command examples
+    COMMANDS.md     short command list
+    RUNNER_GUIDE.md detailed examples, funding, recovery and verification
+    RPC.md          composer RPC methods, inputs and responses
   tools/            block/trace decoding and explorer verification
   DeployBridge.s.sol  shared deployment utility used beyond E2E
 ```
@@ -334,7 +348,8 @@ verification under the original deadline. A stable semantic mismatch fails.
 When the fronts do not support correlation (`-32601`), or
 `E2E_CORRELATION=off`, pre-trigger snapshots bound the existing content scans.
 Index catch-up and transport failures do not silently disable correlation.
-See [the RPC and retry flow](COMMANDS.md#settlement-correlation-rpc-eez_getsettlementbyl2block--co).
+See the [RPC reference](RPC.md) and
+[detailed verification flow](RUNNER_GUIDE.md#settlement-correlation-rpc-eez_getsettlementbyl2block--co).
 
 ## What a network run verifies
 

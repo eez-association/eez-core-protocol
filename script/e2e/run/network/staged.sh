@@ -3,7 +3,7 @@
 # them, so thousands of transactions can be in flight while the local machine
 # only runs a handful of lightweight workers. The heavy lifting (forge scripts)
 # is confined to the prepare and verify phases, each with its own concurrency
-# cap; the send phase is pure curl.
+# cap; L2 sending obtains a fresh composer quote before signing and submission.
 #
 # Phases:
 #   1. fund     — one pooled wallet per job via the run faucet + MultiSend
@@ -17,16 +17,13 @@
 #                 for a block. ALL deploy txs are then fired at
 #                 once by the curl workers, mined with ONE wait, a batched
 #                 eth_getCode pass asserts every predicted address holds code, and
-#                 version-2 manifests are already complete. The finish step is
-#                 retained only for waves mode and version-1/incomplete resumes.
-#                 PREPARE_MODE=waves = per Deploy-contract dry-run waves against the
-#                 real RPCs, mined one wave at a time (E2E_PREPARE_STEP=deploy:<k>,
-#                 then finish); PREPARE_MODE=classic = per-job forge deploys.
+#                 version-2 manifests are already complete.
+#                 PREPARE_MODE=classic uses per-job forge deployments instead.
 #                 Every prepare launch is bounded by PREPARE_JOB_TIMEOUT (a hung
 #                 forge run drops its job; the run goes on).
 #   3. snapshot — one L1+L2 block snapshot bounds every job's verification scans.
-#   4. send     — SEND_WORKERS curl-only workers publish the pre-signed raw txs
-#                 fire-and-forget and record job,chain,txhash in sent.csv.
+#   4. send     — publish prepared L1 triggers; quote/sign L2 triggers through
+#                 the composer after deployment, then record hashes in sent.csv.
 #   5. monitor  — batch-poll receipts per chain until everything is mined;
 #                 every 60s inspect pool/fees and recover stuck transactions.
 #                 Results in mined.csv; MAX_MONITOR_WAIT bounds waiting (300s maximum).
@@ -58,14 +55,14 @@
 #                    SEND_PAUSE / --workers to avoid the burst that lost them
 #
 # Env knobs:
-#   PREPARE_MODE      plan (default) | waves | classic — see phase 2 above
+#   PREPARE_MODE      plan (default) | classic — see phase 2 above
 #   DEPLOY_MINE_TIMEOUT  seconds between deploy recovery checks (default 60)
 #   PREPARE_PARALLEL  concurrent prepare jobs (default 40)
-#   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / wave / finish /
-#                     classic) may run before its job is dropped (default 300)
+#   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / classic) may run before its job is dropped (default 300)
 #   SEND_WORKERS      send workers (default 80; --workers overrides)
 #   SEND_RETRIES      attempts per raw-tx send when the RPC gives no answer at
-#                     all (default 3; JSON-RPC errors are never retried)
+#                     all (default 3). Explicit L2 reconciliation refusals instead
+#                     get a fresh quote under EEZ_QUOTE_TIMEOUT.
 #   SEND_PAUSE        seconds each send worker sleeps after every trigger it
 #                     fires (default 0 = burst); the effective rate is
 #                     SEND_WORKERS / SEND_PAUSE tx/s, e.g. --workers 5 with
@@ -82,10 +79,10 @@
 #   parallel.sh.
 #
 # Run dir: tmp/e2e-staged-net/<ts>/ — jobs.csv, wallets.csv, snapshot.env,
-# timings.csv (run phases per attempt) / job-timings.csv (per-job plan / finish
+# timings.csv (run phases per attempt) / job-timings.csv (per-job plan / prepare
 # / verify durations; schema in orchestrator.sh),
 # deploy-sent.csv / deploy-mined.csv, sent.csv, mined.csv, pending.csv (still
-# unmined), recovery.log and deploy-sent*.replacements.json / sent.replacements.json,
+# unmined), recovery.log and deploy-sent.replacements.json / sent.replacements.json,
 # send-notes.log (duplicate sends recovered on resume),
 # jobs/<job>/{prepare.log, deploy-env.env, deploy-addrs.txt, deploytxs.txt,
 # deploy-hashes.txt, .deploys-done, manifest.env, rawtxs.txt, compute.out,
@@ -100,16 +97,30 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
+_check_prepare_mode() {
+    PREPARE_MODE="${PREPARE_MODE:-plan}"
+    case "$PREPARE_MODE" in
+        plan|classic) ;;
+        *) echo "Unsupported PREPARE_MODE: $PREPARE_MODE (plan | classic)" >&2; return 1 ;;
+    esac
+}
+_check_prepare_mode || exit 1
+source "$SCRIPT_DIR/../../lib/orchestrator.sh"
 source "$SCRIPT_DIR/../../lib/network-config.sh"
+source "$SCRIPT_DIR/../../lib/network-fees.sh"
 # Resume must work even if discovery is unavailable or the deployment changed.
 _CONFIG_SNAPSHOT=""
 _CONFIG_ARGS=("$@")
 for ((i=0; i<${#_CONFIG_ARGS[@]}; i++)); do
     case "${_CONFIG_ARGS[i]}" in
-        --resume|--resend|--verify-only) _CONFIG_SNAPSHOT="${_CONFIG_ARGS[i+1]:-}" ;;
+        --resume|--resend)
+            _CONFIG_SNAPSHOT="${_CONFIG_ARGS[i+1]:-}"
+            _check_resume_manifests "$_CONFIG_SNAPSHOT" || exit 1 ;;
+        --verify-only) _CONFIG_SNAPSHOT="${_CONFIG_ARGS[i+1]:-}" ;;
     esac
 done
 load_network_config "${DEVNET_ENV:-}" "$_CONFIG_SNAPSHOT" || exit 1
+_check_prepare_mode || exit 1  # DEVNET_ENV may also configure preparation.
 DEVNET_ENV="${DEVNET_ENV:-chain.env}"
 for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2; do
     [[ -n "${!var:-}" ]] || { echo "Missing $var (check $DEVNET_ENV)"; exit 1; }
@@ -162,7 +173,6 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
 done
 FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
 
-source "$SCRIPT_DIR/../../lib/orchestrator.sh"
 
 # A run is bound to the network it was prepared on: its pre-signed txs carry
 # that chain's nonces and contract addresses. Fresh runs record the resolved
@@ -223,7 +233,8 @@ _rpc_send_raw() {  # $1=rpc $2=raw signed tx → accepted hash on stdout
     # Transport failures (no HTTP answer at all: timeout, reset, empty body) are
     # retried SEND_RETRIES times: a resend is idempotent — a node that did take
     # the tx answers "already known" (or a nonce-taken error, resolved below by
-    # hash lookup). JSON-RPC errors are never retried.
+    # hash lookup). This transport does not retry JSON-RPC errors; the L2 fee
+    # helper may obtain a fresh quote after a definite reconciliation refusal.
     for ((attempt = 1; attempt <= ${SEND_RETRIES:-3}; attempt++)); do
         out=$(curl -s --max-time 15 -X POST "$1" -H 'Content-Type: application/json' \
             -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendRawTransaction\",\"params\":[\"$2\"]}") \
@@ -262,6 +273,7 @@ _rpc_send_raw() {  # $1=rpc $2=raw signed tx → accepted hash on stdout
             echo "$out" >&2; return 1
         fi
     fi
+    [[ "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]] || { echo 'Invalid transaction hash returned by submission' >&2; return 1; }
     echo "$hash"
 }
 _rpc_has_tx() {  # $1=rpc $2=tx hash → 0 when the node knows the tx (pending or mined)
@@ -488,73 +500,70 @@ _monitor_files() {
 }
 
 # ══════════════════════════════════════════════
-#  Deploy-tx helpers shared by the plan and wave prepare modes
+#  Plan deployment helpers
 # ══════════════════════════════════════════════
-# Per-job files: deploytxs<sfx>.txt ("<L1|L2> <rawtx>" lines, nonce order) and
-# deploy-hashes<sfx>.txt (one accepted hash per sent line — a resumed fire
-# continues after them, so nothing is ever sent twice). Run files:
-# deploy-sent<sfx>.csv / deploy-mined<sfx>.csv / deploy-pending<sfx>.csv.
-# sfx is "" (plan mode: one batch) or "-wave<k>". A job holding .deploys-done
-# has nothing left to fire.
+# Per-job deploytxs.txt contains "<L1|L2> <rawtx>" lines in nonce order.
+# deploy-hashes.txt records accepted hashes; resume sends only the remaining
+# lines. Run journals are deploy-sent.csv, deploy-mined.csv and deploy-pending.csv.
 
 # ── Fire every live job's pending deploy txs with the curl workers ──
 # Deploys go to the normal RPCs, never the fronts (fronts swallow ordinary txs).
 # A job whose send fails is dropped: its remaining txs would collide.
-_fire_deploy_txs() {  # $1=sfx
-    local sfx="$1" w pids=()
-    touch "$RUN_DIR/deploy-sent$sfx.csv"
-    : > "$RUN_DIR/deploy-send-failed$sfx.txt"
+_fire_deploy_txs() {
+    local w pids=()
+    touch "$RUN_DIR/deploy-sent.csv"
+    : > "$RUN_DIR/deploy-send-failed.txt"
     for ((w = 0; w < SEND_WORKERS; w++)); do
         (
             local j name dir f chain raw rpc hash done_n
             for ((j = w; j < NJOBS; j += SEND_WORKERS)); do
-                name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"; f="$dir/deploytxs$sfx.txt"
+                name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"; f="$dir/deploytxs.txt"
                 [[ "$DEAD" == *",$name,"* ]] && continue
                 [[ -s "$f" && ! -f "$dir/.deploys-done" ]] || continue
                 done_n=0
-                [[ -f "$dir/deploy-hashes$sfx.txt" ]] && done_n=$(wc -l < "$dir/deploy-hashes$sfx.txt")
-                touch "$dir/deploy-hashes$sfx.txt"
+                [[ -f "$dir/deploy-hashes.txt" ]] && done_n=$(wc -l < "$dir/deploy-hashes.txt")
+                touch "$dir/deploy-hashes.txt"
                 while IFS=' ' read -r chain raw; do
                     [[ -n "$raw" ]] || continue
                     [[ "$chain" == "L2" ]] && rpc="$L2_RPC" || rpc="$L1_RPC"
                     if ! hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log"); then
                         echo "DEPLOY SEND FAILED: $name ($chain)" >> "$RUN_DIR/send-failed.log"
-                        echo "$name" >> "$RUN_DIR/deploy-send-failed$sfx.txt"   # parent marks it dead
+                        echo "$name" >> "$RUN_DIR/deploy-send-failed.txt"   # parent marks it dead
                         break
                     fi
-                    echo "$hash" >> "$dir/deploy-hashes$sfx.txt"
-                    echo "$name,$chain,$hash" >> "$RUN_DIR/deploy-sent$sfx.csv"
+                    echo "$hash" >> "$dir/deploy-hashes.txt"
+                    echo "$name,$chain,$hash" >> "$RUN_DIR/deploy-sent.csv"
                 done < <(tail -n +$((done_n + 1)) "$f")
             done
         ) &
         pids+=($!)
     done
     wait "${pids[@]}"   # the senders only
-    _chain_counts deploy "$RUN_DIR/deploy-sent$sfx.csv"
+    _chain_counts deploy "$RUN_DIR/deploy-sent.csv"
     local name
     while read -r name; do
         [[ -n "$name" ]] && _prep_failed "$name" "deploy tx not sent - see send-failed.log"
-    done < "$RUN_DIR/deploy-send-failed$sfx.txt"
+    done < "$RUN_DIR/deploy-send-failed.txt"
 }
 
 # ── Wait for the fired deploy txs; drop jobs whose txs never mined or reverted ──
-_mine_deploy_txs() {  # $1=sfx
-    local sfx="$1" name chain hash blk status
-    [[ -s "$RUN_DIR/deploy-sent$sfx.csv" ]] || return 0
+_mine_deploy_txs() {
+    local name chain hash blk status
+    [[ -s "$RUN_DIR/deploy-sent.csv" ]] || return 0
     local deploy_interval="$DEPLOY_POLL_INTERVAL"
-    _monitor_files "$RUN_DIR/deploy-sent$sfx.csv" "$RUN_DIR/deploy-mined$sfx.csv" \
-        "$RUN_DIR/deploy-pending$sfx.csv" "$DEPLOY_MINE_TIMEOUT" direct "$deploy_interval" || true
+    _monitor_files "$RUN_DIR/deploy-sent.csv" "$RUN_DIR/deploy-mined.csv" \
+        "$RUN_DIR/deploy-pending.csv" "$DEPLOY_MINE_TIMEOUT" direct "$deploy_interval" || true
     while IFS=, read -r name chain hash; do
         _prep_failed "$name" "deploy tx $hash never mined"
-    done < "$RUN_DIR/deploy-pending$sfx.csv"
+    done < "$RUN_DIR/deploy-pending.csv"
     while IFS=, read -r name chain hash blk status; do
         [[ "$status" == "0x1" ]] && continue
         _prep_failed "$name" "deploy tx $hash reverted"
-    done < "$RUN_DIR/deploy-mined$sfx.csv"
+    done < "$RUN_DIR/deploy-mined.csv"
 }
 
 # ── Assert every predicted address really holds code before trusting it ──
-# Both prepare modes rest on forge's dry-run address prediction; this is the
+# Plan mode uses forge's address prediction; this is the
 # cheap cross-check (one batched eth_getCode per chain). Each address the
 # planned txs create (jobs/<job>/deploy-addrs.txt, "<L1|L2> <address>" lines
 # recorded at re-sign) is checked on the chain its tx targets: the same
@@ -734,7 +743,7 @@ verify_phase() {
             if [[ ! -f "$dir/.prepare-failed" ]] && $RESUME_TRUNCATED; then NOT_PREPARED=$((NOT_PREPARED+1)); else
                 PRE_FAILED+=("$name (prepare failed - $dir/prepare.log)"); fi
             continue
-        elif ! _job_prepared "$dir"; then
+        elif [[ -f "$dir/.prepare-failed" ]] || { ! _job_prepared "$dir" && [[ "$(_manifest_version "$dir/manifest.env")" != 1 ]]; }; then
             # v2 manifest (written at plan time) whose deploys never mined / held no code
             PRE_FAILED+=("$name (planned but deploys not confirmed - $dir/prepare.log)"); continue
         elif [[ ! -s "$dir/txs.txt" ]]; then
@@ -749,9 +758,14 @@ verify_phase() {
     done
 
     local PASS=0 FAIL=0 FAILED_LIST=() i
+    echo 'job,source_chain,source_hash,chain,transaction_hash,role,block_hash,block_number,transaction_index' > "$RUN_DIR/cross-chain-transactions.csv"
     for i in "${!V_PIDS[@]}"; do
         if wait "${V_PIDS[$i]}"; then
             PASS=$((PASS+1)); echo "RESULT ${V_NAMES[$i]}: PASS"
+            local links="$RUN_DIR/jobs/${V_NAMES[$i]}/cross-chain/transactions.csv"
+            if [[ -f "$links" && "${E2E_TX_LINKS:-required}" != off ]]; then
+                tail -n +2 "$links" | sed "s/^/${V_NAMES[$i]},/" >> "$RUN_DIR/cross-chain-transactions.csv"
+            fi
         else
             FAIL=$((FAIL+1)); FAILED_LIST+=("${V_NAMES[$i]}")
             echo "RESULT ${V_NAMES[$i]}: FAIL  (log: $RUN_DIR/jobs/${V_NAMES[$i]}/verify.log)"
@@ -786,13 +800,13 @@ _print_block_summary() {
     l1t=$(awk -F, '$2=="L1"{print $4}' "$RUN_DIR/mined.csv" 2>/dev/null | _block_list)
     l2t=$(awk -F, '$2=="L2"{print $4}' "$RUN_DIR/mined.csv" 2>/dev/null | _block_list)
     l1b=$(_settle_blocks "L1 postBatch")
-    l2b=$(_settle_blocks "L2 loadTable")
+    l2b=$(_settle_blocks "(L2 loadTable|L2 system table load|L2 delivery \\(load\\+execute\\))")
     echo ""
     echo "  Blocks mined (block xN = N txs / jobs in that block):"
     echo "    trigger txs    L1: ${l1t:-none}"
     echo "                   L2: ${l2t:-none}"
     echo "    L1 postBatch:  ${l1b:-none}"
-    echo "    L2 loadTable:  ${l2b:-none}"
+    echo "    L2 load/deliver: ${l2b:-none}"
 }
 
 if [[ -n "$VERIFY_ONLY" ]]; then
@@ -848,46 +862,9 @@ _mark_deploys_done() {  # every live job's deploys are mined and hold code
         [[ -f "$d/manifest.env" && "$(_manifest_version "$d/manifest.env")" == 2 ]] && rm -f "$d/.prepare-failed"
     done
 }
-# ── Finish step: trigger presign + ComputeExpected (read-only, fast) for every
-# live job whose deploys all mined and that has no manifest yet. Success clears
-# a .prepare-failed marker left by an earlier, interrupted attempt. ──
-_finish_prepare() {
-    local i k name todo=() pids=() idx=()
-    for ((i = 0; i < NJOBS; i++)); do
-        name="${JOB_NAMES[$i]}"
-        [[ "$DEAD" == *",$name,"* ]] && continue
-        [[ -f "$RUN_DIR/jobs/$name/.deploys-done" && ! -f "$RUN_DIR/jobs/$name/manifest.env" ]] && todo+=("$i")
-    done
-    (( ${#todo[@]} > 0 )) || return 0
-    echo ""
-    echo "== Prepare finish: ${#todo[@]} job(s) ($PREPARE_PARALLEL parallel)"
-    _restore_forge_cache
-    for i in "${todo[@]}"; do
-        while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-        echo "PREPARE ${JOB_NAMES[$i]}"
-        ( _timed_job "${JOB_NAMES[$i]}" finish _job_launch_prepare "$i" finish ) &
-        pids+=($!); idx+=("$i")
-    done
-    local rc
-    for k in "${!pids[@]}"; do
-        name="${JOB_NAMES[${idx[$k]}]}"
-        rc=0; wait "${pids[$k]}" || rc=$?
-        if (( rc == 0 )); then rm -f "$RUN_DIR/jobs/$name/.prepare-failed"
-        else _prep_launch_failed "$name" finish "$rc"; fi
-    done
-}
-
 if [[ -n "$RESUME" ]]; then
-# ── Resume a stopped run: mine what was fired, finish what is deploy-complete, fire what is prepared ──
-# A job is fireable once it has a complete manifest (written last by the prepare
-# stage) and has sent nothing yet (double-fire guard). A job whose pre-signed
-# deploys (deploytxs.txt) have not all mined (no .deploys-done) gets the rest
-# fired first (continuing after any hash already in deploy-hashes.txt) and
-# mined. A job whose deploys all mined but that never reached the finish step
-# only lacks the read-only part (trigger presign + ComputeExpected), so that
-# step is re-run — no deploy is repeated, and a job killed mid-finish just
-# rewrites its manifest. Everything else in jobs.csv is left for the verify
-# summary to report as "never prepared".
+# Resume v2 plans: send remaining deploys, confirm code, then send triggers.
+# Jobs without a complete manifest are unprepared and remain skipped.
 RUN_DIR="${RESUME%/}"
 [[ -f "$RUN_DIR/jobs.csv" && -f "$RUN_DIR/wallets.csv" ]] || {
     echo "Not a staged run dir: $RUN_DIR (missing jobs.csv/wallets.csv)"; exit 1; }
@@ -924,10 +901,7 @@ while IFS=, read -r _name _sol; do
         # Keep fully sent jobs in this run: send_worker skips their recorded
         # transactions, while the monitor recovers any still-pending hashes.
     fi
-    if [[ ! -f "$_jd/manifest.env" ]]; then
-        [[ -n "${_PK_OF[$_name]:-}" && -s "$_jd/deploy-env.env" ]] || continue
-        [[ -f "$_jd/.deploys-done" || -s "$_jd/deploytxs.txt" ]] || continue
-    fi
+    [[ -f "$_jd/manifest.env" && -n "${_PK_OF[$_name]:-}" ]] || continue
     JOB_NAMES+=("$_name"); JOB_SOLS+=("$_sol"); WALLET_PKS+=("${_PK_OF[$_name]}")
 done < "$RUN_DIR/jobs.csv"
 NJOBS=${#JOB_NAMES[@]}
@@ -942,14 +916,13 @@ for ((i = 0; i < NJOBS; i++)); do
 done
 if (( _DEPLOYS_PENDING > 0 )); then
     echo "== RESUME $RUN_DIR: firing + mining the deploys of $_DEPLOYS_PENDING job(s)"
-    _phase_begin deploy-send; _fire_deploy_txs ""; _phase_end deploy-send
-    _phase_begin deploy-mine; _mine_deploy_txs ""
+    _phase_begin deploy-send; _fire_deploy_txs; _phase_end deploy-send
+    _phase_begin deploy-mine; _mine_deploy_txs
     _phase_end deploy-mine "$([[ -s "$RUN_DIR/deploy-pending.csv" ]] && echo timeout || echo pass)"
     _phase_begin deploy-liveness; _check_deploy_liveness; _phase_end deploy-liveness
     _mark_deploys_done
 fi
-_phase_begin finish; _finish_prepare; _phase_end finish
-# keep only jobs that are prepared (deploy and finish failures drop out here)
+# Keep only jobs whose deployments are confirmed.
 _N=(); _S=(); _P=()
 for ((i = 0; i < NJOBS; i++)); do
     _job_prepared "$RUN_DIR/jobs/${JOB_NAMES[$i]}" || continue
@@ -997,12 +970,7 @@ _phase_end fund
 #   (_job_prepared). Triggers are fired only after the deploys mined (phase 4):
 #   a front's acceptance of a trigger whose nonce is ahead of chain state is
 #   unverified.
-# waves: dry-run + pre-sign each job's k-th Deploy contract against the real
-#   RPCs, fire the whole wave, mine ONCE, then wave k+1 — the run blocks on
-#   deploy mining once per Deploy contract. Wave ordering keeps the dry-run
-#   nonce truthful.
 # classic: each job's forge deploys and waits for its own receipts.
-PREPARE_MODE="${PREPARE_MODE:-plan}"
 
 if [[ "$PREPARE_MODE" == "classic" ]]; then
     # ── classic single-pass prepare ──
@@ -1024,78 +992,34 @@ if [[ "$PREPARE_MODE" == "classic" ]]; then
     done
     _phase_end prepare-classic
 else
-    if [[ "$PREPARE_MODE" == "plan" ]]; then
-        _phase_begin nonce-barrier; _nonce_barrier; _phase_end nonce-barrier
-        _phase_begin plan-inputs; _read_plan_inputs; _phase_end plan-inputs
-        echo ""
-        echo "== Prepare (plan mode): one forge run per job, $NJOBS job(s) ($PREPARE_PARALLEL parallel)"
-        _phase_begin plan
-        _restore_forge_cache
-        P_PIDS=(); P_IDX=()
-        for ((i = 0; i < NJOBS; i++)); do
-            while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-            mkdir -p "$RUN_DIR/jobs/${JOB_NAMES[$i]}"
-            echo "PREPARE ${JOB_NAMES[$i]}"
-            ( _timed_job "${JOB_NAMES[$i]}" plan _job_launch_prepare "$i" plan ) &
-            P_PIDS+=($!); P_IDX+=($i)
-        done
-        for k in "${!P_PIDS[@]}"; do
-            rc=0; wait "${P_PIDS[$k]}" || rc=$?
-            (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[${P_IDX[$k]}]}" plan "$rc"
-        done
-        _phase_end plan
+    _phase_begin nonce-barrier; _nonce_barrier; _phase_end nonce-barrier
+    _phase_begin plan-inputs; _read_plan_inputs; _phase_end plan-inputs
+    echo ""
+    echo "== Prepare (plan mode): one forge run per job, $NJOBS job(s) ($PREPARE_PARALLEL parallel)"
+    _phase_begin plan
+    _restore_forge_cache
+    P_PIDS=(); P_IDX=()
+    for ((i = 0; i < NJOBS; i++)); do
+        while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
+        mkdir -p "$RUN_DIR/jobs/${JOB_NAMES[$i]}"
+        echo "PREPARE ${JOB_NAMES[$i]}"
+        ( _timed_job "${JOB_NAMES[$i]}" plan _job_launch_prepare "$i" plan ) &
+        P_PIDS+=($!); P_IDX+=($i)
+    done
+    for k in "${!P_PIDS[@]}"; do
+        rc=0; wait "${P_PIDS[$k]}" || rc=$?
+        (( rc == 0 )) || _prep_launch_failed "${JOB_NAMES[${P_IDX[$k]}]}" plan "$rc"
+    done
+    _phase_end plan
 
-        # ── fire every job's deploys at once, mine with one wait ──
-        echo ""
-        echo "== Deploy: firing all pre-signed deploy txs"
-        _phase_begin deploy-send; _fire_deploy_txs ""; _phase_end deploy-send
-        _phase_begin deploy-mine; _mine_deploy_txs ""
-        _phase_end deploy-mine "$([[ -s "$RUN_DIR/deploy-pending.csv" ]] && echo timeout || echo pass)"
-        _phase_begin deploy-liveness; _check_deploy_liveness; _phase_end deploy-liveness
-        _mark_deploys_done
-    elif [[ "$PREPARE_MODE" == "waves" ]]; then
-        _phase_begin prepare-waves
-        for ((wave = 1; ; wave++)); do
-            # ── dry-run + presign every live job's <wave>-th Deploy contract ──
-            W_PIDS=(); W_IDX=()
-            _restore_forge_cache
-            for ((i = 0; i < NJOBS; i++)); do
-                name="${JOB_NAMES[$i]}"
-                [[ "$DEAD" == *",$name,"* ]] && continue
-                [[ -f "$RUN_DIR/jobs/$name/.deploys-done" ]] && continue
-                while (( $(jobs -rp | wc -l) >= PREPARE_PARALLEL )); do sleep 1; done
-                mkdir -p "$RUN_DIR/jobs/$name"
-                ( _timed_job "$name" "wave$wave" _job_launch_prepare "$i" "deploy:$wave" ) &
-                W_PIDS+=($!); W_IDX+=($i)
-            done
-            (( ${#W_PIDS[@]} > 0 )) || break   # every job is done deploying (or dead)
-            echo ""
-            echo "== Prepare wave $wave: dry-run + presign, ${#W_PIDS[@]} job(s) ($PREPARE_PARALLEL parallel)"
-            WAVE_TXS=false
-            for k in "${!W_PIDS[@]}"; do
-                rc=0; wait "${W_PIDS[$k]}" || rc=$?
-                name="${JOB_NAMES[${W_IDX[$k]}]}"
-                case $rc in
-                    0) WAVE_TXS=true ;;
-                    2) touch "$RUN_DIR/jobs/$name/.deploys-done" ;;   # fewer than <wave> Deploy contracts
-                    *) _prep_launch_failed "$name" "wave $wave dry-run" "$rc" ;;
-                esac
-            done
-            $WAVE_TXS || continue
-
-            # ── fire the wave, then mine it (one shared wait). A job whose deploy
-            # never left the machine would dry-run the next wave from a stale nonce
-            # and presign a colliding trigger — _fire_deploy_txs drops it. ──
-            _fire_deploy_txs "-wave$wave"
-            _mine_deploy_txs "-wave$wave"
-        done
-        _check_deploy_liveness
-        _phase_end prepare-waves
-    else
-        echo "Unknown PREPARE_MODE: $PREPARE_MODE (plan | waves | classic)"; exit 1
-    fi
-    # v2 manifests (plan mode) already exist — _finish_prepare only picks up jobs without one
-    _phase_begin finish; _finish_prepare; _phase_end finish
+    # ── fire every job's deploys at once, mine with one wait ──
+    echo ""
+    echo "== Deploy: firing all pre-signed deploy txs"
+    _phase_begin deploy-send; _fire_deploy_txs; _phase_end deploy-send
+    _phase_begin deploy-mine; _mine_deploy_txs
+    _phase_end deploy-mine "$([[ -s "$RUN_DIR/deploy-pending.csv" ]] && echo timeout || echo pass)"
+    _phase_begin deploy-liveness; _check_deploy_liveness; _phase_end deploy-liveness
+    _mark_deploys_done
 fi
 echo "prepared $((NJOBS - PREP_FAIL))/$NJOBS job(s)"
 (( NJOBS - PREP_FAIL > 0 )) || { echo "Nothing prepared - aborting"; exit 1; }
@@ -1117,26 +1041,50 @@ fi
 echo ""
 echo "== Snapshot: $(tr '\n' ' ' < "$RUN_DIR/snapshot.env")"
 
-# ══ Phase 4: send (curl only — nothing heavier runs until the monitor is done) ══
+# ══ Phase 4: send (fresh composer quotes for L2, then raw-tx submission) ══
 echo "== Send phase ($SEND_WORKERS workers)"
 _phase_begin send
 # touch, not truncate — a resumed run appends to the earlier records
 touch "$RUN_DIR/sent.csv" "$RUN_DIR/send-failed.log"
-send_worker() {  # $1=worker index — handles jobs $1, $1+W, $1+2W, ... (round-robin shard)
-    local j name dir chain rpc raw hash done_n
-    for ((j = $1; j < NJOBS; j += SEND_WORKERS)); do
+_SEND_FAILURES_BEFORE=$(grep -c '^SEND FAILED:' "$RUN_DIR/send-failed.log" || true)
+_staged_save_quoted_trigger() { # signed quote, raw file, line
+    local plan="$1" file="$2" line="$3"
+    [[ "$line" =~ ^[1-9][0-9]*$ && $(wc -l < "$file") -ge $line ]] || return 1
+    { jq -r .raw <<< "$plan"; cat "$file"; } | awk -v n="$line" \
+        'NR==1 {replacement=$0; next} NR==n+1 {$0=replacement} {print}' > "$file.quoted" || return 1
+    mv "$file.quoted" "$file"
+}
+
+send_worker() {  # worker index, chain, worker count
+    local j name dir chain rpc raw hash done_n raw_line signing_key send_rc
+    for ((j = $1; j < NJOBS; j += $3)); do
         name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"
         _job_prepared "$dir" || continue   # prepare failed, or a v2 manifest whose deploys never mined
         chain=$(sed -n 's/^declare -- _TRIGGER_CHAIN="\(.*\)"$/\1/p' "$dir/manifest.env")
+        [[ "$chain" == "$2" ]] || continue
         rpc=$(_front_rpc "$chain")
         # A resumed partial multi-tx send continues after the hashes already recorded.
         done_n=0
         [[ -f "$dir/txs.txt" ]] && done_n=$(wc -l < "$dir/txs.txt")
         touch "$dir/txs.txt"
-        # Multi-tx jobs: same worker, in nonce order, back-to-back (fire-and-forget).
+        # L2 quotes simulate deployed contracts and expire: quote/sign immediately
+        # before each submission, including resumed prepared runs.
+        raw_line=$done_n
         while IFS= read -r raw; do
             [[ -n "$raw" ]] || continue
-            if ! hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log"); then
+            raw_line=$((raw_line + 1))
+            send_rc=0
+            if [[ "$chain" == L2 ]]; then
+                signing_key=$(awk -F, -v j="$name" 'NR>1 && $1==j {print $3; exit}' "$RUN_DIR/wallets.csv")
+                hash=$(EEZ_L2_FRESH_SEND="$([[ -z "$RESUME" ]] && echo 1 || echo 0)" \
+                    network_send_quoted_l2 "$raw" "$signing_key" "$rpc" "$L2_RPC" \
+                    "$dir/fee-quote-$raw_line.json" _rpc_send_raw _staged_save_quoted_trigger "$dir/rawtxs.txt" "$raw_line" \
+                    2>>"$RUN_DIR/send-failed.log") || send_rc=$?
+                unset signing_key
+            else
+                hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log") || send_rc=$?
+            fi
+            if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 echo "SEND FAILED: $name ($chain)" >> "$RUN_DIR/send-failed.log"
                 break
             fi
@@ -1148,14 +1096,19 @@ send_worker() {  # $1=worker index — handles jobs $1, $1+W, $1+2W, ... (round-
 }
 S_PIDS=()
 for ((w = 0; w < SEND_WORKERS; w++)); do
-    send_worker "$w" &
+    send_worker "$w" L1 "$SEND_WORKERS" &
     S_PIDS+=($!)
 done
 for pid in "${S_PIDS[@]}"; do wait "$pid"; done
+# A quoted L2 sender must not occupy a worker ahead of an unrelated L1 trigger.
+# The shared lock still coordinates this sender with other runs on this machine.
+send_worker 0 L2 1
 N_SENT=$(wc -l < "$RUN_DIR/sent.csv")
 _chain_counts trigger "$RUN_DIR/sent.csv"
-[[ ! -s "$RUN_DIR/send-failed.log" ]] || echo "SEND FAILURES in $RUN_DIR/send-failed.log"
-_phase_end send "$([[ -s "$RUN_DIR/send-failed.log" ]] && echo fail || echo pass)"
+_SEND_FAILURES_AFTER=$(grep -c '^SEND FAILED:' "$RUN_DIR/send-failed.log" || true)
+(( _SEND_FAILURES_AFTER == _SEND_FAILURES_BEFORE )) || echo "SEND FAILURES in $RUN_DIR/send-failed.log"
+_phase_end send "$(if (( _SEND_FAILURES_AFTER > _SEND_FAILURES_BEFORE )); then echo fail; else echo pass; fi)"
+
 (( N_SENT > 0 )) || { echo "Nothing sent - aborting"; exit 1; }
 
 # ══ Phase 5: monitor ══

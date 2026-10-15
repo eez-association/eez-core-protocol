@@ -10,7 +10,8 @@ via_ir = true
 # Read access for file-based tools (BlobTools.s.sol), scoped to the DSL examples
 # folder — input files (scenario .dsl / blob hex) must live there — and for the
 # compiled artifacts the e2e PrepareJob driver instantiates via vm.getCode.
-fs_permissions = [{access = "read", path = "./script/blob/examples/"}, {access = "read", path = "./out/"}]
+# Linked network verifiers read evidence from the staged and standalone job roots.
+fs_permissions = [{access = "read", path = "./script/blob/examples/"}, {access = "read", path = "./out/"}, {access = "read", path = "./tmp/e2e-staged-net/"}, {access = "read", path = "./tmp/e2e-network/"}]
 
 [profile.default.fmt]
 line_length = 120

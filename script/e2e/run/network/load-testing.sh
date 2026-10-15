@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Worker and progress helpers. Sourcing this file only defines functions.
+_load_publish_raw() { timeout "$SEND_TIMEOUT" cast publish "$2" --async --rpc-url "$1"; }
 load_worker() (
     set -euo pipefail
     local worker="$1" count="$2" address="$3" key="$4"
@@ -14,8 +15,8 @@ load_worker() (
         hashes=(); starts=(); nonces=(); indexes=()
         for ((j=0; j<WINDOW && i<count; j++, i++)); do
             start=$(_now_ms)
-            # Explicit fees/chain ID make signing offline. Legacy transactions match
-            # the devnet's gas-price model and avoid fee-estimation RPCs per trigger.
+            # Build an offline legacy candidate; L2 replaces its gas and fees
+            # with a fresh composer quote immediately before submission.
             sign_rc=0
             raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
@@ -29,7 +30,12 @@ load_worker() (
             # Never advance past an uncertain send: doing so could leave a nonce gap.
             # stderr is retained in worker-N.log by the worker launcher.
             send_rc=0
-            hash=$(timeout "$SEND_TIMEOUT" cast publish "$raw" --async --rpc-url "$SEND_RPC") || send_rc=$?
+            if [[ "$TRIGGER_CONTRACT" == *L2 ]]; then
+                hash=$(EEZ_L2_FRESH_SEND=1 network_send_quoted_l2 "$raw" "$key" "$SEND_RPC" "$READ_RPC" \
+                    "$RUN_DIR/fee-quote-$worker-$i.json" _load_publish_raw) || send_rc=$?
+            else
+                hash=$(_load_publish_raw "$SEND_RPC" "$raw") || send_rc=$?
+            fi
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 printf 'send_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$send_rc" "$SEND_TIMEOUT" >&2
                 if (( send_rc == 124 )); then
@@ -235,7 +241,8 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
    "$CALLDATA" =~ ^0x([0-9a-fA-F]{2})*$ && "$GAS" =~ ^[1-9][0-9]*$ ]] || {
     echo "Invalid trigger template; see $RUN_DIR/trigger.log"; exit 1;
 }
-# Resolve fees once on the ordinary RPC; front endpoints only receive signed triggers.
+# Ordinary fee values build offline candidates; every L2 submission replaces
+# them with a fresh eez_quoteFee option from its source front.
 CHAIN_ID=$(cast chain-id --rpc-url "$READ_RPC")
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
 declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"

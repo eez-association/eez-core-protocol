@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from test_staged_monitor import E2E, function
 
@@ -55,6 +56,12 @@ _recovery_rpc() {
                 jq -nc --arg h "$(jq -r '.[0]' <<< "$3")" '{hash:$h,blockNumber:null}'
             else return 1; fi ;;
         eth_sendRawTransaction)
+            if [[ "${CHECK_QUOTE_LOCK:-0}" == 1 ]]; then
+                if flock -n "$TMPDIR/eez-e2e-fee-quote.lock" true; then return 99; fi
+                # The journal and evidence must exist before broadcast, even on a lost reply.
+                jq -e --arg raw "$(jq -r '.[0]' <<< "$3")" '.[0].variants | any(. == $raw)' sent.replacements.json >/dev/null || return 98
+                [[ -s jobs/job/fee-quote-recovery.json ]] || return 97
+            fi
             echo send >> sends
             if [[ "$SCENARIO" == fee_reject ]]; then
                 echo '{"code":-32000,"message":"replacement transaction underpriced"}'; return 2
@@ -69,6 +76,29 @@ SENDER=$(_recovery_decode "$(cat jobs/job/rawtxs.txt)" | jq -r .signer)
 '''
 
 
+# Use the real quote validation and signing code with deterministic composer responses.
+L2_QUOTE = r'''
+CHECK_QUOTE_LOCK=1
+cast() {
+    case "$1" in
+        chain-id) echo 1 ;;
+        rpc)
+            [[ "$*" == *eez_quoteFee* ]] || return 90
+            echo eez_quoteFee >> calls
+            local cap="${QUOTE_CAP:-200}" tip="${QUOTE_TIP:-20}" gas="${QUOTE_GAS:-21000}"
+            if [[ "$SCENARIO" == fee_reject && -f sends ]]; then cap=300; tip=30; fi
+            jq -nc --arg expires "$(printf '0x%x' "$QUOTE_EXPIRES")" \
+                --arg cap "$(printf '0x%x' "$cap")" --arg tip "$(printf '0x%x' "$tip")" \
+                --arg gas "$(printf '0x%x' "$gas")" \
+                '{version:1,chainId:"0x1",nonce:"0x0",expiresAt:$expires,
+                  options:[{type:"0x2",gas:$gas,maxFeePerGas:$cap,maxPriorityFeePerGas:$tip,
+                  estimatedFee:"0x1",intentHash:("0x" + ("ab" * 32))}]}' ;;
+        *) command cast "$@" ;;
+    esac
+}
+'''
+
+
 class RecoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -78,7 +108,7 @@ class RecoveryTests(unittest.TestCase):
             "0x1111111111111111111111111111111111111111", "0x"], text=True).strip()
         cls.hash = subprocess.check_output(["cast", "keccak", cls.raw], text=True).strip()
 
-    def run_recovery(self, scenario="missing", actions="_recover_pending pending.csv front\n"):
+    def run_recovery(self, scenario="missing", actions="_recover_pending pending.csv front\n", chain="L1"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             job = root / "jobs/job"
@@ -86,12 +116,13 @@ class RecoveryTests(unittest.TestCase):
             (job / "rawtxs.txt").write_text(self.raw + "\n")
             (job / "txs.txt").write_text(self.hash + "\n")
             for name in ("sent", "pending"):
-                (root / f"{name}.csv").write_text(f"job,L1,{self.hash}\n")
+                (root / f"{name}.csv").write_text(f"job,{chain},{self.hash}\n")
             (root / "wallets.csv").write_text(f"job,address,key\njob,unused,{KEY}\n")
-            shell = 'set -euo pipefail\ncd "$TEST_ROOT"\nsource "$RECOVERY"\n' + function("_remove_mined") + RPC + actions + '\n_recovery_report .\n'
+            shell = 'set -euo pipefail\ncd "$TEST_ROOT"\nsource "$RECOVERY"\n' + function("_remove_mined") + RPC + actions + '\n_recovery_report .\nif [[ -f "$TMPDIR/eez-e2e-fee-quote.lock" ]]; then flock -n "$TMPDIR/eez-e2e-fee-quote.lock" true; fi\n'
             result = subprocess.run(["bash", "-c", shell], capture_output=True, text=True, timeout=30,
                                     env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
-                                         "RECOVERY": str(E2E / "lib/staged-recovery.sh"),
+                                         "RECOVERY": str(E2E / "lib/staged-recovery.sh"), "TMPDIR": directory,
+                                         "QUOTE_EXPIRES": str(int(time.time()) + 3600),
                                          "SCENARIO": scenario, "ORIGINAL": self.hash})
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stderr, "", result.stdout + result.stderr)
@@ -119,6 +150,78 @@ _recover_pending pending.csv front
 ''')
         self.assertNotIn("sends", files)
         self.assertIn("disappeared tx", entries[0]["stop_retry"])
+
+    def test_l2_replacement_requires_fresh_quote_without_oracle_fallback(self):
+        _, files, entries = self.run_recovery("held", chain="L2", actions='''
+network_l2_fee_quote() { echo eez_quoteFee >> calls; return 1; }
+_recover_pending pending.csv front
+''')
+        self.assertIn("eez_quoteFee", files["calls"])
+        self.assertNotIn("sends", files)
+        self.assertIn("no unquoted replacement", entries[0]["stop_retry"])
+
+    def test_l2_tariff_replaces_even_when_node_prices_would_be_adequate(self):
+        result, files, entries = self.run_recovery("held", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L2")
+        self.assertEqual(files["sends"].count("send"), 1)
+        self.assertNotIn("stop_retry", entries[0])
+        self.assertNotIn("eth_gasPrice", files["calls"])
+        self.assertNotIn("eth_maxPriorityFeePerGas", files["calls"])
+        self.assertNotIn("eth_getBlockByNumber", files["calls"])
+        self.assertEqual(files["calls"].count("eez_quoteFee"), 1)
+        self.assertEqual(files["calls"].count("eth_getBalance"), 1)
+        self.assertIn("cap=100->200 tip=1->20", result.stdout)
+
+    def test_l2_adequacy_is_established_by_a_fresh_quote(self):
+        result, files, entries = self.run_recovery("held", L2_QUOTE + 'QUOTE_CAP=100 QUOTE_TIP=1\n_recover_pending pending.csv front\n', chain="L2")
+        self.assertEqual(files["calls"].count("eez_quoteFee"), 1)
+        self.assertNotIn("eth_gasPrice", files["calls"])
+        self.assertNotIn("sends", files)
+        self.assertEqual(entries, [])  # Healthy pending transactions need no recovery journal entry.
+        self.assertIn("adequate against fresh composer quote", result.stdout)
+
+    def test_l2_quote_must_preserve_gas_and_meet_replacement_floor(self):
+        for setting, reason in (("QUOTE_GAS=22000", "changes pending gas limit"),
+                                ("QUOTE_CAP=105", "does not satisfy replacement fees")):
+            with self.subTest(setting=setting):
+                _, files, entries = self.run_recovery("held", L2_QUOTE + setting + '\n_recover_pending pending.csv front\n', chain="L2")
+                self.assertNotIn("sends", files)
+                self.assertIn(reason, entries[0]["stop_retry"])
+
+    def test_l2_immediate_retries_keep_the_lock_without_deadlock(self):
+        _, files, entries = self.run_recovery("fee_reject", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L2")
+        self.assertEqual(files["calls"].count("eez_quoteFee"), 2)
+        self.assertNotIn("eth_gasPrice", files["calls"])
+        self.assertEqual(files["sends"].count("send"), 2)
+        self.assertEqual(len(entries[0]["variants"]), 3)
+        self.assertIn("two fee increases rejected", entries[0]["stop_retry"])
+
+    def test_l2_uncertain_send_preserves_and_reconciles_the_quoted_candidate(self):
+        _, files, entries = self.run_recovery("lost_response", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L2")
+        self.assertEqual(files["sends"].count("send"), 1)
+        self.assertEqual(files["calls"].count("eez_quoteFee"), 1)
+        self.assertNotIn("stop_retry", entries[0])
+        evidence = json.loads(files["jobs/job/fee-quote-recovery.json"])
+        self.assertEqual(evidence["signedHash"], entries[0]["current"])
+        self.assertNotEqual(entries[0]["current"], self.hash)
+
+    def test_l2_quote_expiring_during_persistence_never_sends(self):
+        _, files, entries = self.run_recovery("held", L2_QUOTE + r'''
+date() {
+    if jq -e '.[0].fee_bumps > 0' sent.replacements.json >/dev/null; then echo 9999999999
+    else command date "$@"; fi
+}
+_recover_pending pending.csv front 2> quote-errors
+''', chain="L2")
+        self.assertNotIn("sends", files)
+        self.assertIn("expired before submission", entries[0]["stop_retry"])
+        self.assertIn("Fee quote expired", files["quote-errors"])
+        self.assertNotIn("rpc front1 eth_getTransactionByHash", files["calls"])
+
+    def test_l2_mined_receipt_needs_no_quote(self):
+        _, files, _ = self.run_recovery("original_wins_fee_failure", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L2")
+        self.assertNotIn("eez_quoteFee", files["calls"])
+        self.assertNotIn("sends", files)
+        self.assertEqual(files["pending.csv"], "")
 
     def test_two_immediate_fee_increases_then_fail(self):
         _, files, entries = self.run_recovery("fee_reject")
@@ -220,19 +323,19 @@ _recover_pending pending.csv front --reconcile-only
         self.assertIn(entries[0]["current"], files["pending.csv"])
         self.assertNotEqual(entries[0]["current"], self.hash)
 
-    def test_deploy_wave_uses_direct_rpc_and_preserves_chain_prefix(self):
+    def test_plan_deploy_uses_direct_rpc_and_preserves_chain_prefix(self):
         _, files, _ = self.run_recovery(actions='''
-mv jobs/job/txs.txt jobs/job/deploy-hashes-wave1.txt
-sed 's/^/L1 /' jobs/job/rawtxs.txt > jobs/job/deploytxs-wave1.txt
-mv sent.csv deploy-sent-wave1.csv
-mv pending.csv deploy-pending-wave1.csv
-_recover_pending deploy-pending-wave1.csv direct
-_recover_pending deploy-pending-wave1.csv direct
+mv jobs/job/txs.txt jobs/job/deploy-hashes.txt
+sed 's/^/L1 /' jobs/job/rawtxs.txt > jobs/job/deploytxs.txt
+mv sent.csv deploy-sent.csv
+mv pending.csv deploy-pending.csv
+_recover_pending deploy-pending.csv direct
+_recover_pending deploy-pending.csv direct
 ''')
-        entries = json.loads(files["deploy-sent-wave1.replacements.json"])
+        entries = json.loads(files["deploy-sent.replacements.json"])
         self.assertNotIn("sends", files)
         self.assertNotIn("front1", files["calls"])
-        self.assertEqual(files["jobs/job/deploytxs-wave1.txt"].strip(), "L1 " + self.raw)
+        self.assertEqual(files["jobs/job/deploytxs.txt"].strip(), "L1 " + self.raw)
         self.assertIn("disappeared tx", entries[0]["stop_retry"])
 
     def test_missing_does_not_trigger_fee_replacement(self):

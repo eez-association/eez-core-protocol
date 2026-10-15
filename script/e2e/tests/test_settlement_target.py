@@ -27,6 +27,7 @@ source "$HELPER"
 source "$EVIDENCE"
 NETWORK_VERIFY_DEADLINE=$(( $(date +%s) + 60 ))
 L1_BATCH_TXS=()
+NETWORK_LINKS_ACTIVE=false
 network_receipt() {
     jq -nc --arg to "$TARGET" '{to:$to,blockNumber:"0x7b",status:"0x1"}'
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -38,7 +40,7 @@ import {
 //   L1: reverts with FrameFailed(2)
 // L2: catches that error, then adds 1 and returns 1.
 // Final: L1 = 0, L2 = 1. There are no earlier or later root calls.
-// Focused scenario: included in default/all runs.
+// Explicit selection only until validated on the live network.
 
 abstract contract CatchNestedRevertAfterCallbackActions is CallPatternHelpers {
     struct ScenarioTables {

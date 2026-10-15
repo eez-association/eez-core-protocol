@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Sourced by staged.sh. Normal receipt polling stays in the runner.
 # Recovery uses the runner's existing curl/jq/cast/bc dependencies.
+source "$(dirname "${BASH_SOURCE[0]}")/network-fees.sh"
 
 _recovery_log() {
     printf '[%s][%s] %s\n' "$_rec_phase" "$_rec_chain" "$*" | tee -a "$_rec_root/recovery.log"
@@ -101,11 +102,10 @@ _recovery_adopt() {
     _recovery_save && _recovery_apply
 }
 _recovery_locate() {  # Original hash -> _rec_entry (same journal format as earlier runs)
-    local suffix hashes raws index raw
-    suffix=$(basename "$_rec_pending" .csv); suffix=${suffix#deploy-pending}
+    local hashes raws index raw
     hashes="jobs/$_rec_job/txs.txt"; raws="jobs/$_rec_job/rawtxs.txt"
     if [[ "$_rec_mode" == direct ]]; then
-        hashes="jobs/$_rec_job/deploy-hashes$suffix.txt"; raws="jobs/$_rec_job/deploytxs$suffix.txt"
+        hashes="jobs/$_rec_job/deploy-hashes.txt"; raws="jobs/$_rec_job/deploytxs.txt"
     fi
     index=$(awk -v h="$1" '$0==h {print NR-1; exit}' "$_rec_root/$hashes")
     [[ -n "$index" ]] || return 1
@@ -188,8 +188,7 @@ _recovery_nonce_owner() {  # Find the mined transaction consuming sender+nonce.
         '.transactions[] | select((.from|ascii_downcase)==$s and .nonce==$n) | .hash' <<< "$block"
 }
 _recovery_one() {
-    local hash="$1" _rec_entry h raw tx sender kind nonce gas value cap tip low newcap newtip
-    local balance needed confirmed pk newhash rc=0 error reason held=false receipt owner
+    local hash="$1" _rec_entry h reason held=false receipt
     _rec_entry=$(jq -c --arg j "$_rec_job" --arg c "$_rec_chain" --arg h "$hash" \
         '.[] | select(.job==$j and .chain==$c and (.variants|has($h)))' "$_rec_journal") || return 1
     local aliases=("$hash")
@@ -226,10 +225,21 @@ _recovery_one() {
         _recovery_stop 'disappeared tx: no receipt and not visible in front/source RPC; no resend'
         return $?
     fi
-    if ! $_rec_fees_ready; then
-        _recovery_fee_snapshot || { _recovery_stop 'RPC status error: fee lookup failed after one status recheck'; return $?; }
-        _rec_fees_ready=true
+    if [[ "$_rec_mode" == front && "$_rec_chain" == L2 ]]; then
+        network_with_l2_fee_lock _recovery_send_pending "$hash"
+    else
+        _recovery_send_pending "$hash"
     fi
+}
+
+_recovery_submit_raw() { _recovery_rpc "$1" eth_sendRawTransaction "[\"$2\"]"; }
+
+_recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers hold the quote lock.
+    local hash="$1" raw tx sender kind nonce gas value cap tip low newcap newtip
+    local balance needed confirmed pk newhash rc=0 error reason receipt owner h
+    local plan='' quote_cap quote_tip fee_cap fee_tip quoted=false aliases=()
+    [[ "$_rec_mode" != front || "$_rec_chain" != L2 ]] || quoted=true
+    mapfile -t aliases < <(jq -r '.variants|keys[]' <<< "$_rec_entry")
     raw=$(jq -r '.variants[.current]' <<< "$_rec_entry")
     tx=$(_recovery_decode "$raw") || return 1
     sender=$(jq -r .signer <<< "$tx"); kind=$(cast to-dec "$(jq -r .type <<< "$tx")") || return 1
@@ -237,15 +247,7 @@ _recovery_one() {
     nonce=$(cast to-dec "$(jq -r .nonce <<< "$tx")"); gas=$(cast to-dec "$(jq -r .gas <<< "$tx")")
     value=$(cast to-dec "$(jq -r .value <<< "$tx")")
     cap=$(cast to-dec "$(jq -r '.maxFeePerGas // .gasPrice' <<< "$tx")")
-    tip=$(cast to-dec "$(jq -r '.maxPriorityFeePerGas // .gasPrice' <<< "$tx")")
-    local fee_cap="$cap" fee_tip="$tip"
-    if jq -e '.fee_retry!=null' <<< "$_rec_entry" >/dev/null; then
-        fee_cap=$(jq -r .fee_retry.cap <<< "$_rec_entry"); fee_tip=$(jq -r .fee_retry.tip <<< "$_rec_entry")
-        fee_cap=$(bc <<< "if ($cap > $fee_cap) $cap else $fee_cap")
-        fee_tip=$(bc <<< "if ($tip > $fee_tip) $tip else $fee_tip")
-    fi
-    read -r low newcap newtip < <(_recovery_fees "$kind" "$fee_cap" "$fee_tip" "$_rec_base" "$_rec_price" "$_rec_tip") || return 1
-    if jq -e '.fee_retry!=null' <<< "$_rec_entry" >/dev/null; then low=1; fi
+    tip=$(cast to-dec "$(jq -r '.maxPriorityFeePerGas // "0x0"' <<< "$tx")")
     confirmed=$(_recovery_read "$_rec_rpc" eth_getTransactionCount "[\"$sender\",\"latest\"]") || {
         _recovery_stop 'RPC status error: nonce lookup failed after one status recheck'; return $?; }
     confirmed=$(cast to-dec "$(jq -r . <<< "$confirmed")") || return 1
@@ -263,6 +265,34 @@ _recovery_one() {
         else _recovery_adopt "$owner"; _recovery_log "job=$_rec_job own nonce mined; waiting for receipt"; fi
         return $?
     fi
+    fee_cap="$cap"; fee_tip="$tip"
+    if jq -e '.fee_retry!=null' <<< "$_rec_entry" >/dev/null; then
+        fee_cap=$(jq -r .fee_retry.cap <<< "$_rec_entry"); fee_tip=$(jq -r .fee_retry.tip <<< "$_rec_entry")
+        fee_cap=$(bc <<< "if ($cap > $fee_cap) $cap else $fee_cap")
+        fee_tip=$(bc <<< "if ($tip > $fee_tip) $tip else $fee_tip")
+    fi
+    if $quoted; then
+        plan=$(network_l2_fee_quote "$tx" "$_rec_submit" "$_rec_rpc") || {
+            _recovery_stop 'cross-chain fee adequacy unknown: fresh L2 fee quote unavailable; no unquoted replacement sent'; return $?; }
+        read -r quote_cap quote_tip < <(jq -r '[.cap,.tip] | @tsv' <<< "$plan") || return 1
+        [[ $(jq -r .gas <<< "$plan") == "$gas" ]] || {
+            _recovery_stop 'fresh L2 quote changes pending gas limit; fee adequacy unknown; no replacement sent'; return $?; }
+        # Ordinary node prices cannot establish coverage of the cross-chain tariff.
+        low=$(bc <<< "$cap < $quote_cap || $tip < $quote_tip")
+        read -r _ newcap newtip < <(_recovery_fees "$kind" "$fee_cap" "$fee_tip" 0 0 0) || return 1
+    else
+        if ! $_rec_fees_ready; then
+            _recovery_fee_snapshot || { _recovery_stop 'RPC status error: fee lookup failed after one status recheck'; return $?; }
+            _rec_fees_ready=true
+        fi
+        read -r low newcap newtip < <(_recovery_fees "$kind" "$fee_cap" "$fee_tip" "$_rec_base" "$_rec_price" "$_rec_tip") || return 1
+    fi
+    if jq -e '.fee_retry!=null' <<< "$_rec_entry" >/dev/null; then low=1; fi
+    if $quoted && [[ "$low" == 1 ]]; then
+        [[ $(bc <<< "$quote_cap >= $newcap && $quote_tip >= $newtip") == 1 ]] || {
+            _recovery_stop 'fresh L2 quote does not satisfy replacement fees; no replacement sent'; return $?; }
+        newcap="$quote_cap"; newtip="$quote_tip"
+    fi
     balance=$(_recovery_read "$_rec_rpc" eth_getBalance "[\"$sender\",\"latest\"]") || {
         _recovery_stop 'RPC status error: balance lookup failed after one status recheck'; return $?; }
     balance=$(cast to-dec "$(jq -r . <<< "$balance")") || return 1
@@ -274,9 +304,10 @@ _recovery_one() {
         _recovery_stop "insufficient funds: need=$(cast from-wei "$needed") ETH have=$(cast from-wei "$balance") ETH shortfall=$(cast from-wei "$shortfall") ETH; increase funding floor"
         return $?
     fi
-    if $held && [[ "$low" == 0 ]]; then
-        if $_rec_expired; then _recovery_stop 'non-mined valid tx: visible with adequate fees at the 5-minute limit'
-        else _recovery_log "job=$_rec_job hash=$hash visible; fees adequate; waiting (maximum 5 minutes)"; fi
+    if [[ "$low" == 0 ]]; then
+        local fee_source="node prices"; if $quoted; then fee_source="fresh composer quote"; fi
+        if $_rec_expired; then _recovery_stop "non-mined valid tx: visible with adequate fees against $fee_source at the 5-minute limit"
+        else _recovery_log "job=$_rec_job hash=$hash visible; fees adequate against $fee_source; waiting (maximum 5 minutes)"; fi
         return $?
     fi
     if $_rec_expired; then
@@ -300,14 +331,27 @@ _recovery_one() {
     if [[ "$low" == 1 ]]; then
         pk=$(awk -F, -v j="$_rec_job" 'NR>1 && $1==j {print $3; exit}' "$_rec_root/wallets.csv")
         [[ -n "$pk" ]] || return 1
-        raw=$(_recovery_sign "$tx" "$pk" "$newcap" "$newtip") || return 1
-        newhash=$(cast keccak "$raw") || return 1
+        if $quoted; then
+            plan=$(network_sign_l2_quote "$plan" "$pk" "$balance") || return 1
+            raw=$(jq -r .raw <<< "$plan"); newhash=$(jq -r .signedHash <<< "$plan")
+        else
+            raw=$(_recovery_sign "$tx" "$pk" "$newcap" "$newtip") || return 1
+            newhash=$(cast keccak "$raw") || return 1
+        fi
         _rec_entry=$( { printf '%s\n' "$_rec_entry"; printf '%s' "$raw" | jq -Rs .; } | jq -s --arg h "$newhash" \
             '.[0].variants[$h]=.[1] | .[0] | .fee_bumps=((.fee_bumps // 0)+1)') || return 1
         _recovery_log "job=$_rec_job fee increase $(jq -r .fee_bumps <<< "$_rec_entry")/2 nonce=$nonce cap=$cap->$newcap tip=$tip->$newtip hash=$newhash"
     fi
-    _recovery_save || return 1  # Counters and candidates survive a crash/lost response.
-    confirmed=$(_recovery_rpc "$_rec_submit" eth_sendRawTransaction "[\"$raw\"]") || rc=$?
+    if $quoted; then
+        confirmed=$(network_submit_l2_quote "$plan" "$_rec_submit" \
+            "$_rec_root/jobs/$_rec_job/fee-quote-recovery.json" _recovery_submit_raw _recovery_save) || rc=$?
+        if (( rc == 70 )); then
+            _recovery_stop 'quoted replacement could not be saved or expired before submission; no replacement sent'; return $?;
+        fi
+    else
+        _recovery_save || return 1  # Counters and candidates survive a crash/lost response.
+        confirmed=$(_recovery_submit_raw "$_rec_submit" "$raw") || rc=$?
+    fi
     if (( rc == 2 )); then
         error=$(jq -r .message <<< "$confirmed"); reason=${error,,}
         [[ "$reason" != *revert* ]] || reason='execution rejected'
@@ -323,8 +367,9 @@ _recovery_one() {
                     _recovery_stop "low fees: two fee increases rejected; $error"; return $?
                 fi
                 _recovery_log "job=$_rec_job fee rejected; refresh fees and retry immediately: $error"
-                _recovery_fee_snapshot || { _recovery_stop 'RPC status error: fee refresh failed after one recheck'; return $?; }
-                _recovery_one "$hash"; return $? ;;
+                _rec_fees_ready=false
+                # Keep the L2 turn through rejection handling and any immediate retry.
+                _recovery_send_pending "$hash"; return $? ;;
             *insufficient\ funds*|*insufficient\ balance*)
                 _recovery_stop "insufficient funds: need=$(cast from-wei "$needed") ETH last_balance=$(cast from-wei "$balance") ETH; $error"; return $? ;;
             *timeout*|*timed\ out*|*temporarily\ unavailable*|*rate\ limit*|*too\ many\ requests*) rc=1 ;;

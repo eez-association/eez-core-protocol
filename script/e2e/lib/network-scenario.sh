@@ -30,6 +30,10 @@
 #
 # Workers pass resolved addresses explicitly. Standalone runs read chain.env,
 # then apply command-line overrides and discover current deployment addresses.
+case "${E2E_PREPARE_STEP:-}" in
+    ""|plan) ;;
+    *) echo "Unsupported E2E_PREPARE_STEP: use plan or leave unset for classic" >&2; exit 1 ;;
+esac
 source "$(dirname "$0")/network-config.sh"
 _CLI_ROLLUPS=false
 _CLI_MANAGER_L2=false
@@ -44,6 +48,7 @@ if [[ "$_CLI_ROLLUPS" != true || "$_CLI_MANAGER_L2" != true ]]; then
 fi
 source "$(dirname "$0")/E2EBase.sh"
 source "$(dirname "$0")/settlement-target.sh"
+source "$(dirname "$0")/network-links.sh"
 
 SOL="$1"; shift || { echo "Usage: network-scenario.sh <E2E.s.sol> --l1-rpc <RPC> --l2-rpc <RPC> --pk <PK> --rollups <ROLLUPS> --manager-l2 <ADDR>"; exit 1; }
 # Accept paths recorded by staged runs before scenarios/ was introduced.
@@ -106,6 +111,10 @@ if [[ "$E2E_STAGE" == "verify" ]]; then
 source "$E2E_JOB_DIR/manifest.env"
 EXPECTED_L1_STATIC_TABLE="${EXPECTED_L1_STATIC_TABLE:-0x}"   # manifests written before the static table existed
 COMPUTE_OUT=$(cat "$E2E_JOB_DIR/compute.out")
+_REFRESH_EXPECTATIONS=false
+[[ -v EXPECTED_L2_STATIC_TABLE ]] || _REFRESH_EXPECTATIONS=true
+EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-$(extract "$COMPUTE_OUT" EXPECTED_L2_STATIC_TABLE)}"
+EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}"
 # Deploy* outputs (COUNTER_PROXY, READER_L1, ...) — the VerifyNetwork* self-checks
 # read them from the environment, same as in a full run.
 if [[ -f "$E2E_JOB_DIR/deploy-env.env" ]]; then
@@ -113,6 +122,26 @@ if [[ -f "$E2E_JOB_DIR/deploy-env.env" ]]; then
     # shellcheck disable=SC1091
     source "$E2E_JOB_DIR/deploy-env.env"
     set +a
+fi
+# ComputeExpected is a read-only function of saved deployment addresses. Older
+# manifests predate static exports and the repeated-call fix; refresh them without
+# sending, deploying, or silently changing their saved mutable table expectations.
+if $_REFRESH_EXPECTATIONS && $_HAS_COMPUTE; then
+    echo 'Refreshing expectations from saved deployment addresses'
+    _CURRENT_EXPECTED=$(forge script "$SOL:ComputeExpected" --sender "$_SENDER" 2>&1) || {
+        echo "$_CURRENT_EXPECTED" | strip_traces; exit 1; }
+    for _field in EXPECTED_L1_TABLE EXPECTED_L2_TABLE; do
+        _current=$(extract "$_CURRENT_EXPECTED" "$_field"); _current="${_current:-0x}"
+        [[ "$_current" == "${!_field}" ]] || { echo "ERROR: $_field changed since preparation"; exit 1; }
+    done
+    printf '%s\n' "$_CURRENT_EXPECTED" > "$E2E_JOB_DIR/compute-verification.out"
+    EXPECTED_L2_STATIC_TABLE=$(extract "$_CURRENT_EXPECTED" EXPECTED_L2_STATIC_TABLE)
+    EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}"
+    _current=$(extract "$_CURRENT_EXPECTED" EXPECTED_L2_CALL_HASHES)
+    if [[ "$_current" != "$EXPECTED_L2_CALL_HASHES" ]]; then
+        echo "NOTE: refreshed EXPECTED_L2_CALL_HASHES: $EXPECTED_L2_CALL_HASHES -> $_current (saved in compute-verification.out)"
+    fi
+    EXPECTED_L2_CALL_HASHES="$_current"
 fi
 # Pre-send block snapshot, recorded ONCE by the orchestrator right before its
 # send phase — it bounds every job's scan ranges (the per-run analogue of the
@@ -158,11 +187,6 @@ fi
 #                in-process forks of both chains with the wallet nonces
 #                injected, pre-sign the planned deploy txs, then exit (0 = txs
 #                written, 1 = failure); the orchestrator fires and mines them.
-#   deploy:<k> → dry-run + pre-sign ONLY the k-th Deploy* contract, then exit
-#                (0 = txs written, 2 = no such contract, 1 = failure); the
-#                orchestrator sends and mines each wave before the next.
-#   finish     → deploys are already mined; reload their exported addresses and
-#                continue with trigger signing + ComputeExpected below.
 # Unset → classic one-pass prepare/full behavior.
 if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
     [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_PREPARE_STEP=plan needs E2E_JOB_DIR"; exit 1; }
@@ -171,25 +195,8 @@ if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
     plan_job_deploys "$SOL" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
     exit "$_RC"
 fi
-if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == deploy:* ]]; then
-    [[ -n "${E2E_JOB_DIR:-}" ]] || { echo "E2E_PREPARE_STEP=deploy needs E2E_JOB_DIR"; exit 1; }
-    mkdir -p "$E2E_JOB_DIR"
-    _RC=0
-    presign_deploy_contract "$SOL" "${E2E_PREPARE_STEP#deploy:}" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
-    exit "$_RC"
-fi
-
 echo "====== Deploy ======"
-if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "finish" ]]; then
-    [[ -f "${E2E_JOB_DIR:-}/deploy-env.env" ]] || { echo "E2E_PREPARE_STEP=finish needs E2E_JOB_DIR/deploy-env.env"; exit 1; }
-    set -a
-    # shellcheck disable=SC1091
-    source "$E2E_JOB_DIR/deploy-env.env"
-    set +a
-    echo "reloaded deploy outputs from deploy-env.env (deploys mined by the orchestrator)"
-else
-    deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
-fi
+deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
 
 # ══════════════════════════════════════════════
 #  2. Create signed raw transaction
@@ -228,7 +235,7 @@ else
     COMPUTE_OUT=""
     EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"
     EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
-    EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"
+    EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"; EXPECTED_L2_STATIC_TABLE="0x"
     EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
     if ! grep -qE '^contract VerifyNetwork(L2)? ' "$SOL"; then
         echo "ERROR: scenario has neither ComputeExpected nor a VerifyNetwork/VerifyNetworkL2 contract - nothing would be verified"
@@ -243,10 +250,12 @@ if [[ "$E2E_STAGE" == "prepare" ]]; then
     mkdir -p "$E2E_JOB_DIR"
     printf '%s\n' "${RLP_ENCODED_TXS[@]}" > "$E2E_JOB_DIR/rawtxs.txt"
     echo "$COMPUTE_OUT" > "$E2E_JOB_DIR/compute.out"
-    declare -p _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
+    E2E_MANIFEST_VERSION=2
+    declare -p E2E_MANIFEST_VERSION _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
         EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
-        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EXPECTED_L2_STATIC_TABLE EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
         > "$E2E_JOB_DIR/manifest.env"
+    touch "$E2E_JOB_DIR/.deploys-done"
     echo ""
     echo "====== Prepared ($_TX_COUNT pre-signed tx, $_TRIGGER_CHAIN trigger) → $E2E_JOB_DIR ======"
     exit 0
@@ -271,7 +280,7 @@ if [[ "$_TRIGGER_CHAIN" == "L2" ]]; then
     # [L1_BLOCK_BEFORE..latest] with a deadline (see step 5).
     L1_BLOCK_BEFORE=$(cast block-number --rpc-url "$RPC")
 
-    publish_user_tx "${L2_FRONT:-$L2_RPC}"
+    publish_l2_user_tx
     L2_BLOCK="$TX_BLOCK_NUMBER"
 else
     # ── L1 trigger ──
@@ -327,6 +336,13 @@ FAILED=false; L1_OK=true; L2_OK=true; L2_CALL_OK=true; RETRY_OUT=""
 L1_BATCH_TXS=()
 _CORR_TX=""; _CORR_BLOCK=""; _CORR_LAST=""; _CORRELATIONS='[]'
 _Batch_RC=0
+network_links_capture || _Batch_RC=$?
+if (( _Batch_RC != 0 )); then
+    (( _Batch_RC != 1 )) || exit 1
+    network_retry "transaction links pending or unavailable" || exit 1
+    continue
+fi
+_Batch_RC=0
 network_refresh_triggers || _Batch_RC=$?
 if (( _Batch_RC != 0 )); then
     if (( _Batch_RC == 1 )) && network_evidence_check; then exit 1; fi
@@ -353,6 +369,19 @@ if $_HAS_COMPUTE; then
     fi
 fi
 
+_Batch_RC=0
+network_links_resolve || _Batch_RC=$?
+if (( _Batch_RC != 0 )); then
+    if (( _Batch_RC == 1 )) && network_evidence_check; then exit 1; fi
+    network_retry "linked transaction evidence unavailable or changed" || exit 1
+    continue
+fi
+if $NETWORK_LINKS_ACTIVE; then
+    _CORR_TX="$NETWORK_LINK_POSTS"
+    _CORR_BLOCK=$(jq -r '[.[].references[]|select(.role=="l1-post-batch")|.blockNumber]|first' <<< "$NETWORK_LINKS")
+    _CORR_BLOCK=$((_CORR_BLOCK))
+fi
+
 _l1_scan() {
     if [[ "$_L1_CONTRACT" == VerifyL1SettlementTxsInRange ]]; then
         forge script "script/e2e/scenarios/shared/Verify.s.sol:$_L1_CONTRACT" \
@@ -366,6 +395,11 @@ _l1_scan() {
 }
 if ! $_HAS_COMPUTE; then
     echo "SKIP: no ComputeExpected; scenario self-verification follows"
+elif $NETWORK_LINKS_ACTIVE; then
+    _L1_CONTRACT=VerifyL1BatchCalldata
+    L1_BATCH_TX=$(head -1 <<< "$NETWORK_LINK_POSTS")
+    L1_BLOCK="$_CORR_BLOCK"
+    L1_OK=true
 else
     _L1_CONTRACT=VerifyL1BatchInRange
     if [[ -z "$EXPECTED_L1_CALL_HASHES" || "$EXPECTED_L1_CALL_HASHES" == '[]' ]]; then
@@ -449,6 +483,10 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
     # refreshed; an old .meta file from a resumed run is never trusted.
     _cand_input() {  # $1=txhash → calldata on stdout
         local cf="${E2E_L1TX_CACHE:-}/$1.input" inp
+        if $NETWORK_LINKS_ACTIVE; then
+            jq -r --arg key "L1:$1" '.[$key].transaction.input' <<< "$NETWORK_LINK_EVIDENCE"
+            return
+        fi
         [[ -n "${E2E_L1TX_CACHE:-}" && -s "$cf" ]] && { cat "$cf"; return 0; }
         inp=$(network_transaction_input L1 "$1" "$_BATCH_RECEIPT") || return 1
         if [[ -n "${E2E_L1TX_CACHE:-}" ]]; then
@@ -497,7 +535,8 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
             [[ $(date +%s) -ge $_CD_DEADLINE ]] && break
             [[ ",$_REJECTED," == *",$_TX,"* || "$_CD_DONE" == *",$_TX,"* ]] && continue
             _hint=$(jq -r --arg tx "$_TX" '.[]|select(.l1TransactionHash==$tx)|.l1BlockHash' <<< "${_CORRELATIONS:-[]}")
-            if ! _BATCH_RECEIPT=$(network_receipt L1 "$_TX" "$_hint"); then
+            _BATCH_RECEIPT="${NETWORK_RECEIPTS[L1:$_TX]:-}"
+            if [[ -z "$_BATCH_RECEIPT" ]] && ! _BATCH_RECEIPT=$(network_receipt L1 "$_TX" "$_hint"); then
                 network_retry "settlement receipt unavailable: $_TX" || exit 1
                 continue 3
             fi
@@ -527,12 +566,13 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
                 continue
             fi
             [[ -z "$_TARGET_CHECK" ]] || echo "NOTE: $_TARGET_CHECK"
+            _batch_args=(--sig "run(bytes,address,bytes,bytes,bytes,bool)"
+                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" "$_CD_PARTIAL")
+            if $NETWORK_LINKS_ACTIVE; then
+                _batch_args=(--sig "runLinked(string,bytes32,address,bool)" "$E2E_LINK_EVIDENCE" "$_TX" "$ROLLUPS" "$_CD_PARTIAL")
+            fi
             if BATCH_VERIFY=$(forge script script/e2e/scenarios/shared/Verify.s.sol:VerifyL1BatchCalldata \
-                --rpc-url "$RPC" \
-                --fork-block-number "$((_BATCH_BLOCK))" \
-                --sig "run(bytes,address,bytes,bytes,bytes,bool)" \
-                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" \
-                "$_CD_PARTIAL" 2>&1); then
+                --rpc-url "$RPC" --fork-block-number "$((_BATCH_BLOCK))" "${_batch_args[@]}" 2>&1); then
                 echo "Matched settlement tx $_TX"
                 echo "$BATCH_VERIFY" | grep -E "PASS|NOTE|Posted batch"
                 L1_BATCH_TXS+=("$_TX")
@@ -615,7 +655,10 @@ L2_BLOCKS="[]"
 if [[ "$_TRIGGER_CHAIN" == L2 ]]; then
     L2_BLOCKS=$(printf '%s\n' "${TX_BLOCK_NUMBERS[@]}" | jq -sc 'unique')
 fi
-if [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != '[]' ]]; then
+if $NETWORK_LINKS_ACTIVE; then
+    L2_BLOCKS=$(jq -r '[.[].references[]|select(.chain=="L2")|.blockNumber]|unique[]' <<< "$NETWORK_LINKS" |
+        while read -r number; do echo "$((number))"; done | jq -sc 'unique')
+elif [[ -n "${EXPECTED_L2_CALL_HASHES:-}" && "$EXPECTED_L2_CALL_HASHES" != '[]' ]]; then
     _l2_calls_scan_latest() {
         network_evidence_check || return 75
         local to="$_SCAN_TO"
@@ -670,7 +713,7 @@ if [[ -z "${EXPECTED_L2_HASHES:-}" ]]; then
     echo "ERROR: No EXPECTED_L2_HASHES — add to ComputeExpected"
     FAILED=true
     L2_OK=false
-elif [[ "$EXPECTED_L2_HASHES" == "[]" ]]; then
+elif [[ "$EXPECTED_L2_HASHES" == "[]" && "${EXPECTED_L2_STATIC_TABLE:-0x}" == 0x && "${NETWORK_LINK_HAS_L2_TABLES:-false}" != true ]]; then
     echo "No L2 entry events expected (lookup, terminal revert, or an eventless static pool)"
     # ABSENT_L2_HASHES: call keys that must have left NO trace on L2 — the active proof
     # that a lookup (a call that reverts on L2, a top-level static read) was never
@@ -760,7 +803,7 @@ _run_verify_network VerifyNetwork "$RPC" L1
 _run_verify_network VerifyNetworkL2 "$L2_RPC" L2
 
 # Record the actual table/delivery transactions selected by the semantic verifiers.
-if [[ "$FAILED" != true ]]; then
+if [[ "$FAILED" != true && "$NETWORK_LINKS_ACTIVE" != true ]]; then
     _receipts_ready=true
     _l2_receipt_hints=""
     while read -r _number; do
@@ -793,6 +836,10 @@ if [[ "$FAILED" != true ]]; then
 fi
 if ! network_evidence_check; then
     network_retry "canonical inclusion changed or could not be revalidated; discarding this pass" || exit 1
+    continue
+fi
+if ! network_links_recheck; then
+    network_retry "transaction links or attempt changed; discarding this pass" || exit 1
     continue
 fi
 network_time_left >/dev/null || { echo "ERROR: network verification deadline expired"; exit 1; }
@@ -846,6 +893,9 @@ for _tx in "${L1_BATCH_TXS[@]}"; do
     echo "L1 postBatch:   $_tx  (block $(( $(jq -r .blockNumber <<< "$_receipt") )))"
 done
 
+if $NETWORK_LINKS_ACTIVE; then
+    network_links_finish || exit 1
+else
 for _kind in TABLE CALL; do
     _label="L2 loadTable"; [[ "$_kind" != CALL ]] || _label="L2 call exec"
     while read -r _tx; do
@@ -855,6 +905,7 @@ for _kind in TABLE CALL; do
     done < <(printf '%s\n' "${VERIFY_STEP_OUT[L2 $_kind]:-}" |
         sed -nE "s/.*L2_${_kind}_TX=(0x[0-9a-fA-F]{64}).*/\\1/p" | sort -u)
 done
+fi
 
 echo ""
 echo "====== Done ======"
