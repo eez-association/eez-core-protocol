@@ -15,8 +15,8 @@ load_worker() (
         hashes=(); starts=(); nonces=(); indexes=()
         for ((j=0; j<WINDOW && i<count; j++, i++)); do
             start=$(_now_ms)
-            # Build an offline legacy candidate; L2 replaces its gas and fees
-            # with a fresh composer quote immediately before submission.
+            # Build an offline legacy candidate; cross-chain triggers on either chain
+            # try a quote and fall back to node fees immediately before submission.
             sign_rc=0
             raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
@@ -30,12 +30,8 @@ load_worker() (
             # Never advance past an uncertain send: doing so could leave a nonce gap.
             # stderr is retained in worker-N.log by the worker launcher.
             send_rc=0
-            if [[ "$TRIGGER_CONTRACT" == *L2 ]]; then
-                hash=$(EEZ_L2_FRESH_SEND=1 network_send_quoted_l2 "$raw" "$key" "$SEND_RPC" "$READ_RPC" \
-                    "$RUN_DIR/fee-quote-$worker-$i.json" _load_publish_raw) || send_rc=$?
-            else
-                hash=$(_load_publish_raw "$SEND_RPC" "$raw") || send_rc=$?
-            fi
+            hash=$(EEZ_FRESH_SEND=1 network_send_quoted_trigger "$raw" "$key" "$SEND_RPC" "$READ_RPC" \
+                "$RUN_DIR/fee-quote-$worker-$i.json" _load_publish_raw) || send_rc=$?
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 printf 'send_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$send_rc" "$SEND_TIMEOUT" >&2
                 if (( send_rc == 124 )); then
@@ -241,8 +237,8 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
    "$CALLDATA" =~ ^0x([0-9a-fA-F]{2})*$ && "$GAS" =~ ^[1-9][0-9]*$ ]] || {
     echo "Invalid trigger template; see $RUN_DIR/trigger.log"; exit 1;
 }
-# Ordinary fee values build offline candidates; every L2 submission replaces
-# them with a fresh eez_quoteFee option from its source front.
+# Ordinary fees build offline candidates; each cross-chain trigger tries
+# eez_quoteFee on its source front, with fresh node fees as fallback.
 CHAIN_ID=$(cast chain-id --rpc-url "$READ_RPC")
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
 declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"

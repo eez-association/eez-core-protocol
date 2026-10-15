@@ -13,6 +13,7 @@ KEY = "0x" + "01".zfill(64)  # Public test-only key.
 RPC = r'''
 L1_RPC=direct1 L2_RPC=direct2
 _front_rpc() { echo front1; }
+network_fee_quote() { echo eez_quoteFee >> calls; return 75; }
 _recovery_lookup_once() {
     echo "lookup $1 $2" >> calls
     if [[ "$SCENARIO" == rpc_failure || "$SCENARIO" == partial_receipt_failure && "$1" == front1 ]]; then return 1; fi
@@ -57,7 +58,7 @@ _recovery_rpc() {
             else return 1; fi ;;
         eth_sendRawTransaction)
             if [[ "${CHECK_QUOTE_LOCK:-0}" == 1 ]]; then
-                if flock -n "$TMPDIR/eez-e2e-fee-quote.lock" true; then return 99; fi
+                if flock -n "$TMPDIR/eez-e2e-fee-quote-1.lock" true; then return 99; fi
                 # The journal and evidence must exist before broadcast, even on a lost reply.
                 jq -e --arg raw "$(jq -r '.[0]' <<< "$3")" '.[0].variants | any(. == $raw)' sent.replacements.json >/dev/null || return 98
                 [[ -s jobs/job/fee-quote-recovery.json ]] || return 97
@@ -78,6 +79,8 @@ SENDER=$(_recovery_decode "$(cat jobs/job/rawtxs.txt)" | jq -r .signer)
 
 # Use the real quote validation and signing code with deterministic composer responses.
 L2_QUOTE = r'''
+source "$(dirname "$RECOVERY")/network-fees.sh"
+
 CHECK_QUOTE_LOCK=1
 cast() {
     case "$1" in
@@ -85,6 +88,14 @@ cast() {
         rpc)
             [[ "$*" == *eez_quoteFee* ]] || return 90
             echo eez_quoteFee >> calls
+            if [[ "${QUOTE_REJECT:-0}" == 1 ]]; then
+                echo 'Error: server returned an error response: error code -32602: invalid params' >&2
+                return 1
+            fi
+            if [[ "${QUOTE_BUSY:-0}" == 1 ]]; then
+                echo 'quote_unavailable: settlement reconciliation pending' >&2
+                return 1
+            fi
             local cap="${QUOTE_CAP:-200}" tip="${QUOTE_TIP:-20}" gas="${QUOTE_GAS:-21000}"
             if [[ "$SCENARIO" == fee_reject && -f sends ]]; then cap=300; tip=30; fi
             jq -nc --arg expires "$(printf '0x%x' "$QUOTE_EXPIRES")" \
@@ -118,7 +129,7 @@ class RecoveryTests(unittest.TestCase):
             for name in ("sent", "pending"):
                 (root / f"{name}.csv").write_text(f"job,{chain},{self.hash}\n")
             (root / "wallets.csv").write_text(f"job,address,key\njob,unused,{KEY}\n")
-            shell = 'set -euo pipefail\ncd "$TEST_ROOT"\nsource "$RECOVERY"\n' + function("_remove_mined") + RPC + actions + '\n_recovery_report .\nif [[ -f "$TMPDIR/eez-e2e-fee-quote.lock" ]]; then flock -n "$TMPDIR/eez-e2e-fee-quote.lock" true; fi\n'
+            shell = 'set -euo pipefail\ncd "$TEST_ROOT"\nsource "$RECOVERY"\n' + function("_remove_mined") + RPC + actions + '\n_recovery_report .\nif [[ -f "$TMPDIR/eez-e2e-fee-quote-1.lock" ]]; then flock -n "$TMPDIR/eez-e2e-fee-quote-1.lock" true; fi\n'
             result = subprocess.run(["bash", "-c", shell], capture_output=True, text=True, timeout=30,
                                     env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
                                          "RECOVERY": str(E2E / "lib/staged-recovery.sh"), "TMPDIR": directory,
@@ -151,14 +162,55 @@ _recover_pending pending.csv front
         self.assertNotIn("sends", files)
         self.assertIn("disappeared tx", entries[0]["stop_retry"])
 
-    def test_l2_replacement_requires_fresh_quote_without_oracle_fallback(self):
-        _, files, entries = self.run_recovery("held", chain="L2", actions='''
-network_l2_fee_quote() { echo eez_quoteFee >> calls; return 1; }
-_recover_pending pending.csv front
-''')
-        self.assertIn("eez_quoteFee", files["calls"])
-        self.assertNotIn("sends", files)
-        self.assertIn("no unquoted replacement", entries[0]["stop_retry"])
+    def test_both_chains_fall_back_to_old_recovery_fees(self):
+        for chain in ('L1', 'L2'):
+            with self.subTest(chain=chain):
+                result, files, entries = self.run_recovery("lost_response", chain=chain)
+                self.assertIn("eez_quoteFee", files["calls"])
+                self.assertIn("eth_gasPrice", files["calls"])
+                self.assertEqual(files["sends"].count("send"), 1)
+                self.assertEqual(entries[0]["fee_bumps"], 1)
+                self.assertIn("falling back to node fees", result.stdout)
+
+    def test_invalid_quote_does_not_fall_back_in_recovery(self):
+        for chain in ('L1', 'L2'):
+            actions = 'network_fee_quote() { echo eez_quoteFee >> calls; return 1; }\n_recover_pending pending.csv front\n'
+            _, files, entries = self.run_recovery("held", chain=chain, actions=actions)
+            self.assertNotIn("sends", files)
+            self.assertNotIn("eth_gasPrice", files["calls"])
+            self.assertIn("fee quote rejected, timed out, or invalid", entries[0]["stop_retry"])
+
+    def test_quote_rejection_and_timeout_never_use_node_recovery_fees(self):
+        for chain in ('L1', 'L2'):
+            for setting in ('QUOTE_REJECT=1', 'QUOTE_BUSY=1 EEZ_QUOTE_TIMEOUT=1'):
+                with self.subTest(chain=chain, setting=setting):
+                    actions = L2_QUOTE + setting + '\n_recover_pending pending.csv front 2> quote-errors\n'
+                    _, files, entries = self.run_recovery("held", actions, chain=chain)
+                    self.assertNotIn("sends", files)
+                    self.assertNotIn("eth_gasPrice", files["calls"])
+                    self.assertIn("fee quote rejected, timed out, or invalid", entries[0]["stop_retry"])
+
+    def test_l1_prefers_a_valid_quote_to_node_fees(self):
+        _, files, entries = self.run_recovery("held", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L1")
+        self.assertEqual(files["sends"].count("send"), 1)
+        self.assertNotIn("eth_gasPrice", files["calls"])
+        self.assertEqual(files["calls"].count("eez_quoteFee"), 1)
+        self.assertNotIn("stop_retry", entries[0])
+
+    def test_deployment_replacement_uses_node_fees_without_quoting(self):
+        actions = """
+mv jobs/job/txs.txt jobs/job/deploy-hashes.txt
+sed 's/^/L1 /' jobs/job/rawtxs.txt > jobs/job/deploytxs.txt
+mv sent.csv deploy-sent.csv
+mv pending.csv deploy-pending.csv
+_recover_pending deploy-pending.csv direct
+"""
+        _, files, _ = self.run_recovery("lost_response", actions)
+        self.assertNotIn("eez_quoteFee", files["calls"])
+        self.assertNotIn("front1", files["calls"])
+        self.assertIn("eth_gasPrice", files["calls"])
+        self.assertEqual(files["sends"].count("send"), 1)
+        self.assertTrue(files["jobs/job/deploytxs.txt"].startswith("L1 "))
 
     def test_l2_tariff_replaces_even_when_node_prices_would_be_adequate(self):
         result, files, entries = self.run_recovery("held", L2_QUOTE + '_recover_pending pending.csv front\n', chain="L2")

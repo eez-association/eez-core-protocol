@@ -3,7 +3,8 @@
 # them, so thousands of transactions can be in flight while the local machine
 # only runs a handful of lightweight workers. The heavy lifting (forge scripts)
 # is confined to the prepare and verify phases, each with its own concurrency
-# cap; L2 sending obtains a fresh composer quote before signing and submission.
+# cap; cross-chain triggers try a fresh quote, with node-fee fallback only
+# for unsupported quote RPCs or transport failures, before signing/submission.
 #
 # Phases:
 #   1. fund     — one pooled wallet per job via the run faucet + MultiSend
@@ -22,7 +23,7 @@
 #                 Every prepare launch is bounded by PREPARE_JOB_TIMEOUT (a hung
 #                 forge run drops its job; the run goes on).
 #   3. snapshot — one L1+L2 block snapshot bounds every job's verification scans.
-#   4. send     — publish prepared L1 triggers; quote/sign L2 triggers through
+#   4. send     — quote/sign L1 and L2 triggers through
 #                 the composer after deployment, then record hashes in sent.csv.
 #   5. monitor  — batch-poll receipts per chain until everything is mined;
 #                 every 60s inspect pool/fees and recover stuck transactions.
@@ -61,12 +62,12 @@
 #   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / classic) may run before its job is dropped (default 300)
 #   SEND_WORKERS      send workers (default 80; --workers overrides)
 #   SEND_RETRIES      attempts per raw-tx send when the RPC gives no answer at
-#                     all (default 3). Explicit L2 reconciliation refusals instead
+#                     all (default 3). Explicit reconciliation refusals instead
 #                     get a fresh quote under EEZ_QUOTE_TIMEOUT.
 #   SEND_PAUSE        seconds each send worker sleeps after every trigger it
 #                     fires (default 0 = burst); the effective rate is
-#                     SEND_WORKERS / SEND_PAUSE tx/s, e.g. --workers 5 with
-#                     SEND_PAUSE=0.5 → 10 tx/s
+#                     no higher than SEND_WORKERS / SEND_PAUSE tx/s. Each source
+#                     chain also serializes quote/sign/send, which may be slower.
 #   VERIFY_PARALLEL   concurrent verify jobs (default 8)
 #   Receipt polling is fixed at 3 seconds on both chains.
 #   MINE_TIMEOUT      seconds between trigger recovery checks (default 60)
@@ -1041,7 +1042,7 @@ fi
 echo ""
 echo "== Snapshot: $(tr '\n' ' ' < "$RUN_DIR/snapshot.env")"
 
-# ══ Phase 4: send (fresh composer quotes for L2, then raw-tx submission) ══
+# ══ Phase 4: send (fresh composer quotes, then raw-tx submission) ══
 echo "== Send phase ($SEND_WORKERS workers)"
 _phase_begin send
 # touch, not truncate — a resumed run appends to the earlier records
@@ -1067,23 +1068,21 @@ send_worker() {  # worker index, chain, worker count
         done_n=0
         [[ -f "$dir/txs.txt" ]] && done_n=$(wc -l < "$dir/txs.txt")
         touch "$dir/txs.txt"
-        # L2 quotes simulate deployed contracts and expire: quote/sign immediately
+        # Quotes simulate deployed contracts and expire: quote/sign immediately
         # before each submission, including resumed prepared runs.
         raw_line=$done_n
         while IFS= read -r raw; do
             [[ -n "$raw" ]] || continue
             raw_line=$((raw_line + 1))
             send_rc=0
-            if [[ "$chain" == L2 ]]; then
-                signing_key=$(awk -F, -v j="$name" 'NR>1 && $1==j {print $3; exit}' "$RUN_DIR/wallets.csv")
-                hash=$(EEZ_L2_FRESH_SEND="$([[ -z "$RESUME" ]] && echo 1 || echo 0)" \
-                    network_send_quoted_l2 "$raw" "$signing_key" "$rpc" "$L2_RPC" \
-                    "$dir/fee-quote-$raw_line.json" _rpc_send_raw _staged_save_quoted_trigger "$dir/rawtxs.txt" "$raw_line" \
-                    2>>"$RUN_DIR/send-failed.log") || send_rc=$?
-                unset signing_key
-            else
-                hash=$(_rpc_send_raw "$rpc" "$raw" 2>>"$RUN_DIR/send-failed.log") || send_rc=$?
-            fi
+            local read_rpc="$L1_RPC"
+            [[ "$chain" != L2 ]] || read_rpc="$L2_RPC"
+            signing_key=$(awk -F, -v j="$name" 'NR>1 && $1==j {print $3; exit}' "$RUN_DIR/wallets.csv")
+            hash=$(EEZ_FRESH_SEND="$([[ -z "$RESUME" ]] && echo 1 || echo 0)" \
+                network_send_quoted_trigger "$raw" "$signing_key" "$rpc" "$read_rpc" \
+                "$dir/fee-quote-$raw_line.json" _rpc_send_raw _staged_save_quoted_trigger "$dir/rawtxs.txt" "$raw_line" \
+                2>>"$RUN_DIR/send-failed.log") || send_rc=$?
+            unset signing_key
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 echo "SEND FAILED: $name ($chain)" >> "$RUN_DIR/send-failed.log"
                 break

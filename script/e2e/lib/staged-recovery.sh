@@ -225,20 +225,27 @@ _recovery_one() {
         _recovery_stop 'disappeared tx: no receipt and not visible in front/source RPC; no resend'
         return $?
     fi
-    if [[ "$_rec_mode" == front && "$_rec_chain" == L2 ]]; then
-        network_with_l2_fee_lock _recovery_send_pending "$hash"
+    if _recovery_requires_quote; then
+        local fee_tx fee_chain
+        fee_tx=$(_recovery_decode "$(jq -r '.variants[.current]' <<< "$_rec_entry")") || return 1
+        fee_chain=$(cast to-dec "$(jq -r .chainId <<< "$fee_tx")") || return 1
+        network_with_fee_lock "$fee_chain" _recovery_send_pending "$hash"
     else
         _recovery_send_pending "$hash"
     fi
 }
 
+# Cross-chain triggers try quotes on either chain; direct deployments never do.
+_recovery_requires_quote() {
+    [[ "$_rec_mode" == front ]]
+}
+
 _recovery_submit_raw() { _recovery_rpc "$1" eth_sendRawTransaction "[\"$2\"]"; }
 
-_recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers hold the quote lock.
+_recovery_send_pending() { # _rec_entry is owned by _recovery_one; quoted callers hold the quote lock.
     local hash="$1" raw tx sender kind nonce gas value cap tip low newcap newtip
     local balance needed confirmed pk newhash rc=0 error reason receipt owner h
     local plan='' quote_cap quote_tip fee_cap fee_tip quoted=false aliases=()
-    [[ "$_rec_mode" != front || "$_rec_chain" != L2 ]] || quoted=true
     mapfile -t aliases < <(jq -r '.variants|keys[]' <<< "$_rec_entry")
     raw=$(jq -r '.variants[.current]' <<< "$_rec_entry")
     tx=$(_recovery_decode "$raw") || return 1
@@ -271,12 +278,22 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers ho
         fee_cap=$(bc <<< "if ($cap > $fee_cap) $cap else $fee_cap")
         fee_tip=$(bc <<< "if ($tip > $fee_tip) $tip else $fee_tip")
     fi
+    if _recovery_requires_quote; then
+        rc=0
+        plan=$(network_fee_quote "$tx" "$_rec_submit" "$_rec_rpc") || rc=$?
+        if (( rc == 75 )); then
+            _recovery_log 'eez_quoteFee unavailable; falling back to node fees'
+        elif (( rc != 0 )); then
+            _recovery_stop 'fee quote rejected, timed out, or invalid; no replacement sent'; return $?
+        else
+            quoted=true
+        fi
+        rc=0
+    fi
     if $quoted; then
-        plan=$(network_l2_fee_quote "$tx" "$_rec_submit" "$_rec_rpc") || {
-            _recovery_stop 'cross-chain fee adequacy unknown: fresh L2 fee quote unavailable; no unquoted replacement sent'; return $?; }
         read -r quote_cap quote_tip < <(jq -r '[.cap,.tip] | @tsv' <<< "$plan") || return 1
         [[ $(jq -r .gas <<< "$plan") == "$gas" ]] || {
-            _recovery_stop 'fresh L2 quote changes pending gas limit; fee adequacy unknown; no replacement sent'; return $?; }
+            _recovery_stop 'fresh quote changes pending gas limit; fee adequacy unknown; no replacement sent'; return $?; }
         # Ordinary node prices cannot establish coverage of the cross-chain tariff.
         low=$(bc <<< "$cap < $quote_cap || $tip < $quote_tip")
         read -r _ newcap newtip < <(_recovery_fees "$kind" "$fee_cap" "$fee_tip" 0 0 0) || return 1
@@ -290,7 +307,7 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers ho
     if jq -e '.fee_retry!=null' <<< "$_rec_entry" >/dev/null; then low=1; fi
     if $quoted && [[ "$low" == 1 ]]; then
         [[ $(bc <<< "$quote_cap >= $newcap && $quote_tip >= $newtip") == 1 ]] || {
-            _recovery_stop 'fresh L2 quote does not satisfy replacement fees; no replacement sent'; return $?; }
+            _recovery_stop 'fresh quote does not satisfy replacement fees; no replacement sent'; return $?; }
         newcap="$quote_cap"; newtip="$quote_tip"
     fi
     balance=$(_recovery_read "$_rec_rpc" eth_getBalance "[\"$sender\",\"latest\"]") || {
@@ -332,7 +349,7 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers ho
         pk=$(awk -F, -v j="$_rec_job" 'NR>1 && $1==j {print $3; exit}' "$_rec_root/wallets.csv")
         [[ -n "$pk" ]] || return 1
         if $quoted; then
-            plan=$(network_sign_l2_quote "$plan" "$pk" "$balance") || return 1
+            plan=$(network_sign_quote "$plan" "$pk" "$balance") || return 1
             raw=$(jq -r .raw <<< "$plan"); newhash=$(jq -r .signedHash <<< "$plan")
         else
             raw=$(_recovery_sign "$tx" "$pk" "$newcap" "$newtip") || return 1
@@ -343,7 +360,7 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers ho
         _recovery_log "job=$_rec_job fee increase $(jq -r .fee_bumps <<< "$_rec_entry")/2 nonce=$nonce cap=$cap->$newcap tip=$tip->$newtip hash=$newhash"
     fi
     if $quoted; then
-        confirmed=$(network_submit_l2_quote "$plan" "$_rec_submit" \
+        confirmed=$(network_submit_quote "$plan" "$_rec_submit" \
             "$_rec_root/jobs/$_rec_job/fee-quote-recovery.json" _recovery_submit_raw _recovery_save) || rc=$?
         if (( rc == 70 )); then
             _recovery_stop 'quoted replacement could not be saved or expired before submission; no replacement sent'; return $?;
@@ -368,7 +385,7 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; L2 callers ho
                 fi
                 _recovery_log "job=$_rec_job fee rejected; refresh fees and retry immediately: $error"
                 _rec_fees_ready=false
-                # Keep the L2 turn through rejection handling and any immediate retry.
+                # Keep the chain lock through rejection handling and any immediate retry.
                 _recovery_send_pending "$hash"; return $? ;;
             *insufficient\ funds*|*insufficient\ balance*)
                 _recovery_stop "insufficient funds: need=$(cast from-wei "$needed") ETH last_balance=$(cast from-wei "$balance") ETH; $error"; return $? ;;

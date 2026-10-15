@@ -7,7 +7,7 @@ The examples show JSON-RPC `params` arrays; replace angle-bracket placeholders.
 | Method | Use | Front |
 | --- | --- | --- |
 | `eez_composerInfo` | Discover version, contracts and chains | L1 |
-| `eez_quoteFee` | Get the fee for an exact L2 transaction | L2 |
+| `eez_quoteFee` | Get the fee for an exact source transaction | Source chain |
 | `eez_getCrossChainTransaction` | Check a transaction's progress or rejection | Source chain |
 | `eez_getSettlementByL2Block` | Find the L1 settlement for an L2 block | L2 |
 | `eez_getSettledL2RangesByL1Block` | Find the settled L2 blocks associated with an L1 block | L1 |
@@ -23,6 +23,13 @@ On 2026-10-15, this harness observed version-1 fee options change from
 `intentHash` to `requestHash`, with `recoveryMode` also disappearing. The runner
 accepts either hash spelling and preserves the raw quote fields in its evidence.
 Both spellings remain supported; neither is assumed to be the final API field name.
+
+On 2026-10-16, the composer rejected an unquoted L1 trigger with
+`l1_tip_underfunded` and returned a valid version-1 quote on L1. The staged runner
+now quotes both L1 and L2 triggers, retaining the same intent and fee checks.
+Standalone and load-test cross-chain triggers use the same policy. Older
+deployments may return `unsupported_direction`; an unavailable quote RPC falls
+back to source-node fee estimates.
 
 For another schema change, retain the exact request, response and composer build
 version, compare them with this reference, and add a regression fixture before
@@ -64,31 +71,50 @@ Require matching chain IDs for the front, read node, candidate and quote.
 Preserve sender, target, calldata, value, nonce and transaction type. Check expiry
 and funds; maximum cost is native value plus quoted gas times the gas price
 (or maximum fee per gas). Use the quoted gas even if the prepared limit differs.
-Keep quote/sign/send together and save the quote. Never guess a tip or replace
-the quote with ordinary gas-price estimates.
+Keep quote/sign/send together and save the quote. Only cross-chain trigger
+transactions on L1 and L2 use `eez_quoteFee`. Deployments, funding transfers and
+other ordinary transactions keep their existing node fee path.
 
-Serialize the full quote/sign/send sequence locally, holding the lock through
-submission. Queue waiting is separate from `EEZ_QUOTE_TIMEOUT` (default 120
+If the quote RPC is unsupported (-32601 or -32004/unsupported_direction) or
+fails with a recognized transport error (including HTTP 5xx), use fresh node fees from the source
+read RPC. Other composer errors, including invalid params and simulation
+reverts, are terminal.
+Legacy transactions use `eth_gasPrice`; EIP-1559 transactions also use the latest
+base fee and priority-fee oracle, with the existing gas-price-minus-base fallback
+when the priority oracle is unsupported. Preserve the prepared gas limit and
+transaction intent, and check funds before signing. Returned quotes that are
+malformed, expired or inconsistent with the candidate still stop submission.
+
+Serialize the full quote/sign/send sequence per source chain, holding
+`$TMPDIR/eez-e2e-fee-quote-<chainId>.lock` through submission. Different chains
+use independent locks; same-chain workers and recovery share a lock.
+Queue waiting is separate from `EEZ_QUOTE_TIMEOUT` (default 120
 seconds), which starts at the quote request. Retry only explicit `quote_busy`,
-`stale_context`, or reconciliation-pending `quote_unavailable` responses within
-that deadline; any other quote failure stops submission.
+`stale_context`, HTTP 429, or reconciliation-pending `quote_unavailable` responses within
+that deadline. Exhausting the quote deadline or retry count is terminal:
+a reachable composer that is still reconciling or rate-limiting must not trigger node-fee
+fallback. Invalid returned quotes and local failures also remain terminal.
 
 A definite `-32003` / `quote_unavailable` reconciliation rejection during initial
-L2 submission waits two seconds, obtains a fresh quote, re-signs the same intent
+cross-chain submission waits two seconds, obtains a fresh quote, re-signs the same intent
 and nonce, and retries under the original deadline while retaining the lock. Local persistence
 failures, uncertain sends and other submission errors do not take this retry path.
 Rejected quote evidence is retained in `fee-quote-*.rejections.jsonl` before the
 current quote file and candidate are replaced.
 
 Resume obtains fresh quotes for unsent transactions; a known saved transaction
-is adopted without resending. Assess stuck L2 trigger fees against a fresh
-composer quote, never ordinary node prices. A pending replacement needs a fresh quote that
-preserves nonce/gas and meets replacement pricing, otherwise recovery stops.
+is adopted without resending. Stuck cross-chain triggers on either chain try a
+fresh composer quote, falling back to the existing node fee snapshot when the
+quote RPC is unavailable. A returned quote must preserve nonce/gas and satisfy
+replacement pricing; otherwise recovery stops. Deployment recovery uses node
+fees directly. Uncertain submissions never cause a fallback resend.
 
 Staged evidence: `jobs/<job>/fee-quote-<index>.json`.
 Load-test evidence: `fee-quote-<worker>-<index>.json` in the run directory.
-L1 triggers and ordinary deployments keep their existing fee path; local Anvil
-tests do not use this service.
+Initial-send evidence records `feeSource` (`composer` or `node`), signed hash,
+gas and fees. Node fallback has no quote; recovery logs when it uses node fees.
+Local Anvil tests do not use this service. Node estimates do not guarantee
+coverage of a composer tariff, so a fallback trigger may still be rejected.
 
 ## eez_getCrossChainTransaction
 
@@ -163,10 +189,10 @@ See [how the runner verifies settlement](RUNNER_GUIDE.md#settlement-correlation-
 | --- | --- |
 | `-32601` | Method unsupported |
 | `-32001` | Settlement indexing is catching up |
-| `-32004` / `unsupported_direction` | Fee quoting is unsupported for this direction; currently L1 |
+| `-32004` / `unsupported_direction` | Fee quoting is unsupported for this direction on this deployment |
 | `quote_busy` | Another quote is running; retry briefly |
 | `quote_unavailable` | No quote available; inspect the reason, such as pending settlement reconciliation |
-| `l2_tip_underfunded` | The signed priority payment does not cover the cross-chain fee |
+| `l1_tip_underfunded` / `l2_tip_underfunded` | The signed priority payment does not cover the cross-chain fee |
 
 A null result or empty settlement list does not establish a successful flow or
 a rejection. Recheck status and receipts; do not infer completion from absence.

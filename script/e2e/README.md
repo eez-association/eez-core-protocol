@@ -60,9 +60,9 @@ The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
 validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
 and default local runs; named scenarios and category selections remain available.
 
-### L2 trigger fees
+### Cross-chain trigger fees
 
-Follow the mandatory [L2 trigger quote and recovery rules](RPC.md#eez_quotefee).
+Follow the [L1/L2 cross-chain quote, fallback and recovery rules](RPC.md#eez_quotefee).
 
 ## Script layout
 

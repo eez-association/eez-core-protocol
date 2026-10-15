@@ -96,9 +96,10 @@ Read [BUILD_AND_REVIEW_E2E_TESTS](script/e2e/BUILD_AND_REVIEW_E2E_TESTS.md) befo
   RPC endpoints handle deployment/reads; fronts receive cross-chain triggers. Never expose keys or
   commit env files, wallet pools or run artifacts.
 
-## Mandatory L2 trigger fee quote
+## Cross-chain trigger fees
 
-Follow the mandatory [L2 trigger quote and recovery rules](script/e2e/RPC.md#eez_quotefee).
+Follow the [L1/L2 cross-chain quote, fallback and recovery rules](script/e2e/RPC.md#eez_quotefee).
+Quote only cross-chain triggers; deployments and funding transfers use node fees.
 
 ## Composer status and settlement
 

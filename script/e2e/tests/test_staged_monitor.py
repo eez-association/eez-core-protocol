@@ -270,12 +270,12 @@ curl() { printf '%s\n' "$RESPONSE"; }
                     (root / "wallets.csv").write_text("job,address,private_key\njob,unused,test-only-key\n")
                     script = r'''set -euo pipefail
 RUN_DIR="$TEST_ROOT"; JOB_NAMES=(job); NJOBS=1
-SEND_PAUSE=0 RESUME=saved-run L2_RPC=mock-read
+SEND_PAUSE=0 RESUME=saved-run L1_RPC=mock-read L2_RPC=mock-read
 _job_prepared() { return 0; }
 _front_rpc() { echo mock-front; }
 _reply() { echo "$1" >> "$RUN_DIR/submissions"; printf '%s\n' "$RETURNED_HASH"; }
 _rpc_send_raw() { _reply "$2"; }
-network_send_quoted_l2() { _reply "$1"; }
+network_send_quoted_trigger() { _reply "$1"; }
 ''' + function("send_worker") + '\nsend_worker 0 "$CHAIN" 1\n'
                     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                         timeout=5, env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,

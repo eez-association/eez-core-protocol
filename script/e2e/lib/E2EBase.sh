@@ -823,15 +823,19 @@ _poll_receipt() {
 # Sets TX_HASH and TX_BLOCK_NUMBER. Override the wait with RECEIPT_TIMEOUT (seconds).
 publish_user_tx() {
     local rpc="$1" tx_hash
-    tx_hash=$(_send_raw_tx "$rpc" "$RLP_ENCODED_TX") || return 1
+    tx_hash=$(_send_cross_chain_trigger "$rpc" "$RPC" "$RLP_ENCODED_TX") || return 1
     _wait_user_tx "$rpc" "$tx_hash"
 }
 
 publish_l2_user_tx() {
     local rpc="${L2_FRONT:?L2_FRONT is required for eez_quoteFee}" tx_hash
-    tx_hash=$(EEZ_L2_FRESH_SEND=1 network_send_quoted_l2 "$RLP_ENCODED_TX" "$PK" "$rpc" "$L2_RPC" \
-        "${E2E_JOB_DIR:-tmp/e2e-network}/fee-quote-$(cast keccak "$RLP_ENCODED_TX").json" _send_raw_tx) || return 1
+    tx_hash=$(_send_cross_chain_trigger "$rpc" "$L2_RPC" "$RLP_ENCODED_TX") || return 1
     _wait_user_tx "$rpc" "$tx_hash"
+}
+
+_send_cross_chain_trigger() { # source front, source read RPC, raw trigger
+    EEZ_FRESH_SEND=1 network_send_quoted_trigger "$3" "$PK" "$1" "$2" \
+        "${E2E_JOB_DIR:-tmp/e2e-network}/fee-quote-$(cast keccak "$3").json" _send_raw_tx
 }
 
 _wait_user_tx() {
@@ -862,7 +866,7 @@ publish_user_txs_nowait() {
     TX_HASHES=()
     local raw tx_hash
     for raw in "${RLP_ENCODED_TXS[@]}"; do
-        tx_hash=$(_send_raw_tx "$rpc" "$raw") || {
+        tx_hash=$(_send_cross_chain_trigger "$rpc" "$RPC" "$raw") || {
             echo "ERROR: send failed at tx $(( ${#TX_HASHES[@]} + 1 ))/${#RLP_ENCODED_TXS[@]}"
             return 1
         }

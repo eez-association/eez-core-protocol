@@ -10,7 +10,7 @@ settings below are existing runner options.
 - [Parallel examples](#big-parallel-load-mix-770-jobs)
 - [Staged and load examples](#network-commands)
 - [Recovery and saved artifacts](#recovery-and-saved-artifacts)
-- [Fee quotes and recovery limits](#l2-fees-and-recovery-limits)
+- [Fee quotes and recovery limits](#cross-chain-fees-and-recovery-limits)
 - [Settlement verification](#settlement-correlation-rpc-eez_getsettlementbyl2block--co)
 - [Contract verification](#verify-contracts-from-tx-hashes)
 - [Caveats](#caveats)
@@ -119,7 +119,7 @@ than a capped number of forge processes, however many txs are in flight:
 fund → **prepare** (one forge plan run per job: simulated deploys + trigger
 presign + ComputeExpected, capped at `PREPARE_PARALLEL`; then all deploys fired
 and mined at once) → one block snapshot → **send** (`SEND_WORKERS` workers
-publish L1 candidates and freshly quote/sign L2 triggers, then record hashes) → **monitor** (batched
+quote/sign cross-chain triggers on both chains with node-fee fallback, then record hashes) → **monitor** (batched
 receipt polls per chain with a source-RPC fallback, every 3 seconds, with recovery every `MINE_TIMEOUT` seconds) →
 **verify** (capped at `VERIFY_PARALLEL`, deferrable). Every artifact lives in
 `tmp/e2e-staged-net/RUN_DIRECTORY/` — per-job manifests + raw txs, `sent.csv`, `mined.csv`,
@@ -156,12 +156,12 @@ bash script/e2e/run/network/staged.sh counter:10 counterL2:10 counter-multi-tx:1
 DEVNET_ENV=chain.env2 bash script/e2e/run/network/staged.sh --no-verify counter:1000
 VERIFY_PARALLEL=4 bash script/e2e/run/network/staged.sh --verify-only tmp/e2e-staged-net/RUN_DIRECTORY
 
-# Big runs: pace sends (upper bound = workers / SEND_PAUSE tx/s; L2 quotes add delay). A burst of
+# Big runs: SEND_PAUSE paces workers; each chain also serializes quote/sign/send. A burst of
 # ~280 triggers at once was accepted and then dropped by the fronts on 2026-09-03.
-SEND_PAUSE=0.5 bash script/e2e/run/network/staged.sh --workers 5 counter:10 counterL2:10   # at most 10 tx/s
+SEND_PAUSE=0.5 bash script/e2e/run/network/staged.sh --workers 5 counter:10 counterL2:10   # pacing ceiling 10 tx/s; chain serialization may be slower
 
 # Re-fire the triggers of a run the fronts dropped (accepted, never mined; nonces
-# still free): L2 triggers are quoted again; old hashes archived as *.attempt<N>
+# still free): cross-chain triggers try quotes again; old hashes archived as *.attempt<N>
 SEND_PAUSE=0.5 bash script/e2e/run/network/staged.sh --workers 5 --resend tmp/e2e-staged-net/RUN_DIRECTORY
 # LOAD testing
 bash script/e2e/run/network/load-testing.sh --workers 20 --txs-per-wallet 500 counter
@@ -188,8 +188,10 @@ It reconciles all saved mined attempts before querying the pool or fee oracles:
   the same nonce, payload, value, gas limit and access list. The fee cap and tip
   increase by at least **10%**, rounded up, and cover current estimates. Explicit
   fee rejection refreshes estimates and retries immediately within that budget.
-  L2 replacements additionally require a fresh composer quote preserving nonce/gas
-  and satisfying replacement pricing; otherwise recovery stops.
+  Cross-chain replacements on both chains try a fresh composer quote preserving
+  nonce/gas and satisfying replacement pricing. An unavailable quote RPC falls
+  back to node fees; an invalid returned quote stops recovery. Deployment
+  replacements use node fees directly.
 - Insufficient funds stop the job. The report gives the required balance and
   available balance in ETH, with the shortfall when known. No automatic top-up.
 - A consumed nonce is traced to its mined transaction. Own attempts are reconciled;
@@ -297,19 +299,23 @@ slowest jobs. `E2E_TIMING_BASELINE=<timings.csv of a reference run>` reports
 every phase more than `TIMING_REGRESSION_PCT` (default 20) % slower than the
 baseline's last attempt.
 
-## L2 fees and recovery limits
+## Cross-chain fees and recovery limits
 
-Follow the mandatory [L2 quote and recovery rules](RPC.md#eez_quotefee).
+Follow the [L1/L2 cross-chain quote, fallback and recovery rules](RPC.md#eez_quotefee).
 
 Fresh sends decode the candidate and check endpoint identities before waiting for
 the lock. They skip the two known-hash lookups used by resume. The balance is read
 after queueing so funding checks remain fresh. The staged sender fires L1 jobs with
-its normal workers first, then processes L2 jobs with one quoted sender. The lock
-also coordinates other runs on this machine using the same `$TMPDIR`.
+its normal workers first, then processes L2 jobs with one sender. Both directions
+hold their source chain's quote lock through submission, including node-fee
+fallback. Different chains have separate locks. Same-chain sends remain
+serialized across workers and runs using the same `$TMPDIR`, so adding workers
+does not parallelize quote/sign/send on that chain. L1 serialization remains
+until the composer's concurrency requirements are established.
 
-Mandatory quoting adds work compared with the old direct-send path. Composer
+Trying quotes for cross-chain triggers adds work compared with the old direct-send path. Composer
 reconciliation can delay a quote even after deployments are mined; client-side
-serialization cannot remove that delay. L2 load-test rates include quote service
+serialization cannot remove that delay. Cross-chain load-test rates include quote service
 and reconciliation time and must not be presented as chain-only throughput.
 
 
