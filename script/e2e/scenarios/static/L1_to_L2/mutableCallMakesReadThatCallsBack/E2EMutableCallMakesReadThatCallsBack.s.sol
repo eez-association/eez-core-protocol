@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -37,7 +39,7 @@ import {
 //     L1 -> L2: read the stored value (returns 0)
 // L2: after the reads finish, add 1 and return the answer 1.
 // Final: L1 = 0, L2 = 1. All calls beneath the read are read-only.
-// Focused scenario: included in default/all runs.
+// Explicit selection only until validated on the live network.
 
 abstract contract MutableCallMakesReadThatCallsBackActions is CallPatternHelpers {
     struct ScenarioTables {

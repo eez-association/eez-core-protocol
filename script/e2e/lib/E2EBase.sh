@@ -4,6 +4,7 @@
 
 set -euo pipefail
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
+source "$(dirname "${BASH_SOURCE[0]}")/network-fees.sh"
 
 # Default values
 PK="${PK:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
@@ -139,64 +140,6 @@ deploy_contracts() {
             _export_outputs "$out" --echo >> "$E2E_JOB_DIR/deploy-env.env"
         fi
     done <<< "$contracts"
-}
-
-# ── Pre-sign one Deploy* contract's txs from a DRY RUN (staged wave prepare) ──
-# Runs the INDEX-th (1-based) Deploy* contract of SOL WITHOUT --broadcast. The
-# simulation prints the same address outputs a real run would — CREATE addresses
-# depend only on wallet+nonce, which stays truthful because the orchestrator
-# mines each wave before the next one is dry-run — and forge writes the planned
-# txs to <out_dir>/broadcast/<sol>/<chainid>/dry-run/run-latest.json (private
-# per job via FOUNDRY_BROADCAST, so parallel jobs of the same scenario don't
-# clobber each other). Each planned tx is re-signed with cast mktx and appended
-# to OUT_DIR/deploytxs-wave<INDEX>.txt as "<L1|L2> <rawtx>"; exported env
-# outputs accumulate in OUT_DIR/deploy-env.env for later waves and the finish
-# step. Returns 2 when SOL has fewer than INDEX Deploy contracts (job done).
-presign_deploy_contract() {
-    local sol="$1" index="$2" l1_rpc="$3" l2_rpc="$4" pk="$5" out_dir="$6"
-    local contract
-    contract=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | sed -n "${index}p")
-    [[ -n "$contract" ]] || return 2
-
-    local rpc label
-    if [[ "$contract" == *L2* ]]; then rpc="$l2_rpc"; label="L2"; else rpc="$l1_rpc"; label="L1"; fi
-
-    # Earlier waves' outputs feed this wave's vm.env* reads.
-    if [[ -f "$out_dir/deploy-env.env" ]]; then
-        set -a
-        # shellcheck disable=SC1091
-        source "$out_dir/deploy-env.env"
-        set +a
-    fi
-
-    # Forge only rewrites run-latest.json when the script plans txs; clear the
-    # previous wave's file so a zero-tx contract reads as "nothing to sign"
-    # instead of re-signing already-mined txs.
-    local out rc=0 dry_json sender
-    dry_json="$out_dir/broadcast/$(basename "$sol")/$(cast chain-id --rpc-url "$rpc")/dry-run/run-latest.json"
-    rm -f "$dry_json"
-    out=$(FOUNDRY_BROADCAST="$out_dir/broadcast" forge script "$sol:$contract" \
-        --rpc-url "$rpc" --private-key "$pk" 2>&1) || rc=$?
-    if [[ $rc -ne 0 ]]; then
-        echo "DRY RUN FAILED: $contract ($label) — forge output tail:"
-        echo "$out" | tail -25
-        return 1
-    fi
-    local vars
-    vars=$(echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true)
-    if [[ -n "$vars" ]]; then
-        echo "$vars"
-        echo "$vars" >> "$out_dir/deploy-env.env"
-        while IFS= read -r line; do export "$line"; done <<< "$vars"
-    fi
-
-    [[ -f "$dry_json" ]] || { echo "$contract ($label): no planned txs"; return 0; }
-
-    # The dry-run nonces are correct as-is: earlier waves are mined before this
-    # one is simulated, and the wallet is dedicated.
-    local n
-    n=$(_resign_planned_txs "$dry_json" "$rpc" "$pk" "$label" "$out_dir/deploytxs-wave$index.txt") || return 1
-    echo "presigned $n tx(s) for $contract ($label) → deploytxs-wave$index.txt"
 }
 
 # ── Re-sign the txs of a forge run JSON with cast mktx ──
@@ -362,13 +305,13 @@ plan_job_deploys() {
         extract_expected_outputs "$out"
     else
         EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"; EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
-        EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"
+        EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"; EXPECTED_L2_STATIC_TABLE="0x"
         EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
     fi
     E2E_MANIFEST_VERSION=2
     declare -p E2E_MANIFEST_VERSION _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
         EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
-        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EXPECTED_L2_STATIC_TABLE \
         EVENTLESS_L2_HASHES ABSENT_L2_HASHES > "$out_dir/manifest.env"
 }
 
@@ -435,10 +378,22 @@ verify_l1_calldata() {
 }
 
 # Usage: verify_l2_table RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_ENTRY_HASHES [EXPECTED_TABLE] [EVENTLESS_ENTRY_HASHES]
-verify_l2_table() { _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[],bytes,bytes32[])" "$2" "$3" "$4" "${5:-0x}" "${6:-[]}"; }
+verify_l2_table() {
+    if [[ -n "${E2E_LINK_EVIDENCE:-}" ]]; then
+        _run_verifier VerifyL2Blocks "$1" "runLinked(string,address)" "$E2E_LINK_EVIDENCE" "$3"
+    else
+        E2E_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}" _run_verifier VerifyL2Blocks "$1" "run(uint256[],address,bytes32[],bytes,bytes32[])" "$2" "$3" "$4" "${5:-0x}" "${6:-[]}"
+    fi
+}
 
 # Usage: verify_l2_calls RPC BLOCKS_ARRAY MANAGER_L2 EXPECTED_CALL_HASHES [EXPECTED_TABLE]
-verify_l2_calls() { _run_verifier VerifyL2Calls "$1" "run(uint256[],address,bytes32[],bytes)" "$2" "$3" "$4" "${5:-0x}"; }
+verify_l2_calls() {
+    if [[ -n "${E2E_LINK_EVIDENCE:-}" ]]; then
+        _run_verifier VerifyL2Calls "$1" "runLinked(string,address)" "$E2E_LINK_EVIDENCE" "$3"
+    else
+        _run_verifier VerifyL2Calls "$1" "run(uint256[],address,bytes32[],bytes)" "$2" "$3" "$4" "${5:-0x}"
+    fi
+}
 
 # Usage: verify_l2_absent RPC FROM_BLOCK TO_BLOCK MANAGER_L2 ABSENT_KEYS
 # Active proof that a lookup was never delivered: none of the call keys may appear
@@ -793,6 +748,8 @@ extract_expected_outputs() {
     else
         echo "NOTE: no EXPECTED_L1_TABLE printed - L1 field-level checks OFF (hash-only)"
     fi
+    EXPECTED_L2_STATIC_TABLE=$(extract "$out" "EXPECTED_L2_STATIC_TABLE")
+    EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}"
     EXPECTED_L2_TABLE=$(extract "$out" "EXPECTED_L2_TABLE")
     EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
     if [[ "$EXPECTED_L2_TABLE" != "0x" ]]; then
@@ -865,9 +822,24 @@ _poll_receipt() {
 # ── Publish RLP_ENCODED_TX and wait for its receipt ──
 # Sets TX_HASH and TX_BLOCK_NUMBER. Override the wait with RECEIPT_TIMEOUT (seconds).
 publish_user_tx() {
-    local rpc="$1"
-    local tx_hash receipt block_number status
-    tx_hash=$(_send_raw_tx "$rpc" "$RLP_ENCODED_TX") || return 1
+    local rpc="$1" tx_hash
+    tx_hash=$(_send_cross_chain_trigger "$rpc" "$RPC" "$RLP_ENCODED_TX") || return 1
+    _wait_user_tx "$rpc" "$tx_hash"
+}
+
+publish_l2_user_tx() {
+    local rpc="${L2_FRONT:?L2_FRONT is required for eez_quoteFee}" tx_hash
+    tx_hash=$(_send_cross_chain_trigger "$rpc" "$L2_RPC" "$RLP_ENCODED_TX") || return 1
+    _wait_user_tx "$rpc" "$tx_hash"
+}
+
+_send_cross_chain_trigger() { # source front, source read RPC, raw trigger
+    EEZ_FRESH_SEND=1 network_send_quoted_trigger "$3" "$PK" "$1" "$2" \
+        "${E2E_JOB_DIR:-tmp/e2e-network}/fee-quote-$(cast keccak "$3").json" _send_raw_tx
+}
+
+_wait_user_tx() {
+    local rpc="$1" tx_hash="$2" receipt block_number status
     TX_HASH="$tx_hash"
     echo "submitted tx: $tx_hash"
     receipt=$(_poll_receipt "$rpc" "$tx_hash" $(( $(date +%s) + ${RECEIPT_TIMEOUT:-300} ))) || return 1
@@ -894,7 +866,7 @@ publish_user_txs_nowait() {
     TX_HASHES=()
     local raw tx_hash
     for raw in "${RLP_ENCODED_TXS[@]}"; do
-        tx_hash=$(_send_raw_tx "$rpc" "$raw") || {
+        tx_hash=$(_send_cross_chain_trigger "$rpc" "$RPC" "$raw") || {
             echo "ERROR: send failed at tx $(( ${#TX_HASHES[@]} + 1 ))/${#RLP_ENCODED_TXS[@]}"
             return 1
         }

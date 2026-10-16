@@ -1,0 +1,3360 @@
+{
+  "L1": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "_recoveryAddress",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "MAINNET_ROLLUP_ID",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "PROXY_INIT_CODE_HASH",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "RECOVERY_ADDRESS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "STATIC_CHECK_GAS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "_attemptExecuteImmediateL2Txs",
+      "inputs": [
+        {
+          "name": "entry",
+          "type": "tuple",
+          "internalType": "struct ExecutionEntry",
+          "components": [
+            {
+              "name": "rollupUpdates",
+              "type": "tuple[]",
+              "internalType": "struct RollupUpdate[]",
+              "components": [
+                {
+                  "name": "rollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "etherDelta",
+                  "type": "int192",
+                  "internalType": "int192"
+                },
+                {
+                  "name": "currentRoot",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "newRoot",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                }
+              ]
+            },
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "l2ToL1Calls",
+              "type": "tuple[]",
+              "internalType": "struct L2ToL1Call[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "expectedL1ToL2Calls",
+              "type": "tuple[]",
+              "internalType": "struct ExpectedL1ToL2Call[]",
+              "components": [
+                {
+                  "name": "expectedL1toL2Hash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "l2ToL1Calls",
+                  "type": "tuple[]",
+                  "internalType": "struct L2ToL1Call[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "revertedOrStaticRollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "destinationRollupId",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "authorizedProxies",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "isProxy",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "computeCrossChainCallHash",
+      "inputs": [
+        {
+          "name": "isStatic",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "sourceRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "targetAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "targetRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "computeCrossChainProxyAddress",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "createCrossChainProxy",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "entryQueueIndex",
+      "inputs": [
+        {
+          "name": "_rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "executeCrossChainCall",
+      "inputs": [
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "result",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "executeInContextAndRevert",
+      "inputs": [
+        {
+          "name": "calls",
+          "type": "tuple[]",
+          "internalType": "struct L2ToL1Call[]",
+          "components": [
+            {
+              "name": "revertNextNCalls",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "isStatic",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "gas",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "sourceAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sourceRollupId",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "targetAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "data",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "executeL2Txs",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "result",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "getOrCreateCrossChainProxy",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "lastVerifiedBlock",
+      "inputs": [
+        {
+          "name": "_rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "postAndVerifyBatch",
+      "inputs": [
+        {
+          "name": "batch",
+          "type": "tuple",
+          "internalType": "struct ProofSystemBatchPerVerificationEntries",
+          "components": [
+            {
+              "name": "expectedRootPerRollup",
+              "type": "tuple[]",
+              "internalType": "struct ExpectedRootPerRollup[]",
+              "components": [
+                {
+                  "name": "rollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "root",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                }
+              ]
+            },
+            {
+              "name": "entries",
+              "type": "tuple[]",
+              "internalType": "struct ExecutionEntry[]",
+              "components": [
+                {
+                  "name": "rollupUpdates",
+                  "type": "tuple[]",
+                  "internalType": "struct RollupUpdate[]",
+                  "components": [
+                    {
+                      "name": "rollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "etherDelta",
+                      "type": "int192",
+                      "internalType": "int192"
+                    },
+                    {
+                      "name": "currentRoot",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "newRoot",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    }
+                  ]
+                },
+                {
+                  "name": "proxyEntryHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "l2ToL1Calls",
+                  "type": "tuple[]",
+                  "internalType": "struct L2ToL1Call[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "expectedL1ToL2Calls",
+                  "type": "tuple[]",
+                  "internalType": "struct ExpectedL1ToL2Call[]",
+                  "components": [
+                    {
+                      "name": "expectedL1toL2Hash",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "l2ToL1Calls",
+                      "type": "tuple[]",
+                      "internalType": "struct L2ToL1Call[]",
+                      "components": [
+                        {
+                          "name": "revertNextNCalls",
+                          "type": "uint16",
+                          "internalType": "uint16"
+                        },
+                        {
+                          "name": "isStatic",
+                          "type": "bool",
+                          "internalType": "bool"
+                        },
+                        {
+                          "name": "gas",
+                          "type": "uint64",
+                          "internalType": "uint64"
+                        },
+                        {
+                          "name": "sourceAddress",
+                          "type": "address",
+                          "internalType": "address"
+                        },
+                        {
+                          "name": "sourceRollupId",
+                          "type": "uint64",
+                          "internalType": "uint64"
+                        },
+                        {
+                          "name": "targetAddress",
+                          "type": "address",
+                          "internalType": "address"
+                        },
+                        {
+                          "name": "value",
+                          "type": "uint256",
+                          "internalType": "uint256"
+                        },
+                        {
+                          "name": "data",
+                          "type": "bytes",
+                          "internalType": "bytes"
+                        }
+                      ]
+                    },
+                    {
+                      "name": "revertedOrStaticRollingHash",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "success",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "returnData",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "rollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "destinationRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "staticEntries",
+              "type": "tuple[]",
+              "internalType": "struct StaticExecutionEntry[]",
+              "components": [
+                {
+                  "name": "expectedRoots",
+                  "type": "tuple[]",
+                  "internalType": "struct ExpectedRootPerRollup[]",
+                  "components": [
+                    {
+                      "name": "rollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "root",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    }
+                  ]
+                },
+                {
+                  "name": "proxyEntryHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "l2ToL1Calls",
+                  "type": "tuple[]",
+                  "internalType": "struct L2ToL1Call[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "rollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "destinationRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "immediateEntryCount",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "immediateStaticEntryCount",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "proofSystems",
+              "type": "address[]",
+              "internalType": "address[]"
+            },
+            {
+              "name": "rollupIdsWithProofSystems",
+              "type": "tuple[]",
+              "internalType": "struct RollupIdWithProofSystems[]",
+              "components": [
+                {
+                  "name": "rollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "proofSystemIndexes",
+                  "type": "uint64[]",
+                  "internalType": "uint64[]"
+                }
+              ]
+            },
+            {
+              "name": "blobIndices",
+              "type": "uint256[]",
+              "internalType": "uint256[]"
+            },
+            {
+              "name": "callData",
+              "type": "bytes",
+              "internalType": "bytes"
+            },
+            {
+              "name": "proofs",
+              "type": "bytes[]",
+              "internalType": "bytes[]"
+            },
+            {
+              "name": "blockNumber",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "bindMsgSenderInPublicInput",
+              "type": "bool",
+              "internalType": "bool"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "queueLength",
+      "inputs": [
+        {
+          "name": "_rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "registerRollup",
+      "inputs": [
+        {
+          "name": "rollupContract",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "initialRoot",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "rollupCounter",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "rollups",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rollupContract",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "root",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "etherBalance",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setRoot",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "newRoot",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "staticCrossChainCall",
+      "inputs": [
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "event",
+      "name": "BatchPosted",
+      "inputs": [
+        {
+          "name": "sharedPublicInput",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rollupIds",
+          "type": "uint64[]",
+          "indexed": false,
+          "internalType": "uint64[]"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CallResult",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "l2ToL1CallNumber",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "success",
+          "type": "bool",
+          "indexed": false,
+          "internalType": "bool"
+        },
+        {
+          "name": "returnData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CallsReverted",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "startL2ToL1Call",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "nCalls",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CrossChainCallExecuted",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CrossChainProxyCreated",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "EntryExecuted",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "ExecutionConsumed",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "entryQueueIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "L2ExecutionPerformed",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "newRoot",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "etherBalance",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "L2TxExecuted",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "L2TxSkipped",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "revertData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RollupCreated",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "rollupContract",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "initialRoot",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RootUpdated",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "newRoot",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "AllImmediateL2TxsFailed",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "BlobNotFound",
+      "inputs": [
+        {
+          "name": "blobIndex",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "CallSourceNotVerified",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ContextResult",
+      "inputs": [
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "reentrantConsumed",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "DuplicateProofSystem",
+      "inputs": [
+        {
+          "name": "proofSystem",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "EEZDestinationForbidden",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EntryDestinationNotInRollupUpdates",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "EntryHasNoRollupUpdates",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EtherDeltaMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ExecutionNotFound",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ExecutionNotInCurrentBlock",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ExpectedRootMismatch",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ExpectedRootsNotStrictlyIncreasing",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ImmediateCountExceedsEntries",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ImmediateCountStrandsLeadingL2Tx",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ImmediateL2TxOutOfGas",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ImmediateStaticEntriesWithoutImmediateEntries",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ImmediateStaticEntryCountExceedsStaticEntries",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InsufficientCallGas",
+      "inputs": [
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InsufficientRollupBalance",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidProof",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidProofSystemConfig",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidRecoveryAddress",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidRollupContract",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "L2TxEntryNotCanonical",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "L2TxNotAllowedDuringExecution",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "MetaEntriesWithoutReceiver",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NonStaticSubCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotRollupContract",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotSelf",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "PostBatchReentry",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ReentrantDestinationNotVerified",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ResidualEntryEtherIn",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RevertSpanOutOfBounds",
+      "inputs": [
+        {
+          "name": "start",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "span",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "length",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RollingHashMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RollingHashNotCleared",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RollupBatchActiveThisBlock",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RollupNotInBatch",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RollupUpdatesNotStrictlyIncreasing",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RootMismatch",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "SameNetworkProxy",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "SetRootNotAllowedDuringExecution",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaticCallProxyNotDeployed",
+      "inputs": [
+        {
+          "name": "sourceProxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StaticCallWithRevertSpan",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaticCallWithValue",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaticEntryDestinationNotPinned",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "SuccessRowWithRevertedOrStaticHash",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "UnauthorizedProxy",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "UnexpectedContextRevert",
+      "inputs": [
+        {
+          "name": "revertData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ]
+    }
+  ],
+  "L2": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "_rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "_systemAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "_useGasLeft",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "_recoveryAddress",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "PROXY_INIT_CODE_HASH",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "RECOVERY_ADDRESS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "ROLLUP_ID",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "STATIC_CHECK_GAS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "SYSTEM_ADDRESS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "USE_GAS_LEFT",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "authorizedProxies",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "isProxy",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "computeCrossChainCallHash",
+      "inputs": [
+        {
+          "name": "isStatic",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "sourceRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "targetAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "targetRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "computeCrossChainProxyAddress",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "createCrossChainProxy",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "entries",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxyEntryHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "success",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "returnData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "entriesLength",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "entryIndex",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "executeCrossChainCall",
+      "inputs": [
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "result",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "executeInContextAndRevert",
+      "inputs": [
+        {
+          "name": "calls",
+          "type": "tuple[]",
+          "internalType": "struct CrossChainCall[]",
+          "components": [
+            {
+              "name": "revertNextNCalls",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "isStatic",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "gas",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "sourceAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "sourceRollupId",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "targetAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "data",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "executeIncomingCrossChainCall",
+      "inputs": [
+        {
+          "name": "_entries",
+          "type": "tuple[]",
+          "internalType": "struct ExecutionEntry[]",
+          "components": [
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "expectedOutgoingCalls",
+              "type": "tuple[]",
+              "internalType": "struct ExpectedOutgoingCrossChainCall[]",
+              "components": [
+                {
+                  "name": "expectedOutgoingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "incomingCalls",
+                  "type": "tuple[]",
+                  "internalType": "struct CrossChainCall[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "revertedOrStaticRollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        },
+        {
+          "name": "_staticEntries",
+          "type": "tuple[]",
+          "internalType": "struct StaticExecutionEntryL2[]",
+          "components": [
+            {
+              "name": "expectedEntryIndex",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "result",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "getOrCreateCrossChainProxy",
+      "inputs": [
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "lastLoadBlock",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "loadExecutionTable",
+      "inputs": [
+        {
+          "name": "_entries",
+          "type": "tuple[]",
+          "internalType": "struct ExecutionEntry[]",
+          "components": [
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "expectedOutgoingCalls",
+              "type": "tuple[]",
+              "internalType": "struct ExpectedOutgoingCrossChainCall[]",
+              "components": [
+                {
+                  "name": "expectedOutgoingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "incomingCalls",
+                  "type": "tuple[]",
+                  "internalType": "struct CrossChainCall[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "revertedOrStaticRollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        },
+        {
+          "name": "_staticEntries",
+          "type": "tuple[]",
+          "internalType": "struct StaticExecutionEntryL2[]",
+          "components": [
+            {
+              "name": "expectedEntryIndex",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "staticCrossChainCall",
+      "inputs": [
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "staticEntries",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "expectedEntryIndex",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "proxyEntryHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "success",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "returnData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "staticEntriesLength",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "event",
+      "name": "CallResult",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "callNumber",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "success",
+          "type": "bool",
+          "indexed": false,
+          "internalType": "bool"
+        },
+        {
+          "name": "returnData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CallsReverted",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "startCallNumber",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "nCalls",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CrossChainCallExecuted",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CrossChainCallExecuted",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "callData",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "CrossChainProxyCreated",
+      "inputs": [
+        {
+          "name": "proxy",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "originalAddress",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "originalRollupId",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "EntryExecuted",
+      "inputs": [
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "callsProcessed",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "outgoingCallsConsumed",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "ExecutionConsumed",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "entryIndex",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "ExecutionTableLoaded",
+      "inputs": [
+        {
+          "name": "entries",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct ExecutionEntry[]",
+          "components": [
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "expectedOutgoingCalls",
+              "type": "tuple[]",
+              "internalType": "struct ExpectedOutgoingCrossChainCall[]",
+              "components": [
+                {
+                  "name": "expectedOutgoingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "incomingCalls",
+                  "type": "tuple[]",
+                  "internalType": "struct CrossChainCall[]",
+                  "components": [
+                    {
+                      "name": "revertNextNCalls",
+                      "type": "uint16",
+                      "internalType": "uint16"
+                    },
+                    {
+                      "name": "isStatic",
+                      "type": "bool",
+                      "internalType": "bool"
+                    },
+                    {
+                      "name": "gas",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "sourceAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "sourceRollupId",
+                      "type": "uint64",
+                      "internalType": "uint64"
+                    },
+                    {
+                      "name": "targetAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "value",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "data",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                },
+                {
+                  "name": "revertedOrStaticRollingHash",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "success",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "returnData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        },
+        {
+          "name": "staticEntries",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct StaticExecutionEntryL2[]",
+          "components": [
+            {
+              "name": "expectedEntryIndex",
+              "type": "uint256",
+              "internalType": "uint256"
+            },
+            {
+              "name": "proxyEntryHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "incomingCalls",
+              "type": "tuple[]",
+              "internalType": "struct CrossChainCall[]",
+              "components": [
+                {
+                  "name": "revertNextNCalls",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "isStatic",
+                  "type": "bool",
+                  "internalType": "bool"
+                },
+                {
+                  "name": "gas",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "sourceAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "sourceRollupId",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "targetAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "value",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "data",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            },
+            {
+              "name": "rollingHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "success",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "returnData",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "IncomingCrossChainCallExecuted",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "isStatic",
+          "type": "bool",
+          "indexed": false,
+          "internalType": "bool"
+        },
+        {
+          "name": "sourceAddress",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "sourceRollup",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "destination",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "value",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "data",
+          "type": "bytes",
+          "indexed": false,
+          "internalType": "bytes"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "ContextResult",
+      "inputs": [
+        {
+          "name": "rollingHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "reentrantConsumed",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "EEZDestinationForbidden",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EmptyEntries",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EmptyIncomingCalls",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EntryHashMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "EntryNotFound",
+      "inputs": [
+        {
+          "name": "crossChainCallHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "EtherTransferFailed",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ExecutionNotFound",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ExecutionNotInCurrentBlock",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InsufficientCallGas",
+      "inputs": [
+        {
+          "name": "callGas",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "InvalidRecoveryAddress",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidRollupId",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NonStaticSubCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotSelf",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RevertSpanOutOfBounds",
+      "inputs": [
+        {
+          "name": "start",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "span",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "length",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "RollingHashMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RollingHashNotCleared",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "SameNetworkProxy",
+      "inputs": [
+        {
+          "name": "rollupId",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StaticCallProxyNotDeployed",
+      "inputs": [
+        {
+          "name": "sourceProxy",
+          "type": "address",
+          "internalType": "address"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "StaticCallWithRevertSpan",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaticCallWithValue",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "SuccessRowWithRevertedOrStaticHash",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "Unauthorized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "UnauthorizedProxy",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "UnexpectedContextRevert",
+      "inputs": [
+        {
+          "name": "revertData",
+          "type": "bytes",
+          "internalType": "bytes"
+        }
+      ]
+    }
+  ]
+}

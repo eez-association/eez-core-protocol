@@ -157,7 +157,7 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
     fi
 
     # ── Verify L2 ExecutionTableLoaded entries ──
-    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
+    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && ( "$EXPECTED_L2_HASHES" != "[]" || "${EXPECTED_L2_STATIC_TABLE:-0x}" != 0x ) ]]; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))

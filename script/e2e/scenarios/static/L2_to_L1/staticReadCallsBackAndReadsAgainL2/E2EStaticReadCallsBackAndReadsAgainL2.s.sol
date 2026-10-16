@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -28,7 +30,7 @@ import {
 //     L2 -> L1: read the stored value (returns 0)
 // Final: the user records 2. Neither value changes.
 // One read request is enough: the callback itself makes another read.
-// Focused scenario: included in default/all runs.
+// Explicit selection only until validated on the live network.
 
 abstract contract StaticReadCallsBackAndReadsAgainL2Actions is CallPatternHelpers {
     function _tables(address actorL1, address actorL2) internal pure returns (L2OriginTables memory t) {
@@ -170,6 +172,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticReadCallsBackAndReadsAgai
         _printL1Steps(t.l1, t.steps);
         _printL1Table(t.l1);
         _printL2Table(t.l2);
+        _printL2StaticTable(t.statics);
         string memory hashes;
         for (uint256 i; i < t.l2.length; i++) {
             hashes = string.concat(hashes, i == 0 ? "" : ",", vm.toString(_entryHash(t.l2[i])));

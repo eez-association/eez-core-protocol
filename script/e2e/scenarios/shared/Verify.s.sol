@@ -18,6 +18,7 @@ import {
     ExpectedOutgoingCrossChainCall
 } from "../../../../src/interfaces/IEEZL2.sol";
 import {EEZ} from "../../../../src/EEZ.sol";
+import {EEZL2} from "../../../../src/L2/EEZL2.sol";
 import {ComputeExpectedBase} from "./ComputeExpectedBase.sol";
 import {crossChainCallHashWithGas, HashStep, RollingHashBuilder} from "./E2EHelpers.sol";
 
@@ -213,7 +214,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     /// @dev Concatenated target-contract logs of every listed block (blocks are queried one
     ///      by one — the list may be sparse, and unlisted in-between blocks must not leak in).
     function _getLogsUnion(
-        uint256[] calldata blockNumbers,
+        uint256[] memory blockNumbers,
         address target
     )
         internal
@@ -234,14 +235,192 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                 all[idx++] = perBlock[i][j];
             }
         }
+        // The network runner supplies exact linked hashes. Local and compatibility
+        // runs leave the filter unset. Check intervening loads BEFORE filtering.
+        if (target == vm.envOr("MANAGER_L2", address(0))) {
+            string memory path = vm.envOr("E2E_LINK_EVIDENCE", string(""));
+            if (bytes(path).length > 0) {
+                bytes32[] memory allowed = vm.parseJsonBytes32Array(vm.readFile(path), ".l2.allowedTransactions");
+                _checkLoaderOrdering(all);
+                return _filterTransactionLogs(all, allowed);
+            }
+        }
         return all;
+    }
+
+    function _filterTransactionLogs(
+        Vm.EthGetLogs[] memory logs,
+        bytes32[] memory allowed
+    )
+        internal
+        pure
+        returns (Vm.EthGetLogs[] memory result)
+    {
+        uint256 count;
+        for (uint256 i; i < logs.length; i++) {
+            if (_containsHash(allowed, logs[i].transactionHash)) count++;
+        }
+        result = new Vm.EthGetLogs[](count);
+        count = 0;
+        for (uint256 i; i < logs.length; i++) {
+            if (_containsHash(allowed, logs[i].transactionHash)) result[count++] = logs[i];
+        }
+    }
+
+    function _checkLoaderOrdering(Vm.EthGetLogs[] memory logs) internal view {
+        string memory evidence = vm.readFile(vm.envString("E2E_LINK_EVIDENCE"));
+        bytes32[] memory loaders = vm.parseJsonBytes32Array(evidence, ".l2.loaders");
+        uint256[] memory positions = vm.parseJsonUintArray(evidence, ".l2.sourcePositions");
+        _checkLoaderOrdering(logs, loaders, positions);
+    }
+
+    function _checkLoaderOrdering(
+        Vm.EthGetLogs[] memory logs,
+        bytes32[] memory loaders,
+        uint256[] memory positions
+    )
+        internal
+        pure
+    {
+        require(positions.length == 2 * loaders.length, "Invalid source positions");
+        for (uint256 i; i < loaders.length; i++) {
+            uint256 loadIndex;
+            bool found;
+            for (uint256 j; j < logs.length; j++) {
+                if (logs[j].transactionHash == loaders[i] && logs[j].topics[0] == SIG_TABLE_LOADED) {
+                    require(!found, "Duplicate loader event");
+                    require(logs[j].blockNumber == positions[2 * i], "Loader in another block");
+                    loadIndex = logs[j].transactionIndex;
+                    found = true;
+                }
+            }
+            require(found && loadIndex < positions[2 * i + 1], "Loader must precede source");
+            for (uint256 j; j < logs.length; j++) {
+                if (logs[j].blockNumber == positions[2 * i] && logs[j].topics[0] == SIG_TABLE_LOADED) {
+                    require(
+                        logs[j].transactionIndex <= loadIndex || logs[j].transactionIndex > positions[2 * i + 1],
+                        "Intervening table replacement"
+                    );
+                }
+            }
+        }
+    }
+
+    function _collectStaticEntries(Vm.EthGetLogs[] memory logs)
+        internal
+        pure
+        returns (L2StaticExecutionEntry[] memory result)
+    {
+        uint256 count;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_TABLE_LOADED) continue;
+            (, L2StaticExecutionEntry[] memory rows) =
+                abi.decode(logs[i].data, (L2ExecutionEntry[], L2StaticExecutionEntry[]));
+            count += rows.length;
+        }
+        result = new L2StaticExecutionEntry[](count);
+        count = 0;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_TABLE_LOADED) continue;
+            (, L2StaticExecutionEntry[] memory rows) =
+                abi.decode(logs[i].data, (L2ExecutionEntry[], L2StaticExecutionEntry[]));
+            for (uint256 j; j < rows.length; j++) {
+                result[count++] = rows[j];
+            }
+        }
+    }
+
+    function _verifyL2StaticFields(
+        Vm.EthGetLogs[] memory logs,
+        bytes memory expectedBlob,
+        bool exact
+    )
+        internal
+        pure
+        returns (bool)
+    {
+        L2StaticExecutionEntry[] memory expected = expectedBlob.length == 0
+            ? new L2StaticExecutionEntry[](0)
+            : abi.decode(expectedBlob, (L2StaticExecutionEntry[]));
+        L2StaticExecutionEntry[] memory actual = _collectStaticEntries(logs);
+        // Static rows are reusable, not consumed. A composer may retain one
+        // identical row per read while fixtures reuse a single complete row.
+        // Compare all distinct alternatives in both directions, never just keys.
+        bytes32[] memory actualHashes = new bytes32[](actual.length);
+        bytes32[] memory expectedHashes = new bytes32[](expected.length);
+        for (uint256 i; i < actual.length; i++) {
+            actualHashes[i] = keccak256(abi.encode(actual[i]));
+        }
+        for (uint256 i; i < expected.length; i++) {
+            expectedHashes[i] = keccak256(abi.encode(expected[i]));
+            if (!_containsHash(actualHashes, expectedHashes[i])) return false;
+        }
+        if (exact) {
+            for (uint256 i; i < actual.length; i++) {
+                if (!_containsHash(expectedHashes, actualHashes[i])) return false;
+            }
+        }
+        return true;
+    }
+
+    /// @dev Bind every table event to its linked transaction calldata. The ordered
+    /// expected table is grouped by source order, then canonical delivery order.
+    function _verifyLinkedTables(Vm.EthGetLogs[] memory logs, bytes memory expectedBlob) internal view {
+        string memory evidence = vm.readFile(vm.envString("E2E_LINK_EVIDENCE"));
+        bytes32[] memory hashes = vm.parseJsonBytes32Array(evidence, ".l2.tableTransactions");
+        bytes[] memory inputs = vm.parseJsonBytesArray(evidence, ".l2.tableInputs");
+        bytes32[] memory loaders = vm.parseJsonBytes32Array(evidence, ".l2.loaders");
+        _verifyLinkedTables(logs, expectedBlob, hashes, inputs, loaders);
+    }
+
+    function _verifyLinkedTables(
+        Vm.EthGetLogs[] memory logs,
+        bytes memory expectedBlob,
+        bytes32[] memory hashes,
+        bytes[] memory inputs,
+        bytes32[] memory loaders
+    )
+        internal
+        pure
+    {
+        require(hashes.length == inputs.length, "Missing linked calldata");
+        L2ExecutionEntry[] memory expected =
+            expectedBlob.length == 0 ? new L2ExecutionEntry[](0) : abi.decode(expectedBlob, (L2ExecutionEntry[]));
+        uint256 offset;
+        for (uint256 i; i < hashes.length; i++) {
+            uint256 matches;
+            for (uint256 j; j < logs.length; j++) {
+                if (logs[j].transactionHash != hashes[i] || logs[j].topics[0] != SIG_TABLE_LOADED) continue;
+                matches++;
+                bytes memory input = inputs[i];
+                require(input.length >= 4, "Missing table calldata");
+                bytes4 selector = _containsHash(loaders, hashes[i])
+                    ? EEZL2.loadExecutionTable.selector
+                    : EEZL2.executeIncomingCrossChainCall.selector;
+                require(bytes4(input) == selector, "Wrong linked L2 function");
+                require(
+                    keccak256(input) == keccak256(abi.encodePacked(selector, logs[j].data)),
+                    "Table event/calldata mismatch"
+                );
+                L2ExecutionEntry[] memory entries = abi.decode(logs[j].data, (L2ExecutionEntry[]));
+                for (uint256 k; k < entries.length; k++) {
+                    require(
+                        offset < expected.length && _l2EntryEq(entries[k], expected[offset]),
+                        "Linked table differs from source expectation"
+                    );
+                    offset++;
+                }
+            }
+            require(matches == 1, "Linked transaction must load exactly one table");
+        }
+        require(offset == expected.length, "Linked tables omit expected entries");
     }
 
     /// @dev Multiplicity-aware: each actual hash satisfies at most one expected slot, so
     ///      N-call scenarios emitting the same hash N times need N actual events.
     function _findMissingHashes(
         bytes32[] memory actual,
-        bytes32[] calldata expected
+        bytes32[] memory expected
     )
         internal
         pure
@@ -1658,30 +1837,53 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1BatchCalldata is VerifyHelpers {
+    function runLinked(string calldata path, bytes32 txHash, address rollups, bool allowPartial) external view {
+        string memory evidence = vm.readFile(path);
+        bytes32[] memory hashes = vm.parseJsonBytes32Array(evidence, ".l1.hashes");
+        bytes[] memory inputs = vm.parseJsonBytesArray(evidence, ".l1.inputs");
+        require(hashes.length == inputs.length, "Missing posting calldata");
+        for (uint256 i; i < hashes.length; i++) {
+            if (hashes[i] != txHash) continue;
+            run(
+                inputs[i],
+                rollups,
+                vm.parseJsonBytes(evidence, ".expected.l1Table"),
+                vm.parseJsonBytes(evidence, ".expected.l1Steps"),
+                vm.parseJsonBytes(evidence, ".expected.l1StaticTable"),
+                allowPartial
+            );
+            return;
+        }
+        revert("Posting transaction missing from evidence");
+    }
+
     // Derived from the contract so a batch-struct change can never leave a stale
     // hardcoded selector behind.
     bytes4 constant SEL_POST_BATCH = EEZ.postAndVerifyBatch.selector;
 
     function run(
-        bytes calldata batchInput,
+        bytes memory batchInput,
         address rollups,
-        bytes calldata expectedTable,
-        bytes calldata expectedSteps,
-        bytes calldata expectedStaticTable,
+        bytes memory expectedTable,
+        bytes memory expectedSteps,
+        bytes memory expectedStaticTable,
         bool allowPartial
     )
-        external
+        public
         view
     {
         require(expectedTable.length > 0 || expectedStaticTable.length > 0, "expected table required");
         require(batchInput.length > 4, "batch input too short");
-        bytes4 sel = bytes4(batchInput[:4]);
+        bytes4 sel = bytes4(batchInput);
         if (sel != SEL_POST_BATCH) {
             console.log("Unknown settlement tx selector: %s", vm.toString(abi.encodePacked(sel)));
             revert("settlement tx is not postAndVerifyBatch (update SEL_POST_BATCH if the ABI changed)");
         }
-        ProofSystemBatchPerVerificationEntries memory b =
-            abi.decode(batchInput[4:], (ProofSystemBatchPerVerificationEntries));
+        bytes memory args = new bytes(batchInput.length - 4);
+        assembly ("memory-safe") {
+            mcopy(add(args, 32), add(batchInput, 36), mload(args))
+        }
+        ProofSystemBatchPerVerificationEntries memory b = abi.decode(args, (ProofSystemBatchPerVerificationEntries));
         console.log(
             "Posted batch decoded from calldata: %s entries, %s static entries",
             b.entries.length,
@@ -1724,7 +1926,18 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL2Blocks is VerifyHelpers {
-    function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedEntryHashes) external view {
+    function runLinked(string calldata path, address managerL2) external view {
+        string memory evidence = vm.readFile(path);
+        _run(
+            vm.parseJsonUintArray(evidence, ".l2.blocks"),
+            managerL2,
+            vm.parseJsonBytes32Array(evidence, ".expected.l2EntryHashes"),
+            vm.parseJsonBytes(evidence, ".expected.l2Table"),
+            vm.parseJsonBytes32Array(evidence, ".expected.eventlessHashes")
+        );
+    }
+
+    function run(uint256[] memory l2Blocks, address managerL2, bytes32[] memory expectedEntryHashes) external view {
         _run(l2Blocks, managerL2, expectedEntryHashes, "", new bytes32[](0));
     }
 
@@ -1733,9 +1946,9 @@ contract VerifyL2Blocks is VerifyHelpers {
     ///      compares every entry field, checks structural invariants, and matches the
     ///      EntryExecuted result fields.
     function run(
-        uint256[] calldata l2Blocks,
+        uint256[] memory l2Blocks,
         address managerL2,
-        bytes32[] calldata expectedEntryHashes,
+        bytes32[] memory expectedEntryHashes,
         bytes memory expectedTable
     )
         external
@@ -1748,11 +1961,11 @@ contract VerifyL2Blocks is VerifyHelpers {
     ///      enclosing frame that reverted — their EntryExecuted event unwinds with that
     ///      frame, so the field check accepts its absence for exactly these entries.
     function run(
-        uint256[] calldata l2Blocks,
+        uint256[] memory l2Blocks,
         address managerL2,
-        bytes32[] calldata expectedEntryHashes,
+        bytes32[] memory expectedEntryHashes,
         bytes memory expectedTable,
-        bytes32[] calldata eventlessEntryHashes
+        bytes32[] memory eventlessEntryHashes
     )
         external
         view
@@ -1761,9 +1974,9 @@ contract VerifyL2Blocks is VerifyHelpers {
     }
 
     function _run(
-        uint256[] calldata l2Blocks,
+        uint256[] memory l2Blocks,
         address managerL2,
-        bytes32[] calldata expectedEntryHashes,
+        bytes32[] memory expectedEntryHashes,
         bytes memory expectedTable,
         bytes32[] memory eventlessEntryHashes
     )
@@ -1786,23 +1999,68 @@ contract VerifyL2Blocks is VerifyHelpers {
         if (expectedTable.length > 0 && !_verifyL2TableFields(entries, logs, expectedTable, eventlessEntryHashes)) {
             revert("Field verification failed");
         }
+        bool linked = bytes(vm.envOr("E2E_LINK_EVIDENCE", string(""))).length > 0;
+        bytes memory staticTable = linked
+            ? vm.parseJsonBytes(vm.readFile(vm.envString("E2E_LINK_EVIDENCE")), ".expected.l2StaticTable")
+            : vm.envOr("E2E_L2_STATIC_TABLE", bytes(""));
+        require(_verifyL2StaticFields(logs, staticTable, linked), "L2 static table mismatch");
+        if (linked) _verifyLinkedTables(logs, expectedTable);
         console.log(
-            "PASS: all %s expected entries found across %s L2 block(s)", expectedEntryHashes.length, l2Blocks.length
+            "PASS: all %s expected entries and static rows checked across %s L2 block(s)",
+            expectedEntryHashes.length,
+            l2Blocks.length
         );
-        for (uint256 j = 0; j < logs.length; j++) {
-            if (logs[j].topics[0] == SIG_TABLE_LOADED) {
-                console.log("L2_TABLE_TX=%s", vm.toString(logs[j].transactionHash));
-                break;
+        _printMatchedTables(logs, expectedTable, staticTable);
+    }
+
+    function _printMatchedTables(
+        Vm.EthGetLogs[] memory logs,
+        bytes memory expectedTable,
+        bytes memory staticTable
+    )
+        internal
+        pure
+    {
+        L2ExecutionEntry[] memory expected =
+            expectedTable.length == 0 ? new L2ExecutionEntry[](0) : abi.decode(expectedTable, (L2ExecutionEntry[]));
+        L2StaticExecutionEntry[] memory statics = staticTable.length == 0
+            ? new L2StaticExecutionEntry[](0)
+            : abi.decode(staticTable, (L2StaticExecutionEntry[]));
+        bool[] memory used = new bool[](expected.length);
+        bool[] memory usedStatic = new bool[](statics.length);
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] != SIG_TABLE_LOADED) continue;
+            (L2ExecutionEntry[] memory entries, L2StaticExecutionEntry[] memory rows) =
+                abi.decode(logs[i].data, (L2ExecutionEntry[], L2StaticExecutionEntry[]));
+            bool matched;
+            for (uint256 j; j < entries.length; j++) {
+                for (uint256 k; k < expected.length; k++) {
+                    if (!used[k] && _l2EntryEq(entries[j], expected[k])) {
+                        used[k] = true;
+                        matched = true;
+                        break;
+                    }
+                }
             }
+            for (uint256 j; j < rows.length; j++) {
+                for (uint256 k; k < statics.length; k++) {
+                    if (!usedStatic[k] && keccak256(abi.encode(rows[j])) == keccak256(abi.encode(statics[k]))) {
+                        usedStatic[k] = true;
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if (matched) console.log("L2_TABLE_TX=%s", vm.toString(logs[i].transactionHash));
         }
     }
 
     /// @dev Failure diagnostics for `run`, split into its own frame to keep `run` under the
     ///      via-ir stack limit (the inlined i/j/c loop nest would otherwise overflow).
     function _reportL2Failure(
-        uint256[] calldata l2Blocks,
+        uint256[] memory l2Blocks,
         address managerL2,
-        bytes32[] calldata expectedEntryHashes
+        bytes32[] memory expectedEntryHashes
     )
         internal
         view
@@ -1831,7 +2089,7 @@ contract VerifyL2Blocks is VerifyHelpers {
 
     function _allPresent(
         L2ExecutionEntry[] memory entries,
-        bytes32[] calldata expectedEntryHashes
+        bytes32[] memory expectedEntryHashes
     )
         internal
         pure
@@ -1864,7 +2122,17 @@ contract VerifyL2Blocks is VerifyHelpers {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL2Calls is VerifyHelpers {
-    function run(uint256[] calldata l2Blocks, address managerL2, bytes32[] calldata expectedCallHashes) external view {
+    function runLinked(string calldata path, address managerL2) external view {
+        string memory evidence = vm.readFile(path);
+        run(
+            vm.parseJsonUintArray(evidence, ".l2.blocks"),
+            managerL2,
+            vm.parseJsonBytes32Array(evidence, ".expected.l2CallHashes"),
+            vm.parseJsonBytes(evidence, ".expected.l2Table")
+        );
+    }
+
+    function run(uint256[] memory l2Blocks, address managerL2, bytes32[] memory expectedCallHashes) external view {
         run(l2Blocks, managerL2, expectedCallHashes, "");
     }
 
@@ -1873,9 +2141,9 @@ contract VerifyL2Calls is VerifyHelpers {
     ///      runs even with an empty blob) and, when `expectedTable` is given, compares the
     ///      event fields against the expected entry's inbound call.
     function run(
-        uint256[] calldata l2Blocks,
+        uint256[] memory l2Blocks,
         address managerL2,
-        bytes32[] calldata expectedCallHashes,
+        bytes32[] memory expectedCallHashes,
         bytes memory expectedTable
     )
         public
@@ -1886,15 +2154,9 @@ contract VerifyL2Calls is VerifyHelpers {
             revert("No L2 blocks");
         }
 
-        bool fieldsOk = true;
-        for (uint256 i = 0; i < l2Blocks.length; i++) {
-            bytes32[] memory topics = new bytes32[](0);
-            Vm.EthGetLogs[] memory blkLogs = vm.eth_getLogs(l2Blocks[i], l2Blocks[i], managerL2, topics);
-            if (!_verifyIncomingCallEvents(blkLogs, managerL2, expectedTable)) fieldsOk = false;
-        }
-        if (!fieldsOk) revert("Field verification failed");
-
-        bytes32[] memory found = _collectActionHashes(l2Blocks, managerL2);
+        Vm.EthGetLogs[] memory allLogs = _getLogsUnion(l2Blocks, managerL2);
+        require(_verifyIncomingCallEvents(allLogs, managerL2, expectedTable), "Field verification failed");
+        bytes32[] memory found = _collectTopic1(allLogs, SIG_CROSSCHAIN_CALL, SIG_INCOMING_CROSSCHAIN_CALL);
         bytes32[] memory missing = _findMissingHashes(found, expectedCallHashes);
 
         if (missing.length > 0) {
@@ -1914,23 +2176,22 @@ contract VerifyL2Calls is VerifyHelpers {
 
         console.log("PASS: %s/%s expected L2 calls verified", expectedCallHashes.length, expectedCallHashes.length);
         // Both consumption events count as an executed call (see _collectActionHashes).
-        Vm.EthGetLogs[] memory allLogs = _getLogsUnion(l2Blocks, managerL2);
+        bool[] memory used = new bool[](expectedCallHashes.length);
         for (uint256 i = 0; i < allLogs.length; i++) {
             bytes32 sig = allLogs[i].topics[0];
             if (sig == SIG_CROSSCHAIN_CALL || sig == SIG_INCOMING_CROSSCHAIN_CALL) {
-                console.log("L2_CALL_TX=%s", vm.toString(allLogs[i].transactionHash));
+                for (uint256 j; j < expectedCallHashes.length; j++) {
+                    if (!used[j] && allLogs[i].topics[1] == expectedCallHashes[j]) {
+                        used[j] = true;
+                        console.log("L2_CALL_TX=%s", vm.toString(allLogs[i].transactionHash));
+                        break;
+                    }
+                }
             }
         }
     }
 
-    function _collectActionHashes(
-        uint256[] calldata blocks,
-        address managerL2
-    )
-        internal
-        view
-        returns (bytes32[] memory)
-    {
+    function _collectActionHashes(uint256[] memory blocks, address managerL2) internal view returns (bytes32[] memory) {
         // Accept both L2 consumption events: the 6-field CrossChainCallExecuted overload
         // (proxy-driven executeCrossChainCall) AND IncomingCrossChainCallExecuted
         // (system-driven executeIncomingCrossChainCall). The crossChainCallHash is the first
