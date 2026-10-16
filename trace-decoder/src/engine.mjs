@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { ChainReader, makeRpc, validateSettlement } from './rpc.mjs';
 import { protocol, hex, lower, number, parseEvent, same } from './protocol.mjs';
 import { buildGraph } from './logical.mjs';
+import { lookupTransactionLinks, validateTransactionLinks, recheckTransactionLinks, isolateL2Execution } from './transaction-links.mjs';
 
 async function concurrent(items, fn, limit = 8) {
   let next = 0;
@@ -122,8 +123,28 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
     rollupIds.L2 = protocol.L2.decodeFunctionResult('ROLLUP_ID', await readers.L2.send('eth_call', [{ to: managers.L2, data: protocol.L2.encodeFunctionData('ROLLUP_ID') }, hex(origin.blockNumber)]))[0].toString();
   } catch { /* Latest immutable ROLLUP_ID remains useful on an unpruned deployment. */ }
 
+  let linkDiscovery = { state: 'fallback' }, linkedRecords = null;
+  const transactionLinks = [];
+  try {
+    linkDiscovery = await lookupTransactionLinks({ config, rpc, origin, chainIds });
+    if (linkDiscovery.state === 'complete') {
+      linkedRecords = await validateTransactionLinks(linkDiscovery, { readers, managers, rollupIds, origin });
+      for (const record of linkedRecords.values()) await add(record.chain, record.hash, record.blockNumber, true);
+      linkDiscovery.l1Execution = await isolateL2Execution(linkDiscovery, { rpc, readers, managers, rollupIds, chainIds, origin, records: linkedRecords });
+      await recheckTransactionLinks(linkDiscovery, { rpc, url: linkDiscovery.endpoint, origin, chainIds, readers, records: linkedRecords });
+      const { endpoint, ...evidence } = linkDiscovery;
+      transactionLinks.push(evidence);
+      report('transaction-links-verified', `Following ${linkedRecords.size} exact linked transactions`);
+    } else if (linkDiscovery.state === 'pending') {
+      unresolvedReason('transaction-links-pending', 'Cross-chain transaction links are not complete; retry after composer processing');
+    } else report('transaction-links-fallback', linkDiscovery.reason);
+  } catch (e) {
+    linkDiscovery = { ...linkDiscovery, state: 'invalid' };
+    unresolvedReason('invalid-transaction-links', e.message);
+  }
+  const legacyDiscovery = linkDiscovery.state === 'fallback';
   let correlation = null;
-  if (!config.noCorrelation) for (const [name, url] of [['override', config.correlationRpc], ['L2_FRONT', config.l2Front], ['L1_FRONT', config.l1Front], ['L2_RPC', config.l2Rpc]].filter(([,url], i, a) => url && a.findIndex(([,u]) => u === url) === i)) {
+  if (legacyDiscovery && !config.noCorrelation) for (const [name, url] of [['override', config.correlationRpc], ['L2_FRONT', config.l2Front], ['L1_FRONT', config.l1Front], ['L2_RPC', config.l2Rpc]].filter(([,url], i, a) => url && a.findIndex(([,u]) => u === url) === i)) {
     try {
       const [l2, l1] = await Promise.all([
         rpc(url, 'eez_getSettlementByL2Block', ['0x1']), rpc(url, 'eez_getSettledL2RangesByL1Block', ['0x1']),
@@ -232,8 +253,8 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
   // in that batch. Explicit ranges and --thorough still request broader discovery.
   const localL2 = !config.thorough && origin.chain === 'L2' && !!origin.traceResult.trace &&
     !touchesManager('L2', origin.traceResult.trace) && settlements.length > 0;
-  if (!localL2) await scanBlock(origin.chain, origin.blockNumber);
-  else report('local-transaction-settlement', 'No EEZ calls in the L2 trace; tracing its exact L1 settlement without scanning other transactions');
+  if (legacyDiscovery && !localL2) await scanBlock(origin.chain, origin.blockNumber);
+  else if (localL2) report('local-transaction-settlement', 'No EEZ calls in the L2 trace; tracing its exact L1 settlement without scanning other transactions');
   for (const s of settlements) {
     await add('L1', s.l1TransactionHash, s.l1BlockNumber, true);
     if (localL2) continue;
@@ -241,7 +262,7 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
     await scanBlock('L2', s.lastL2Block); // E2E delivery convention: inspect last first.
     await scanRange('L2', s.firstL2Block, s.lastL2Block, 'settlement');
   }
-  if (!settlements.length && !correlationAnswered) {
+  if (legacyDiscovery && !settlements.length && !correlationAnswered) {
     const other = origin.chain === 'L1' ? 'L2' : 'L1';
     let from = config[`${other.toLowerCase()}From`], to = config[`${other.toLowerCase()}To`];
     if (from == null || to == null) {
@@ -255,15 +276,15 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
   // Explicit ranges extend discovery even when correlation is available/null.
   for (const chain of ['L1', 'L2']) {
     const from = config[`${chain.toLowerCase()}From`], to = config[`${chain.toLowerCase()}To`];
-    if (from != null && to != null && !search.some(s => s.chain === chain && s.from <= from && s.to >= to)) await scanRange(chain, from, to, 'explicit');
+    if (legacyDiscovery && from != null && to != null && !search.some(s => s.chain === chain && s.from <= from && s.to >= to)) await scanRange(chain, from, to, 'explicit');
   }
   const transactions = [...records.values()].sort((a,b) => a.chain.localeCompare(b.chain) || a.blockNumber - b.blockNumber || a.transactionIndex - b.transactionIndex);
-  const graph = await buildGraph({ config: { ...config, chainIds }, transactions, managers, readers, rollupIds, settlements, unresolvedReason });
+  const graph = await buildGraph({ config: { ...config, chainIds }, transactions, managers, readers, rollupIds, settlements, transactionLinks, matchingDisabled: !legacyDiscovery && !transactionLinks.length, unresolvedReason });
   return {
     schemaVersion: '1.0.0', txHash: lower(txHash), origin: { chain: origin.chain, transactionId: origin.id },
-    metadata: { chainIds, rollupIds, managers, composer, correlation: correlation?.name ?? null, search },
+    metadata: { chainIds, rollupIds, managers, composer, correlation: correlation?.name ?? null, transactionLinks: { state: linkDiscovery.state, reason: linkDiscovery.reason ?? null, observation: linkDiscovery.raw ?? null }, search },
     transactions: transactions.map(({ traceResult, ...r }) => ({ ...r, trace: { available: !!traceResult.trace, provenance: traceResult.provenance ?? null, reason: traceResult.reason ?? null, failures: traceResult.failures ?? [] } })),
     originalTraces: transactions.map(r => ({ chain: r.chain, transactionHash: r.hash, trace: r.traceResult.trace })),
-    settlements, ...graph, unresolved, diagnostics,
+    settlements, transactionLinks, ...graph, unresolved, diagnostics,
   };
 }

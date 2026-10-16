@@ -159,24 +159,26 @@
   const isPlumbing = r => PLUMBING_ROLES.includes(r.role);
   const sectionOf = t => t.relatedSettlement ? 'settlement' : t.requested && t.role === 'other' ? 'flow'
     : t.inFlow === false ? 'other' : PLUMBING_ROLES.includes(t.role) ? 'plumbing' : 'flow';
-  const rootVisible = r => opt.protocol || r.relatedSettlement || !isPlumbing(r) || M.roots.every(isPlumbing);
+  const rootVisible = r => r.isOrigin || opt.protocol || r.relatedSettlement || !isPlumbing(r) || M.roots.every(isPlumbing);
   function defaultRoot() {
     // The trigger starts the flow; the requested transaction may be its settlement instead.
-    const t = M.roots.findIndex(r => r.role === 'trigger');
+    const requested = M.roots.findIndex(r => r.isOrigin && !isPlumbing(r));
+    if (requested >= 0) return requested;
+    const t = M.roots.findIndex(r => r.inFlow !== false && r.role === 'trigger');
     if (t >= 0) return t;
     const i = M.roots.findIndex(r => r.isOrigin && rootVisible(r));
     if (i >= 0) return i;
-    let best = 0, most = -1;
-    M.roots.forEach((r, j) => { if (!rootVisible(r)) return; const n = appCalls(r); if (n > most) { most = n; best = j; } });
+    let best = -1, most = -1;
+    M.roots.forEach((r, j) => { if (!rootVisible(r) || r.inFlow === false && !txOfRoot(r)?.inFlow && !r.relatedSettlement) return; const n = appCalls(r); if (n > most) { most = n; best = j; } });
     return best;
   }
   const currentRoot = () => M.roots[rootIndex] || null;
   function renderRootPicker() {
     const originTx = M.transactions.find(t => M.origin && `${t.chain}:${t.hash}` === M.origin.transactionId);
     const missing = M.origin && !M.roots.some(r => r.isOrigin);
-    const shown = M.roots[rootIndex], trigger = M.transactions.find(t => t.role === 'trigger');
+    const shown = M.roots[rootIndex], trigger = M.transactions.find(t => t.inFlow === true && t.role === 'trigger');
     let note = '';
-    if (missing) note = `<b>The requested ${esc(M.origin.chain)} transaction could not be traced</b> (${esc(originTx?.traceReason || 'no call trace')}), so its own calls cannot be drawn. ${M.roots.length ? 'Showing a related transaction found through the settlement; pick another below.' : 'No related transaction was traced either.'} An archive RPC (<code>--l1-trace-rpc</code> / <code>--l2-trace-rpc</code>) usually fixes this.`;
+    if (missing) note = `<b>The requested ${esc(M.origin.chain)} transaction could not be traced</b> (${esc(originTx?.traceReason || 'no call trace')}), so its own calls cannot be drawn. ${shown ? 'Showing a related transaction found through the settlement; pick another below.' : 'No related transaction was traced either.'} An archive RPC (<code>--l1-trace-rpc</code> / <code>--l2-trace-rpc</code>) usually fixes this.`;
     else if (originTx && shown && !shown.isOrigin && trigger) note = `<b>You asked for the ${esc(originTx.label.toLowerCase())}</b> on ${esc(originTx.chain)} (${esc(short(originTx.hash))}). The flow starts in the <b>trigger transaction on ${esc(trigger.chain)}</b> (${esc(short(trigger.hash))}), shown here. ${trigger.evidence.length ? `Evidence: ${esc(trigger.evidence.join('; '))}.` : ''}`;
     else if (originTx?.role === 'other' && M.roots.some(r => r.relatedSettlement)) note = shown?.relatedSettlement
       ? 'Showing the L1 batch that settles the requested L2 transaction. No cross-chain call was observed in that L2 transaction.'
@@ -1070,7 +1072,7 @@
     stop(); opt[key] = !!$(id).checked; kidsMemo = new Map(); crossMemo.clear();
     if (key !== 'voidReturns') {
       // Hiding plumbing also hides system transactions; fall back to the default one.
-      if (M.roots[rootIndex] && !rootVisible(M.roots[rootIndex])) rootIndex = defaultRoot();
+      if (!M.roots[rootIndex] || !rootVisible(M.roots[rootIndex])) rootIndex = defaultRoot();
       const keep = expanded; defaultExpansion(); keep.forEach(k => expanded.add(k));
       selection = null; step = -1; initMapState(); initFlowState(); G = graphModel(); inspectSummary();
       $('caption').innerHTML = captionIdle(); renderRootPicker();

@@ -121,13 +121,15 @@ async function main(argv) {
     console.log(summary(model, source));
     // Every transaction found must be traced; a page without part of the flow is misleading.
     const untraced = model.transactions.filter(t => !t.traced);
-    if (untraced.length && !allowPartial) {
+    const linkFailure = (trace.unresolved || []).find(u => ['invalid-transaction-links', 'transaction-links-pending'].includes(u.code));
+    if ((untraced.length || linkFailure) && !allowPartial) {
       if (isHash(input)) {
         const partial = path.resolve(out ? out.replace(/\.html$/, '') : path.join(here, '..', '..', 'tmp', 'flow-diagrams', input)) + '.partial.json';
         fs.mkdirSync(path.dirname(partial), { recursive: true });
         fs.writeFileSync(partial, JSON.stringify(trace, (_, v) => typeof v === 'bigint' ? v.toString() : v));
         console.error(`Incomplete result saved to ${partial} (nothing else was written).`);
       }
+      if (linkFailure) throw new Error(`Cross-chain transaction links are incomplete: ${linkFailure.message}. Use --allow-partial to inspect the partial result.`);
       throw new Error([
         `No call trace for ${untraced.length} transaction${untraced.length === 1 ? '' : 's'}:`,
         ...untraced.map(t => `  ${t.chain} ${t.hash}${t.requested ? ' (requested)' : ''}: ${t.traceReason || 'trace unavailable'}`),

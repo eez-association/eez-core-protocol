@@ -71,3 +71,36 @@ test('failed batch reads retain the archive fallback for ordinary block reads', 
   assert.equal((await reader.block(2)).hash, hash('0x2'));
   assert.equal(calls.filter(c => c.url === 'archive').length, 2);
 });
+
+
+test('null historical block reads retry the archive by number and hash', async () => {
+  const expected = { number: '0x1', hash: hash('historical'), transactions: [] }, calls = [];
+  const reader = new ChainReader('L1', 'primary', 'archive', async (url, method, params) => {
+    calls.push({ url, method, params }); return url === 'primary' ? null : expected;
+  });
+  assert.equal(await reader.block(1), expected);
+  assert.equal(await reader.block(expected.hash), expected);
+  assert.deepEqual(calls.map(c => c.url), ['primary', 'archive', 'primary', 'archive']);
+});
+
+test('null slots in successful block batches are filled from the archive', async () => {
+  const calls = [], block = n => ({ number: n, hash: hash(n), transactions: [] });
+  const rpc = makeRpc({ fetch: async (url, options) => {
+    const r = JSON.parse(options.body); calls.push({ url, request: r });
+    return response(Array.isArray(r) ? r.map(x => reply(x, x.params[0] === '0x2' ? null : block(x.params[0]))) : reply(r, block(r.params[0])));
+  } });
+  const reader = new ChainReader('L1', 'primary', 'archive', rpc);
+  await reader.prefetchBlocks([1, 2, 3]);
+  assert.deepEqual(await Promise.all([1, 2, 3].map(n => reader.block(n))), [block('0x1'), block('0x2'), block('0x3')]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, 'archive');
+  assert.deepEqual(calls[1].request.params, ['0x2', true]);
+});
+
+test('a null prefetched block cannot be replaced with the wrong archive block', async () => {
+  const rpc = makeRpc({ fetch: async (url, options) => {
+    const r = JSON.parse(options.body);
+    return response(Array.isArray(r) ? r.map(x => reply(x, null)) : reply(r, { number: '0x99', hash: hash('wrong'), transactions: [] }));
+  } });
+  await assert.rejects(new ChainReader('L1', 'primary', 'archive', rpc).prefetchBlocks([1]), /invalid archive block/);
+});

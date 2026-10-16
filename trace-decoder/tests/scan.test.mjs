@@ -164,3 +164,14 @@ test('L1 blocks trace only manager calls and manager events; --thorough traces e
   assert.ok(l1Traces(full) >= 21, `traced ${l1Traces(full)} L1 transactions`);
   assert.deepEqual(slow.transactions.map(t => t.hash), fast.transactions.map(t => t.hash), 'same transactions found either way');
 });
+
+
+test('origin discovery succeeds when transaction, receipt and block exist only in the archive', async () => {
+  const f = scenario(), rpc = f.config.rpc;
+  const result = await decodeCrossChainTrace({ ...f.config, l1TraceRpc: 'l1-archive', rpc: async (url, method, params) => {
+    if (url === 'l1-rpc' && ['eth_getTransactionByHash', 'eth_getTransactionReceipt', 'eth_getBlockByNumber', 'eth_getBlockByHash'].includes(method)) return null;
+    return rpc(url, method, params);
+  } }, f.trigger);
+  assert.equal(result.origin.transactionId, `L1:${f.trigger}`);
+  assert.equal(result.outgoing[0].status, 'matched');
+});

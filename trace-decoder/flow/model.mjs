@@ -136,13 +136,13 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     gasUsed: toDecimal(tx.receipt?.gasUsed), traced: tx.trace?.available !== false, traceReason: tx.trace?.reason || null,
     requested: `${tx.chain}:${tx.hash}` === originTx,
   }));
-  classifyTransactions(trace, transactions, frames);
+  const scope = classifyTransactions(trace, transactions, frames);
   // Triggers first: they start the flow. Then settlement, system transactions, the rest.
   const rank = { trigger: 0, settlement: 1, 'table-load': 2, delivery: 3, related: 4, other: 5 };
   const txOf = id => transactions.find(t => id.startsWith(`${t.chain}:${t.hash}:`));
   const rootIds = [...(trace.logicalRoots || [])].sort((a, b) => {
     const x = txOf(a), y = txOf(b);
-    return (rank[x?.role] ?? 9) - (rank[y?.role] ?? 9) || Number(x?.block ?? 0) - Number(y?.block ?? 0) || Number(x?.index ?? 0) - Number(y?.index ?? 0);
+    return Number(scope.roots.has(b)) - Number(scope.roots.has(a)) || (rank[x?.role] ?? 9) - (rank[y?.role] ?? 9) || Number(x?.block ?? 0) - Number(y?.block ?? 0) || Number(x?.index ?? 0) - Number(y?.index ?? 0);
   });
   const roots = [];
   for (const id of rootIds) {
@@ -150,9 +150,9 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     if (n == null) continue;
     const tx = txOf(id);
     roots.push({ node: n, chain: frame.chain, tx: frame.transactionHash, block: frame.blockNumber ?? null, from: frame.from,
-      isOrigin: !!tx?.requested, relatedSettlement: !!tx?.relatedSettlement, role: tx?.role || 'other', label: tx?.label || 'Transaction' });
+      inFlow: scope.roots.has(id), isOrigin: !!tx?.requested, relatedSettlement: !!tx?.relatedSettlement, role: tx?.role || 'other', label: tx?.label || 'Transaction' });
   }
-  transactions.sort((a, b) => (rank[a.role] ?? 9) - (rank[b.role] ?? 9) || Number(a.block ?? 0) - Number(b.block ?? 0) || Number(a.index ?? 0) - Number(b.index ?? 0));
+  transactions.sort((a, b) => Number(b.inFlow === true || b.requested) - Number(a.inFlow === true || a.requested) || (rank[a.role] ?? 9) - (rank[b.role] ?? 9) || Number(a.block ?? 0) - Number(b.block ?? 0) || Number(a.index ?? 0) - Number(b.index ?? 0));
 
   const chainIds = trace.metadata?.chainIds || {};
   return {
@@ -167,7 +167,7 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     settlements: (trace.settlements || []).map(s => ({ id: s.id, l1Tx: s.l1TransactionHash, l1Block: s.l1BlockNumber ?? null, firstL2Block: s.firstL2Block ?? null, lastL2Block: s.lastL2Block ?? null })),
     transactions, roots, nodes,
     unresolved: (trace.unresolved || []).map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
-    stats: { frames: trace.frames.length, crossings: (trace.outgoing || []).length, matched: (trace.outgoing || []).filter(o => o.status === 'matched').length, events: (trace.events || []).length },
+    stats: { frames: scope.frames.size, crossings: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId)).length, matched: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId) && o.status === 'matched').length, events: (trace.events || []).filter(e => scope.frames.has(e.frameId)).length },
   };
 }
 
@@ -225,7 +225,9 @@ function classifyTransactions(trace, transactions, frames) {
     if (t.role !== 'trigger') continue;
     t.startsOn = t.chain;
     const outs = (trace.outgoing || []).filter(o => keyOf(o.frameId) === `${t.chain}:${t.hash}` && !nested(o.frameId));
-    for (const x of l2TxEntries) if ((x.e.l2ToL1Calls || []).some(r => outs.some(o => sameCall(r, o)))) {
+    const isolation = (trace.transactionLinks || []).find(l => l.sourceChain === t.chain && lower(l.sourceHash) === lower(t.hash))?.l1Execution;
+    if (isolation) t.evidence.push(`isolated L1 entry #${isolation.entryIndex}: ${isolation.basis}`);
+    for (const x of l2TxEntries) if ((!isolation || x.index === isolation.entryIndex) && (x.e.l2ToL1Calls || []).some(r => outs.some(o => sameCall(r, o)))) {
       t.evidence.push(`matches L2Tx entry #${x.index} of the settlement batch (proxyEntryHash = 0: started on L2)`);
       link(`${t.chain}:${t.hash}`, x.tx);
     }
@@ -238,14 +240,44 @@ function classifyTransactions(trace, transactions, frames) {
     // Transactions connected to a trigger through matched calls, tables or batch entries.
     t.links = [...links.get(`${t.chain}:${t.hash}`)];
   }
-  const triggers = transactions.filter(t => t.role === 'trigger');
-  const reach = new Set(triggers.map(t => `${t.chain}:${t.hash}`)), queue = [...reach];
-  while (queue.length) for (const k of links.get(queue.shift()) || []) if (!reach.has(k)) { reach.add(k); queue.push(k); }
+  // Follow logical call trees from the requested transaction. Shared tables are
+  // dependencies, never bridges to every other trigger in the same batch.
+  const requested = transactions.find(t => t.requested);
+  const logical = new Map((trace.logicalNodes || []).map(n => [n.id, n]));
+  const descendants = root => {
+    const ids = new Set(), pending = [root];
+    while (pending.length) {
+      const id = pending.pop();
+      if (ids.has(id)) continue;
+      ids.add(id);
+      pending.push(...(logical.get(id)?.children || []));
+    }
+    return ids;
+  };
+  const requestedKey = requested ? `${requested.chain}:${requested.hash}` : null;
+  const exact = (trace.transactionLinks || []).filter(l => l.references.some(r => `${r.chain}:${r.hash}` === requestedKey));
+  const requestedTables = new Set((trace.tables || []).filter(t => `${t.chain}:${t.transactionHash}` === requestedKey).map(t => t.id));
+  const selectedRoots = new Set(), selectedFrames = new Set();
+  for (const root of trace.logicalRoots || []) {
+    const ids = descendants(root);
+    const hasRequested = [...ids].some(id => keyOf(id) === requestedKey);
+    const usesRequestedTable = ['settlement', 'table-load'].includes(requested?.role) && [...ids].some(id => requestedTables.has(frames.get(id)?.generationId));
+    const exactSource = exact.some(l => keyOf(root) === `${l.sourceChain}:${l.sourceHash}`);
+    if (!requestedKey || hasRequested || usesRequestedTable || exactSource) {
+      selectedRoots.add(root);
+      for (const id of ids) selectedFrames.add(id);
+    }
+  }
+  const reach = new Set([...selectedFrames].map(keyOf));
+  for (const id of selectedFrames) {
+    const dependency = tableTx.get(frames.get(id)?.generationId);
+    if (dependency) reach.add(dependency);
+  }
+  for (const l of exact) for (const r of l.references) reach.add(`${r.chain}:${r.hash}`);
   // inFlow: true / false from evidence; null when the transaction could not be traced.
-  for (const t of transactions) t.inFlow = t.role === 'untraced' ? null : reach.has(`${t.chain}:${t.hash}`) && t.role !== 'other';
+  for (const t of transactions) t.inFlow = !t.traced ? null : reach.has(`${t.chain}:${t.hash}`) && (t.role !== 'other' || t.requested);
   // A local L2 transaction still has an L1 settlement. Keep that relationship
   // visible without inventing a cross-chain call or including unrelated batch jobs.
-  const requested = transactions.find(t => t.requested);
   if (requested?.role === 'other') {
     requested.label = 'Requested transaction · no cross-chain calls';
     requested.evidence = ['no cross-chain calls observed in the requested transaction'];
@@ -256,11 +288,14 @@ function classifyTransactions(trace, transactions, frames) {
       if (t.relatedSettlement) t.evidence.push('settles the requested L2 transaction; no cross-chain call is implied');
     }
   }
+  return { roots: selectedRoots, frames: selectedFrames };
 }
 
 function defaultLabel(nodes, roots, trace) {
   // Name the page after the trigger: the transaction that starts the flow.
-  const origin = roots.find(r => r.role === 'trigger') || roots.find(r => r.isOrigin);
+  const requested = roots.find(r => r.isOrigin);
+  const origin = requested && !['settlement', 'table-load', 'delivery'].includes(requested.role) ? requested
+    : roots.find(r => r.inFlow && r.role === 'trigger') || requested;
   // Never name the page after an unrelated transaction when nothing traced starts the flow.
   if (!origin && trace?.origin) return `Untraced ${trace.origin.chain} transaction ${String(trace.txHash || '').slice(0, 10)}…`;
   if (!origin) return roots.length ? defaultLabel(nodes, [{ ...roots[0], isOrigin: true }]) : 'Empty trace';

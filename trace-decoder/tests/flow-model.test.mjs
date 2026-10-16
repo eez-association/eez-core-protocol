@@ -113,3 +113,39 @@ test('a 10,000-frame trace builds quickly', async () => {
   assert.ok(m.nodes.length >= 10_000);
   assert.ok(performance.now() - start < 3000, `took ${Math.round(performance.now() - start)} ms`);
 });
+
+
+test('a requested plain L1 transfer never inherits another same-block trigger or title', async () => {
+  const { trace } = await decode();
+  const hash = '0x' + 'cd'.repeat(32), id = `L1:${hash}:0`;
+  const decoded = { contractName: 'RequestedRecipient', functionName: 'receive', arguments: [], returns: [] };
+  trace.transactions.push({ chain: 'L1', hash, blockNumber: 100, transactionIndex: 2, receipt: { status: '0x1' }, trace: { available: true } });
+  trace.frames.push({ id, chain: 'L1', transactionHash: hash, path: '0', parentId: null, children: [], type: 'CALL', role: 'application', to: address(77), input: '0x', output: '0x', value: '1', decoded });
+  trace.logicalNodes.push({ id, decoded, children: [] }); trace.logicalRoots.push(id);
+  trace.origin = { chain: 'L1', transactionId: `L1:${hash}` }; trace.txHash = hash;
+  const m = buildFlowModel(trace);
+  assert.equal(m.label, 'RequestedRecipient.receive()');
+  assert.equal(m.stats.crossings, 0);
+  assert.equal(m.roots[0].tx, hash);
+  assert.ok(m.transactions.filter(t => !t.requested).every(t => t.inFlow === false));
+});
+
+test('shared L1 posting does not connect a second trigger to the requested call tree', async () => {
+  const { f, trace } = await decode({ direction: 'L2' });
+  const second = '0x' + 'ef'.repeat(32), oldPrefix = `L2:${f.trigger}`, prefix = `L2:${second}`;
+  const replace = x => JSON.parse(JSON.stringify(x).replaceAll(oldPrefix, prefix).replaceAll(f.trigger, second));
+  trace.transactions.push({ ...replace(trace.transactions.find(t => t.hash === f.trigger)), transactionIndex: 2 });
+  const copiedFrames = trace.frames.filter(f => f.id.startsWith(oldPrefix)).map(replace);
+  trace.frames.push(...copiedFrames);
+  // An unresolved second trigger loads the same table. That dependency must not
+  // expand the requested flow to its calls, even when the call bytes are identical.
+  const copiedIds = new Set(copiedFrames.map(f => f.id));
+  trace.logicalNodes.push(...trace.logicalNodes.filter(n => n.id.startsWith(oldPrefix)).map(replace).map(n => ({ ...n, children: n.children.filter(id => copiedIds.has(id)) })));
+  trace.logicalRoots.push(`${prefix}:0`);
+  const out = replace(trace.outgoing[0]); delete out.remoteFrameId; out.status = 'unresolved'; trace.outgoing.push(out);
+  const m = buildFlowModel(trace);
+  assert.equal(m.transactions.find(t => t.hash === second).inFlow, false);
+  assert.equal(m.roots.find(r => r.tx === second).inFlow, false);
+  assert.equal(m.stats.crossings, 1);
+  assert.equal(m.stats.matched, 1);
+});

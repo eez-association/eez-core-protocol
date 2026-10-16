@@ -9,10 +9,11 @@ const ENV = {
   ETHERSCAN_API_KEY: "etherscanApiKey",
   ROLLUPS: "rollups", MANAGER_L2: "managerL2", EEZ_ROLLUP_MANAGER: "rollupManager",
   EEZ_CORR_RPC: "correlationRpc", L1_TRACE_RPC: "l1TraceRpc", L2_TRACE_RPC: "l2TraceRpc",
+  EEZ_TX_LINKS: "txLinks",
   EXPECTED_L1_CHAIN_ID: "expectedL1ChainId", EXPECTED_L2_CHAIN_ID: "expectedL2ChainId",
 };
 const FLAGS = {
-  "--tx": "tx", "--env-file": "envFile", "--l1-rpc": "l1Rpc", "--l2-rpc": "l2Rpc",
+  "--tx-links": "txLinks", "--tx": "tx", "--env-file": "envFile", "--l1-rpc": "l1Rpc", "--l2-rpc": "l2Rpc",
   "--l1-front": "l1Front", "--l2-front": "l2Front", "--l1-explorer": "l1Explorer",
   "--l2-explorer": "l2Explorer", "--rollups": "rollups", "--manager-l2": "managerL2",
   "--l1-manager": "rollups", "--l2-manager": "managerL2", "--correlation-rpc": "correlationRpc",
@@ -89,6 +90,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env, cwd 
     if ((config[chain + "From"] == null) !== (config[chain + "To"] == null)) throw new Error(`Provide both --${chain}-from and --${chain}-to`);
     if (config[chain + "From"] > config[chain + "To"]) throw new Error(`Inverted ${chain} search range`);
   }
+  if (config.txLinks && !["auto", "required", "off"].includes(config.txLinks)) throw new Error("--tx-links must be auto, required, or off");
   return config;
 }
 
@@ -96,7 +98,8 @@ export const HELP = `Usage: node trace-decoder/decode-trace.mjs <TX_HASH> [optio
   --tx HASH                       Compatibility alias for positional hash
   --env-file FILE                 Otherwise DEVNET_ENV, then chain.env
   --l1-rpc URL --l2-rpc URL        Chain reads and traces
-  --l1-front URL --l2-front URL    Composer / settlement discovery
+  --l1-front URL --l2-front URL    Composer / exact transaction links
+  --tx-links MODE                auto (default), required, off; also EEZ_TX_LINKS
   --correlation-rpc URL           First settlement capability candidate
   --l1-trace-rpc URL --l2-trace-rpc URL
   --l1-manager ADDRESS --l2-manager ADDRESS  Historical deployment overrides

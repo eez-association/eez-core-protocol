@@ -6,7 +6,7 @@ import { decodeCrossChainTrace } from '../src/engine.mjs';
 import { buildFlowModel } from '../flow/model.mjs';
 import { renderFlowHtml } from '../flow/render-flow.mjs';
 import { buildSamples } from '../samples/build-samples.mjs';
-import { scenario } from './fixtures/scenarios.mjs';
+import { scenario, hash, address, frame } from './fixtures/scenarios.mjs';
 
 const plain = v => JSON.parse(JSON.stringify(v, (_, x) => typeof x === 'bigint' ? x.toString() : x));
 
@@ -141,4 +141,35 @@ test('the sequence and timeline views render every sample', async () => {
     p.tab('timeline'); assert.ok(/class="card/.test(p.el('canvas').innerHTML));
     p.tab('flow');
   }
+});
+
+
+test('the viewer selects a requested plain transfer over another same-block trigger', async () => {
+  const f = scenario(), block = f.blocks.L1.get(100), txHash = hash('plain transfer');
+  const transaction = { hash: txHash, from: address(81), to: address(82), input: '0x', blockNumber: block.number, blockHash: block.hash, transactionIndex: '0x2', value: '0x1' };
+  f.txs.L1.set(txHash, { transaction, receipt: { transactionHash: txHash, blockNumber: block.number, blockHash: block.hash, transactionIndex: '0x2', status: '0x1', logs: [] }, trace: frame(transaction.from, transaction.to) });
+  block.transactions.push(transaction);
+  const model = buildFlowModel(plain(await decodeCrossChainTrace(f.config, txHash)));
+  const p = page(renderFlowHtml([{ model }], { views: ['flow', 'sequence'] }));
+  assert.equal(model.roots[Number(p.el('root-select').value)].tx, txHash);
+  assert.match(model.label, /receive/);
+  assert.equal(model.stats.crossings, 0);
+  assert.equal(model.transactions.find(t => t.hash === f.trigger).inFlow, false);
+  assert.ok(!p.el('notice').innerHTML.includes('flow starts in'));
+});
+
+
+test('enabling plumbing selects a related root when the default selection was empty', async () => {
+  const f = scenario({ direction: 'L2' }); f.failure.allTrace.add(f.trigger);
+  const model = buildFlowModel(plain(await decodeCrossChainTrace(f.config, f.trigger)));
+  const post = model.transactions.find(t => t.hash === f.posting); post.inFlow = true;
+  // A mixed set of roots hides plumbing by default; the remaining application
+  // root is unrelated and must not be chosen to fill an empty selection.
+  const unrelatedHash = hash('unrelated-viewer-root');
+  model.roots.push({ ...model.roots[0], tx: unrelatedHash, role: 'other', inFlow: false, isOrigin: false });
+  model.transactions.push({ chain: 'L1', hash: unrelatedHash, role: 'other', inFlow: false, evidence: [], traced: true });
+  const p = page(renderFlowHtml([{ model }], { views: ['flow'] }));
+  assert.equal(p.el('root-select').value, '-1');
+  p.el('opt-protocol').checked = true; p.el('opt-protocol').onchange();
+  assert.equal(model.roots[Number(p.el('root-select').value)].tx, f.posting);
 });

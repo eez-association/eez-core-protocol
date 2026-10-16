@@ -4,11 +4,15 @@ import { abiValue, callHash, hex, lower, named, parseCall, parseEvent, protocol,
 const outgoingNames = new Set(['executeCrossChainCall', 'staticCrossChainCall']);
 const loadNames = new Set(['postAndVerifyBatch', 'loadExecutionTable', 'executeIncomingCrossChainCall']);
 
-export async function buildGraph({ config, transactions, managers, readers, rollupIds, settlements, unresolvedReason }) {
+export async function buildGraph({ config, transactions, managers, readers, rollupIds, settlements, transactionLinks = [], matchingDisabled = false, unresolvedReason }) {
   // Registry caching is invocation-local, including failed historical reads.
   const registry = new Map(), frames = [], byId = new Map(), events = [], tables = [], physicalRoots = [];
   const parse = new Map(), tableById = new Map();
   function scopes(record, generation = null) {
+    if (transactionLinks.length) return transactionLinks.filter(link =>
+      link.references.some(r => r.chain === record.chain && same(r.hash, record.hash)) &&
+      (!generation || link.references.some(r => r.chain === record.chain && same(r.hash, generation.transactionHash)))
+    ).map(link => link.id);
     return settlements.filter(s => record.chain === 'L2'
       ? record.blockNumber >= s.firstL2Block && record.blockNumber <= s.lastL2Block
       : (generation ? same(generation.transactionHash, s.l1TransactionHash) : same(record.hash, s.l1TransactionHash)))
@@ -172,7 +176,13 @@ export async function buildGraph({ config, transactions, managers, readers, roll
   function nearestIncoming(out) { return ancestors(byId.get(out.frameId)).map(f => incomingByFrame.get(f.id)).find(Boolean); }
   function nearestOutgoing(inc) { return ancestors(byId.get(inc.frameId)).map(f => outgoingByFrame.get(f.id)).find(Boolean); }
   function compatibleScope(out, inc) {
-    if (settlements.length) return out.settlementIds.some(s => inc.settlementIds.includes(s));
+    if (matchingDisabled) return false;
+    for (const link of transactionLinks) if (link.l1Execution?.frameId) {
+      const l1 = byId.get(out.chain === 'L1' ? out.frameId : inc.frameId);
+      const host = link.l1Execution.frameId;
+      if (l1.id !== host && !l1.id.startsWith(`${host}.`)) return false;
+    }
+    if (transactionLinks.length || settlements.length) return out.settlementIds.some(s => inc.settlementIds.includes(s));
     // Bounded fallback has no canonical mapping. Require table evidence and a
     // matching entry identity as well as the full call identity.
     const table = tableById.get(inc.generationId);
@@ -198,7 +208,7 @@ export async function buildGraph({ config, transactions, managers, readers, roll
   }
   function assign(out, inc, evidence) {
     assigned.set(out.id, inc.id); used.add(inc.id); out.status = 'matched'; out.remoteFrameId = inc.frameId;
-    out.matchEvidence = ['source/destination identity', 'calldata', 'value', 'static context', settlements.length ? 'canonical settlement scope' : 'bounded table evidence', ...evidence];
+    out.matchEvidence = ['source/destination identity', 'calldata', 'value', 'static context', transactionLinks.length ? 'verified transaction link scope' : settlements.length ? 'canonical settlement scope' : 'bounded table evidence', ...evidence];
     out.candidates = [inc.frameId]; inc.sourceFrameId = out.frameId;
   }
   let progress = true;

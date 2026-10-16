@@ -74,12 +74,12 @@ export class ChainReader {
     Object.assign(this, { chain, url, traceUrl: traceUrl || url, rpc, report });
     this.blocks = new Map(); this.receiptBlocks = new Map(); this.traces = new Map();
   }
-  // Reads go to the read RPC. When it fails, or reports a transaction or receipt as unknown
+  // Reads go to the read RPC. When it fails, or reports a transaction, receipt or block as unknown
   // (typical of non-archive nodes), the read is retried on the trace RPC, whose chain ID was
   // verified at start-up. An archive trace endpoint alone then covers historical reads.
   async send(method, params = [], trace = false) {
     if (trace || this.traceUrl === this.url) return this.rpc(trace ? this.traceUrl : this.url, method, params);
-    const retryOnNull = method === 'eth_getTransactionReceipt' || method === 'eth_getTransactionByHash';
+    const retryOnNull = ['eth_getTransactionReceipt', 'eth_getTransactionByHash', 'eth_getBlockByNumber', 'eth_getBlockByHash'].includes(method);
     try {
       const result = await this.rpc(this.url, method, params);
       if (result != null || !retryOnNull) return result;
@@ -106,7 +106,14 @@ export class ChainReader {
           if (blocks.length !== tags.length || blocks.some((b, i) => b && (number(b.number) !== number(tags[i]) || !/^0x[0-9a-f]{64}$/i.test(b.hash) || !Array.isArray(b.transactions)))) {
             throw new Error(`${this.chain}: invalid block batch response`);
           }
-          blocks.forEach((b, i) => this.blocks.set(tags[i], Promise.resolve(b)));
+          await mapConcurrent(tags.map((tag, i) => ({ tag, i })), async ({ tag, i }) => {
+            // A null batch slot may be pruned on the read node but present in the archive.
+            const b = blocks[i] ?? (this.traceUrl !== this.url ? await this.send('eth_getBlockByNumber', [tag, true], true) : null);
+            if (b && (number(b.number) !== number(tag) || !/^0x[0-9a-f]{64}$/i.test(b.hash) || !Array.isArray(b.transactions))) {
+              throw new Error(`${this.chain}: invalid archive block response`);
+            }
+            this.blocks.set(tag, Promise.resolve(b));
+          });
           continue;
         }
       }
