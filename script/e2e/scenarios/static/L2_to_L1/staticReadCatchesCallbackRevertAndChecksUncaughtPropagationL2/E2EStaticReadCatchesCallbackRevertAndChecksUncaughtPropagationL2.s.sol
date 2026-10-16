@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -182,6 +184,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticReadCatchesCallbackRevert
         _printL1Steps(t.l1, t.steps);
         _printL1Table(t.l1);
         _printL2Table(t.l2);
+        _printL2StaticTable(t.statics);
         // L2 only resolves static reads: no mutable table or consumption events.
         console.log("EXPECTED_L2_HASHES=[]");
         console.log("EXPECTED_L2_CALL_HASHES=[]");

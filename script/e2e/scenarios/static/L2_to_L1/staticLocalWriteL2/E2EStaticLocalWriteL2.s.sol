@@ -312,6 +312,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticLocalWriteL2Actions {
         }
         _printL1Steps(l1, steps);
         _printL1Table(l1);
+        _printL2StaticTable(_l2Statics(a));
         console.log("EXPECTED_L2_HASHES=[]");
         console.log("EXPECTED_L2_CALL_HASHES=[]");
     }

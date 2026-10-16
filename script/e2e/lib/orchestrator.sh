@@ -96,10 +96,8 @@ _poll_delay() {
 }
 
 # ══ Manifest version ══
-# v1: written by the finish step after the deploys mined (waves / classic /
-# older runs). v2: written by the plan step BEFORE the deploys are fired, so
-# "manifest present" alone no longer means "prepared" — the job must also hold
-# .deploys-done and no .prepare-failed marker.
+# Both prepare modes write v2. Plan writes it before deployment; neither mode
+# is sendable until all deploys mined and .deploys-done is present.
 _manifest_version() {  # $1=manifest.env → 1 | 2
     local v
     v=$(sed -n 's/^declare -- E2E_MANIFEST_VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null)
@@ -107,7 +105,20 @@ _manifest_version() {  # $1=manifest.env → 1 | 2
 }
 _job_prepared() {  # $1=job dir → 0 when the job may be sent / verified
     [[ -f "$1/manifest.env" && ! -f "$1/.prepare-failed" ]] || return 1
-    [[ "$(_manifest_version "$1/manifest.env")" == 1 || -f "$1/.deploys-done" ]]
+    [[ "$(_manifest_version "$1/manifest.env")" == 2 && -f "$1/.deploys-done" ]]
+}
+
+# Reject legacy resumes before discovery, recovery or wallet use. Historical
+# v1 evidence can still be inspected with --verify-only; it is never sent again.
+_check_resume_manifests() {
+    local manifest
+    for manifest in "$1"/jobs/*/manifest.env; do
+        [[ -f "$manifest" ]] || continue
+        [[ "$(_manifest_version "$manifest")" == 2 ]] || {
+            echo "Cannot resume $manifest: only v2 manifests are supported; use --verify-only or start a new run" >&2
+            return 1
+        }
+    done
 }
 
 # ── Expand args into a flat job list ──

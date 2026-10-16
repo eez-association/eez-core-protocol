@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -220,6 +222,7 @@ contract ComputeExpected is ComputeExpectedBase, DeepStaticReadCallbacksUnderSta
         _printL1Steps(t.l1, t.steps);
         _printL1Table(t.l1);
         _printL2Table(t.l2);
+        _printL2StaticTable(t.statics);
         console.log("EXPECTED_L2_HASHES=[%s]", vm.toString(_entryHash(t.l2[0])));
         _printL2CallHashes(t.l2);
         console.log("EVENTLESS_L2_HASHES=[]");

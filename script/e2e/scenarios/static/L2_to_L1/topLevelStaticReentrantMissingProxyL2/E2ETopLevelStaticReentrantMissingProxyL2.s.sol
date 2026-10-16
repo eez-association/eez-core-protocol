@@ -368,6 +368,9 @@ contract ComputeExpected is ComputeExpectedBase, TopLevelStaticReentrantCounterL
         console.log("EXPECTED_L2_CALL_HASHES=[]");
         console.log("");
         console.log("=== EXPECTED L2 STATIC POOL (1 entry, no events) ===");
+        _printL2StaticTable(
+            _staticEntries(vm.envAddress("PRODUCER_L2"), vm.envAddress("CALLBACK_L1"), counterL1Addr, readerL2Addr)
+        );
         _logStaticLookup(
             0,
             _staticEntries(vm.envAddress("PRODUCER_L2"), vm.envAddress("CALLBACK_L1"), counterL1Addr, readerL2Addr)[0]

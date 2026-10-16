@@ -46,9 +46,19 @@ def receipt(chain,tx):
     if chain==2 and mode=="many_receipts" and tx in [h(i) for i in range(21,46)]: n=l2
     if n is None: return None
     b=block(chain,n)
+    logs=[]
+    if mode.startswith("links"):
+        incoming="0xfadc5c8956d764aece83e7d2607b05b34acd6c3787d9891a4d155a74a4d52642"
+        consumed="0xa17dc82da628b280737819918ee433b966773121ff974c081d8cbac4c6199d7d"
+        if chain==1 and tx==h(1) and direction=="L1" and mode!="links_source_only":
+            logs=[{"address":"0x"+"a"*40,"topics":[consumed,h(50),h(1)],"logIndex":"0x0"}]
+            if mode=="links_multi": logs.append({**logs[0],"logIndex":"0x1"})
+        if chain==2 and tx in (h(21),h(22)) and direction=="L1":
+            logs=[{"address":"0x"+"b"*40,"topics":[incoming,h(50)],"logIndex":"0x0"}]
     return {"transactionHash":tx,"blockNumber":hex(n),"blockHash":b["hash"],
-            "transactionIndex":"0x0","status":"0x0" if mode=="delivery_reverted" and chain==2 and tx==h(21) else "0x1",
-            "to":"0x"+"a"*40,"logs":[]}
+            "transactionIndex":"0x0","status":"0x0" if mode in ("delivery_reverted", "links_reverted") and chain==2 and tx==h(21) else "0x1",
+            "to":"0x"+("b" if mode.startswith("links") and chain==2 and tx in (h(21),h(22)) else "a")*40,"logs":logs,
+            **({"transactionIndex":"0x3" if tx==h(1) else "0x2" if tx==h(21) else "0x4"} if mode.startswith("links") else {})}
 def correlation(index=0):
     l1,l2=position(index)
     a,b=block(1,l1),block(2,l2)
@@ -64,6 +74,10 @@ if name=="date":
 if name=="sleep":
     (root/"clock").write_text(str(clock+int(args[0]))); sys.exit()
 if name=="cast":
+    if args[0]=="to-dec": print(int(args[1],16)); sys.exit()
+    if args[0]=="keccak":
+        print("0xa17dc82da628b280737819918ee433b966773121ff974c081d8cbac4c6199d7d" if args[1].startswith("ExecutionConsumed(") else
+              "0xfadc5c8956d764aece83e7d2607b05b34acd6c3787d9891a4d155a74a4d52642"); sys.exit()
     endpoint=args[args.index("--rpc-url")+1]
     chain=1 if endpoint.endswith("1") else 2
     if args[0]=="block-number":
@@ -80,6 +94,13 @@ if name=="cast":
 if name=="forge":
     text=" ".join(args)
     state.setdefault("forge",[]).append(args)
+    if mode.startswith("links"):
+        evidence=os.environ.get("E2E_LINK_EVIDENCE")
+        if evidence:
+            parsed=json.loads(pathlib.Path(evidence).read_text())
+            assert pathlib.Path(evidence)==root/"job/cross-chain/evidence.json"
+            state.setdefault("filters",[]).append({"evidence":evidence,"l2":parsed["l2"],
+                "calldata_env":os.environ.get("E2E_L2_TABLE_INPUTS")})
     if ":VerifyL1BatchCalldata" in text:
         state["decodes"]=state.get("decodes",0)+1
         if mode in ("reorg_same_height","reorg_move") and not state.get("changed"):
@@ -108,6 +129,8 @@ if name=="forge":
         print("L2_MATCH_BLOCKS="+("invalid" if mode=="discovery_malformed" else json.dumps(matches, separators=(",", ":"))))
         if mode=="discovery_reorg" and not state.get("changed"): state["changed"]=True
     elif ":VerifyL2Blocks" in text or ":VerifyL2Calls " in text:
+        if mode=="links_wrong_function":
+            save(); print("FAIL: Wrong linked L2 function"); sys.exit(1)
         if mode.startswith("split"):
             expected=json.dumps([position(0)[1],position(1)[1]], separators=(",", ":"))
             assert expected in args,args
@@ -118,7 +141,7 @@ if name=="forge":
         if mode=="many_receipts" and key=="L2_CALL_TX":
             for i in range(22,46): print(key+"="+h(i))
     else: raise AssertionError(args)
-    if mode=="reorg_after_pass" and ":VerifyL2Calls " in text and not state.get("changed"):
+    if mode in ("reorg_after_pass", "links_reorg") and ":VerifyL2Calls " in text and not state.get("changed"):
         state["changed"]=True
     if mode=="padded_empty_reorg" and ":VerifyL2Calls " in text:
         state["empty_changed"]=True
@@ -134,7 +157,36 @@ def respond(request):
         if endpoint.startswith("direct") or mode=="unsupported": error={"code":-32601,"message":"Method not found"}
         elif mode=="invalid_params": error={"code":-32602,"message":"Invalid params"}
         elif mode=="catchup" and clock<1002: error={"code":-32001,"message":"Index catching up"}
-        elif method=="eez_getCrossChainTransaction": result=None
+        elif method=="eez_getCrossChainTransaction":
+            if not mode.startswith("links"): result=None
+            elif mode=="links_unsupported": error={"code":-32601,"message":"Unsupported"}
+            elif mode=="links_null" or (mode=="links_pending" and clock<1002): result=None
+            else:
+                state["status_calls"]=state.get("status_calls",0)+1
+                source=params[0]
+                l2=[] if mode=="links_source_only" else [{"chainId":"0x2","hash":h(21)}]
+                if mode in ("links_extra","links_multi"): l2.append({"chainId":"0x2","hash":h(22)})
+                if direction=="L2": l2.append({"chainId":"0x2","hash":source})
+                if mode=="links_missing_loader": l2=[item for item in l2 if item["hash"]==source]
+                result={"hash":source,"direction":"inbound" if direction=="L1" else "outbound", "nonce":208,
+                        "transactions":{"complete":True,"basis":"attempt","attemptGeneration":
+                            "0x2" if mode=="links_attempt" and state["status_calls"]>1 else "0x1",
+                            "l1":{"chainId":"0x1","hash":source if direction=="L1" else post()},
+                            "postBatch":{"chainId":"0x1","hash":post()},"l2":l2}}
+                if mode=="links_observation":
+                    result["ownership"]={"state":"terminal","reason":"Committed","observedAtMs":state["status_calls"]}
+                    if state["status_calls"]>1: result["ownership"]["replacementHash"]=None
+                if mode=="links_quantities":
+                    result["nonce"]="0X00D0"
+                    result["transactions"]["l1"]["chainId"]="0x01"
+                    result["transactions"]["postBatch"]["chainId"]=1
+                    for item in result["transactions"]["l2"]: item["chainId"]="0X002"
+                if mode=="links_legacy": del result["transactions"]
+                if mode=="links_wrong_hash": result["hash"]=h(999)
+                if mode=="links_wrong_chain": result["transactions"]["postBatch"]["chainId"]="0x3"
+                if mode=="links_incomplete": result["transactions"]["complete"]=False
+                if mode=="links_duplicate": result["transactions"]["l2"]*=2
+                if mode=="links_rejected": result["ownership"]={"rejection":{"error":"SimulationFailed"}}
         elif params==["0x1"]: result=None
         else:
             assert isinstance(params[0],dict) and "blockHash" in params[0],params
@@ -144,6 +196,7 @@ def respond(request):
                 expected=c["matchedL2Block"]["hash"] if method=="eez_getSettlementByL2Block" else c["l1BlockHash"]
                 if params[0]["blockHash"]==expected: matches.append(c)
             result=(matches[0] if matches else None) if method=="eez_getSettlementByL2Block" else matches
+    elif method=="eth_chainId": result="0x99" if mode=="links_front_chain" and endpoint=="front2" else hex(chain)
     elif method=="eth_getBlockByNumber":
         result=block(chain,202 if chain==2 else 102) if params[0]=="latest" else block(chain,int(params[0],16))
     elif method in ("eth_getTransactionReceipt","eth_getTransactionByHash"):
@@ -153,7 +206,12 @@ def respond(request):
         elif method=="eth_getTransactionReceipt":
             result=None if mode=="block_receipts" else r
         elif r:
-            result={**r,"hash":params[0],"input":"0x0012" if params[0]==h(12) else "0x0011"}
+            data="0x0012" if params[0]==h(12) else "0x0011"
+            if mode.startswith("links") and chain==2 and params[0] in (h(21),h(22)):
+                data=("0xbf2eebd3" if direction=="L2" else "0xc3fb5f3d")+"00"
+                if mode=="links_wrong_function": data="0x12345678"
+                if mode=="links_large": data += "ab"*100000
+            result={**r,"hash":params[0],"input":data,"nonce":"0xd0"}
     elif method=="eth_getTransactionByBlockHashAndIndex":
         for index in range(2 if mode.startswith("split") else 1):
             r=receipt(chain,post(index))
@@ -206,7 +264,7 @@ print(json.dumps(response))
 
 
 class NetworkEvidenceTests(unittest.TestCase):
-    def run_verifier(self, mode="normal", direction="L2", runner=None):
+    def run_verifier(self, mode="normal", direction="L2", runner=None, links=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "clock").write_text("1000")
@@ -219,6 +277,7 @@ class NetworkEvidenceTests(unittest.TestCase):
                 path.chmod(0o755)
             job = root / "job"
             job.mkdir()
+            static = mode in ("links_static", "links_source_only")
             count = 2 if mode.startswith("split") or mode=="multi_same_batch" else 1
             (job / "txs.txt").write_text("\n".join(h(i + 1) for i in range(count)) + "\n")
             (job / "compute.out").write_text("EXPECTED fixture")
@@ -227,8 +286,9 @@ class NetworkEvidenceTests(unittest.TestCase):
                 "_SENDER=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
                 "EXPECTED_L1_CALL_HASHES='[]'\nEXPECTED_L1_HASHES='[]'\n"
                 "EXPECTED_L1_TABLE=0x01\nEXPECTED_L1_STEPS=0x1234\nEXPECTED_L1_STATIC_TABLE=0x\n"
-                "EXPECTED_L2_HASHES='[0x01]'\n"
-                f"EXPECTED_L2_CALL_HASHES='{('[]' if mode=='padded_table_only' else '[0x02]')}'\n"
+                f"EXPECTED_L2_HASHES='{('[]' if static else '[0x01]')}'\n"
+                f"EXPECTED_L2_CALL_HASHES='{('[]' if mode=='padded_table_only' or static else '[0x02]')}'\n"
+                f"EXPECTED_L2_STATIC_TABLE={'0x01' if mode=='links_static' else '0x'}\n"
                 "EXPECTED_L2_TABLE=0x01\nEVENTLESS_L2_HASHES='[]'\nABSENT_L2_HASHES='[]'\n")
             (root / "snapshot.env").write_text("L1_BLOCK_BEFORE=90\nL2_BLOCK_BEFORE=190\n")
             (root / "Scenario.sol").write_text("contract ComputeExpected {}\n")
@@ -246,15 +306,103 @@ class NetworkEvidenceTests(unittest.TestCase):
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "E2E_STAGE": "verify", "E2E_JOB_DIR": str(job),
                     "E2E_SNAPSHOT": str(root / "snapshot.env"), "E2E_L1TX_CACHE": str(cache),
-                    "E2E_VERIFY_TIMEOUT": "8", "E2E_CORRELATION": "auto"},
+                    "E2E_VERIFY_TIMEOUT": "8", "E2E_CORRELATION": "auto", "E2E_TX_LINKS": links or ("auto" if mode.startswith("links") else "off")},
                 capture_output=True, text=True, timeout=40)
-            return result, json.loads((root / "state.json").read_text()), int((root / "clock").read_text())
+            state = json.loads((root / "state.json").read_text())
+            if mode.startswith("links"):
+                state["artifacts"] = {str(p.relative_to(job)): p.read_text() for p in (job / "cross-chain").rglob("*.json")}
+            return result, state, int((root / "clock").read_text())
 
     def assert_passes(self, mode="normal", direction="L2"):
         result, state, clock = self.run_verifier(mode, direction)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("====== Done ======", result.stdout)
         return result, state, clock
+
+    def test_links_both_directions_are_exact_and_skip_range_scans(self):
+        for direction in ("L1", "L2"):
+            result, state, _ = self.assert_passes("links_normal", direction)
+            self.assertTrue(all(not any(":VerifyL1BatchInRange" in a or ":VerifyL1SettlementTxsInRange" in a or
+                                       ":VerifyL2CallsInRange" in a for a in args) for args in state["forge"]))
+            records = [json.loads(v) for k,v in state["artifacts"].items() if k.endswith("verified-links.json")]
+            self.assertEqual(len(records), 1)
+            roles = [ref["role"] for ref in records[0]["references"]]
+            self.assertIn("l2-table-load" if direction=="L2" else "l2-delivery", roles)
+            self.assertIn("L2 system table load:" if direction=="L2" else "L2 delivery (load+execute):", result.stdout)
+            self.assertNotIn("L2 loadTable:", result.stdout)
+            self.assertFalse(any(method=="eth_sendRawTransaction" for _,method,_ in state["calls"]))
+            self.assertEqual(sum(method=="eez_getCrossChainTransaction" for _,method,_ in state["calls"]), 2)
+            filters = state["filters"]
+            self.assertTrue(filters)
+            self.assertEqual(filters[0]["l2"]["tableTransactions"], [h(21)])
+            self.assertIsNone(filters[0]["calldata_env"])
+            self.assertEqual([k for k in state["artifacts"] if k.endswith("evidence.json")],
+                             ["cross-chain/evidence.json"])
+
+    def test_diagnostic_ownership_updates_do_not_repeat_verification(self):
+        result, state, _ = self.assert_passes("links_observation", "L2")
+        self.assertEqual(state["status_calls"], 2)
+        self.assertNotIn("discarding this pass", result.stdout + result.stderr)
+
+    def test_link_quantities_accept_padding_uppercase_and_json_numbers(self):
+        self.assert_passes("links_quantities", "L2")
+
+    def test_large_linked_calldata_uses_file_instead_of_environment_or_arguments(self):
+        _, state, _ = self.assert_passes("links_large")
+        self.assertGreater(len(state["filters"][0]["l2"]["tableInputs"][0]), 128*1024)
+        self.assertTrue(all(row["calldata_env"] is None for row in state["filters"]))
+        self.assertTrue(all(len(arg)<128*1024 for args in state["forge"] for arg in args))
+
+    def test_link_static_only_source_still_checks_and_reports_loader(self):
+        result, state, _ = self.assert_passes("links_static", "L2")
+        self.assertIn("L2 system table load: " + h(21), result.stdout)
+        self.assertTrue(any(any(a.endswith(":VerifyL2Blocks") for a in args) for args in state["forge"]))
+
+    def test_link_multicall_preserves_two_distinct_deliveries(self):
+        result, _, _ = self.assert_passes("links_multi", "L1")
+        self.assertEqual(result.stdout.count("L2 delivery (load+execute):"), 2)
+        self.assertIn(h(22), result.stdout)
+
+    def test_source_only_links_do_not_invent_deliveries(self):
+        result, _, _ = self.assert_passes("links_source_only", "L1")
+        self.assertIn("No L2 delivery: expected and verified", result.stdout)
+
+    def test_supported_incomplete_links_never_fall_back(self):
+        for mode in ("links_null", "links_incomplete"):
+            result, _, clock = self.run_verifier(mode)
+            self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+            self.assertEqual(clock, 1008)
+            self.assertNotIn("compatibility verification", result.stdout)
+
+    def test_pending_links_and_changed_attempt_refresh_within_deadline(self):
+        for mode in ("links_pending", "links_attempt"):
+            result, state, clock = self.assert_passes(mode)
+            self.assertEqual(clock, 1002)
+            self.assertGreaterEqual(len([p for p in state["artifacts"] if "/status-" in p]), 3)
+
+    def test_bad_complete_links_fail_without_content_scan_fallback(self):
+        for mode in ("links_wrong_hash", "links_wrong_chain", "links_duplicate", "links_missing_loader", "links_wrong_function", "links_extra", "links_rejected", "links_front_chain", "links_reverted"):
+            result, state, clock = self.run_verifier(mode)
+            self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+            self.assertEqual(clock, 1000)
+            self.assertNotIn("====== Done ======", result.stdout)
+
+    def test_required_links_reject_legacy_and_unsupported_servers(self):
+        for mode in ("links_legacy", "links_unsupported"):
+            result, _, _ = self.run_verifier(mode, links="required")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Required transaction links unsupported", result.stderr)
+
+    def test_linked_reorg_discards_pass_and_refreshes_receipts(self):
+        result, state, _ = self.assert_passes("links_reorg")
+        self.assertEqual(state["decodes"], 2)
+        self.assertIn("discarding this pass", result.stderr)
+        self.assertIn("L1 postBatch:   " + h(12), result.stdout)
+
+    def test_unsupported_and_legacy_links_use_explicit_compatibility(self):
+        for mode in ("links_unsupported", "links_legacy"):
+            result, _, _ = self.assert_passes(mode)
+            self.assertIn("compatibility verification", result.stdout)
 
     def test_hash_correlation_in_both_directions_ignores_stale_metadata(self):
         for direction in ("L1", "L2"):
