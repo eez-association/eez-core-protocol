@@ -6,8 +6,9 @@ Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`
 
 The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
 `topLevelStaticReentrantCounterL2` are included in automatic `all` / default runs.
-The staged runner reports disappeared transactions in its final summary; inclusion
-in `all` does not guarantee that a particular live deployment supports these scenarios.
+The staged runner checks composer status before classifying absent cross-chain
+triggers and reports unresolved triggers at its monitor deadline. Inclusion in
+`all` does not guarantee that a live deployment supports these scenarios.
 The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
 `topLevelStaticReentrantMissingProxyL2` are expected-rejection tests in the
 **staged network runner**. They pass only when `eez_getCrossChainTransaction`

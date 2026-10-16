@@ -187,6 +187,51 @@ _recovery_nonce_owner() {  # Find the mined transaction consuming sender+nonce.
     jq -er --arg s "${sender,,}" --arg n "$(printf '0x%x' "$nonce")" \
         '.transactions[] | select((.from|ascii_downcase)==$s and .nonce==$n) | .hash' <<< "$block"
 }
+# Standard Ethereum lookups can hide composer-held triggers. Status observations
+# inform waiting/rejection only; receipts and the verifier still establish inclusion.
+_recovery_composer_wait() {
+    local hash status rc dir lifecycle direction detail='status unavailable' rejected=''
+    direction=inbound; [[ "$_rec_chain" != L2 ]] || direction=outbound
+    dir="$_rec_root/jobs/$_rec_job/composer-status"
+    mkdir -p "$dir" || return 1
+    _recovery_save || return 1
+    while read -r hash; do
+        rc=0
+        status=$(_recovery_rpc "$_rec_submit" eez_getCrossChainTransaction "[\"$hash\"]") || rc=$?
+        if (( rc != 0 )) || ! jq -e --arg hash "$hash" --arg direction "$direction" \
+            'type=="object" and .hash==$hash and .direction==$direction and
+             (.lifecycle=="queued" or .lifecycle=="in_flight" or .lifecycle=="terminal")' \
+            <<< "$status" >/dev/null 2>&1; then
+            continue
+        fi
+        # Keep the latest valid observation; failed reads must not erase evidence.
+        # Replace atomically so a failed write also leaves the previous response intact.
+        jq -nc --arg hash "$hash" --argjson response "$status" \
+            '{hash:$hash,response:$response}' > "$dir/$hash.json.tmp" &&
+            mv "$dir/$hash.json.tmp" "$dir/$hash.json" || return 1
+        lifecycle=$(jq -r .lifecycle <<< "$status")
+        if [[ "$lifecycle" == terminal ]] && jq -e \
+            '.ownership.rejection!=null or .ownership.reason=="SimulationFailed"' <<< "$status" >/dev/null; then
+            # An older refused replacement must not override a live current attempt.
+            if [[ "$hash" == "$(jq -r .current <<< "$_rec_entry")" ]]; then
+                rejected=$(jq -c '.ownership' <<< "$status")
+            fi
+            continue
+        fi
+        detail="hash=$hash lifecycle=$lifecycle blocking=$(jq -c '.blocking.condition // null' <<< "$status")"
+        # A terminal committed record also needs a real receipt; never mark mined here.
+        rejected=''
+        break
+    done < <(jq -r '.variants|keys[]' <<< "$_rec_entry")
+    if [[ -n "$rejected" ]]; then
+        _recovery_stop "composer rejection: $rejected"
+    elif $_rec_expired; then
+        _recovery_stop "monitor timeout: no receipt; composer $detail; no resend"
+    else
+        _recovery_log "job=$_rec_job awaiting receipt; composer $detail; no resend"
+    fi
+}
+
 _recovery_one() {
     local hash="$1" _rec_entry h reason held=false receipt
     _rec_entry=$(jq -c --arg j "$_rec_job" --arg c "$_rec_chain" --arg h "$hash" \
@@ -222,6 +267,7 @@ _recovery_one() {
         fi
     done
     if ! $held; then
+        if [[ "$_rec_mode" == front ]]; then _recovery_composer_wait; return $?; fi
         _recovery_stop 'disappeared tx: no receipt and not visible in front/source RPC; no resend'
         return $?
     fi

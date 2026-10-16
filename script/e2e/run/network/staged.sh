@@ -60,7 +60,7 @@
 #   DEPLOY_MINE_TIMEOUT  seconds between deploy recovery checks (default 60)
 #   PREPARE_PARALLEL  concurrent prepare jobs (default 40)
 #   PREPARE_JOB_TIMEOUT  seconds one prepare launch (plan / classic) may run before its job is dropped (default 300)
-#   SEND_WORKERS      send workers (default 80; --workers overrides)
+#   SEND_WORKERS      L1/deploy send workers (default 80; --workers overrides); one L2 sender
 #   SEND_RETRIES      attempts per raw-tx send when the RPC gives no answer at
 #                     all (default 3). Explicit reconciliation refusals instead
 #                     get a fresh quote under EEZ_QUOTE_TIMEOUT.
@@ -224,6 +224,7 @@ _on_exit() {
     fi
     if [[ -n "${RUN_DIR:-}" ]] && declare -F _recovery_report >/dev/null; then
         _recovery_report "$RUN_DIR"
+        network_fee_rejection_report "$RUN_DIR"
     fi
 }
 trap _on_exit EXIT
@@ -485,7 +486,7 @@ _monitor_files() {
             return 1
         fi
         if (( now >= checkpoint )); then
-            echo "[$phase] status check: marking disappeared transactions; checking visible transactions"
+            echo "[$phase] status check: checking composer-held and visible transactions"
             _recover_pending "$3" "$5" || return 1
             now=$(date +%s); checkpoint=$((now + $4))
             continue  # Poll any recovered hash immediately, then resume normal timing.
@@ -1042,8 +1043,13 @@ fi
 echo ""
 echo "== Snapshot: $(tr '\n' ' ' < "$RUN_DIR/snapshot.env")"
 
+# Validate both endpoint pairs in the parent before workers inherit the context.
+# Resume reaches this point after loading its saved endpoint configuration.
+network_fee_cache_pair "$L1_FRONT" "$L1_RPC" "${EXPECTED_L1_CHAIN_ID:-}" || exit 1
+network_fee_cache_pair "$L2_FRONT" "$L2_RPC" "${EXPECTED_L2_CHAIN_ID:-}" || exit 1
+
 # ══ Phase 4: send (fresh composer quotes, then raw-tx submission) ══
-echo "== Send phase ($SEND_WORKERS workers)"
+echo "== Send phase ($SEND_WORKERS L1 workers + one L2 sender; concurrent)"
 _phase_begin send
 # touch, not truncate — a resumed run appends to the earlier records
 touch "$RUN_DIR/sent.csv" "$RUN_DIR/send-failed.log"
@@ -1079,12 +1085,12 @@ send_worker() {  # worker index, chain, worker count
             [[ "$chain" != L2 ]] || read_rpc="$L2_RPC"
             signing_key=$(awk -F, -v j="$name" 'NR>1 && $1==j {print $3; exit}' "$RUN_DIR/wallets.csv")
             hash=$(EEZ_FRESH_SEND="$([[ -z "$RESUME" ]] && echo 1 || echo 0)" \
-                network_send_quoted_trigger "$raw" "$signing_key" "$rpc" "$read_rpc" \
+                _timed_job "$name" "send-$raw_line" network_send_quoted_trigger "$raw" "$signing_key" "$rpc" "$read_rpc" \
                 "$dir/fee-quote-$raw_line.json" _rpc_send_raw _staged_save_quoted_trigger "$dir/rawtxs.txt" "$raw_line" \
-                2>>"$RUN_DIR/send-failed.log") || send_rc=$?
+                2> >(tee -a "$RUN_DIR/send-failed.log" >&2)) || send_rc=$?
             unset signing_key
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-                echo "SEND FAILED: $name ($chain)" >> "$RUN_DIR/send-failed.log"
+                echo "SEND FAILED: $name ($chain)" | tee -a "$RUN_DIR/send-failed.log" >&2
                 break
             fi
             echo "$hash" >> "$dir/txs.txt"
@@ -1094,14 +1100,15 @@ send_worker() {  # worker index, chain, worker count
     done
 }
 S_PIDS=()
-for ((w = 0; w < SEND_WORKERS; w++)); do
+# Start the existing L2 sender alongside the L1 workers, without another worker pool.
+# Quote/sign/send remains locked per chain, including across independent runs.
+send_worker 0 L2 1 &
+S_PIDS+=($!)
+for ((w = 0; w < SEND_WORKERS && w < NJOBS; w++)); do
     send_worker "$w" L1 "$SEND_WORKERS" &
     S_PIDS+=($!)
 done
 for pid in "${S_PIDS[@]}"; do wait "$pid"; done
-# A quoted L2 sender must not occupy a worker ahead of an unrelated L1 trigger.
-# The shared lock still coordinates this sender with other runs on this machine.
-send_worker 0 L2 1
 N_SENT=$(wc -l < "$RUN_DIR/sent.csv")
 _chain_counts trigger "$RUN_DIR/sent.csv"
 _SEND_FAILURES_AFTER=$(grep -c '^SEND FAILED:' "$RUN_DIR/send-failed.log" || true)

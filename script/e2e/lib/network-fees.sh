@@ -4,6 +4,24 @@
 # Deployments and funding transfers do not enter this trigger-only path.
 # Return 75 only for unsupported quote RPCs or transport failures.
 
+# Endpoint pair -> checked chain ID. In memory only; workers inherit it, each run rechecks.
+declare -gA _NETWORK_FEE_IDENTITIES=()
+
+network_fee_cache_pair() { # front, read RPC, optional expected ID and output variable; call in parent
+    local front="$1" read_rpc="$2" expected="${3:-}" chain read_chain pair
+    [[ -n "$front" && -n "$read_rpc" ]] || return 1
+    pair="${#front}:$front$read_rpc"
+    unset '_NETWORK_FEE_IDENTITIES[$pair]'
+    chain=$(cast chain-id --rpc-url "$front") || return 1
+    read_chain=$(cast chain-id --rpc-url "$read_rpc") || return 1
+    [[ "$chain" =~ ^[1-9][0-9]*$ && "$chain" == "$read_chain" &&
+       ( -z "$expected" || "$chain" == "$expected" ) ]] || {
+        echo 'Quote front/read chain ID mismatch' >&2; return 1;
+    }
+    _NETWORK_FEE_IDENTITIES[$pair]="$chain"
+    [[ -z "${4:-}" ]] || printf -v "$4" '%s' "$chain"
+}
+
 network_with_fee_lock() ( # chain ID, command, args...; release on every exit
     local chain="$1" fee_lock
     shift
@@ -16,13 +34,19 @@ network_with_fee_lock() ( # chain ID, command, args...; release on every exit
 
 network_fee_chain() { # validate the candidate and endpoint identities before queueing
     local tx="$1" front="$2" read_rpc="$3"
-    local chain read_chain
+    local chain read_chain pair
     [[ -n "$front" && -n "$read_rpc" ]] || { echo 'Fee quoting requires a source front and read RPC' >&2; return 1; }
     jq -e '.type=="0x0" or .type=="0x2"' <<< "$tx" >/dev/null || { echo 'Unsupported trigger transaction type for fee quote' >&2; return 1; }
     jq -e '(.to|type)=="string" and ((.accessList // [])|length)==0' <<< "$tx" >/dev/null || {
         echo 'Trigger quotes require a target and an empty access list' >&2; return 1; }
-    chain=$(cast chain-id --rpc-url "$front") || return 1
-    read_chain=$(cast chain-id --rpc-url "$read_rpc") || return 1
+    pair="${#front}:$front$read_rpc"
+    chain="${_NETWORK_FEE_IDENTITIES[$pair]:-}"
+    if [[ -n "$chain" ]]; then
+        read_chain="$chain"
+    else
+        chain=$(cast chain-id --rpc-url "$front") || return 1
+        read_chain=$(cast chain-id --rpc-url "$read_rpc") || return 1
+    fi
     [[ "$chain" == "$read_chain" && "$chain" == "$(cast to-dec "$(jq -r .chainId <<< "$tx")")" ]] || {
         echo 'Quote front, read RPC and signed candidate disagree on chain ID' >&2; return 1; }
     echo "$chain"
@@ -213,29 +237,35 @@ network_send_quoted_trigger() { # raw, key, front, read RPC, evidence, submit, o
 
 # Recognize only a definite tariff admission refusal, in raw JSON-RPC or Cast's
 # server-error format. Timeouts, arbitrary text and other error codes never retry.
-_network_reconciliation_rejection() {
+_network_submission_rejection_kind() {
     local response="$1"
     if [[ "$response" != \{* ]]; then
         response=$(sed -n 's/^Error: server returned an error response: error code -32003:.*, data: \(.*\)$/\1/p' <<< "$response")
         [[ -n "$response" ]] || return 1
         response="{\"code\":-32003,\"data\":$response}"
     fi
-    jq -e '(.error // .) | .code == -32003 and .data.code == "quote_unavailable" and
-        (.data.message == "quote unavailable: unsettled native history requires reconciliation" or
-         .data.message == "quote unavailable: settlement reconciliation pending")' \
-        <<< "$response" >/dev/null 2>&1
+    jq -er '(.error // .) | select(.code == -32003) |
+        if .data.code == "l1_tip_underfunded" or .data.code == "l2_tip_underfunded" then .data.code
+        elif .data.code == "quote_unavailable" and
+            (.data.message == "quote unavailable: unsettled native history requires reconciliation" or
+             .data.message == "quote unavailable: settlement reconciliation pending") then "reconciliation"
+        else empty end' <<< "$response" 2>/dev/null
 }
 
 _network_quote_and_send() {
     local tx="$1" chain="$2" key="$3" front="$4" read_rpc="$5" evidence="$6" submit="$7" persist="$8"
     shift 8
-    local plan balance result rc deadline left
+    local plan balance result rc deadline left rejection_kind retry_reason=reconciliation tariff_rejected=false
     [[ "${EEZ_QUOTE_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] || { echo 'EEZ_QUOTE_TIMEOUT must be positive seconds' >&2; return 1; }
     deadline=$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))
     while (( SECONDS < deadline )); do
         rc=0
         plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline") || rc=$?
         if (( rc == 75 )); then
+            if $tariff_rejected; then
+                echo 'Fresh composer quote unavailable after tariff refusal; stopping without node-fee fallback' >&2
+                return 1
+            fi
             echo 'eez_quoteFee unavailable; falling back to node fees' >&2
             plan=$(network_node_fee_plan "$tx" "$read_rpc" "$chain") || return 1
         elif (( rc != 0 )); then
@@ -248,19 +278,46 @@ _network_quote_and_send() {
         rc=0
         result=$(network_submit_quote "$plan" "$front" "$evidence" "$submit" "$persist" "$@" 2>&1) || rc=$?
         if (( rc == 0 )); then printf '%s\n' "$result"; return 0; fi
-        if [[ $(jq -r .feeSource <<< "$plan") == node ]] || (( rc != 1 && rc != 2 )) || ! _network_reconciliation_rejection "$result"; then
+        rejection_kind=''
+        if (( rc == 1 || rc == 2 )); then
+            rejection_kind=$(_network_submission_rejection_kind "$result") || rejection_kind=''
+        fi
+        if [[ -z "$rejection_kind" ]]; then
             printf '%s\n' "$result" >&2; return "$rc"
         fi
+        printf 'ERROR: submission refused (%s) chain=%s nonce=%s hash=%s: %s\n' \
+            "$rejection_kind" "$chain" "$(jq -r .nonce <<< "$plan")" "$(jq -r .signedHash <<< "$plan")" "$result" >&2
         # Retain the rejected quote before the next attempt replaces the current
         # evidence and signed candidate. The refused nonce/intent remain unchanged.
         if [[ -n "$evidence" ]]; then
-            jq --arg error "$result" '{intent,quote,selectedOption,signedHash,submissionError:$error}' \
+            jq -c --arg error "$result" --arg kind "$rejection_kind" \
+                '{intent,quote,selectedOption,signedHash,rejectionKind:$kind,submissionError:$error}' \
                 <<< "$plan" >> "${evidence%.json}.rejections.jsonl" || return 70
         fi
-        echo 'Submission refused pending reconciliation; waiting for a fresh quote' >&2
+        # Node estimates cannot resolve a reachable composer's tariff refusal.
+        if [[ $(jq -r .feeSource <<< "$plan") == node ]]; then return "$rc"; fi
+        retry_reason="$rejection_kind"
+        if [[ "$rejection_kind" == l1_tip_underfunded || "$rejection_kind" == l2_tip_underfunded ]]; then tariff_rejected=true; fi
+        echo 'Retrying with a fresh composer quote in 2s (same intent and nonce; original deadline)' >&2
         left=$((deadline - SECONDS)); (( left > 0 )) || break
         sleep "$((left < 2 ? left : 2))"
     done
-    echo 'Quote/sign/send reconciliation timeout' >&2
+    echo "Quote/sign/send $retry_reason timeout" >&2
     return 1
 }
+
+network_fee_rejection_report() ( # staged run directory, including earlier resume attempts
+    shopt -s nullglob
+    local root="$1" count=0 l1=0 l2=0 totals
+    local files=("$root"/jobs/*/fee-quote-*.rejections.jsonl)
+    if (( ${#files[@]} )); then
+        totals=$(jq -sr '
+            [.[] | select(.rejectionKind=="l1_tip_underfunded" or .rejectionKind=="l2_tip_underfunded")] |
+            [length, (map(select(.rejectionKind=="l1_tip_underfunded"))|length),
+             (map(select(.rejectionKind=="l2_tip_underfunded"))|length)] | @tsv' "${files[@]}") || {
+            echo 'Tariff rejection count unavailable: could not read saved evidence'; return 1;
+        }
+        read -r count l1 l2 <<< "$totals"
+    fi
+    printf '\nTARIFF REJECTIONS: %s (L1: %s, L2: %s; includes successful retries and prior attempts in this run)\n' "$count" "$l1" "$l2"
+)

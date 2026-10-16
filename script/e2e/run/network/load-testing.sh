@@ -239,7 +239,7 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
 }
 # Ordinary fees build offline candidates; each cross-chain trigger tries
 # eez_quoteFee on its source front, with fresh node fees as fallback.
-CHAIN_ID=$(cast chain-id --rpc-url "$READ_RPC")
+network_fee_cache_pair "$SEND_RPC" "$READ_RPC" "" CHAIN_ID || exit 1
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
 declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"
 echo "Sending $TXS transactions to $TARGET ($TRIGGER_CONTRACT), $WORKERS wallets, window $WINDOW"

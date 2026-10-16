@@ -39,6 +39,9 @@ cast() {
             fi
             if [[ "${PERSISTENT_TRANSIENT:-0}" == 1 ]]; then echo "${TRANSIENT_ERROR:-quote_unavailable: settlement reconciliation pending}" >&2; return 1; fi
             if [[ "${RPC_ERROR:-0}" == 1 ]]; then echo "${RPC_ERROR_TEXT:-error sending request: connection refused}" >&2; return 1; fi
+            if [[ "${QUOTE_FAIL_AFTER_REFUSAL:-0}" == 1 && -f "$TEST_ROOT/send-refused" ]]; then
+                echo 'error sending request: connection refused' >&2; return 1
+            fi
             cat "$TEST_ROOT/quote.json" ;;
         mktx) echo sign >> "$TEST_ROOT/signs"; command cast "$@" ;;
         *) command cast "$@" ;;
@@ -69,7 +72,13 @@ submit() {
     if [[ -n "${SUBMIT_ERROR_TEXT:-}" ]]; then printf '%s\n' "$SUBMIT_ERROR_TEXT" >&2; return "${SUBMIT_ERROR_RC:-1}"; fi
     if [[ "${SEND_RECONCILE:-0}" == always || ( "${SEND_RECONCILE:-0}" == once && ! -f "$TEST_ROOT/send-refused" ) ]]; then
         touch "$TEST_ROOT/send-refused"
-        if [[ "${SEND_RECONCILE_CAST:-0}" == 1 ]]; then
+        if [[ -n "${TARIFF_CODE:-}" ]]; then
+            if [[ "${SEND_RECONCILE_CAST:-0}" == 1 ]]; then
+                printf 'Error: server returned an error response: error code -32003: settlement tariff admission failed, data: {"code":"%s","message":"underfunded"}\n' "$TARIFF_CODE" >&2
+            else
+                jq -nc --arg code "$TARIFF_CODE" '{error:{code:-32003,data:{code:$code,message:"underfunded"}}}' >&2
+            fi
+        elif [[ "${SEND_RECONCILE_CAST:-0}" == 1 ]]; then
             echo 'Error: server returned an error response: error code -32003: L2 settlement tariff admission failed, data: {"code": "quote_unavailable", "message": "quote unavailable: unsettled native history requires reconciliation"}' >&2
         else
             echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"L2 settlement tariff admission failed","data":{"code":"quote_unavailable","message":"quote unavailable: unsettled native history requires reconciliation"}}}' >&2
@@ -112,6 +121,12 @@ class NetworkFeeTests(unittest.TestCase):
         (self.root / 'quote.json').write_text(json.dumps(self.quote))
         (self.root / 'rawtxs.txt').write_text(self.candidates[kind] + '\n')
         action = 'network_send_quoted_trigger "$RAW" "$KEY" front direct "$TEST_ROOT/evidence.json" submit persist "$TEST_ROOT/rawtxs.txt" 1'
+        if env.get('REPEAT_SENDS'):
+            action = 'for ((i=0; i<REPEAT_SENDS; i++)); do\n' + action + '\ndone'
+        if env.get('PRECHECK'):
+            action = 'network_fee_cache_pair "${PRECHECK_FRONT:-front}" direct "${EXPECTED_CHAIN:-}" CHECKED_CHAIN\n[[ "$CHECKED_CHAIN" == "${READ_CHAIN:-906969}" ]]\n' + action
+        if env.get('RESET_CONTEXT'):
+            action = 'network_fee_cache_pair front direct\nsource "$HELPER"\n' + action
         if not send:
             action += ' >/dev/null\ncat "$TEST_ROOT/rawtxs.txt"'
         args = ['bash', '-c', 'set -euo pipefail\nsource "$HELPER"\n' + function("_staged_save_quoted_trigger") + "\n" + MOCK + action]
@@ -126,6 +141,41 @@ class NetworkFeeTests(unittest.TestCase):
     def decode(self, raw):
         value = json.loads(subprocess.check_output(['cast', 'decode-transaction', raw], text=True))
         return json.loads(value) if isinstance(value, str) else value
+
+    def test_prechecked_endpoints_are_read_once_for_multiple_triggers(self):
+        result = self.run_quote(send=True, PRECHECK="1", REPEAT_SENDS="3", EEZ_FRESH_SEND="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / "cast-calls").read_text().splitlines()
+        self.assertEqual(calls.count("chain-id"), 2)
+        self.assertEqual(calls.count("balance"), 3)
+        self.assertEqual(len((self.root / "intents").read_text().splitlines()), 3)
+
+    def test_changed_endpoint_pair_cannot_use_cached_identity(self):
+        result = self.run_quote(send=True, PRECHECK="1", PRECHECK_FRONT="different-front")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "cast-calls").read_text().splitlines().count("chain-id"), 4)
+
+    def test_new_run_context_rechecks_endpoints(self):
+        result = self.run_quote(send=True, RESET_CONTEXT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "cast-calls").read_text().splitlines().count("chain-id"), 4)
+
+    def test_cached_identity_still_checks_candidate_and_quote(self):
+        self.quote["chainId"] = "0x1"
+        result = self.run_quote(send=True, PRECHECK="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Fee quote chain ID mismatch", result.stderr)
+        self.assertFalse((self.root / "sends").exists())
+        result = self.run_quote(send=True, PRECHECK="1", FRONT_CHAIN="1", READ_CHAIN="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("signed candidate disagree", result.stderr)
+        self.assertFalse((self.root / "sends").exists())
+
+    def test_preflight_checks_expected_chain_before_send(self):
+        result = self.run_quote(send=True, PRECHECK="1", EXPECTED_CHAIN="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "intents").exists())
+        self.assertFalse((self.root / "sends").exists())
 
     def test_l1_quote_preserves_intent_and_uses_quoted_fees(self):
         self.candidates = dict(self.candidates)
@@ -439,9 +489,74 @@ class NetworkFeeTests(unittest.TestCase):
         self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 1)
         self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 2)
 
+    def test_tariff_refusals_requote_and_log_every_occurrence(self):
+        for code in ("l1_tip_underfunded", "l2_tip_underfunded"):
+            for cast_format in ("0", "1"):
+                with self.subTest(code=code, cast=cast_format):
+                    for name in ("send-refused", "sends", "intents", "evidence.rejections.jsonl"):
+                        (self.root / name).unlink(missing_ok=True)
+                    result = self.run_quote(send=True, SEND_RECONCILE="once", TARIFF_CODE=code,
+                                            SEND_RECONCILE_CAST=cast_format)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr.count("ERROR: submission refused (" + code + ")"), 1)
+                    self.assertEqual(len((self.root / "sends").read_text().splitlines()), 2)
+                    intents = (self.root / "intents").read_text().splitlines()
+                    self.assertEqual(intents[0], intents[1])
+                    self.assertEqual(self.decode((self.root / "rawtxs.txt").read_text().strip())["nonce"], "0x7")
+                    evidence = json.loads((self.root / "evidence.rejections.jsonl").read_text())
+                    self.assertEqual(evidence["rejectionKind"], code)
+
+    def test_persistent_tariff_refusals_stop_and_log_each_attempt(self):
+        result = self.run_quote(send=True, SEND_RECONCILE="always", TARIFF_CODE="l2_tip_underfunded",
+                                EEZ_QUOTE_TIMEOUT="3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("l2_tip_underfunded timeout", result.stderr)
+        count = len((self.root / "sends").read_text().splitlines())
+        self.assertLessEqual(count, 2)
+        self.assertEqual(result.stderr.count("ERROR: submission refused (l2_tip_underfunded)"), count)
+        self.assertEqual(len((self.root / "evidence.rejections.jsonl").read_text().splitlines()), count)
+
+    def test_tariff_retry_does_not_fall_back_to_node_fees_when_quote_fails(self):
+        result = self.run_quote(send=True, SEND_RECONCILE="once", TARIFF_CODE="l2_tip_underfunded",
+                                QUOTE_FAIL_AFTER_REFUSAL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stopping without node-fee fallback", result.stderr)
+        self.assertEqual(len((self.root / "sends").read_text().splitlines()), 1)
+        self.assertNotIn("gas-price", (self.root / "cast-calls").read_text().splitlines())
+
+    def test_node_fallback_tariff_refusal_is_logged_once_without_retry(self):
+        result = self.run_quote(send=True, RPC_ERROR="1", SEND_RECONCILE="once",
+                                TARIFF_CODE="l2_tip_underfunded")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len((self.root / "sends").read_text().splitlines()), 1)
+        self.assertEqual(result.stderr.count("ERROR: submission refused (l2_tip_underfunded)"), 1)
+        self.assertEqual(json.loads((self.root / "evidence.rejections.jsonl").read_text())["rejectionKind"], "l2_tip_underfunded")
+
+    def test_pending_nonce_quote_failure_does_not_wait_for_mining_or_send(self):
+        error = 'Error: server returned an error response: error code -32602: invalid transaction: source nonce is already pending; queued predecessors are not simulated'
+        result = self.run_quote(send=True, RPC_ERROR="1", RPC_ERROR_TEXT=error)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source nonce is already pending", result.stderr)
+        self.assertEqual(len((self.root / "intents").read_text().splitlines()), 1)
+        self.assertFalse((self.root / "sends").exists())
+
+    def test_tariff_count_includes_recovered_and_prior_attempts_but_not_other_rejections(self):
+        for job in ("a", "b"):
+            directory = self.root / "jobs" / job
+            directory.mkdir(parents=True)
+            rows = [{"rejectionKind": "l1_tip_underfunded"}, {"rejectionKind": "l2_tip_underfunded"},
+                    {"rejectionKind": "reconciliation"}]
+            (directory / "fee-quote-1.rejections.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+        result = subprocess.run(["bash", "-c", 'source "$1"; network_fee_rejection_report "$2"', "test",
+                                 str(E2E / "lib/network-fees.sh"), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TARIFF REJECTIONS: 4 (L1: 2, L2: 2", result.stdout)
+
     def test_other_send_errors_and_uncertainty_are_not_requoted(self):
         errors = [
             'timeout: no response',
+            '{"error":{"code":-32603,"data":{"code":"l2_tip_underfunded"}}}',
+            'l2_tip_underfunded',
             '{"error":{"code":-32603,"data":{"code":"quote_unavailable","message":"quote unavailable: unsettled native history requires reconciliation"}}}',
             '{"error":{"code":-32003,"data":{"code":"quote_unavailable","message":"another failure"}}}',
             'quote_unavailable: unsettled native history requires reconciliation',
@@ -511,39 +626,59 @@ publish_user_txs_nowait front-L1
 
 
 class StagedSendOrderTests(unittest.TestCase):
-    def test_l1_burst_finishes_before_quoted_l2_jobs_without_losing_resume_mode(self):
+    def test_both_chains_progress_without_a_barrier_and_keep_job_nonce_order(self):
         dispatch = "S_PIDS=()" + RUNNER.split("\nS_PIDS=()", 1)[1].split("\nN_SENT=", 1)[0]
         for resume in ("", "saved-run"):
-            with self.subTest(resume=resume), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                for name, chain in (("first", "L2"), ("second", "L1"), ("third", "L1"), ("last", "L2")):
-                    job = root / "jobs" / name
-                    job.mkdir(parents=True)
-                    (job / "manifest.env").write_text(f'declare -- _TRIGGER_CHAIN="{chain}"\n')
-                    (job / "rawtxs.txt").write_text(name + "\n")
-                (root / "wallets.csv").write_text("job,address,key\nfirst,unused,test-key\nsecond,unused,test-key\nthird,unused,test-key\nlast,unused,test-key\n")
-                script = r'''set -euo pipefail
+            for workers in (1, 2):
+                with self.subTest(resume=resume, workers=workers), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    names = (("first", "L2"), ("second", "L1"), ("third", "L1"), ("last", "L2"))
+                    for name, chain in names:
+                        job = root / "jobs" / name
+                        job.mkdir(parents=True)
+                        (job / "manifest.env").write_text(f'declare -- _TRIGGER_CHAIN="{chain}"\n')
+                        (job / "rawtxs.txt").write_text(name + "_1\n" + name + "_2\n")
+                        if resume:
+                            (job / "txs.txt").write_text("0x" + "a" * 64 + "\n")
+                    (root / "wallets.csv").write_text("job,address,key\n" + "".join(f"{n},unused,test-key\n" for n, _ in names))
+                    script = r'''set -euo pipefail
+source "$ORCHESTRATOR"
+ATTEMPT=1
 RUN_DIR="$TEST_ROOT"; JOB_NAMES=(first second third last); NJOBS=4
-SEND_WORKERS=1 SEND_PAUSE=0 L1_RPC=read-L1 L2_RPC=read-L2
+SEND_PAUSE=0 L1_RPC=read-L1 L2_RPC=read-L2
 _job_prepared() { return 0; }
 _front_rpc() { echo "$1"; }
-_rpc_send_raw() { echo "$2" >> "$RUN_DIR/order"; printf '0x%064x\n' 1; }
 network_send_quoted_trigger() {
     [[ "$4" == "read-$3" && "$2" == test-key ]] || return 97
-    if [[ "$3" == L2 ]]; then
-    [[ $(head -2 "$RUN_DIR/order" | paste -sd,) == second,third ]] || return 99
-    fi
     [[ "$EEZ_FRESH_SEND" == "$EXPECTED_FRESH" ]] || return 98
+    touch "$RUN_DIR/entered-$3"
+    local other=L1 tries=0
+    [[ "$3" != L1 ]] || other=L2
+    while [[ ! -f "$RUN_DIR/entered-$other" ]]; do
+        (( tries++ < 200 )) || return 99
+        sleep 0.01
+    done
+    echo "ERROR: example retry for $1" >&2
     echo "$1" >> "$RUN_DIR/order"
     printf '0x%064x\n' 2
 }
 ''' + function("send_worker") + "\n" + dispatch
-                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
-                    env={"PATH": os.environ["PATH"], "TEST_ROOT": directory, "RESUME": resume,
-                         "EXPECTED_FRESH": "0" if resume else "1"})
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual((root / "order").read_text().splitlines(), ["second", "third", "first", "last"])
-                self.assertEqual(len((root / "sent.csv").read_text().splitlines()), 4)
+                    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                        env={"PATH": os.environ["PATH"], "TEST_ROOT": directory, "RESUME": resume,
+                             "SEND_WORKERS": str(workers), "EXPECTED_FRESH": "0" if resume else "1",
+                             "ORCHESTRATOR": str(E2E / "lib/orchestrator.sh")})
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    order = (root / "order").read_text().splitlines()
+                    for name, _ in names:
+                        expected = [name + "_2"] if resume else [name + "_1", name + "_2"]
+                        self.assertEqual([x for x in order if x.startswith(name + "_")], expected)
+                        timings = (root / "jobs" / name / "timings.csv").read_text().splitlines()
+                        self.assertEqual(len(timings), len(expected))
+                        self.assertTrue(all(row.endswith(",pass") for row in timings))
+                        for value in expected:
+                            self.assertIn("ERROR: example retry for " + value, result.stderr)
+                            self.assertIn("ERROR: example retry for " + value, (root / "send-failed.log").read_text())
+                    self.assertEqual(len((root / "sent.csv").read_text().splitlines()), 4 if resume else 8)
 
 
 if __name__ == '__main__':

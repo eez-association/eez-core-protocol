@@ -33,6 +33,17 @@ _recovery_lookup_once() {
 _recovery_rpc() {
     echo "rpc $1 $2" >> calls
     case "$2" in
+        eez_getCrossChainTransaction)
+            case "${COMPOSER_STATE:-null}" in
+                error) return 1 ;;
+                unsupported) echo '{"code":-32601,"message":"unsupported"}'; return 2 ;;
+                null) echo null ;;
+                malformed) echo '{"hash":"wrong","lifecycle":"queued"}' ;;
+                rejected) jq -nc --arg h "$ORIGINAL" --arg d "$COMPOSER_DIRECTION" \
+                    '{hash:$h,direction:$d,lifecycle:"terminal",ownership:{reason:"SimulationFailed",rejection:{error:"simulation failed"}}}' ;;
+                *) jq -nc --arg h "$ORIGINAL" --arg d "$COMPOSER_DIRECTION" --arg state "$COMPOSER_STATE" \
+                    '{hash:$h,direction:$d,lifecycle:$state,blocking:{condition:{reason:"fee"}}}' ;;
+            esac ;;
         eth_getBlockByNumber)
             [[ "$SCENARIO" != original_wins_fee_failure ]] || return 1
             if [[ "$3" == *true* ]]; then
@@ -134,33 +145,90 @@ class RecoveryTests(unittest.TestCase):
                                     env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
                                          "RECOVERY": str(E2E / "lib/staged-recovery.sh"), "TMPDIR": directory,
                                          "QUOTE_EXPIRES": str(int(time.time()) + 3600),
-                                         "SCENARIO": scenario, "ORIGINAL": self.hash})
+                                         "SCENARIO": scenario, "ORIGINAL": self.hash,
+                                         "COMPOSER_DIRECTION": "inbound" if chain == "L1" else "outbound"})
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stderr, "", result.stdout + result.stderr)
             files = {str(p.relative_to(root)): p.read_text() for p in root.rglob("*") if p.is_file()}
             return result, files, json.loads(files.get("sent.replacements.json", "[]"))
 
-    def test_missing_is_marked_without_resending_including_resume(self):
+    def test_missing_waits_without_resending_including_resume(self):
         result, files, entries = self.run_recovery(actions='''
 _recover_pending pending.csv front
 _recover_pending pending.csv front --reconcile-only
 _recover_pending pending.csv front
-_recovery_all_stopped pending.csv || exit 9
+if _recovery_all_stopped pending.csv; then exit 9; fi
 ''')
         self.assertNotIn("sends", files)
-        self.assertTrue(entries[0]["disappeared"])
-        self.assertIn("disappeared tx", entries[0]["stop_retry"])
-        self.assertIn("DISAPPEARED TESTS (1 transaction(s))", result.stdout)
-        self.assertIn("DISAPPEARED", result.stdout)
-        self.assertIn("Tx: " + self.hash, result.stdout)
+        self.assertNotIn("stop_retry", entries[0])
+        self.assertFalse(entries[0].get("disappeared", False))
+        self.assertIn("composer status unavailable", result.stdout)
+        self.assertNotIn(f"jobs/job/composer-status/{self.hash}.json", files)
 
-    def test_missing_does_not_require_previous_resend_history(self):
-        _, files, entries = self.run_recovery(actions='''
-echo "[trigger][L1] job=job hash=$ORIGINAL not visible in pool/front; rebroadcasting same nonce=0" > recovery.log
+    def test_failed_or_invalid_status_preserves_last_valid_response(self):
+        for state in ("error", "null", "unsupported", "malformed"):
+            with self.subTest(state=state):
+                _, files, entries = self.run_recovery(actions=f'''
+COMPOSER_STATE=queued
+_recover_pending pending.csv front
+cp "jobs/job/composer-status/$ORIGINAL.json" previous-status.json
+COMPOSER_STATE={state}
 _recover_pending pending.csv front
 ''')
+                path = f"jobs/job/composer-status/{self.hash}.json"
+                self.assertEqual(files[path], files["previous-status.json"])
+                self.assertEqual(json.loads(files[path])["response"]["blocking"]["condition"]["reason"], "fee")
+                self.assertNotIn("stop_retry", entries[0])
+                self.assertNotIn("sends", files)
+                self.assertEqual([p for p in files if "/composer-status/" in p], [path])
+
+    def test_valid_status_replaces_previous_response_in_one_file(self):
+        _, files, _ = self.run_recovery(actions='''
+COMPOSER_STATE=queued
+_recover_pending pending.csv front
+COMPOSER_STATE=in_flight
+_recover_pending pending.csv front
+''')
+        path = f"jobs/job/composer-status/{self.hash}.json"
+        self.assertEqual(json.loads(files[path])["response"]["lifecycle"], "in_flight")
+        self.assertEqual([p for p in files if "/composer-status/" in p], [path])
+
+    def test_held_status_waits_on_both_chains_until_receipt(self):
+        for chain in ("L1", "L2"):
+            for state in ("queued", "in_flight", "terminal"):
+                with self.subTest(chain=chain, state=state):
+                    result, files, entries = self.run_recovery(chain=chain, actions=f'''
+COMPOSER_STATE={state}
+_recover_pending pending.csv front
+if _recovery_all_stopped pending.csv; then exit 9; fi
+SCENARIO=partial_receipt_failure
+_recover_pending pending.csv front --reconcile-only
+''')
+                    self.assertNotIn("sends", files)
+                    self.assertEqual(files["pending.csv"], "")
+                    self.assertIn(self.hash, files["mined.csv"])
+                    self.assertNotIn("stop_retry", entries[0])
+                    self.assertFalse(entries[0].get("disappeared", False))
+                    self.assertIn("lifecycle=" + state, result.stdout)
+
+    def test_missing_or_unavailable_status_times_out_without_claiming_disappearance(self):
+        for state in ("null", "error", "unsupported", "malformed", "queued"):
+            with self.subTest(state=state):
+                _, files, entries = self.run_recovery(actions=f'''
+COMPOSER_STATE={state}
+_recover_pending pending.csv front
+if _recovery_all_stopped pending.csv; then exit 9; fi
+_recover_pending pending.csv front --expire
+_recovery_all_stopped pending.csv || exit 9
+''')
+                self.assertNotIn("sends", files)
+                self.assertIn("monitor timeout", entries[0]["stop_retry"])
+                self.assertFalse(entries[0].get("disappeared", False))
+
+    def test_confirmed_composer_rejection_stops_without_resending(self):
+        _, files, entries = self.run_recovery(actions="COMPOSER_STATE=rejected\n_recover_pending pending.csv front\n")
         self.assertNotIn("sends", files)
-        self.assertIn("disappeared tx", entries[0]["stop_retry"])
+        self.assertIn("composer rejection", entries[0]["stop_retry"])
 
     def test_both_chains_fall_back_to_old_recovery_fees(self):
         for chain in ('L1', 'L2'):
@@ -394,14 +462,14 @@ _recover_pending deploy-pending.csv direct
         _, files, entries = self.run_recovery("missing_low")
         self.assertNotIn("sends", files)
         self.assertNotIn("eth_gasPrice", files["calls"])
-        self.assertTrue(entries[0]["disappeared"])
+        self.assertNotIn("stop_retry", entries[0])
 
-    def test_disappeared_summary_tracks_late_mining(self):
+    def test_pending_status_tracks_late_mining(self):
         result, files, entries = self.run_recovery(actions="_recover_pending pending.csv front\nSCENARIO=partial_receipt_failure\n_recover_pending pending.csv front --reconcile-only\n")
         self.assertNotIn("sends", files)
         self.assertEqual(files["pending.csv"], "")
-        self.assertTrue(entries[0]["disappeared"])
-        self.assertIn("MINED LATER", result.stdout)
+        self.assertFalse(entries[0].get("disappeared", False))
+        self.assertIn("DISAPPEARED TESTS (0 transaction(s))", result.stdout)
 
     def test_fees_round_up_ten_percent_and_cover_current_market(self):
         result = subprocess.run(["bash", "-c", 'source "$1"; _recovery_fees 2 100 10 0 0 0; _recovery_fees 0 101 101 200 250 0',

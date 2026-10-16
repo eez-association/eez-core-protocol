@@ -68,6 +68,9 @@ Each option also has `estimatedFee` and `requestHash` (`intentHash` on older
 deployments). This hash is quote metadata, **not a transaction hash**.
 
 Require matching chain IDs for the front, read node, candidate and quote.
+Staged and load runs check each front/read pair once per run (in memory only);
+other callers read both chain IDs per trigger.
+
 Preserve sender, target, calldata, value, nonce and transaction type. Check expiry
 and funds; maximum cost is native value plus quoted gas times the gas price
 (or maximum fee per gas). Use the quoted gas even if the prepared limit differs.
@@ -101,6 +104,12 @@ and nonce, and retries under the original deadline while retaining the lock. Loc
 failures, uncertain sends and other submission errors do not take this retry path.
 Rejected quote evidence is retained in `fee-quote-*.rejections.jsonl` before the
 current quote file and candidate are replaced.
+
+Definite `-32003` refusals with `l1_tip_underfunded` / `l2_tip_underfunded` also
+retry with a fresh composer quote under the same deadline, never with node fees.
+Each refusal is logged (chain, nonce, signed hash; staged: `send-failed.log`), and
+the staged exit summary counts them. A pending-nonce `-32602` quote refusal stays
+terminal: waiting for mining would break same-account bursts (`counter-multi-tx`).
 
 Resume obtains fresh quotes for unsent transactions; a known saved transaction
 is adopted without resending. Stuck cross-chain triggers on either chain try a
@@ -201,3 +210,9 @@ Implementation references: [discovery](lib/composer-info.sh),
 [fees](lib/network-fees.sh), [status](run/network/staged.sh),
 [settlement](lib/network-evidence.sh). For runner examples, see
 [COMMANDS.md](COMMANDS.md) and the [full runner guide](RUNNER_GUIDE.md).
+
+## Submission timing records
+
+Each staged trigger send adds a `<job>:send-<index>` row to `jobs/<job>/timings.csv`
+(collected into `job-timings.csv`). It covers lock wait, quote retries, signing and
+submission, and ends at the send acknowledgement, not mining or settlement.

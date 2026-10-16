@@ -179,11 +179,15 @@ unresolved hashes are also checked on the source-chain RPC. Deployments use dire
 Recovery runs every **60 seconds** (`MINE_TIMEOUT` / `DEPLOY_MINE_TIMEOUT`).
 It reconciles all saved mined attempts before querying the pool or fee oracles:
 
-- At the one-minute check, a transaction with no receipt and absent from both
-  front/source transaction lookups is marked **DISAPPEARED**, without resending it.
-  These tests appear together in a clean **DISAPPEARED TESTS** table at the end of
-  the log, with the chain and full transaction hash. A front may hide held transactions;
-  the label reports lookup absence. RPC failures are reported separately.
+- At the one-minute check, a cross-chain trigger absent from receipt and standard
+  transaction lookups is checked with `eez_getCrossChainTransaction`. Queued or
+  in-flight records log the blocking reason and keep waiting without resending.
+  Null, unsupported, unavailable, or malformed status also keeps waiting until
+  the monitor deadline, when it reports a timeout. Confirmed terminal rejections
+  stop recovery; completed composer records still require receipts. The latest
+  valid response is saved in `jobs/<job>/composer-status/<hash>.json`. Failed,
+  null, or invalid responses preserve that file; only a valid matching response
+  replaces it. Direct deployment absence still reports **DISAPPEARED**.
 - Visible transactions with low fees allow at most **two fee increases**, retaining
   the same nonce, payload, value, gas limit and access list. The fee cap and tip
   increase by at least **10%**, rounded up, and cover current estimates. Explicit
@@ -200,7 +204,9 @@ It reconciles all saved mined attempts before querying the pool or fee oracles:
 - An uncertain read gets one status recheck. Failure is terminal and reported as
   **RPC status error**. An uncertain resend gets one receipt/transaction status
   check; there is no blind resend. Outcomes can remain unknown and may mine later.
-- Reverted receipts and other definite rejections are never automatically resent.
+- Reverted receipts and unrelated definite rejections are never automatically resent.
+  Initial quoted trigger submission has bounded retries for explicit reconciliation
+  and tariff refusals; see [fee retry rules](RPC.md#eez_quotefee).
 
 Each deployment/trigger monitor waits at most **300 seconds**. `MAX_MONITOR_WAIT`
 can shorten that limit (1–300), but cannot disable or extend it. At expiry a visible,
@@ -224,14 +230,18 @@ transactions which eventually mined after recovery.
 
 `recovery.log` records decisions. `sent.replacements.json` and
 `deploy-sent*.replacements.json` persist retry budgets and every signed attempt
-before submission. Resume does not reset those budgets or terminal disappearance
-results. Saved older attempts can still win; their receipts repair CSVs and per-job signed bytes. Verification-only
+before submission. Resume does not reset those budgets or terminal failures. Saved older attempts can still win; their receipts repair CSVs and per-job signed bytes. Verification-only
 reconciles receipts without broadcasting. Recovery remains Bash using `curl`, `jq`,
 `cast` and `bc`; its offline regression tests use Python to drive mocked RPCs.
 
 A run is bound to the network it was prepared on: the resolved endpoints are
 saved in `<run-dir>/devnet.env` and `--resume` / `--verify-only` reload them, so
 `DEVNET_ENV` is only needed on the initial command.
+
+Sending runs `SEND_WORKERS` L1 workers (at most one per job) and one L2 sender
+concurrently; each job's transactions go out in nonce order, and same-chain
+quote/sign/send is serialized by the shared lock. Per-trigger send durations are in
+the job timings ([details](RPC.md#submission-timing-records)).
 
 Defaults: `PREPARE_PARALLEL=40`, `PREPARE_JOB_TIMEOUT=300` (a prepare launch past
 it is killed and its job dropped, the run continues), `SEND_WORKERS=80`

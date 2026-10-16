@@ -269,6 +269,8 @@ curl() { printf '%s\n' "$RESPONSE"; }
                     (root / "sent.csv").write_text(original)
                     (root / "wallets.csv").write_text("job,address,private_key\njob,unused,test-only-key\n")
                     script = r'''set -euo pipefail
+source "$ORCHESTRATOR"
+ATTEMPT=1
 RUN_DIR="$TEST_ROOT"; JOB_NAMES=(job); NJOBS=1
 SEND_PAUSE=0 RESUME=saved-run L1_RPC=mock-read L2_RPC=mock-read
 _job_prepared() { return 0; }
@@ -279,7 +281,8 @@ network_send_quoted_trigger() { _reply "$1"; }
 ''' + function("send_worker") + '\nsend_worker 0 "$CHAIN" 1\n'
                     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                         timeout=5, env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
-                                       "CHAIN": chain, "RETURNED_HASH": value})
+                                       "CHAIN": chain, "RETURNED_HASH": value,
+                                       "ORCHESTRATOR": str(E2E / "lib/orchestrator.sh")})
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual((root / "submissions").read_text().splitlines(),
                                      ["next", "later"] if valid else ["next"])
