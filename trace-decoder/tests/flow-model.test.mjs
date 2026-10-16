@@ -143,9 +143,12 @@ test('shared L1 posting does not connect a second trigger to the requested call 
   trace.logicalNodes.push(...trace.logicalNodes.filter(n => n.id.startsWith(oldPrefix)).map(replace).map(n => ({ ...n, children: n.children.filter(id => copiedIds.has(id)) })));
   trace.logicalRoots.push(`${prefix}:0`);
   const out = replace(trace.outgoing[0]); delete out.remoteFrameId; out.status = 'unresolved'; trace.outgoing.push(out);
+  trace.unresolved.push({ code: 'remote-execution-unavailable', message: 'Unrelated batch entry', frameId: out.frameId });
   const m = buildFlowModel(trace);
   assert.equal(m.transactions.find(t => t.hash === second).inFlow, false);
   assert.equal(m.roots.find(r => r.tx === second).inFlow, false);
+  assert.ok(m.nodes.filter(n => n.tx === second).every(n => n.inFlow === false));
+  assert.ok(!m.unresolved.some(u => u.frameId === out.frameId));
   assert.equal(m.stats.crossings, 1);
   assert.equal(m.stats.matched, 1);
 });

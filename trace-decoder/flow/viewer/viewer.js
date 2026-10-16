@@ -1006,7 +1006,7 @@
     $('trace-select').value = String(i);
     $('title').textContent = traces[i].label || M.label;
     $('kicker').textContent = traces[i].synthetic ? 'Synthetic example · EEZ call flow' : 'EEZ cross-chain call flow';
-    const apps = M.nodes.filter(n => !n.protocol), contracts = new Set(apps.map(n => `${n.chain}:${(n.impl?.address || n.address || '').toLowerCase()}`));
+    const apps = M.nodes.filter(n => !n.protocol && n.inFlow !== false), contracts = new Set(apps.map(n => `${n.chain}:${(n.impl?.address || n.address || '').toLowerCase()}`));
     const unres = M.stats.crossings - M.stats.matched;
     $('stats').innerHTML = [[apps.length, 'application calls'], [contracts.size, 'contracts'], [`${M.stats.matched}/${M.stats.crossings}`, 'crossings matched', unres ? 'bad' : ''], [M.transactions.length, 'transactions'], [M.stats.frames, 'physical frames'], [M.unresolved.length, 'unresolved', M.unresolved.length ? 'bad' : '']].map(([v, l, c]) => `<span class="${c || ''}"><b>${esc(v)}</b> ${l}</span>`).join('');
     $('foot').textContent = `Trace schema ${M.schemaVersion || '?'} · ${traces[i].source || 'embedded'} · Everything shown is embedded in this page; it makes no network requests.`;

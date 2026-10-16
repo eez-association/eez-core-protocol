@@ -154,6 +154,7 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
   }
   transactions.sort((a, b) => Number(b.inFlow === true || b.requested) - Number(a.inFlow === true || a.requested) || (rank[a.role] ?? 9) - (rank[b.role] ?? 9) || Number(a.block ?? 0) - Number(b.block ?? 0) || Number(a.index ?? 0) - Number(b.index ?? 0));
 
+  for (const node of nodes) node.inFlow = scope.frames.has(node.frameId || node.crossing?.managerFrameId);
   const chainIds = trace.metadata?.chainIds || {};
   return {
     version: FLOW_MODEL_VERSION, schemaVersion: trace.schemaVersion || null,
@@ -166,7 +167,7 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     }])),
     settlements: (trace.settlements || []).map(s => ({ id: s.id, l1Tx: s.l1TransactionHash, l1Block: s.l1BlockNumber ?? null, firstL2Block: s.firstL2Block ?? null, lastL2Block: s.lastL2Block ?? null })),
     transactions, roots, nodes,
-    unresolved: (trace.unresolved || []).map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
+    unresolved: (trace.unresolved || []).filter(u => !u.frameId || scope.frames.has(u.frameId)).map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
     stats: { frames: scope.frames.size, crossings: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId)).length, matched: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId) && o.status === 'matched').length, events: (trace.events || []).filter(e => scope.frames.has(e.frameId)).length },
   };
 }
