@@ -14,4 +14,4 @@ if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
 fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec node "$here/flow/render-flow.mjs" "$@" --views flow,sequence --open
+exec node "$here/flow/render-flow.mjs" --views flow,sequence "$@" --open

@@ -7,7 +7,7 @@ import { loadConfig, parseEnv } from '../src/config.mjs';
 import { AbiDecoder } from '../src/abi-decoder.mjs';
 import { ChainReader, validateSettlement } from '../src/rpc.mjs';
 import { hex, lower, shortAddress, protocol } from '../src/protocol.mjs';
-import { scenario, address, app, hash, M } from './fixtures/scenarios.mjs';
+import { scenario, address, app, hash, M, frame } from './fixtures/scenarios.mjs';
 
 test('configuration is allowlisted, never evaluates shell, and supports minimal CLI',()=>{
   assert.deepEqual(parseEnv('export L1_RPC="https://one" # comment\nPRIVATE_KEY=secret\nL2_RPC=${L1_RPC}\n'),{L1_RPC:'https://one',L2_RPC:'https://one'});
@@ -33,7 +33,7 @@ for(const direction of ['L1','L2'])test(`${direction} trigger discovers and join
   assert.equal(result.outgoing[0].remoteCall.address,f.target);
   assert.match(renderTrace(result),new RegExp(shortAddress(f.target)));
   assert.ok(JSON.stringify(result).includes(f.target));
-  assert.equal(result.metadata.correlation,'L2_FRONT');
+  assert.equal(result.metadata.correlation,direction === 'L1' ? 'L1_FRONT' : 'L2_FRONT');
   assert.ok(f.calls.filter(c=>c.method==='eth_call'&&c.params[0].data.length>10).some(c=>c.params[1]===(direction==='L1'?'0x64':'0xc8')));
   assert.ok(!f.calls.filter(c=>c.method.startsWith('debug_')).some(c=>c.url.endsWith('front')));
 });
@@ -51,7 +51,7 @@ test('composer supersedes stale env managers but explicit historical flags survi
 test('capability selection falls through override and L2 frontend to L1 frontend',async()=>{
   const f=scenario(),rpc=f.config.rpc;
   const result=await decodeCrossChainTrace({...f.config,correlationRpc:'override',rpc:async(url,method,params)=>{
-    if((url==='override'||url==='l2-front')&&method.startsWith('eez_get'))throw new Error('unsupported');
+    if((url==='override'||url==='l2-front')&&method.startsWith('eez_get'))throw Object.assign(new Error('unsupported'),{code:-32601});
     return rpc(url,method,params);
   }},f.trigger);
   assert.equal(result.metadata.correlation,'L1_FRONT');
@@ -236,7 +236,8 @@ test('missing remote trace preserves local callbacks and precomputed result evid
 test('a precomputed static result is represented without inventing a remote execution',async()=>{
   const f=scenario({isStatic:true});const delivery=f.txs.L2.get(f.deliveries[0]);delivery.trace.calls=[];
   const result=await decodeCrossChainTrace(f.config,f.trigger);
-  assert.equal(result.outgoing[0].status,'unresolved');assert.equal(result.outgoing[0].resultKind,'precomputed-result-only');
+  assert.equal(result.outgoing[0].status,'prepared-result');assert.equal(result.outgoing[0].resultKind,'precomputed-result-only');
+  assert.ok(!result.unresolved.some(u=>u.code==='remote-execution-unavailable'));
   assert.equal(result.incoming.length,0);assert.equal(result.edges.filter(e=>e.type==='cross-chain').length,0);
 });
 
@@ -307,4 +308,132 @@ test('failed nested table replacement restores the previous generation',async()=
   const original=result.tables.find(t=>t.transactionHash===f.posting);
   assert.equal(result.outgoing[0].generationId,original.id);assert.equal(result.outgoing[0].status,'matched');
   assert.ok(result.tables.some(t=>!t.committed));
+});
+
+
+test('an L2-to-L1 read with missing execution is not an expected no-delivery result', async () => {
+  const f = scenario({ direction: 'L2', isStatic: true });
+  f.txs.L1.get(f.posting).trace.calls = [];
+  const result = await decodeCrossChainTrace(f.config, f.trigger);
+  assert.equal(result.outgoing[0].status, 'unresolved');
+  assert.equal(result.outgoing[0].resultKind, null);
+  assert.ok(result.unresolved.some(u => u.code === 'remote-execution-unavailable'));
+});
+
+
+test('an unobserved remote call never inherits a local manager failure', async () => {
+  const f = scenario({ revert: true });
+  f.txs.L2.get(f.deliveries[0]).trace.calls = [];
+  const result = await decodeCrossChainTrace(f.config, f.trigger), out = result.outgoing[0];
+  assert.equal(out.localResponse.rawOutput, '0xdeadbeef');
+  assert.ok(out.localResponse.error);
+  assert.equal(out.remoteCall.rawOutput, '0x');
+  assert.equal(out.remoteCall.error, null);
+  assert.notEqual(out.remoteCall, out.localResponse);
+});
+
+
+test('empty exported settings fall back to the file and env managers pin discovery', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decoder-config-'));
+  try {
+    const f = scenario(), old = address(333);
+    fs.writeFileSync(path.join(dir, 'chain.env'), `L1_RPC=l1-rpc\nL2_RPC=l2-rpc\nL1_TRACE_RPC=archive\nROLLUPS=${old}\nMANAGER_L2=${old}\n`);
+    const loaded = loadConfig([f.trigger], { L1_RPC: '', L1_TRACE_RPC: '' }, dir);
+    assert.equal(loaded.l1Rpc, 'l1-rpc'); assert.equal(loaded.l1TraceRpc, 'archive');
+    assert.deepEqual(loaded.explicitManagers, { L1:true, L2:true });
+    const result = await decodeCrossChainTrace({ ...f.config, ...loaded, l1TraceRpc:undefined }, f.trigger);
+    assert.deepEqual(result.metadata.managers, { L1:old, L2:old });
+    const overridden = loadConfig([f.trigger, '--l1-manager', M.L1], { ROLLUPS:address(444) }, dir);
+    assert.equal(overridden.rollups, M.L1);
+  } finally { fs.rmSync(dir, { recursive:true, force:true }); }
+});
+
+for (const direction of ['L1','L2']) test(`split settlement fronts use the ${direction} block-hash method only`, async () => {
+  const f = scenario({ direction }), rpc = f.config.rpc, lookups = [];
+  const result = await decodeCrossChainTrace({ ...f.config, rpc:async (url,method,params) => {
+    if (method.startsWith('eez_getSettlement') || method.startsWith('eez_getSettled')) {
+      lookups.push({url,method,params});
+      assert.ok(params[0]?.blockHash, 'no numeric capability probe');
+      const allowed = method === 'eez_getSettlementByL2Block' ? 'l2-front' : 'l1-front';
+      if (url !== allowed) throw Object.assign(new Error('method not found'), {code:-32601});
+    }
+    return rpc(url,method,params);
+  } }, f.trigger);
+  assert.equal(result.outgoing[0].status,'matched');
+  assert.equal(lookups.length,1);
+  assert.equal(lookups[0].url,direction.toLowerCase()+'-front');
+  assert.ok(!result.metadata.search.some(s=>s.source==='timestamp-fallback'));
+});
+
+
+for (const variant of ['system', 'reverted', 'wrong destination', 'unavailable identity', 'application caller', 'different value', 'nonempty calldata']) {
+  test(`L2 system value transfer classification: ${variant}`, async () => {
+    const f = scenario({direction:'L2'}), root = f.txs.L2.get(f.trigger).trace;
+    const proxy = root.calls[0], manager = proxy.calls[1], system = address(700);
+    root.value = proxy.value = manager.value = '0x5';
+    const transfer = frame(M.L2,system,'0x',[],{value:'0x5'});
+    manager.calls.push(transfer);
+    if (variant === 'reverted') manager.error = 'execution reverted';
+    if (variant === 'wrong destination') transfer.to = address(701);
+    if (variant === 'application caller') transfer.from = f.source;
+    if (variant === 'different value') transfer.value = '0x4';
+    if (variant === 'nonempty calldata') transfer.input = '0x12345678';
+    const rpc = f.config.rpc, reads = [];
+    f.config.rpc = (url,method,params) => {
+      if (method === 'eth_call' && params[0].data === protocol.L2.encodeFunctionData('SYSTEM_ADDRESS')) {
+        reads.push(params);
+        if (variant === 'unavailable identity') throw new Error('historical read unavailable');
+        return protocol.L2.encodeFunctionResult('SYSTEM_ADDRESS',[system]);
+      }
+      return rpc(url,method,params);
+    };
+    const result = await decodeCrossChainTrace(f.config,f.trigger);
+    const found = result.frames.find(n=>n.to===transfer.to && n.input===transfer.input && n.from===transfer.from);
+    assert.ok(found);
+    const verified = ['system','reverted'].includes(variant);
+    assert.equal(found.role,verified?'system-value-transfer':'application');
+    if (verified) {
+      assert.equal(found.decoded.contractName,'L2 system');
+      assert.equal(found.reverted,variant==='reverted');
+      assert.ok(reads.length && reads.every(p=>p[1]==='0xc8'));
+      assert.ok(!renderTrace(result).includes('L2 system'));
+      assert.ok(renderTrace(result,{full:true}).includes('L2 system'));
+    }
+  });
+}
+
+
+test('a conflicting pinned manager warns without replacing the pin',async()=>{
+  const f=scenario(),old=address(333);
+  const result=await decodeCrossChainTrace({...f.config,rollups:old,managerL2:old,explicitManagers:{L1:true,L2:true}},f.trigger);
+  assert.deepEqual(result.metadata.managers,{L1:old,L2:old});
+  assert.deepEqual(result.diagnostics.filter(d=>d.code==='pinned-manager-mismatch').map(d=>d.chain),['L1','L2']);
+});
+
+for(const failure of ['connection','timeout','http'])test(`correlation retries ${failure} failures without broad scanning`,async()=>{
+  const f=scenario({direction:'L2'}),rpc=f.config.rpc,attempts=[];
+  const result=await decodeCrossChainTrace({...f.config,rpc:async(url,method,params)=>{
+    if(method==='eez_getSettlementByL2Block'){
+      attempts.push(url);
+      if(url==='l2-front')throw Object.assign(new Error(failure),failure==='http'?{transport:true}:{code:failure==='connection'?'ECONNRESET':'ETIMEDOUT'});
+    }
+    return rpc(url,method,params);
+  }},f.trigger);
+  assert.deepEqual(attempts,['l2-front','l1-front']);
+  assert.equal(result.metadata.correlation,'L1_FRONT');
+  assert.equal(result.outgoing[0].status,'matched');
+  assert.ok(!result.metadata.search.some(s=>s.source==='timestamp-fallback'));
+  assert.ok(!result.unresolved.some(u=>u.code==='correlation-lookup-failed'));
+});
+
+test('malformed settlement answers stop endpoint failover and broad scanning',async()=>{
+  const f=scenario({direction:'L2'}),rpc=f.config.rpc,attempts=[];
+  const result=await decodeCrossChainTrace({...f.config,rpc:async(url,method,params)=>{
+    if(method==='eez_getSettlementByL2Block'){attempts.push(url);return 'not a settlement';}
+    return rpc(url,method,params);
+  }},f.trigger);
+  assert.deepEqual(attempts,['l2-front']);
+  assert.equal(result.metadata.search.length,0);
+  assert.ok(result.unresolved.some(u=>u.code==='correlation-lookup-failed'));
 });

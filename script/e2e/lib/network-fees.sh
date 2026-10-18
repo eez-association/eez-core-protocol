@@ -83,8 +83,8 @@ _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|fall
     case "$status" in 28|124) echo fallback ;; *) echo terminal ;; esac
 }
 
-network_fee_quote() { # transaction, front, read RPC, optional checked chain and shared deadline
-    local tx="$1" front="$2" read_rpc="$3" chain="${4:-}"
+network_fee_quote() { # transaction, front, read RPC, optional checked chain, shared deadline, evidence
+    local tx="$1" front="$2" read_rpc="$3" chain="${4:-}" evidence="${6:-}"
     local intent quote option nonce kind gas cap tip value expires attempt deadline left rpc_timeout rc failure
     local retry_reason=reconciliation
     [[ -n "$chain" ]] || chain=$(network_fee_chain "$tx" "$front" "$read_rpc") || return 1
@@ -117,6 +117,18 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain and
         [[ "$failure" != fallback ]] || return 75
         return 1
     done
+    # Save the RPC response before parsing: malformed quotes never reach signed
+    # evidence. Append so retries/resumes retain earlier responses, even non-JSON.
+    if [[ -n "$evidence" ]]; then
+        mkdir -p "$(dirname "$evidence")" || return 70
+        jq -nc --arg receivedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson intent "$intent" --arg nonce "$(jq -r .nonce <<< "$tx")" \
+            --arg kind "$(jq -r .type <<< "$tx")" --arg response "$quote" \
+            '{receivedAt:$receivedAt,intent:$intent,preparedNonce:$nonce,transactionType:$kind,rawResponse:$response}' \
+            >> "${evidence%.json}.responses.jsonl" || {
+                echo 'Could not save fee quote response; stopping before signing' >&2; return 70;
+            }
+    fi
     jq -e 'def quantity: type=="string" and test("^0x[0-9a-fA-F]+$");
         .version==1 and (.chainId|quantity) and (.nonce|quantity) and (.expiresAt|quantity)
         and (.options|type)=="array"' <<< "$quote" >/dev/null || { echo 'Malformed eez_quoteFee response' >&2; return 1; }
@@ -260,7 +272,7 @@ _network_quote_and_send() {
     deadline=$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))
     while (( SECONDS < deadline )); do
         rc=0
-        plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline") || rc=$?
+        plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline" "$evidence") || rc=$?
         if (( rc == 75 )); then
             if $tariff_rejected; then
                 echo 'Fresh composer quote unavailable after tariff refusal; stopping without node-fee fallback' >&2

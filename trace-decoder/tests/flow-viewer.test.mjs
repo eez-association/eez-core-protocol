@@ -75,7 +75,7 @@ test('view calls are hidden by default and the checkbox adds exactly the announc
   const before = count();
   p.el('opt-static').checked = true; p.el('opt-static').onchange();
   assert.equal(count() - before, hidden);
-  assert.equal(p.el('opt-static-label').textContent, 'View calls');
+  assert.equal(p.el('opt-static-label').textContent, 'Local reads');
 });
 
 test('table loads appear only with EEZ plumbing, with the decoded execution table', async () => {
@@ -172,4 +172,184 @@ test('enabling plumbing selects a related root when the default selection was em
   assert.equal(p.el('root-select').value, '-1');
   p.el('opt-protocol').checked = true; p.el('opt-protocol').onchange();
   assert.equal(model.roots[Number(p.el('root-select').value)].tx, f.posting);
+});
+
+
+test('verified links show both recorded traces and prepared responses, with isolated entry selectable', async () => {
+  const f = scenario({ direction: 'L2', isStatic: true });
+  const trace = plain(await decodeCrossChainTrace(f.config, f.trigger));
+  const host = trace.frames.find(f => f.chain === 'L1' && f.role === 'incoming-proxy');
+  trace.transactionLinks = [{ state: 'complete', sourceChain: 'L2', sourceHash: f.trigger,
+    references: [
+      { chain: 'L1', hash: f.posting, role: 'l1-post-batch' },
+      { chain: 'L2', hash: f.trigger, role: 'source' },
+    ], l1Execution: { frameId: host.id, entryIndex: 0 } }];
+  const model = buildFlowModel(trace, { mode: 'physical' }), p = page(renderFlowHtml([{ model }], { views: ['flow', 'sequence'] }));
+  assert.equal(p.el('root-select').value, '-2');
+  assert.match(p.el('notice').innerHTML, /own recorded order/);
+  assert.match(p.el('graph').innerHTML, /Prepared L2 table response/);
+  assert.equal((p.el('graph').innerHTML.match(/class="box big eoa/g) || []).length, 2);
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems, []);
+  p.tab('sequence');
+  assert.match(p.el('graph').innerHTML, /class="lbl seq/);
+  p.tab('flow');
+  p.el('opt-protocol').checked = true; p.el('opt-protocol').onchange();
+  assert.equal(p.el('root-select').value, '-2');
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems, []);
+  p.el('opt-protocol').checked = false; p.el('opt-protocol').onchange();
+  const index = model.roots.findIndex(r => r.preferred);
+  p.el('root-select').onchange({ target: { value: String(index) } });
+  const selected = model.roots[index];
+  assert.equal(selected.preferred, true);
+  assert.equal(model.nodes[selected.node].frameId, host.id);
+  assert.equal(p.el('opt-static').checked, true);
+  assert.match(p.el('notice').innerHTML, /recorded L1 execution/);
+  assert.ok(!p.el('stats').innerHTML.includes('crossings matched'));
+  assert.ok(!model.nodes.some(n => n.kind === 'ghost'));
+  assert.ok(model.roots.some(r => r.isOrigin && r.chain === 'L2'));
+  for (const r of model.roots) {
+    const seen = [], walk = id => { seen.push(model.nodes[id]); model.nodes[id].children.forEach(walk); }; walk(r.node);
+    assert.ok(seen.every(n => n.chain === r.chain), 'physical views never move calls across chains');
+  }
+  p.tab('sequence');
+  assert.ok(p.el('graph').innerHTML.length > 0);
+});
+
+
+test('timeline renders prepared results as labels without corrupting status markers', async () => {
+  const f = scenario({ isStatic: true }); f.txs.L2.get(f.deliveries[0]).trace.calls = [];
+  const model = buildFlowModel(plain(await decodeCrossChainTrace(f.config, f.trigger)));
+  const p = page(renderFlowHtml([{ model }], { views: ['flow', 'timeline'] }));
+  p.el('opt-static').checked = true; p.el('opt-static').onchange();
+  p.el('expand-all').onclick(); p.tab('timeline');
+  const html = p.el('canvas').innerHTML;
+  assert.match(html, /prepared result · no L2 delivery/);
+  assert.ok(!html.includes('c-status <'));
+});
+
+
+test('prepared response labels preserve local results and rollback status', async () => {
+  const f = scenario({ direction: 'L2' });
+  const trace = plain(await decodeCrossChainTrace(f.config, f.trigger));
+  trace.transactionLinks = [{ state: 'complete', sourceChain: 'L2', sourceHash: f.trigger,
+    references: [{ chain: 'L2', hash: f.trigger, role: 'source' }] }];
+  const out = trace.outgoing.find(o => o.chain === 'L2'), local = trace.frames.find(f => f.id === out.frameId);
+  local.reverted = true;
+  out.remoteCall = { contractName: 'Remote', functionName: 'read', signature: 'read()', arguments: [], returns: [{ type: 'uint256', value: '999' }], rawOutput: '0xdead' };
+  out.localResponse = { ...out.remoteCall, returns: [{ type: 'uint256', value: '7' }], rawOutput: local.output };
+  const model = buildFlowModel(trace, { mode: 'physical' }), n = model.nodes.find(n => n.frameId === local.id);
+  assert.equal(n.ret.items[0].value, '7', 'a remote association cannot replace the locally observed result');
+  assert.equal(n.reverted, true); assert.equal(n.preparedResponse, true);
+  assert.equal(model.stats.preparedResponses, 1);
+  const p = page(renderFlowHtml([{ model }], { views: ['flow'] }));
+  for (let i = 0; i < 2; i++) p.el('next').onclick();
+  assert.match(p.el('inspector').innerHTML, /Rolled back by an outer revert/);
+  assert.match(p.el('inspector').innerHTML, /prepared response from loaded table/);
+});
+
+
+test('optional notes show escaped codes and messages', async () => {
+  const f = scenario(), model = buildFlowModel(plain(await decodeCrossChainTrace(f.config, f.trigger)));
+  model.matchingNotes = [{ code: 'ambiguous-remote-occurrence', message: 'Repeated <calls> & returns' }];
+  const p = page(renderFlowHtml([{ model }], { views: ['flow'] }));
+  assert.match(p.el('inspector').innerHTML, /ambiguous-remote-occurrence/);
+  assert.match(p.el('inspector').innerHTML, /Repeated &lt;calls&gt; &amp; returns/);
+});
+
+test('explicit read visibility persists when switching trace kinds', async () => {
+  const f = scenario(), combined = buildFlowModel(plain(await decodeCrossChainTrace(f.config, f.trigger)));
+  const physical = { ...combined, mode: 'physical' };
+  const p = page(renderFlowHtml([{ model: physical }, { model: combined }], { views: ['flow'] }));
+  assert.equal(p.el('opt-static').checked, true);
+  p.el('opt-static').checked = true; p.el('opt-static').onchange();
+  p.trace(1); assert.equal(p.el('opt-static').checked, true);
+  p.el('opt-static').checked = false; p.el('opt-static').onchange();
+  p.trace(0); assert.equal(p.el('opt-static').checked, false);
+});
+
+
+test('linked flow is the default and the recorded toggle preserves confirmed arrows and read preference', async () => {
+  const f = scenario({ direction:'L2' }), trace = plain(await decodeCrossChainTrace(f.config,f.trigger));
+  const host = trace.frames.find(n=>n.chain==='L1'&&n.role==='incoming-proxy');
+  trace.transactionLinks = [{state:'complete',sourceChain:'L2',sourceHash:f.trigger,
+    references:[{chain:'L1',hash:f.posting,role:'l1-post-batch'},{chain:'L2',hash:f.trigger,role:'source'}],
+    l1Execution:{frameId:host.id,entryIndex:0}}];
+  const model = buildFlowModel(trace), p = page(renderFlowHtml([{model}], {views:['flow','sequence','layers']}));
+  assert.equal(p.el('mode-select').value,'combined');
+  assert.equal(p.el('mode-wrap').hidden,false);
+  assert.match(p.el('graph').innerHTML,/class="edge cross/);
+  p.el('opt-static').checked=true;p.el('opt-static').onchange();
+  p.el('mode-select').onchange({target:{value:'physical'}});
+  assert.equal(p.el('root-select').value,'-2');
+  assert.equal(p.el('opt-static').checked,true);
+  assert.doesNotMatch(p.el('graph').innerHTML,/class="edge cross/);
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems,[]);
+  const html=p.el('graph').innerHTML;
+  let checkedHeights = 0;
+  for (const n of model.recordedView.nodes.filter(n=>!n.protocol)) {
+    const match=html.match(new RegExp(`data-node="${n.id}"[^>]*height:([0-9]+)px`));
+    if(match) { checkedHeights++; assert.equal(Number(match[1]),n.preparedResponse?140:100); }
+  }
+  assert.ok(checkedHeights >= 2, 'both prepared and ordinary boxes are checked');
+  assert.match(p.el('caption').innerHTML,/independently on each chain/);
+  p.tab('sequence'); assert.match(p.el('graph').innerHTML,/class="lbl seq/);
+  p.tab('layers'); assert.doesNotMatch(p.el('graph').innerHTML,/class="edge cross/);
+  p.el('opt-static').checked=false;p.el('opt-static').onchange();
+  p.el('mode-select').onchange({target:{value:'combined'}});
+  assert.equal(p.el('opt-static').checked,false);
+  p.tab('flow');assert.match(p.el('graph').innerHTML,/class="edge cross/);
+});
+
+test('an unisolated L1 entry is explained and its full batch remains selectable', async () => {
+  const f=scenario({direction:'L2'}),trace=plain(await decodeCrossChainTrace(f.config,f.trigger));
+  trace.transactionLinks=[{state:'complete',sourceChain:'L2',sourceHash:f.trigger,
+    references:[{chain:'L1',hash:f.posting,role:'l1-post-batch'},{chain:'L2',hash:f.trigger,role:'source'}]}];
+  const p=page(renderFlowHtml([{model:buildFlowModel(trace)}],{views:['flow']}));
+  p.el('mode-select').onchange({target:{value:'physical'}});
+  assert.match(p.el('notice').innerHTML,/could not be isolated/);
+  assert.match(p.el('root-select').innerHTML,/Settlement batch/);
+  assert.ok(!p.el('root-select').innerHTML.includes('Both chains'));
+});
+
+
+test('system ETH transfers are folded with plumbing and remain inspectable', async () => {
+  const f=scenario({direction:'L2'}),trace=plain(await decodeCrossChainTrace(f.config,f.trigger));
+  const model=buildFlowModel(trace),root=model.roots.find(r=>r.isOrigin);
+  const id=model.nodes.length;
+  model.nodes.push({...model.nodes[root.node],id,frameId:'system-transfer',role:'system-value-transfer',
+    contract:'L2 system',fn:'Value to L2 system',protocol:true,children:[],address:address(700)});
+  model.nodes[root.node].children.push(id);
+  const p=page(renderFlowHtml([{model}],{views:['flow']}));
+  assert.doesNotMatch(p.el('graph').innerHTML,/Value to L2 system/);
+  p.el('opt-protocol').checked=true;p.el('opt-protocol').onchange();
+  assert.match(p.el('graph').innerHTML,/Value to L2 system/);
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems,[]);
+});
+
+
+for (const direction of ['L1','L2']) test(`${direction} linked arrows hide EEZ markers until plumbing is enabled`, async () => {
+  const f=scenario({direction}),model=buildFlowModel(plain(await decodeCrossChainTrace(f.config,f.trigger)));
+  const p=page(renderFlowHtml([{model}],{views:['flow','sequence','layers']}));
+  for (const view of ['flow','sequence','layers']) {
+    p.tab(view);
+    assert.match(p.el('graph').innerHTML,/class="edge cross/,`${view}: matched arrow remains visible`);
+    assert.doesNotMatch(p.el('graph').innerHTML,/class="eez(?: |")/,`${view}: no plumbing marker`);
+    p.el('opt-protocol').checked=true;p.el('opt-protocol').onchange();
+    assert.match(p.el('graph').innerHTML,/class="eez(?: |")/,`${view}: plumbing marker can be inspected`);
+    p.el('opt-protocol').checked=false;p.el('opt-protocol').onchange();
+    assert.doesNotMatch(p.el('graph').innerHTML,/class="eez(?: |")/);
+  }
+});
+
+
+for(const direction of ['L1','L2'])test(`${direction} cross-chain reads and their details remain visible without plumbing`,async()=>{
+  const f=scenario({direction,isStatic:true}),trace=plain(await decodeCrossChainTrace(f.config,f.trigger));
+  const model=buildFlowModel(trace),p=page(renderFlowHtml([{model}],{views:['flow','sequence']}));
+  assert.equal(p.el('opt-static').checked,false);
+  assert.equal(p.el('opt-protocol').checked,false);
+  assert.match(p.el('graph').innerHTML,/class="edge cross/);
+  assert.doesNotMatch(p.el('graph').innerHTML,/class="eez(?: |")/);
+  for(let i=0;i<2;i++)p.el('next').onclick();
+  assert.match(p.el('inspector').innerHTML,/Crossing L[12] → L[12]/);
+  p.tab('sequence');assert.match(p.el('graph').innerHTML,/class="edge cross/);
 });

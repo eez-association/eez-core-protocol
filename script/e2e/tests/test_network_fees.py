@@ -117,8 +117,8 @@ class NetworkFeeTests(unittest.TestCase):
                            'maxPriorityFeePerGas': '0xfa0', 'estimatedFee': '0x4a817c80',
                            'intentHash': '0x' + 'cd' * 32}]}
 
-    def run_quote(self, kind='0x2', send=False, start=False, **env):
-        (self.root / 'quote.json').write_text(json.dumps(self.quote))
+    def run_quote(self, kind='0x2', send=False, start=False, quote_text=None, **env):
+        (self.root / 'quote.json').write_text(json.dumps(self.quote) if quote_text is None else quote_text)
         (self.root / 'rawtxs.txt').write_text(self.candidates[kind] + '\n')
         action = 'network_send_quoted_trigger "$RAW" "$KEY" front direct "$TEST_ROOT/evidence.json" submit persist "$TEST_ROOT/rawtxs.txt" 1'
         if env.get('REPEAT_SENDS'):
@@ -244,13 +244,41 @@ class NetworkFeeTests(unittest.TestCase):
                      lambda q: q['options'][1].update(intentHash=None),
                      lambda q: q['options'][1].update(requestHash='bad')]
         baseline = copy.deepcopy(self.quote)
-        for mutation in mutations:
+        for index, mutation in enumerate(mutations, 1):
             self.quote = copy.deepcopy(baseline)
             mutation(self.quote)
             result = self.run_quote(send=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((self.root / 'signs').exists())
             self.assertFalse((self.root / 'sends').exists())
+            records = [json.loads(line) for line in
+                       (self.root / 'evidence.responses.jsonl').read_text().splitlines()]
+            self.assertEqual(len(records), index)
+            self.assertEqual(json.loads(records[-1]['rawResponse']), self.quote)
+            self.assertEqual(records[-1]['intent']['to'], TARGET)
+            self.assertEqual(records[-1]['preparedNonce'], '0x7')
+            self.assertEqual(records[-1]['transactionType'], '0x2')
+            self.assertFalse((self.root / 'evidence.json').exists())
+            self.assertNotIn(KEY, json.dumps(records))
+
+    def test_non_json_quote_response_is_saved_before_validation(self):
+        response = 'broken response\n"quoted" text'
+        result = self.run_quote(send=True, quote_text=response)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Malformed eez_quoteFee response', result.stderr)
+        records = (self.root / 'evidence.responses.jsonl').read_text().splitlines()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0])['rawResponse'], response)
+        self.assertFalse((self.root / 'signs').exists())
+        self.assertFalse((self.root / 'sends').exists())
+
+    def test_response_persistence_failure_stops_before_signing(self):
+        (self.root / 'evidence.responses.jsonl').mkdir()
+        result = self.run_quote(send=True)
+        self.assertEqual(result.returncode, 70)
+        self.assertIn('Could not save fee quote response', result.stderr)
+        self.assertFalse((self.root / 'signs').exists())
+        self.assertFalse((self.root / 'sends').exists())
 
     def test_front_chain_mismatch_stops_before_quote(self):
         result = self.run_quote(FRONT_CHAIN='1')

@@ -17,23 +17,35 @@ export function makeRpc(config) {
   let id = 0;
   const noBatch = new Set();
   const result = (body, method) => {
-    if (body?.error) throw Object.assign(new Error(`${method}: ${body.error.message}`), { code: body.error.code });
-    if (!body || !Object.hasOwn(body, 'result')) throw new Error(`${method}: missing JSON-RPC result`);
+    if (body?.error) {
+      if (!Number.isInteger(body.error.code) || typeof body.error.message !== 'string') {
+        throw Object.assign(new Error(`${method}: malformed JSON-RPC error`), { invalidResponse: true });
+      }
+      throw Object.assign(new Error(`${method}: ${body.error.message}`), { code: body.error.code });
+    }
+    if (!body || !Object.hasOwn(body, 'result')) throw Object.assign(new Error(`${method}: missing JSON-RPC result`), { invalidResponse: true });
     return body.result;
   };
   async function post(url, payload, method) {
-    const response = await (config.fetch || fetch)(url, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(config.timeoutMs ?? 20000),
-    });
+    let response;
+    try {
+      response = await (config.fetch || fetch)(url, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(config.timeoutMs ?? 20000),
+      });
+    } catch (e) { throw Object.assign(new Error(e.message, { cause: e }), { transport: true, code: e.code }); }
     if (!response.ok) {
       // Some servers reject JSON-RPC batches with HTTP 400 and -32600.
       let body;
       try { body = await response.json(); } catch { /* HTTP error without JSON. */ }
-      throw Object.assign(new Error(`${method}: HTTP ${response.status}`), { code: body?.error?.code });
+      throw Object.assign(new Error(`${method}: HTTP ${response.status}`), { code: body?.error?.code, transport: true });
     }
-    return response.json();
+    try { return await response.json(); }
+    catch (e) {
+      if (e instanceof SyntaxError) throw Object.assign(new Error(`${method}: invalid JSON response`, { cause: e }), { invalidResponse: true });
+      throw Object.assign(new Error(`${method}: response body unavailable`, { cause: e }), { transport: true, code: e.code });
+    }
   }
   const rpc = async (url, method, params = []) => result(await post(url, { jsonrpc: '2.0', id: ++id, method, params }, method), method);
   // Same bounded batches and response-ID validation as the E2E network evidence helpers.

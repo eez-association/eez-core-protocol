@@ -1,3 +1,4 @@
+import { isPreparedLookup, isPreparedResult } from './prepared-result.mjs';
 import { AbiDecoder } from './abi-decoder.mjs';
 import { abiValue, callHash, hex, lower, named, parseCall, parseEvent, protocol, proxyABI, same } from './protocol.mjs';
 
@@ -29,6 +30,17 @@ export async function buildGraph({ config, transactions, managers, readers, roll
       } catch { return null; }
     })());
     return registry.get(key);
+  }
+  const systemAddresses = new Map();
+  async function l2SystemAddress(frame) {
+    if (!systemAddresses.has(frame.blockNumber)) systemAddresses.set(frame.blockNumber, (async () => {
+      try {
+        const raw = await readers.L2.send('eth_call', [{ to: managers.L2,
+          data: protocol.L2.encodeFunctionData('SYSTEM_ADDRESS') }, hex(frame.blockNumber)]);
+        return protocol.L2.decodeFunctionResult('SYSTEM_ADDRESS', raw)[0];
+      } catch { return null; } // Unverified destinations remain ordinary visible calls.
+    })());
+    return systemAddresses.get(frame.blockNumber);
   }
   function rowList(table) {
     const rows = [];
@@ -258,13 +270,33 @@ export async function buildGraph({ config, transactions, managers, readers, roll
     }).map(i => i.frameId);
     out.rejectedCandidates = possible.filter(i => !out.candidates.includes(i.frameId)).map(i => ({ frameId: i.frameId, reason: 'return-or-revert-mismatch' }));
     out.status = out.candidates.length ? 'ambiguous' : 'unresolved';
-    const noRemote = out.candidates.length === 0;
     out.precomputedResults = out.entryCandidates;
     const missingRemoteTrace = transactions.some(t => t.chain !== out.chain && !t.traceResult.trace);
-    out.resultKind = noRemote && out.entryCandidates.length && !missingRemoteTrace ? 'precomputed-result-only' : null;
+    const prepared = !missingRemoteTrace && isPreparedLookup(out);
+    out.resultKind = prepared ? 'precomputed-result-only' : null;
+    if (prepared) {
+      out.status = 'prepared-result';
+      out.deliveryExpected = false;
+      continue; // L1 lookups are resolved from prepared data; no L2 trace is missing.
+    }
     unresolvedReason(out.candidates.length ? 'ambiguous-remote-occurrence' : 'remote-execution-unavailable',
       out.candidates.length ? 'Multiple physical occurrences remain possible' : 'No uniquely supported remote execution was observed',
       { frameId: out.frameId, candidateFrameIds: out.candidates, entryCandidates: out.entryCandidates });
+  }
+  // EEZL2 returns the outgoing value to its configured system address before
+  // replaying the prepared result. This is protocol accounting, not an app receiver.
+  // Keep the observed frame (including errors/rollback) and verify the destination
+  // at the receipt block rather than assuming a network-specific constant.
+  for (const frame of frames) {
+    const parent = byId.get(frame.parentId);
+    if (frame.chain === 'L2' && frame.type === 'CALL' && !frame.isStatic &&
+        frame.input === '0x' && BigInt(frame.value) > 0n && frame.value === parent?.value &&
+        same(frame.from, managers.L2) && same(parent?.contextAddress, managers.L2) &&
+        parse.get(parent.id)?.name === 'executeCrossChainCall' &&
+        same(frame.to, await l2SystemAddress(frame))) {
+      frame.role = 'system-value-transfer';
+      frame.systemTransfer = { address: frame.to, blockNumber: frame.blockNumber, provenance: 'SYSTEM_ADDRESS' };
+    }
   }
   const decoder = new AbiDecoder(config, managers);
   for (const frame of frames) {
@@ -277,6 +309,8 @@ export async function buildGraph({ config, transactions, managers, readers, roll
   // remote trace exists. This is call metadata, never a fabricated execution.
   for (const out of outgoing) {
     const remoteChain = out.chain === 'L1' ? 'L2' : 'L1';
+    const local = byId.get(out.frameId);
+    out.localResponse = await decoder.decode({ chain: remoteChain, to: out.targetAddress, input: out.data, output: local?.output || '0x', error: local?.error, role: 'application' });
     out.remoteCall = await decoder.decode({ chain: remoteChain, to: out.targetAddress, input: out.data, output: '0x', role: 'application' });
     if (out.remoteFrameId) out.remoteCall = byId.get(out.remoteFrameId).decoded;
   }
@@ -323,20 +357,51 @@ function sameIdentity(a, b) {
     && a.targetRollupId != null && b.targetRollupId != null && String(a.targetRollupId) === String(b.targetRollupId);
 }
 
-export function renderTrace(result, { full = false } = {}) {
+export function renderTrace(result, { full = false, recorded = false } = {}) {
+  const link = (result.transactionLinks || []).find(l => l.state === 'complete' &&
+    `${l.sourceChain}:${l.sourceHash}` === result.origin?.transactionId);
+  if (link && recorded) {
+    const frames = new Map(result.frames.map(f => [f.id, f]));
+    const outgoing = new Map(result.outgoing.map(o => [o.frameId, o]));
+    const roots = [], seen = new Set(), lines = [];
+    const isolated = link.l1Execution?.frameId;
+    if (isolated && frames.has(isolated)) roots.push({ id: isolated, label: `L1 entry ${link.l1Execution.entryIndex} for the requested L2 transaction` });
+    for (const ref of link.references) {
+      if (isolated && ref.chain === 'L1') continue;
+      const id = `${ref.chain}:${ref.hash}:0`;
+      if (frames.has(id) && !roots.some(r => r.id === id)) roots.push({ id, label: `${ref.chain} ${ref.role} ${ref.hash}` });
+    }
+    function physical(id, depth) {
+      if (seen.has(id)) return;
+      const f = frames.get(id); if (!f) return; seen.add(id);
+      const hidden = !full && ['manager', 'incoming-proxy', 'static-probe', 'system-value-transfer'].includes(f.role);
+      if (!hidden) {
+        const d = f.decoded || {}, out = outgoing.get(id);
+        const prepared = isPreparedResult(out);
+        lines.push(`${'  '.repeat(depth)}${f.chain} ${d.contractName || 'Unknown contract'} · ${d.displayAddress || f.to} · ${d.signature || f.input.slice(0, 10)}${f.isStatic ? ' [read]' : ''}${f.error ? ' [reverted]' : f.reverted ? ' [rolled back]' : ''}${prepared ? ' [prepared result; no L2 delivery expected]' : ''}`);
+        if (full) lines.push(`${'  '.repeat(depth + 1)}${f.id}`);
+      }
+      for (const child of f.children) physical(child, depth + (hidden ? 0 : 1));
+    }
+    for (const root of roots) { lines.push(root.label); physical(root.id, 0); }
+    for (const tx of result.transactions.filter(t => !t.trace.available)) lines.push(`${tx.chain} ${tx.hash}: ${tx.trace.reason}`);
+    return lines.join('\n');
+  }
   const nodes = new Map(result.logicalNodes.map(n => [n.id, n]));
+  const boundaries = new Map((result.outgoing || []).map(o => [o.frameId, o]));
   const visited = new Set(), lines = [];
   function walk(id, depth) {
     const node = nodes.get(id);
     if (!node) return;
     if (visited.has(id)) { if (full) lines.push(`${'  '.repeat(depth)}↪ ${id}`); return; }
     visited.add(id);
-    const hidden = !full && ['manager','incoming-proxy','static-probe'].includes(node.role);
+    const hidden = !full && ['manager','incoming-proxy','static-probe','system-value-transfer'].includes(node.role);
     if (!hidden) {
-      const boundary = node.boundary, call = boundary?.remoteCall || node.decoded;
-      const chain = boundary ? (node.chain === 'L1' ? 'L2' : 'L1') : node.chain;
+      const boundary = boundaries.get(id) || node.boundary, prepared = isPreparedResult(boundary);
+      const call = prepared ? boundary.localResponse || node.decoded : boundary?.remoteCall || node.decoded;
+      const chain = boundary && !prepared ? (node.chain === 'L1' ? 'L2' : 'L1') : node.chain;
       const fn = call.signature || (call.rawInput?.length >= 10 ? `${call.rawInput.slice(0,10)}(?)` : 'fallback()');
-      lines.push(`${'  '.repeat(depth)}${boundary ? '⇢ ' : ''}${chain}  ${call.contractName} · ${call.displayAddress} · ${fn}${node.reverted ? ' [reverted context]' : ''}${boundary && boundary.status !== 'matched' ? ` [${boundary.resultKind || boundary.status}]` : ''}`);
+      lines.push(`${'  '.repeat(depth)}${boundary && !prepared ? '⇢ ' : ''}${chain}  ${call.contractName} · ${call.displayAddress} · ${fn}${node.reverted ? ' [reverted context]' : ''}${prepared ? ' [prepared result; no L2 delivery expected]' : boundary && boundary.status !== 'matched' ? ` [${boundary.resultKind || boundary.status}]` : ''}`);
       if (full) lines.push(`${'  '.repeat(depth+1)}${call.address || '(creation)'}  [${node.id}]`);
     }
     for (const child of node.children) {
@@ -350,7 +415,8 @@ export function renderTrace(result, { full = false } = {}) {
     if (!hidden && node.decoded.error) lines.push(`${'  '.repeat(depth + 1)}↳ ${node.decoded.error.name || node.decoded.error.message}`);
   }
   // Show trigger roots first; delivery plumbing disappears in the default view.
-  const roots = [...result.logicalRoots].sort((a,b) => {
+  const originRoot = `${result.origin?.transactionId}:0`;
+  const roots = (link ? [originRoot].filter(id => nodes.has(id)) : [...result.logicalRoots]).sort((a,b) => {
     const x = nodes.get(a), y = nodes.get(b);
     return Number(x?.role === 'manager') - Number(y?.role === 'manager');
   });

@@ -65,6 +65,10 @@ export class AbiDecoder {
       result.contractName = 'CrossChainProxy';
       result.nameProvenance = { source: 'local-protocol', address };
     }
+    if (frame.role === 'system-value-transfer') {
+      result.contractName = 'L2 system';
+      result.nameProvenance = { source: 'SYSTEM_ADDRESS', address, blockNumber: frame.blockNumber };
+    }
     const decoded = [];
     for (const item of interfaces) {
       const parsed = parseCall(item.iface, frame.input);

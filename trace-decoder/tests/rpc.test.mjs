@@ -104,3 +104,17 @@ test('a null prefetched block cannot be replaced with the wrong archive block', 
   } });
   await assert.rejects(new ChainReader('L1', 'primary', 'archive', rpc).prefetchBlocks([1]), /invalid archive block/);
 });
+
+
+test('RPC distinguishes transport failures from malformed successful responses',async()=>{
+  const network=makeRpc({fetch:async()=>{throw Object.assign(new Error('connection reset'),{code:'ECONNRESET'});}});
+  await assert.rejects(network('rpc','read'),e=>e.transport===true&&e.code==='ECONNRESET');
+  const droppedBody=makeRpc({fetch:async()=>({ok:true,json:async()=>{throw new TypeError('terminated');}})});
+  await assert.rejects(droppedBody('rpc','read'),e=>e.transport===true&&!e.invalidResponse);
+  const http=makeRpc({fetch:async()=>({ok:false,status:503,json:async()=>{throw new Error('not JSON');}})});
+  await assert.rejects(http('rpc','read'),e=>e.transport===true&&!e.invalidResponse);
+  for(const json of [async()=>{throw new SyntaxError('bad JSON');},async()=>({jsonrpc:'2.0',id:1}),async()=>({error:{message:'missing code'}})]){
+    const malformed=makeRpc({fetch:async()=>({ok:true,json})});
+    await assert.rejects(malformed('rpc','read'),e=>e.invalidResponse===true&&!e.transport);
+  }
+});

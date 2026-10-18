@@ -1,11 +1,12 @@
+import { isPreparedResult } from '../src/prepared-result.mjs';
 // Converts a trace-decoder result (schema 1.x) into the call-flow diagram model.
-// Pure and dependency-free: the viewer inlines this file (minus `export`) so a
+// Pure: the viewer inlines this file and its prepared-result helper so a
 // trace JSON opened in the browser goes through exactly the same code.
 
 export const FLOW_MODEL_VERSION = 1;
 
 // Roles the decoder assigns to EEZ plumbing. The diagram folds them by default.
-const PROTOCOL_ROLES = new Set(['manager', 'incoming-proxy', 'static-probe', 'outgoing-proxy']);
+const PROTOCOL_ROLES = new Set(['manager', 'incoming-proxy', 'static-probe', 'outgoing-proxy', 'system-value-transfer']);
 // Public explorer websites by chain id, used for "verify" links.
 const EXPLORER_SITES = { 1: 'https://etherscan.io', 11155111: 'https://sepolia.etherscan.io', 17000: 'https://holesky.etherscan.io', 560048: 'https://hoodi.etherscan.io', 100: 'https://gnosisscan.io', 10200: 'https://gnosis-chiado.blockscout.com' };
 // Keeps only scheme, host and path, so an API key or credential can never reach the page.
@@ -22,7 +23,7 @@ const CHAIN_NAMES = { 1: 'Ethereum', 100: 'Gnosis', 10200: 'Gnosis Chiado', 1115
 const PRECOMPILES = ['ecrecover', 'sha256', 'ripemd160', 'identity', 'modexp', 'ecAdd', 'ecMul', 'ecPairing', 'blake2f', 'pointEvaluation'];
 const lower = v => (v == null ? '' : String(v).toLowerCase());
 
-export function buildFlowModel(trace, { label, explorers = {} } = {}) {
+export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined' } = {}) {
   if (!trace || !Array.isArray(trace.frames) || !Array.isArray(trace.logicalNodes)) {
     throw new Error('This file is not a trace-decoder JSON result: frames and logicalNodes are missing.');
   }
@@ -31,12 +32,16 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
   const outgoingByFrame = new Map((trace.outgoing || []).map(o => [o.frameId, o]));
   const incomingByFrame = new Map((trace.incoming || []).map(i => [i.frameId, i]));
   const nodes = [], seen = new Set();
+  const exactLink = (trace.transactionLinks || []).find(l => l.state === 'complete' &&
+    `${l.sourceChain}:${l.sourceHash}` === trace.origin?.transactionId);
+  const physical = !!exactLink && mode === 'physical';
+  const prepared = new Set((trace.outgoing || []).filter(isPreparedResult).map(o => o.frameId));
 
   function crossing(out) {
     const proxy = frames.get(out.frameId), incoming = out.remoteFrameId ? incomingByFrame.get(out.remoteFrameId) : null;
     const remoteChain = out.chain === 'L1' ? 'L2' : 'L1';
     return {
-      from: out.chain, to: remoteChain, status: out.status || 'unresolved', isStatic: !!out.isStatic, value: String(out.value ?? '0'),
+      from: out.chain, to: remoteChain, status: prepared.has(out.frameId) ? 'prepared-result' : out.status || 'unresolved', isStatic: !!out.isStatic, value: String(out.value ?? '0'),
       sourceAddress: out.sourceAddress, targetAddress: out.targetAddress,
       sourceRollupId: out.sourceRollupId ?? null, targetRollupId: out.targetRollupId ?? null,
       localProxy: proxy?.to ?? null, managerFrameId: out.managerFrameId ?? null,
@@ -54,6 +59,7 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     let role = ln?.role || frame.role || 'application', contract = d.contractName || 'Unknown contract';
     // Proxy deployment by a manager is delivery plumbing, like the proxies themselves.
     if (frame.type?.startsWith('CREATE') && lower(frame.from) === lower(managers[frame.chain])) role = 'proxy-creation';
+    if (role === 'system-value-transfer') contract = 'L2 system';
     // Precompiles sit at 0x01–0x0a and never make calls of their own.
     const precompile = /^0x0{38}(0[1-9a])$/i.exec(frame.to || '');
     if (contract === 'Unknown contract' && precompile && !(ln?.children || frame.children || []).length) contract = `Precompile · ${PRECOMPILES[parseInt(precompile[1], 16) - 1]}`;
@@ -61,8 +67,9 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
       kind: 'call', frameId: frame.id, chain: frame.chain, role,
       protocol: PROTOCOL_ROLES.has(role) || role === 'proxy-creation', callType: frame.type || 'CALL',
       contract, address: frame.to ?? null, from: frame.from ?? null,
-      fn: functionName(d, frame), signature: d.signature || null, args: (d.arguments || []).map(argument),
+      fn: role === 'system-value-transfer' ? 'Value to L2 system' : functionName(d, frame), signature: d.signature || null, args: (d.arguments || []).map(argument),
       ret: returnInfo(d, frame), value: String(frame.value ?? '0'), isStatic: !!frame.isStatic,
+      crossChainRead: !!frame.isStatic && (outgoingByFrame.has(frame.id) || incomingByFrame.has(frame.id)),
       failed: !!frame.error, reverted: !!frame.reverted, gasUsed: toDecimal(frame.gasUsed),
       tx: frame.transactionHash, block: frame.blockNumber ?? null, path: frame.path,
       abiSource: d.provenance?.source || null, abiProvider: d.provenance?.provider || null,
@@ -93,7 +100,9 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     if (out) {
       const info = crossing(out);
       node.outgoing = info;
-      if (out.remoteFrameId && children.includes(out.remoteFrameId)) {
+      if (prepared.has(id)) {
+        node.preparedResult = true; node.protocol = false;
+      } else if (out.status === 'matched' && out.remoteFrameId && children.includes(out.remoteFrameId)) {
         node.remoteChild = out.remoteFrameId;
       } else {
         // No observed remote execution: show the requested call as a ghost. The
@@ -123,7 +132,7 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
       const v = visit(c);
       if (v == null) continue;
       node.children.push(v);
-      if (out && c === out.remoteFrameId) nodes[v].crossing = node.outgoing;
+      if (out?.status === 'matched' && c === out.remoteFrameId) nodes[v].crossing = node.outgoing;
     }
     return index;
   }
@@ -137,26 +146,85 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
     requested: `${tx.chain}:${tx.hash}` === originTx,
   }));
   const scope = classifyTransactions(trace, transactions, frames);
+  const isolated = physical && exactLink.l1Execution?.frameId && frames.has(exactLink.l1Execution.frameId) ? exactLink.l1Execution : null;
+  const unisolatedL1 = physical && exactLink.sourceChain === 'L2' && !isolated;
+  const physicalRoots = [];
+  if (physical) {
+    scope.roots.clear(); scope.frames.clear();
+    if (isolated) physicalRoots.push(isolated.frameId);
+    for (const r of exactLink.references) {
+      // The complete posting trace is retained in JSON. The diagram uses only
+      // the source's isolated entry, rather than the other entries in that post.
+      if (isolated && r.chain === 'L1') continue;
+      const id = `${r.chain}:${r.hash}:0`;
+      if (frames.has(id) && !physicalRoots.includes(id)) physicalRoots.push(id);
+      if (frames.has(id) && (r.role === 'source' || r.role === 'l2-delivery')) scope.roots.add(id);
+    }
+    if (isolated) scope.roots.add(isolated.frameId);
+    const collect = id => { if (scope.frames.has(id)) return; scope.frames.add(id); for (const c of frames.get(id)?.children || []) collect(c); };
+    for (const id of scope.roots) collect(id);
+  }
+  function visitPhysical(id) {
+    const frame = frames.get(id);
+    if (!frame || seen.has(id)) return null;
+    seen.add(id);
+    const node = describe(frame, null), index = add(node), out = outgoingByFrame.get(id);
+    if (out) {
+      node.outgoing = crossing(out); // Metadata only; never graft a guessed remote subtree.
+      node.protocol = false; // Keep the actual proxy request and its returned result visible.
+      node.preparedResult = prepared.has(id);
+      node.preparedResponse = out.chain === 'L2' && !!out.generationId;
+      node.remoteChain = out.chain === 'L1' ? 'L2' : 'L1';
+      node.remoteAddress = out.targetAddress;
+      const remote = out.remoteCall;
+      if (remote?.functionName) {
+        node.fn = functionName(remote, frame); node.signature = remote.signature;
+        node.args = (remote.arguments || []).map(argument);
+        // Return labels must describe this local frame, regardless of any remote association.
+        const response = out.localResponse || (remote.rawOutput === frame.output ? remote : null);
+        if (response) node.ret = returnInfo(response, frame);
+      }
+      node.contract = remote?.contractName && remote.contractName !== 'Unknown contract' ? `${remote.contractName} proxy` : 'Cross-chain proxy';
+    }
+    for (const child of frame.children || []) {
+      const n = visitPhysical(child);
+      if (n != null) node.children.push(n);
+    }
+    return index;
+  }
   // Triggers first: they start the flow. Then settlement, system transactions, the rest.
   const rank = { trigger: 0, settlement: 1, 'table-load': 2, delivery: 3, related: 4, other: 5 };
   const txOf = id => transactions.find(t => id.startsWith(`${t.chain}:${t.hash}:`));
-  const rootIds = [...(trace.logicalRoots || [])].sort((a, b) => {
+  const rootIds = [...(physical ? physicalRoots : trace.logicalRoots || [])].sort((a, b) => {
     const x = txOf(a), y = txOf(b);
+    if (isolated && (a === isolated.frameId || b === isolated.frameId)) return a === isolated.frameId ? -1 : 1;
     return Number(scope.roots.has(b)) - Number(scope.roots.has(a)) || (rank[x?.role] ?? 9) - (rank[y?.role] ?? 9) || Number(x?.block ?? 0) - Number(y?.block ?? 0) || Number(x?.index ?? 0) - Number(y?.index ?? 0);
   });
   const roots = [];
   for (const id of rootIds) {
-    const frame = frames.get(id), n = visit(id);
+    const frame = frames.get(id), n = physical ? visitPhysical(id) : visit(id);
     if (n == null) continue;
     const tx = txOf(id);
     roots.push({ node: n, chain: frame.chain, tx: frame.transactionHash, block: frame.blockNumber ?? null, from: frame.from,
-      inFlow: scope.roots.has(id), isOrigin: !!tx?.requested, relatedSettlement: !!tx?.relatedSettlement, role: tx?.role || 'other', label: tx?.label || 'Transaction' });
+      inFlow: scope.roots.has(id), isOrigin: !!tx?.requested, relatedSettlement: !!tx?.relatedSettlement, role: id === isolated?.frameId ? 'execution' : tx?.role || 'other',
+      unisolatedEntry: !!unisolatedL1 && frame.chain === 'L1',
+      preferred: id === isolated?.frameId, entryIndex: id === isolated?.frameId ? isolated.entryIndex : null,
+      label: id === isolated?.frameId ? `L1 execution · entry ${isolated.entryIndex}` : tx?.label || 'Transaction' });
   }
   transactions.sort((a, b) => Number(b.inFlow === true || b.requested) - Number(a.inFlow === true || a.requested) || (rank[a.role] ?? 9) - (rank[b.role] ?? 9) || Number(a.block ?? 0) - Number(b.block ?? 0) || Number(a.index ?? 0) - Number(b.index ?? 0));
 
   for (const node of nodes) node.inFlow = scope.frames.has(node.frameId || node.crossing?.managerFrameId);
   const chainIds = trace.metadata?.chainIds || {};
+  const relevantIssues = (trace.unresolved || []).filter(u => (!u.frameId || scope.frames.has(u.frameId)) &&
+    !(prepared.has(u.frameId) && u.code === 'remote-execution-unavailable'));
+  const associationCodes = new Set(['ambiguous-remote-occurrence', 'remote-execution-unavailable']);
+  const optionalAssociation = u => associationCodes.has(u.code) && !outgoingByFrame.get(u.frameId)?.rejectedCandidates?.length;
+  const matchingNotes = physical ? relevantIssues.filter(optionalAssociation) : [];
+  const unresolved = relevantIssues.filter(u => !physical || !optionalAssociation(u));
   return {
+    mode: physical ? 'physical' : 'combined',
+    recordedView: exactLink && !physical ? buildFlowModel(trace, { label, explorers, mode: 'physical' }) : null,
+    executionNotice: unisolatedL1 ? 'The L1 entry for this L2 transaction could not be isolated. Select the settlement batch to inspect its full trace; it may include other transactions. A combined recorded view is unavailable.' : null,
     version: FLOW_MODEL_VERSION, schemaVersion: trace.schemaVersion || null,
     label: label || defaultLabel(nodes, roots, trace), txHash: trace.txHash || null,
     origin: trace.origin || null,
@@ -166,9 +234,11 @@ export function buildFlowModel(trace, { label, explorers = {} } = {}) {
       explorer: explorerSite(explorers[c]) || EXPLORER_SITES[chainIds[c]] || null,
     }])),
     settlements: (trace.settlements || []).map(s => ({ id: s.id, l1Tx: s.l1TransactionHash, l1Block: s.l1BlockNumber ?? null, firstL2Block: s.firstL2Block ?? null, lastL2Block: s.lastL2Block ?? null })),
+    stateObservations: trace.metadata?.stateObservations || [],
     transactions, roots, nodes,
-    unresolved: (trace.unresolved || []).filter(u => !u.frameId || scope.frames.has(u.frameId)).map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
-    stats: { frames: scope.frames.size, crossings: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId)).length, matched: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId) && o.status === 'matched').length, events: (trace.events || []).filter(e => scope.frames.has(e.frameId)).length },
+    matchingNotes: matchingNotes.map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
+    unresolved: unresolved.map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
+    stats: { frames: scope.frames.size, preparedResponses: nodes.filter(n => n.preparedResponse && scope.frames.has(n.frameId)).length, preparedResults: [...prepared].filter(id => scope.frames.has(id)).length, crossings: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId)).length, matched: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId) && o.status === 'matched').length, events: (trace.events || []).filter(e => scope.frames.has(e.frameId)).length },
   };
 }
 

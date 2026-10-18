@@ -55,6 +55,9 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
         if (!explicit) {
           if (config[key] && !same(config[key], value)) report('stale-manager-replaced', `${chain} environment manager replaced by composer discovery`);
           config[key] = value;
+        } else if (!same(config[key], value)) {
+          report('pinned-manager-mismatch', `${chain} pinned manager ${config[key]} differs from Composer ${value}; keeping the pin. Check it when decoding transactions after a redeployment.`,
+            { chain, pinnedManager: config[key], composerManager: value });
         }
       }
     }
@@ -143,35 +146,44 @@ export async function decodeCrossChainTrace(inputConfig, txHash) {
     unresolvedReason('invalid-transaction-links', e.message);
   }
   const legacyDiscovery = linkDiscovery.state === 'fallback';
-  let correlation = null;
-  if (legacyDiscovery && !config.noCorrelation) for (const [name, url] of [['override', config.correlationRpc], ['L2_FRONT', config.l2Front], ['L1_FRONT', config.l1Front], ['L2_RPC', config.l2Rpc]].filter(([,url], i, a) => url && a.findIndex(([,u]) => u === url) === i)) {
+  let correlation = null, correlationRaw = null, correlationAnswered = false;
+  const transportFailures = [];
+  const method = origin.chain === 'L2' ? 'eez_getSettlementByL2Block' : 'eez_getSettledL2RangesByL1Block';
+  const sourceFront = origin.chain === 'L1' ? ['L1_FRONT', config.l1Front] : ['L2_FRONT', config.l2Front];
+  const otherFront = origin.chain === 'L1' ? ['L2_FRONT', config.l2Front] : ['L1_FRONT', config.l1Front];
+  if (legacyDiscovery && !config.noCorrelation) for (const [name, url] of [['override', config.correlationRpc], sourceFront, otherFront, ['L2_RPC', config.l2Rpc]].filter(([,url], i, a) => url && a.findIndex(([,u]) => u === url) === i)) {
     try {
-      const [l2, l1] = await Promise.all([
-        rpc(url, 'eez_getSettlementByL2Block', ['0x1']), rpc(url, 'eez_getSettledL2RangesByL1Block', ['0x1']),
-      ]);
-      if ((l2 !== null && typeof l2 !== 'object') || !Array.isArray(l1)) throw new Error('Unrecognized settlement capability response');
-      correlation = { name, url }; break;
-    } catch (e) { report('correlation-candidate-unavailable', `${name}: ${e.message}`); }
+      // Probe the method needed for this origin using its real receipt block.
+      // The two lookup methods may be served by different fronts.
+      correlationRaw = await rpc(url, method, [{ blockHash: origin.blockHash }]);
+      if (origin.chain === 'L1' ? !Array.isArray(correlationRaw) : correlationRaw !== null && (typeof correlationRaw !== 'object' || Array.isArray(correlationRaw))) {
+        throw Object.assign(new Error('Unrecognized settlement capability response'), { invalidResponse: true });
+      }
+      correlation = { name, url }; correlationAnswered = true; break;
+    } catch (e) {
+      if (e.code === -32601) { report('correlation-candidate-unavailable', `${name}: ${e.message}`); continue; }
+      // Retry transport failures against another endpoint with the same block
+      // hash. They never authorize a timestamp scan if every endpoint fails.
+      correlationAnswered = true;
+      if (!e.invalidResponse && (e.transport || e.code == null || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT'].includes(e.code))) {
+        transportFailures.push(`${name}: ${e.message}`);
+        report('correlation-transport-retry', `${name}: ${e.message}; trying the next endpoint`); continue;
+      }
+      unresolvedReason('correlation-lookup-failed', `${name}: ${e.message}`); break;
+    }
+  }
+  if (!correlation && transportFailures.length && !unresolved.some(u => u.code === 'correlation-lookup-failed')) {
+    unresolvedReason('correlation-lookup-failed', transportFailures.join('; '));
   }
   const settlements = [];
-  let correlationAnswered = false;
   if (correlation) {
-    // A supported endpoint failing or still indexing must not silently turn into
-    // an unrelated timestamp scan. Pin the lookup to the observed inclusion, as E2E does.
-    correlationAnswered = true;
-    const method = origin.chain === 'L2' ? 'eez_getSettlementByL2Block' : 'eez_getSettledL2RangesByL1Block';
-    try {
-      const raw = await rpc(correlation.url, method, [{ blockHash: origin.blockHash }]);
-      if (origin.chain === 'L1' && !Array.isArray(raw)) throw new Error('Unrecognized settlement range response');
-      const items = origin.chain === 'L2' ? (raw == null ? [] : [raw]) : raw;
-      correlationAnswered = true;
-      for (const item of items) try {
-        report('settlement-validation', `Validating ${item.l2Blocks?.length ?? 'range boundary'} L2 block hashes in batches`);
-        const s = await validateSettlement(item, readers, { [origin.chain]: origin.blockNumber, blockHash: origin.blockHash });
-        if (!settlements.some(x => x.id === s.id)) settlements.push(s);
-      } catch (e) { unresolvedReason('invalid-settlement', e.message, { settlement: item }); }
-      if (!items.length) unresolvedReason('settlement-not-found', 'No settled range is currently recorded for this block');
-    } catch (e) { unresolvedReason('correlation-lookup-failed', e.message); }
+    const items = origin.chain === 'L2' ? (correlationRaw == null ? [] : [correlationRaw]) : correlationRaw;
+    for (const item of items) try {
+      report('settlement-validation', `Validating ${item.l2Blocks?.length ?? 'range boundary'} L2 block hashes in batches`);
+      const s = await validateSettlement(item, readers, { [origin.chain]: origin.blockNumber, blockHash: origin.blockHash });
+      if (!settlements.some(x => x.id === s.id)) settlements.push(s);
+    } catch (e) { unresolvedReason('invalid-settlement', e.message, { settlement: item }); }
+    if (!items.length) unresolvedReason('settlement-not-found', 'No settled range is currently recorded for this block');
   }
   const search = [], scanned = new Set();
   // Blocks can hold hundreds of unrelated transactions. Unless `thorough`, only those sent

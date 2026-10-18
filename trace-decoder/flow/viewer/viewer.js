@@ -15,7 +15,8 @@
   const VIEWS = (config.views || ALL_VIEWS).filter(v => ALL_VIEWS.includes(v));
   let M = null, current = -1;
   // returns: 'auto' draws dashed return arrows only on small maps.
-  // staticCalls: read-only (STATICCALL-context) calls are hidden unless ticked.
+  // staticCalls controls additional local reads; cross-chain reads stay visible.
+  let readVisibilityChosen = false, traceMode = 'combined';
   const opt = { protocol: false, voidReturns: false, returns: 'auto', staticCalls: false };
   let expanded = new Set(), selection = null, layout = null, step = -1, timer = null, matches = [], matchAt = -1;
 
@@ -25,11 +26,11 @@
   const crossesMemo = new Map();
   function crossesInside(id) {
     if (crossesMemo.has(id)) return crossesMemo.get(id);
-    const n = M.nodes[id], v = n.children.some(c => M.nodes[c].chain !== n.chain || crossesInside(c));
+    const n = M.nodes[id], v = n.children.some(c => M.nodes[c].crossChainRead || M.nodes[c].chain !== n.chain || crossesInside(c));
     crossesMemo.set(id, v);
     return v;
   }
-  const hiddenStatic = n => !opt.staticCalls && n.isStatic && !n.protocol;
+  const hiddenStatic = n => !opt.staticCalls && n.isStatic && !n.protocol && !n.crossChainRead && !n.crossing && !n.outgoing;
   function kids(id) {
     if (kidsMemo.has(id)) return kidsMemo.get(id);
     const out = [];
@@ -83,7 +84,7 @@
     if (typeof v === 'object') return `{${Object.entries(v).map(([k, x]) => `${k}: ${valueText(x)}`).join(', ')}}`;
     const s = String(v);
     if (/^0x[0-9a-f]{40}$/i.test(s)) return short(s);
-    if (/^0x[0-9a-f]{66,}$/i.test(s)) return `${s.slice(0, 10)}…(${(s.length - 2) / 2}B)`;
+    if (/^0x[0-9a-f]{66,}$/i.test(s)) return `${s.slice(0, 6)}…${s.slice(-8)} (${(s.length - 2) / 2}B)`;
     return group(s);
   }
   function returnText(n) {
@@ -159,8 +160,14 @@
   const isPlumbing = r => PLUMBING_ROLES.includes(r.role);
   const sectionOf = t => t.relatedSettlement ? 'settlement' : t.requested && t.role === 'other' ? 'flow'
     : t.inFlow === false ? 'other' : PLUMBING_ROLES.includes(t.role) ? 'plumbing' : 'flow';
-  const rootVisible = r => r.isOrigin || opt.protocol || r.relatedSettlement || !isPlumbing(r) || M.roots.every(isPlumbing);
+  const rootVisible = r => r.isOrigin || r.unisolatedEntry || opt.protocol || r.relatedSettlement || !isPlumbing(r) || M.roots.every(isPlumbing);
+  const BOTH_CHAINS = -2;
+  const linkedRoots = () => M.mode === 'physical' ? M.roots.filter(r => r.preferred || r.isOrigin || r.inFlow && r.role === 'delivery') : [];
+  const hasBothChains = () => new Set(linkedRoots().map(r => r.chain)).size > 1;
   function defaultRoot() {
+    if (hasBothChains()) return BOTH_CHAINS;
+    const preferred = M.roots.findIndex(r => r.preferred);
+    if (preferred >= 0) return preferred;
     // The trigger starts the flow; the requested transaction may be its settlement instead.
     const requested = M.roots.findIndex(r => r.isOrigin && !isPlumbing(r));
     if (requested >= 0) return requested;
@@ -178,22 +185,32 @@
     const missing = M.origin && !M.roots.some(r => r.isOrigin);
     const shown = M.roots[rootIndex], trigger = M.transactions.find(t => t.inFlow === true && t.role === 'trigger');
     let note = '';
-    if (missing) note = `<b>The requested ${esc(M.origin.chain)} transaction could not be traced</b> (${esc(originTx?.traceReason || 'no call trace')}), so its own calls cannot be drawn. ${shown ? 'Showing a related transaction found through the settlement; pick another below.' : 'No related transaction was traced either.'} An archive RPC (<code>--l1-trace-rpc</code> / <code>--l2-trace-rpc</code>) usually fixes this.`;
+    if (rootIndex === BOTH_CHAINS) {
+      const entry = M.roots.find(r => r.preferred);
+      note = entry ? `Both chains for your L2 transaction. <b>L2</b> makes the requests and receives prepared responses from its loaded table. <b>L1 entry ${esc(entry.entryIndex)}</b> records the calls against the remote contracts. Each tree keeps its own recorded order; this is not a shared timeline.`
+        : 'Both chains for your transaction. The L1 source and its linked L2 deliveries are shown in their own recorded order. Prepared lookups without a delivery stay on L1.';
+    }
+    else if (shown?.preferred) note = `Showing the recorded L1 execution for your L2 transaction: entry ${esc(shown.entryIndex)}. Calls remain in trace order, including reads and reverted calls. Select the source transaction below to inspect its L2 trace.`;
+    else if (missing) note = `<b>The requested ${esc(M.origin.chain)} transaction could not be traced</b> (${esc(originTx?.traceReason || 'no call trace')}), so its own calls cannot be drawn. ${shown ? 'Showing a related transaction found through the settlement; pick another below.' : 'No related transaction was traced either.'} An archive RPC (<code>--l1-trace-rpc</code> / <code>--l2-trace-rpc</code>) usually fixes this.`;
     else if (originTx && shown && !shown.isOrigin && trigger) note = `<b>You asked for the ${esc(originTx.label.toLowerCase())}</b> on ${esc(originTx.chain)} (${esc(short(originTx.hash))}). The flow starts in the <b>trigger transaction on ${esc(trigger.chain)}</b> (${esc(short(trigger.hash))}), shown here. ${trigger.evidence.length ? `Evidence: ${esc(trigger.evidence.join('; '))}.` : ''}`;
     else if (originTx?.role === 'other' && M.roots.some(r => r.relatedSettlement)) note = shown?.relatedSettlement
       ? 'Showing the L1 batch that settles the requested L2 transaction. No cross-chain call was observed in that L2 transaction.'
       : 'No cross-chain calls were observed in this transaction. Choose the L1 settlement below to inspect the batch that includes it.';
+    if (M.executionNotice) note += `${note ? '<br>' : ''}${esc(M.executionNotice)}`;
     $('notice').hidden = !note;
     $('notice').innerHTML = note;
-    $('root-wrap').hidden = M.roots.filter(rootVisible).length < 2 && !missing;
+    $('root-wrap').hidden = !hasBothChains() && M.roots.filter(rootVisible).length < 2 && !missing;
     const opt = (r, i) => `<option value="${i}">${esc(r.label)}${r.isOrigin ? ' (requested)' : ''} · ${r.chain} · ${esc(short(r.tx))} · ${appCalls(r)} calls</option>`;
     const listed = M.roots.map((r, i) => [r, i]).filter(([r]) => rootVisible(r));
     const groups = [['flow', 'This flow'], ['settlement', 'L1 settlement'], ['plumbing', 'EEZ plumbing'], ['other', 'Not part of this flow']];
-    $('root-select').innerHTML = groups.map(([key, title]) => {
-      const rows = listed.filter(([r]) => sectionOf(txOfRoot(r) || { role: r.role }) === key);
+    $('root-select').innerHTML = (hasBothChains() ? `<option value="${BOTH_CHAINS}">Both chains · linked execution</option>` : '') + groups.map(([key, title]) => {
+      const rows = listed.filter(([r]) => (r.role === 'execution' ? 'flow' : sectionOf(txOfRoot(r) || { role: r.role })) === key);
       return rows.length ? `<optgroup label="${title}">${rows.map(([r, i]) => opt(r, i)).join('')}</optgroup>` : '';
     }).join('');
     $('root-select').value = String(rootIndex);
+    const snapshots = M.stateObservations || [];
+    $('state-summary').hidden = !snapshots.length;
+    $('state-summary').innerHTML = snapshots.map(s => `<div><b>${esc(s.chain)} · ${esc(s.contractName || short(s.address))}</b><span>${(s.values || []).map(v => `${esc(v.name)} = <b>${esc(v.value)}</b>`).join(' · ')}</span><small>Observed after block ${esc(s.blockNumber)}</small></div>`).join('');
   }
   const PALETTE = 10;
   const contractTag = i => i < 26 ? String.fromCharCode(65 + i) : String.fromCharCode(65 + Math.floor(i / 26) - 1) + String.fromCharCode(65 + (i % 26));
@@ -208,6 +225,7 @@
     if (!root) return { boxes: [], edges: [], seq, callerOf, roots };
     const add = (key, init) => { if (!boxes.has(key)) boxes.set(key, { key, order: boxes.size, fns: [], ...init }); return boxes.get(key); };
     let num = 0;
+    const chainNumbers = { L1: 0, L2: 0 };
     function walk(id, from, depth) {
       const n = M.nodes[id], key = `${n.chain}:${String(n.impl?.address || n.address || 'create').toLowerCase()}`;
       const b = add(key, { kind: n.kind === 'ghost' ? 'ghost' : n.protocol ? 'proto' : 'contract', chain: n.chain, name: nameOf(n), address: n.impl?.address || n.address, depth });
@@ -215,16 +233,16 @@
       if (!b.fns.includes(fn)) b.fns.push(fn);
       const ek = `${from}>${key}`;
       if (!edges.has(ek)) edges.set(ek, { key: ek, from, to: key, calls: [] });
-      const call = { id, num: ++num, edge: ek };
+      const call = { id, num: M.mode === 'physical' && rootIndex === BOTH_CHAINS ? ++chainNumbers[n.chain] : ++num, edge: ek };
       edges.get(ek).calls.push(call); callerOf.set(id, from);
       seq.push({ type: 'call', ...call });
       for (const c of kids(id)) walk(c, key, depth + 1);
       seq.push({ type: 'return', ...call });
     }
-    // One sender per transaction shown; numbering continues across transactions.
+    // One sender per transaction; recorded chains have independent call numbering.
     roots.forEach((r, i) => {
       const key = `eoa:${i}`;
-      add(key, { kind: 'eoa', chain: r.chain, name: 'Transaction sender', address: r.from, depth: 1 });
+      add(key, { kind: 'eoa', chain: r.chain, name: r.preferred ? 'Entry caller' : 'Transaction sender', address: r.from, depth: 1 });
       for (const t of topItems(r)) walk(t, key, 1);
     });
     // Contract identity shared by every view: a letter and a colour, in first-call order.
@@ -236,6 +254,7 @@
   const txOfRoot = r => r && M.transactions.find(t => t.hash === r.tx && t.chain === r.chain);
   // The views draw one transaction: the one selected in the transaction list.
   function shownRoots() {
+    if (rootIndex === BOTH_CHAINS) return linkedRoots();
     const cur = currentRoot();
     return cur ? [cur] : [];
   }
@@ -461,10 +480,14 @@
       }
       return reach;
     }
-    const root = roots[0], sender = { id: 'eoa:0', root, parent: null, col: 0, chain: root.chain, kidsN: 1 };
-    place(sender, {});
-    let pref = { [root.chain]: 0 };
-    for (const t of topItems(root)) { const sub = visit(t, 1, pref, sender); for (const [b, row] of Object.entries(sub)) pref[b] = row + 1; }
+    const nextRootRow = {};
+    for (const [i, root] of roots.entries()) {
+      const sender = { id: `eoa:${i}`, root, parent: null, col: 0, chain: root.chain, kidsN: 1 };
+      place(sender, nextRootRow);
+      const pref = { ...nextRootRow, [root.chain]: sender.row };
+      for (const t of topItems(root)) { const sub = visit(t, 1, pref, sender); for (const [b, row] of Object.entries(sub)) pref[b] = row + 1; }
+      for (const [chain, row] of Object.entries(pref)) nextRootRow[chain] = Math.max(nextRootRow[chain] || 0, row);
+    }
 
     // One trunk lane per parent inside the corridor to the right of its column.
     const nCols = Math.max(...items.map(i => i.col)) + 1, lanesIn = Array(nCols).fill(0);
@@ -473,18 +496,38 @@
     const colX = [];
     let x = F.side;
     for (let c = 0; c < nCols; c++) { colX[c] = x; x += (c === 0 ? F.eoaW : F.w) + corr(c); }
-    const W = x - corr(nCols - 1) + F.side;
-    const bandsUsed = ['L1', 'L2'], rows = b => Math.max(1, ...items.filter(i => i.chain === b).map(i => i.row + 1));
-    const bandH = b => F.pad * 2 + rows(b) * F.h + (rows(b) - 1) * F.row, top = { L1: 0, L2: bandH('L1') };
     for (const it of items) {
-      const snd = isSender(it.id);
-      it.w = snd ? F.eoaW : F.w; it.h = snd ? F.eoaH : F.h;
-      it.x = colX[it.col]; it.y = top[it.chain] + F.pad + it.row * (F.h + F.row) + (F.h - it.h) / 2;
+      it.w = isSender(it.id) ? F.eoaW : F.w;
+      it.h = isSender(it.id) ? F.eoaH : it.n?.preparedResponse || it.n?.preparedResult ? 140 : F.h;
     }
-    const H = top.L2 + bandH('L2'), boundary = top.L2;
-    parts.push(`<div class="band l1" style="top:0;height:${bandH('L1')}px"></div><div class="band l2" style="top:${boundary}px;height:${bandH('L2')}px"></div>`);
-    for (const b of bandsUsed) parts.push(`<div class="band-label ${b.toLowerCase()}" style="top:${top[b] + 14}px">${b} · ${esc(M.chains[b].name)} <small>${M.chains[b].chainId ? 'chain ' + esc(M.chains[b].chainId) : ''}</small></div>`);
-    parts.push(`<div class="boundary" style="top:${boundary}px"><span>chain boundary · calls cross through EEZ proxies</span></div>`);
+    const rowHeights = {}, rowTops = {}, bandHeights = {};
+    for (const chain of ['L1', 'L2']) {
+      const heights = rowHeights[chain] = Array(Math.max(1, ...items.filter(i => i.chain === chain).map(i => i.row + 1))).fill(F.h);
+      for (const it of items.filter(i => i.chain === chain)) heights[it.row] = Math.max(heights[it.row], it.h);
+      let y = F.pad;
+      rowTops[chain] = heights.map(h => { const top = y; y += h + F.row; return top; });
+      bandHeights[chain] = y - F.row + F.pad;
+    }
+    const split = M.mode === 'physical' && rootIndex === BOTH_CHAINS;
+    const paneW = b => {
+      const last = Math.max(0, ...items.filter(i => i.chain === b).map(i => i.col));
+      return colX[last] + (last ? F.w : F.eoaW) + F.side;
+    };
+    const left = { L1: 0, L2: split ? paneW('L1') : 0 };
+    const W = split ? paneW('L1') + paneW('L2') : x - corr(nCols - 1) + F.side;
+    const bandsUsed = ['L1', 'L2'];
+    const bandH = b => bandHeights[b], top = { L1: 0, L2: split ? 0 : bandH('L1') };
+    for (const it of items) {
+      it.x = left[it.chain] + colX[it.col];
+      it.y = top[it.chain] + rowTops[it.chain][it.row] + (rowHeights[it.chain][it.row] - it.h) / 2;
+    }
+    const H = split ? Math.max(bandH('L1'), bandH('L2')) : top.L2 + bandH('L2'), boundary = top.L2;
+    for (const b of bandsUsed) {
+      parts.push(`<div class="band ${b.toLowerCase()}" style="left:${left[b]}px;top:${top[b]}px;width:${split ? paneW(b) : W}px;height:${split ? H : bandH(b)}px"></div>`);
+      parts.push(`<div class="band-label ${b.toLowerCase()}" style="left:${left[b] + 14}px;top:${top[b] + 14}px">${b} · ${esc(M.chains[b].name)} <small>${M.chains[b].chainId ? 'chain ' + esc(M.chains[b].chainId) : ''}</small></div>`);
+    }
+    if (split) parts.push(`<div style="position:absolute;left:${left.L2}px;top:0;height:${H}px;border-left:1px solid var(--line)"></div>`);
+    else parts.push(`<div class="boundary" style="top:${boundary}px"><span>${opt.protocol ? 'chain boundary · calls cross through EEZ proxies' : 'chain boundary'}</span></div>`);
 
     const selId = cur && ['node', 'return', 'cross'].includes(cur.kind) ? cur.id : null, tags = new Set();
     const byKeyF = new Map(G.boxes.map(b => [b.key, b]));
@@ -493,21 +536,21 @@
     for (const it of items) {
       if (isSender(it.id)) {
         const from = it.root.from || '';
-        parts.push(`<div class="box big eoa ${it.chain.toLowerCase()}" style="left:${it.x}px;top:${it.y}px;width:${it.w}px;height:${it.h}px" title="${esc(from)}"><span class="b-name">${['table-load', 'delivery', 'settlement'].includes(it.root.role) ? 'EEZ sender' : 'Transaction sender'}</span><span class="b-addr">${esc(short(from))}</span></div>`);
+        parts.push(`<div class="box big eoa ${it.chain.toLowerCase()}" style="left:${it.x}px;top:${it.y}px;width:${it.w}px;height:${it.h}px" title="${esc(from)}"><span class="b-name">${it.root.preferred ? 'L1 entry caller' : ['table-load', 'delivery', 'settlement'].includes(it.root.role) ? 'EEZ sender' : 'Transaction sender'}</span><span class="b-addr">${esc(short(from))}</span></div>`);
         continue;
       }
       const n = it.n, c = it.chain.toLowerCase(), num = numOf.get(it.id), sel = selId === it.id;
       const cb = byKeyF.get(boxKeyOf(n)), nth = cb ? cb.calls.findIndex(x => x.id === it.id) + 1 : 0, total = cb ? cb.calls.length : 0;
       const ret = n.ret.status === 'void' ? '' : `<span class="b-ret${n.ret.status === 'revert' ? ' bad' : ''}">→ ${esc(returnText(n))}</span>`;
-      const kick = `<span class="b-kick"><span class="num">${num}</span>${tagHtml(cb)}${it.chain}${n.kind === 'ghost' ? ' · not observed' : n.protocol ? ' · EEZ' : ''}${n.isStatic ? ' · view' : ''}${total > 1 ? `<span class="nth" title="Call ${nth} of ${total} to this contract">${nth}/${total}</span>` : ''}</span>`;
+      const kick = `<span class="b-kick"><span class="num">${num}</span>${tagHtml(cb)}${it.chain}${n.kind === 'ghost' ? ' · not observed' : n.protocol ? ' · EEZ' : ''}${n.isStatic ? ' · read' : ''}${total > 1 ? `<span class="nth" title="Call ${nth} of ${total} to this contract">${nth}/${total}</span>` : ''}</span>`;
       const same = selCid != null && cb && cb.cid === selCid && !sel ? ' same' : '';
-      parts.push(`<button type="button" class="box big flow tagged ${c}${n.kind === 'ghost' ? ' ghost' : ''}${n.protocol ? ' proto' : ''}${n.failed ? ' failed' : ''}${sel ? ' sel' : ''}${same}${matches.includes(it.id) ? ' hit' : ''}" data-node="${it.id}" data-cid="${cb?.cid ?? ''}" style="left:${it.x}px;top:${it.y}px;width:${it.w}px;height:${it.h}px;${cb ? cidStyle(cb.cid) : ''}" title="${esc(`${num}. ${nameOf(n)}.${argsText(n)}${ret ? ' → ' + returnText(n) : ''}${total > 1 ? ` · call ${nth} of ${total} to ${nameOf(n)}` : ''}`)}">${kick}<span class="b-name">${esc(nameOf(n))}</span><span class="b-fns">${esc(argsText(n))}</span>${ret}</button>`);
+      parts.push(`<button type="button" class="box big flow tagged ${c}${n.kind === 'ghost' ? ' ghost' : ''}${n.protocol ? ' proto' : ''}${n.failed ? ' failed' : ''}${sel ? ' sel' : ''}${same}${matches.includes(it.id) ? ' hit' : ''}" data-node="${it.id}" data-cid="${cb?.cid ?? ''}" style="left:${it.x}px;top:${it.y}px;width:${it.w}px;height:${it.h}px;${cb ? cidStyle(cb.cid) : ''}" title="${esc(`${num}. ${nameOf(n)}.${argsText(n)}${ret ? ' → ' + returnText(n) : ''}${total > 1 ? ` · call ${nth} of ${total} to ${nameOf(n)}` : ''}`)}">${kick}<span class="b-name">${esc(nameOf(n))}</span><span class="b-fns">${esc(argsText(n))}</span>${n.preparedResponse ? '<span class="b-response">Prepared L2 table response</span>' : n.preparedResult ? '<span class="b-response">Prepared result · no L2 delivery</span>' : ''}${ret}</button>`);
       if (it.kidsN) parts.push(`<button type="button" class="fold ${c}" data-ffold="${it.id}" style="left:${it.x + it.w - 34}px;top:${it.y + it.h - 30}px" aria-expanded="${!it.folded}" title="${it.folded ? 'Show the calls it makes' : 'Fold the calls it makes'}">${it.folded ? `+${subtreeSize(it.id)}` : '−'}</button>`);
       // Arrow from the caller's trunk into this box.
-      const p = it.parent, lx = colX[p.col] + p.w + 18 + p.lane * 7, py = p.y + p.h / 2, cy = it.y + it.h / 2;
+      const p = it.parent, lx = p.x + p.w + 18 + p.lane * 7, py = p.y + p.h / 2, cy = it.y + it.h / 2;
       const cross = !isSender(p.id) && p.chain !== it.chain, cls = cross ? 'cross' : c;
       svg.push(`<path class="edge ${cls}${sel ? ' hot' : ''}" d="${roundPath([[p.x + p.w, py], [lx, py], [lx, cy], [it.x - 2, cy]])}" marker-end="url(#g-call-${cls})"/>`);
-      if (cross && !tags.has(lx)) { tags.add(lx); parts.push(`<button type="button" class="eez" data-cross="${it.id}" style="left:${lx}px;top:${boundary}px" title="How this call crosses chains">EEZ</button>`); }
+      if (opt.protocol && cross && !tags.has(lx)) { tags.add(lx); parts.push(`<button type="button" class="eez" data-cross="${it.id}" style="left:${lx}px;top:${boundary}px" title="How this call crosses chains">EEZ</button>`); }
     }
     const defs = `<defs>${[['call-l1', 'l1'], ['call-l2', 'l2'], ['call-cross', 'ink']].map(([id, k]) => `<marker id="g-${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 9 5 1 9" style="fill:none;stroke:var(--${k});stroke-width:1.8"/></marker>`).join('')}</defs>`;
     fitGraph(W, H);
@@ -569,16 +612,18 @@
     for (const b of groups.L2) { b.w = PW; b.h = PH; b.x = x; b.y = TOPY; x += PW + PG; }
     const W = Math.max(x - PG + LEFT, divider + 200), life = new Map(G.boxes.map(b => [b.key, b.x + b.w / 2]));
     const rows = [], open = new Map();
-    let y = TOPY + PH + 40;
+    const nextY = { all: TOPY + PH + 40, L1: TOPY + PH + 40, L2: TOPY + PH + 40 };
+    const split = M.mode === 'physical' && rootIndex === BOTH_CHAINS;
     for (const s of G.seq) {
       const n = M.nodes[s.id], from = G.callerOf.get(s.id), to = `${n.chain}:${String(n.impl?.address || n.address || 'create').toLowerCase()}`;
       const cross = !isSender(from) && G.boxes.find(b => b.key === from)?.chain !== n.chain;
-      if (s.type === 'call') { rows.push({ s, from, to, y, cross }); open.set(s.id, { to, y }); y += ROW; continue; }
+      const band = split ? n.chain : 'all', y = nextY[band];
+      if (s.type === 'call') { rows.push({ s, from, to, y, cross }); open.set(s.id, { to, y }); nextY[band] += ROW; continue; }
       const show = n.ret.status !== 'void' || opt.voidReturns;
       const start = open.get(s.id);
-      if (show && !isSender(from)) { rows.push({ s, from: to, to: from, y, cross }); start.end = y; y += ROW; } else start.end = y - ROW / 2;
+      if (show && !isSender(from)) { rows.push({ s, from: to, to: from, y, cross }); start.end = y; nextY[band] += ROW; } else start.end = y - ROW / 2;
     }
-    const H = y + 30;
+    const H = Math.max(...Object.values(nextY)) + 30;
     parts.push(`<div class="band l1" style="top:0;bottom:0;left:0;right:auto;width:${divider}px"></div><div class="band l2" style="top:0;bottom:0;left:${divider}px;right:auto;width:${W - divider}px"></div>`);
     parts.push(`<div class="band-label l1" style="top:16px">L1 · ${esc(M.chains.L1.name)}</div><div class="band-label l2" style="top:16px;left:${divider + 18}px">L2 · ${esc(M.chains.L2.name)}</div>`);
     parts.push(`<div class="divider" style="left:${divider}px"></div>`);
@@ -604,7 +649,7 @@
       const sel = hot && (isCall ? cur.kind !== 'return' : cur.kind === 'return') ? ' sel' : '';
       const text = isCall ? esc(argsText(n)) : `↩ ${esc(returnText(n))}`;
       parts.push(`<button type="button" class="lbl seq${isCall ? '' : ' ret'}${bad ? ' bad' : ''}${sel}${dim}" ${isCall ? `data-node="${r.s.id}"` : `data-ret="${r.s.id}"`} style="left:${lx}px;top:${r.y - 4}px${x1 === x2 ? ';transform:translate(0,-100%)' : ''}" title="${esc(`${r.s.num}. ${isCall ? nameOf(n) + '.' + argsText(n) : 'returns ' + returnText(n)}`)}"><span class="num">${r.s.num}</span>${text}</button>`);
-      if (isCall && r.cross) parts.push(`<button type="button" class="eez${dim}" data-cross="${r.s.id}" style="left:${divider}px;top:${r.y}px" title="How this call crosses chains">EEZ</button>`);
+      if (opt.protocol && isCall && r.cross) parts.push(`<button type="button" class="eez${dim}" data-cross="${r.s.id}" style="left:${divider}px;top:${r.y}px" title="How this call crosses chains">EEZ</button>`);
     }
     const defs = `<defs>${[['call-l1', 'l1'], ['call-l2', 'l2'], ['call-cross', 'ink'], ['ret', 'ret'], ['bad', 'bad']].map(([id, c]) => `<marker id="g-${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 9 5 1 9" style="fill:none;stroke:var(--${c});stroke-width:1.8"/></marker>`).join('')}</defs>`;
     fitGraph(W, H);
@@ -620,11 +665,11 @@
     if (geo.orient === 'columns') {
       parts.push(`<div class="band l1" style="top:0;bottom:0;left:0;right:auto;width:${geo.divider}px"></div><div class="band l2" style="top:0;bottom:0;left:${geo.divider}px;right:auto;width:${geo.W - geo.divider}px"></div>`);
       parts.push(chainLabel('L1', 'top:16px') + chainLabel('L2', `top:16px;left:${geo.divider + 18}px`));
-      parts.push(`<div class="divider" style="left:${geo.divider}px"><span>chain boundary · calls cross through EEZ proxies</span></div>`);
+      parts.push(`<div class="divider" style="left:${geo.divider}px"><span>${opt.protocol ? 'chain boundary · calls cross through EEZ proxies' : 'chain boundary'}</span></div>`);
     } else {
       parts.push(`<div class="band l1" style="top:0;height:${geo.bandH.L1}px"></div><div class="band l2" style="top:${geo.boundary}px;height:${geo.bandH.L2}px"></div>`);
       parts.push(chainLabel('L1', 'top:12px') + chainLabel('L2', `top:${geo.boundary + 12}px`));
-      parts.push(`<div class="boundary" style="top:${geo.boundary}px"><span>chain boundary · calls cross through EEZ proxies</span></div>`);
+      parts.push(`<div class="boundary" style="top:${geo.boundary}px"><span>${opt.protocol ? 'chain boundary · calls cross through EEZ proxies' : 'chain boundary'}</span></div>`);
     }
     // What is highlighted: the edge of the selected call/return, or every edge of a selected box.
     const curEdge = cur && ['node', 'return', 'cross'].includes(cur.kind) ? G.seq.find(s => s.id === cur.id)?.edge : cur?.kind === 'edge' ? cur.id : null;
@@ -670,7 +715,7 @@
         const hit = geo.orient === 'columns' ? (x0 - geo.divider) * (x1 - geo.divider) <= 0 && y0 === y1 && [geo.divider, y0] : (y0 - geo.boundary) * (y1 - geo.boundary) <= 0 && x0 === x1 && [x0, geo.boundary];
         if (hit) {
           const key = `${Math.round(hit[0] / 40)}|${Math.round(hit[1] / 30)}`;
-          if (!tags.has(key)) { tags.add(key); parts.push(`<button type="button" class="eez${dim}" data-cross="${e.calls[0].id}" style="left:${hit[0]}px;top:${hit[1]}px" title="How this call crosses chains">EEZ</button>`); }
+          if (opt.protocol && !tags.has(key)) { tags.add(key); parts.push(`<button type="button" class="eez${dim}" data-cross="${e.calls[0].id}" style="left:${hit[0]}px;top:${hit[1]}px" title="How this call crosses chains">EEZ</button>`); }
           break;
         }
       }
@@ -741,7 +786,9 @@
       const n = M.nodes[row.id], c = n.chain.toLowerCase();
       const status = n.kind === 'ghost' ? ['warn', '?'] : n.failed ? ['bad', '✕'] : n.reverted ? ['warn', '↺'] : null;
       const tags = [];
-      if (n.isStatic) tags.push('<span class="tag">view</span>');
+      if (n.preparedResponse) tags.push('<span class="tag">prepared response from table</span>');
+      if (n.preparedResult) tags.push('<span class="tag">prepared result · no L2 delivery</span>');
+      if (n.isStatic) tags.push('<span class="tag">read</span>');
       if (n.value && n.value !== '0') tags.push(`<span class="tag chain">${esc(ether(n.value))}</span>`);
       if (n.kind === 'ghost') tags.push(`<span class="tag warn">${esc(n.crossing?.status || 'unresolved')} · not observed</span>`);
       if (n.reverted && !n.failed) tags.push('<span class="tag bad">rolled back</span>');
@@ -873,7 +920,7 @@
     const t = tableOf(n);
     if (!t) return '';
     const { batch, entries, statics } = t;
-    const callLine = c => `<li><span class="mono">${esc(valueText(c.sourceAddress))}${c.sourceRollupId != null ? ` (rollup ${esc(c.sourceRollupId)})` : ''} → ${esc(valueText(c.targetAddress))} · ${esc(String(c.data || '0x').slice(0, 10))}</span>${c.value && c.value !== '0' ? ` · ${esc(ether(c.value))}` : ''}${c.isStatic ? ' · <span class="tag">view</span>' : ''}${Number(c.revertNextNCalls) ? ` · <span class="tag warn">revert next ${esc(c.revertNextNCalls)}</span>` : ''}</li>`;
+    const callLine = c => `<li><span class="mono">${esc(valueText(c.sourceAddress))}${c.sourceRollupId != null ? ` (rollup ${esc(c.sourceRollupId)})` : ''} → ${esc(valueText(c.targetAddress))} · ${esc(String(c.data || '0x').slice(0, 10))}</span>${c.value && c.value !== '0' ? ` · ${esc(ether(c.value))}` : ''}${c.isStatic ? ' · <span class="tag">read</span>' : ''}${Number(c.revertNextNCalls) ? ` · <span class="tag warn">revert next ${esc(c.revertNextNCalls)}</span>` : ''}</li>`;
     const entryHtml = (e, i, isStatic) => {
       const calls = e.l2ToL1Calls || e.incomingCalls || [];
       const reentrant = e.expectedL1ToL2Calls || e.expectedOutgoingCalls || [];
@@ -897,9 +944,12 @@
     const n = M.nodes[id], c = n.chain.toLowerCase();
     $('i-kind').className = `badge ${c}`; $('i-kind').textContent = n.kind === 'ghost' ? `${n.chain} · not observed` : `${n.chain} · ${n.callType}`;
     const status = n.kind === 'ghost' ? '<span class="badge warn">Remote trace missing</span>' : n.failed ? '<span class="badge bad">Reverted</span>' : n.reverted ? '<span class="badge warn">Rolled back by an outer revert</span>' : '<span class="badge ok">Succeeded</span>';
+    const responseLabel = n.preparedResponse ? '<span class="badge">L2 request · prepared response from loaded table</span>' : n.preparedResult ? '<span class="badge">Prepared result · no L2 delivery expected</span>' : '';
+
     const name = n.impl && n.impl.contract !== 'Unknown contract' ? n.impl.contract : n.contract;
-    $('inspector').innerHTML = `<div>${status}</div><div><h2 class="i-title">${esc(name)}</h2><div class="i-fn ${c}">${esc(tableOf(n) ? argsText(n) : n.signature || n.fn)}</div></div>
+    $('inspector').innerHTML = `<div>${status} ${responseLabel}</div><div><h2 class="i-title">${esc(name)}</h2><div class="i-fn ${c}">${esc(tableOf(n) ? argsText(n) : n.signature || n.fn)}</div></div>
       ${field('Contract', n.address, { copy: true })}
+      ${n.preparedResponse ? `<p class="note">This is the observed L2 proxy request. Its result comes from the loaded table; the linked L1 entry contains the remote execution.</p>${field('Remote contract on ' + n.remoteChain, n.remoteAddress, { copy: true })}` : ''}
       ${n.impl ? field(`Implementation (DELEGATECALL from ${n.contract})`, n.impl.address, { copy: true }) : ''}
       ${M.chains[n.chain]?.explorer ? `<div class="links">${n.address ? explorerLink(n.chain, 'address', n.impl?.address || n.address, 'Contract on explorer ↗') : ''}${n.tx ? explorerLink(n.chain, 'tx', n.tx, 'Transaction on explorer ↗') : ''}</div>` : ''}
       ${tableSection(n)}
@@ -934,6 +984,7 @@
     $('inspector').innerHTML = `<p class="note">Select a card, a crossing label or a return value to see its details.</p>
       <div class="sec"><h3>Transactions in this trace</h3><div class="tx-list">${M.transactions.map(t => `<div class="tx-item"><div><span class="badge ${t.chain.toLowerCase()}">${t.chain}</span> <b>${esc(t.label)}</b> <span class="badge ${t.status === 'success' ? 'ok' : t.status === 'reverted' ? 'bad' : 'warn'}">${esc(t.status)}</span>${t.traced ? '' : ' <span class="badge warn">no trace</span>'}</div><code>${esc(t.hash)}</code><span class="note">block ${t.block != null ? Number(t.block).toLocaleString('en-US') : '—'}${t.gasUsed ? ' · ' + BigInt(t.gasUsed).toLocaleString('en-US') + ' gas' : ''}</span></div>`).join('')}</div></div>
       ${M.settlements.length ? `<div class="sec"><h3>Settlement</h3>${M.settlements.map(s => `${field('L1 settlement transaction', s.l1Tx, { copy: true })}<p class="note">Covers L2 blocks ${s.firstL2Block?.toLocaleString?.('en-US') ?? s.firstL2Block}–${s.lastL2Block?.toLocaleString?.('en-US') ?? s.lastL2Block}</p>`).join('')}</div>` : ''}
+      ${M.matchingNotes?.length ? `<details class="sec"><summary>Optional call details (${M.matchingNotes.length})</summary><p class="note">Some individual call matches could not be established. The recorded traces are displayed independently in their original order.</p>${M.matchingNotes.map(u => `<p class="note"><b>${esc(u.code)}</b>: ${esc(u.message)}</p>`).join('')}</details>` : ''}
       ${M.unresolved.length ? `<div class="sec"><h3>Unresolved (${M.unresolved.length})</h3>${M.unresolved.map(u => `<p class="note"><b>${esc(u.code)}</b>: ${esc(u.message)}</p>`).join('')}</div>` : ''}`;
   }
   function select(kind, id, scroll = false) {
@@ -956,7 +1007,7 @@
 
   // ---------- walkthrough ----------
   function steps() { return isMap() ? G.seq : layout.rows.filter(r => r.type === 'call' || r.type === 'return'); }
-  const captionIdle = () => ({
+  const captionIdle = () => M.mode === 'physical' && rootIndex === BOTH_CHAINS ? 'Call numbering starts at 1 independently on each chain. Read each recorded tree separately; placement across chains does not establish time or execution order.' : ({
     flow: 'Read left to right: each box is one call, numbered in execution order, with its result after →. A box points to the calls it makes; L1 calls sit above the line, L2 calls below. Press › to follow it step by step.',
     columns: 'Each box is a contract: L1 on the left, L2 on the right. Solid arrows are calls, dashed arrows are return values, and the numbers give the order. Press › to follow it step by step.',
     layers: 'Each box is a contract: L1 above the line, L2 below. Solid arrows are calls, dashed arrows are return values, and the numbers give the order. Press › to follow it step by step.',
@@ -996,9 +1047,15 @@
 
   // ---------- load ----------
   function load(i) {
-    stop(); current = i; M = traces[i].model; kidsMemo = new Map(); crossMemo.clear();
+    stop(); current = i;
+    const linked = traces[i].model;
+    M = traceMode === 'physical' && linked.recordedView ? linked.recordedView : linked;
+    $('mode-wrap').hidden = !linked.recordedView; $('mode-select').value = M.mode;
+    kidsMemo = new Map(); crossMemo.clear();
     selection = null; matches = []; step = -1; $('search').value = ''; $('hits').textContent = '';
     crossesMemo.clear(); kidsMemo = new Map();
+    if (!readVisibilityChosen) opt.staticCalls = M.mode === 'physical';
+    $('opt-static').checked = opt.staticCalls;
     rootIndex = defaultRoot();
     defaultExpansion(); initMapState(); initFlowState();
     G = graphModel(); // contract tags are read by the inspector in every view
@@ -1008,7 +1065,7 @@
     $('kicker').textContent = traces[i].synthetic ? 'Synthetic example · EEZ call flow' : 'EEZ cross-chain call flow';
     const apps = M.nodes.filter(n => !n.protocol && n.inFlow !== false), contracts = new Set(apps.map(n => `${n.chain}:${(n.impl?.address || n.address || '').toLowerCase()}`));
     const unres = M.stats.crossings - M.stats.matched;
-    $('stats').innerHTML = [[apps.length, 'application calls'], [contracts.size, 'contracts'], [`${M.stats.matched}/${M.stats.crossings}`, 'crossings matched', unres ? 'bad' : ''], [M.transactions.length, 'transactions'], [M.stats.frames, 'physical frames'], [M.unresolved.length, 'unresolved', M.unresolved.length ? 'bad' : '']].map(([v, l, c]) => `<span class="${c || ''}"><b>${esc(v)}</b> ${l}</span>`).join('');
+    $('stats').innerHTML = [[apps.length, 'application calls'], [contracts.size, 'contracts'], ...(M.mode === 'physical' ? [[M.stats.preparedResponses || 0, 'L2 prepared responses'], [M.stats.preparedResults || 0, 'L1 results without delivery']] : [[`${M.stats.matched}/${M.stats.crossings}`, 'crossings matched', unres ? 'bad' : '']]), [M.transactions.length, 'transactions'], [M.stats.frames, 'physical frames'], [M.unresolved.length, 'unresolved', M.unresolved.length ? 'bad' : '']].map(([v, l, c]) => `<span class="${c || ''}"><b>${esc(v)}</b> ${l}</span>`).join('');
     $('foot').textContent = `Trace schema ${M.schemaVersion || '?'} · ${traces[i].source || 'embedded'} · Everything shown is embedded in this page; it makes no network requests.`;
     inspectSummary();
     $('step').textContent = 'Step through the calls';
@@ -1069,10 +1126,12 @@
   $('collapse').onclick = () => { defaultExpansion(); render(); };
   // Checkboxes that change which calls exist renumber everything, so rebuild the derived state.
   for (const [id, key] of [['opt-protocol', 'protocol'], ['opt-void', 'voidReturns'], ['opt-static', 'staticCalls']]) $(id).onchange = () => {
-    stop(); opt[key] = !!$(id).checked; kidsMemo = new Map(); crossMemo.clear();
+    stop(); opt[key] = !!$(id).checked;
+    if (key === 'staticCalls') readVisibilityChosen = true;
+    kidsMemo = new Map(); crossMemo.clear();
     if (key !== 'voidReturns') {
       // Hiding plumbing also hides system transactions; fall back to the default one.
-      if (!M.roots[rootIndex] || !rootVisible(M.roots[rootIndex])) rootIndex = defaultRoot();
+      if (rootIndex !== BOTH_CHAINS && (!M.roots[rootIndex] || !rootVisible(M.roots[rootIndex]))) rootIndex = defaultRoot();
       const keep = expanded; defaultExpansion(); keep.forEach(k => expanded.add(k));
       selection = null; step = -1; initMapState(); initFlowState(); G = graphModel(); inspectSummary();
       $('caption').innerHTML = captionIdle(); renderRootPicker();
@@ -1090,7 +1149,7 @@
       n = total() - before;
       opt.staticCalls = false; kidsMemo = new Map();
     }
-    $('opt-static-label').textContent = n ? `View calls (${n} hidden)` : 'View calls';
+    $('opt-static-label').textContent = n ? `Local reads (${n} hidden)` : 'Local reads';
   }
   // Hovering a box lights up every box of the same contract.
   function hoverCid(cid) {
@@ -1119,6 +1178,7 @@
     timer = setInterval(() => { if (step >= steps().length - 1) stop(); else goStep(step + 1); }, 1400);
   };
   $('trace-select').onchange = e => load(+e.target.value);
+  $('mode-select').onchange = e => { traceMode = e.target.value; load(current); };
   $('root-select').onchange = e => {
     stop(); rootIndex = +e.target.value; selection = null; step = -1;
     if (M.roots[rootIndex]?.relatedSettlement && !opt.protocol) {

@@ -124,6 +124,8 @@ svg.links{position:absolute;inset:0;pointer-events:none;overflow:visible}
 .badge.warn{color:var(--warn);background:var(--warn-soft)}
 .notice{margin:12px 12px 0;padding:10px 12px;border:1px solid var(--warn);background:var(--warn-soft);color:var(--ink);border-radius:8px;font-size:12.5px;line-height:1.5}
 .notice b{color:var(--warn)}
+.state-summary{display:flex;flex-wrap:wrap;gap:12px;padding:12px}.state-summary>div{flex:1;min-width:260px;border:1px solid var(--line);border-radius:8px;padding:10px}.state-summary span,.state-summary small{display:block;margin-top:6px}.state-summary small{color:var(--muted)}
+.b-response{display:block;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .root-wrap{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .root-wrap .select{max-width:100%}
 .zoom{display:inline-flex;align-items:center;gap:4px}
@@ -297,7 +299,9 @@ details[open] summary{margin-bottom:6px}
   <div class="workspace">
     <section class="panel" aria-label="Call flow diagram">
       <div class="notice" id="notice" role="status" hidden></div>
+      <div id="state-summary" class="state-summary" hidden></div>
       <div class="layout-bar">
+        <label class="root-wrap" id="mode-wrap" hidden><span class="eyebrow">Trace view</span><select class="select" id="mode-select" aria-label="Trace view"><option value="combined">Linked flow</option><option value="physical">Recorded traces</option></select></label>
         <label class="root-wrap" id="root-wrap" hidden><span class="eyebrow">Transaction</span><select class="select" id="root-select" aria-label="Transaction to draw"></select></label>
         <span class="eyebrow">Diagram type</span>
         <div class="views" role="tablist" aria-label="Diagram type">
@@ -313,7 +317,7 @@ details[open] summary{margin-bottom:6px}
         <button class="btn" id="collapse" type="button">Crossings only</button>
         <span class="sep"></span>
         <span class="zoom" id="zoom" role="group" aria-label="Zoom"><button class="btn" id="zoom-out" type="button" aria-label="Zoom out">−</button><button class="btn" id="zoom-fit" type="button" aria-pressed="true" title="Fit the diagram to the panel width">Fit</button><output id="zoom-level">100%</output><button class="btn" id="zoom-in" type="button" aria-label="Zoom in">+</button></span>
-        <label class="chk" title="Show read-only (static) calls such as balanceOf or getReserves"><input type="checkbox" id="opt-static"> <span id="opt-static-label">View calls</span></label>
+        <label class="chk" title="Show additional local read-only calls; cross-chain reads are always visible"><input type="checkbox" id="opt-static"> <span id="opt-static-label">Local reads</span></label>
         <label class="chk" title="Show proxies, managers and settlement plumbing"><input type="checkbox" id="opt-protocol"> EEZ plumbing</label>
         <label class="chk" id="opt-returns-wrap" title="Draw a dashed return arrow next to every call arrow"><input type="checkbox" id="opt-returns"> Return arrows</label>
         <label class="chk" title="Show results and return arrows for calls that return nothing"><input type="checkbox" id="opt-void"> Void returns</label>

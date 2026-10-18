@@ -24,17 +24,46 @@ export const DEFAULT_VIEWS = ['flow', 'sequence'];
 
 const safeJson = value => JSON.stringify(value).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e').replaceAll('&', '\\u0026');
 
+// The prepared-result dependency is explicitly inlined before the model.
+// Accept formatting differences, and fail loudly if another import is added.
+export function inlineModelSource(source) {
+  const script = source.replace(/^[ \t]*import[ \t]+[^;\r\n]*[ \t]+from[ \t]+["'][^"'\r\n]*prepared-result\.mjs["'][ \t]*;?[ \t]*(?:\r?\n|$)/gm, '')
+    .replace(/^export /gm, '');
+  if (/^[ \t]*import\b/m.test(script)) throw new Error('Unbundled import in the flow model');
+  return script;
+}
+
 export function renderFlowHtml(traces, { fragment = false, views = ALL_VIEWS } = {}) {
   const data = safeJson(traces.map(t => ({ label: t.label || t.model.label, synthetic: !!t.synthetic, source: t.source || null, model: t.model })));
-  const model = fs.readFileSync(path.join(here, 'model.mjs'), 'utf8').replace(/^export /gm, '');
+  const prepared = fs.readFileSync(path.join(here, '../src/prepared-result.mjs'), 'utf8').replace(/^export /gm, '');
+  const model = inlineModelSource(fs.readFileSync(path.join(here, 'model.mjs'), 'utf8'));
   const viewer = fs.readFileSync(path.join(here, 'viewer/viewer.js'), 'utf8');
-  const script = `${model}\n${viewer}`.replace(/<\/script/gi, '<\\/script');
+  const script = `${prepared}\n${model}\n${viewer}`.replace(/<\/script/gi, '<\\/script');
   const body = fs.readFileSync(path.join(here, 'viewer/template.html'), 'utf8')
     .replace('__FLOW_DATA__', () => data).replace('__FLOW_CONFIG__', () => safeJson({ views }))
     .replace('__FLOW_SCRIPT__', () => script);
   if (fragment) return body;
   const csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'";
   return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<meta http-equiv="Content-Security-Policy" content="${csp}">\n${body.replace(/<\/title>/, '</title>\n</head>\n<body>')}\n</body>\n</html>\n`;
+}
+
+// Keep a complete saved capture only when this run actually lost a trace from
+// the same linked transaction set. Match counts can change as decoding improves.
+export function preferSavedTrace(previous, current) {
+  if (!previous || previous.schemaVersion !== current.schemaVersion || previous.txHash !== current.txHash) return false;
+  const invalid = trace => ['invalid', 'pending'].includes(trace.metadata?.transactionLinks?.state) ||
+    (trace.unresolved || []).some(u => /invalid|reorg|canonical|receipt|identity|mismatch|correlation|settlement/.test(u.code)) ||
+    (trace.outgoing || []).some(o => o.rejectedCandidates?.length);
+  if (invalid(previous) || invalid(current)) return false;
+  const identity = trace => (trace.transactions || []).map(t => {
+    if (!t.blockHash || t.blockNumber == null || t.transactionIndex == null || t.receipt?.status == null) return null;
+    return [t.chain, t.hash, t.blockHash, Number(t.blockNumber), Number(t.transactionIndex), Number(t.receipt.status)];
+  }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const before = identity(previous), after = identity(current);
+  const scope = trace => [trace.metadata?.chainIds, trace.metadata?.managers];
+  return before.length > 0 && !before.includes(null) && !after.includes(null) &&
+    JSON.stringify(before) === JSON.stringify(after) && JSON.stringify(scope(previous)) === JSON.stringify(scope(current)) &&
+    current.transactions.some(t => t.trace?.available === false) && previous.transactions.every(t => t.trace?.available === true);
 }
 
 // What the decoder found, so the terminal says which transactions the page covers.
@@ -118,7 +147,6 @@ async function main(argv) {
     }
     const model = buildFlowModel(trace, { explorers });
     const source = isHash(input) ? input : path.basename(input);
-    console.log(summary(model, source));
     // Every transaction found must be traced; a page without part of the flow is misleading.
     const untraced = model.transactions.filter(t => !t.traced);
     const linkFailure = (trace.unresolved || []).find(u => ['invalid-transaction-links', 'transaction-links-pending'].includes(u.code));
@@ -145,19 +173,16 @@ async function main(argv) {
     isHash(inputs[0]) ? `${inputs[0]}.html` : `${path.basename(inputs[0], '.json')}-flow.html`));
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // Keep the decoded trace beside the page so it can be re-rendered without new RPC calls.
-  // A run that saw less (e.g. without an archive RPC) never replaces a more complete trace:
-  // it is saved as .partial.json and the page is drawn from the complete one.
+  // A run missing traces may reuse a complete capture of the same transaction set.
   for (const t of traces) if (t.raw) {
     const json = file.replace(/\.html$/, '') + (traces.length > 1 ? `-${t.source.slice(0, 10)}` : '') + '.json';
-    const score = tr => [(tr.transactions || []).filter(x => x.trace?.available !== false).length, (tr.outgoing || []).filter(o => o.status === 'matched').length];
     let previous = null;
     try { if (fs.existsSync(json)) previous = JSON.parse(fs.readFileSync(json, 'utf8')); } catch { /* Unreadable: replace it. */ }
-    const [nt, nm] = score(t.raw), [pt, pm] = previous ? score(previous) : [-1, -1];
     const text = JSON.stringify(t.raw, (_, v) => typeof v === 'bigint' ? v.toString() : v);
-    if (previous && (pt > nt || pm > nm)) {
+    if (preferSavedTrace(previous, t.raw)) {
       const partial = json.replace(/\.json$/, '.partial.json');
       fs.writeFileSync(partial, text);
-      console.error(`This run saw less than the saved trace (${nt} traced txs / ${nm} matched crossings vs ${pt} / ${pm}).`);
+      console.error(`This run is missing call traces present in the saved capture.`);
       console.error(`Kept ${json}; this run is in ${partial}. The page uses the complete trace.`);
       t.model = buildFlowModel(previous, { explorers: t.explorers });
     } else {
@@ -165,6 +190,7 @@ async function main(argv) {
       console.log(`Saved decoded trace ${json}`);
     }
   }
+  for (const t of traces) console.log(summary(t.model, t.source));
   fs.writeFileSync(file, renderFlowHtml(traces, { fragment, views }));
   console.log(`Wrote ${file} (${fs.statSync(file).size.toLocaleString('en-US')} bytes; views: ${views.join(', ')})`);
   if (open) openInBrowser(file);

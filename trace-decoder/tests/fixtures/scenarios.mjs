@@ -85,7 +85,7 @@ export function scenario({direction='L1',repeat=1,deep=false,isStatic=false,reve
     if(method==='eez_composerInfo')return composer;
     if(method==='eez_getCrossChainTransaction')throw Object.assign(new Error('method not found'),{code:-32601});
     if(method.startsWith('eez_get')) {
-      if(failure.noCorrelation||url.endsWith('-rpc'))throw new Error('method not found');
+      if(failure.noCorrelation||url.endsWith('-rpc'))throw Object.assign(new Error('method not found'),{code:-32601});
       if(params[0]==='0x1')return method==='eez_getSettlementByL2Block'?null:[];
       if (method==='eez_getSettlementByL2Block') {
         const matched = params[0]?.blockHash ? [...blocks.L2.values()].find(b=>b.hash===params[0].blockHash) : blocks.L2.get(Number(params[0]));

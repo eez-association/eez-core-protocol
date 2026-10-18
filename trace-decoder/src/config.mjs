@@ -7,7 +7,7 @@ const ENV = {
   L1_EXPLORER_TYPE: "l1ExplorerType", L2_EXPLORER_TYPE: "l2ExplorerType",
   L1_EXPLORER_API_KEY: "l1ExplorerApiKey", L2_EXPLORER_API_KEY: "l2ExplorerApiKey",
   ETHERSCAN_API_KEY: "etherscanApiKey",
-  ROLLUPS: "rollups", MANAGER_L2: "managerL2", EEZ_ROLLUP_MANAGER: "rollupManager",
+  ROLLUPS: "rollups", MANAGER_L2: "managerL2",
   EEZ_CORR_RPC: "correlationRpc", L1_TRACE_RPC: "l1TraceRpc", L2_TRACE_RPC: "l2TraceRpc",
   EEZ_TX_LINKS: "txLinks",
   EXPECTED_L1_CHAIN_ID: "expectedL1ChainId", EXPECTED_L2_CHAIN_ID: "expectedL2ChainId",
@@ -57,7 +57,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env, cwd 
   const cli = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (["--json", "--full", "--no-explorer", "--no-4byte", "--help", "-h", "--no-correlation", "--thorough"].includes(arg)) {
+    if (["--json", "--full", "--recorded", "--no-explorer", "--no-4byte", "--help", "-h", "--no-correlation", "--thorough"].includes(arg)) {
       cli[({"--no-explorer": "noExplorer", "--no-4byte": "no4byte", "--no-correlation": "noCorrelation", "-h": "help"})[arg] || arg.slice(2)] = true;
     } else if (FLAGS[arg]) {
       if (!argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(`${arg} needs a value`);
@@ -72,10 +72,10 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env, cwd 
   const config = {};
   for (const [key, option] of Object.entries(ENV)) {
     // Exported configuration overrides a file; CLI overrides both.
-    if (env[key] ?? file[key]) config[option] = env[key] ?? file[key];
+    if (env[key] || file[key]) config[option] = env[key] || file[key];
   }
   Object.assign(config, cli, { envFile: fs.existsSync(envFile) ? envFile : null,
-    explicitManagers: { L1: !!cli.rollups, L2: !!cli.managerL2 } });
+    explicitManagers: { L1: !!(cli.rollups || config.rollups), L2: !!(cli.managerL2 || config.managerL2) } });
   if (!/^0x[0-9a-f]{64}$/i.test(config.tx || "")) throw new Error("Provide a 32-byte transaction hash (positional or --tx)");
   for (const key of ["l1Rpc", "l2Rpc"]) if (!config[key]) throw new Error(`Missing ${key}; configure RPC URLs or use --env-file`);
   for (const chain of ["l1", "l2"]) {
@@ -108,6 +108,7 @@ export const HELP = `Usage: node trace-decoder/decode-trace.mjs <TX_HASH> [optio
   --l1-explorer-type TYPE --l2-explorer-type TYPE  auto, blockscout, etherscan
   --l1-explorer-api-key KEY --l2-explorer-api-key KEY
   --etherscan-api-key KEY         Also ETHERSCAN_API_KEY; enables V2 fallback
+  --recorded                     Text CLI: show separate recorded traces
   --json --full --no-explorer --no-4byte --no-correlation
   --thorough                      Trace every transaction in scanned blocks, not only manager calls/events
 Fallback search: nearest timestamp on the other chain, ±2,000 blocks, chunks of 500.

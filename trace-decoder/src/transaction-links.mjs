@@ -68,6 +68,52 @@ function checkInclusion(record, ref, successful = true) {
   }
 }
 
+// Posting evidence must survive rollback; source-call evidence includes even
+// caught attempts. Delegate calls execute in their parent's storage context.
+function hasManagerCall(node, options, context = null) {
+  const { chain, manager, names = null, committedOnly = false } = options;
+  if (!node || committedOnly && node.error) return false;
+  const address = ['DELEGATECALL', 'CALLCODE'].includes(node.type) ? context : node.to;
+  return same(address, manager) && (!names || names.includes(parseCall(protocol[chain], node.input)?.name)) ||
+    (node.calls || []).some(c => hasManagerCall(c, options, address));
+}
+
+// An immediate L2Tx execution can reenter the manager without being an L1
+// source. Only skip a manager self-call directly inside its batch context;
+// calls from the poster's meta hook and wrapper siblings remain source evidence.
+function hasSourceCall(node, chain, manager, context = null, batchContext = false) {
+  if (!node) return false;
+  const delegate = ['DELEGATECALL', 'CALLCODE'].includes(node.type);
+  const address = delegate ? context : node.to;
+  const parsed = same(address, manager) ? parseCall(protocol[chain], node.input) : null;
+  if (chain === 'L1' && batchContext && same(context, manager) && same(node.from, manager) &&
+      !delegate && parsed?.name === '_attemptExecuteImmediateL2Txs') return false;
+  if (['executeCrossChainCall', 'staticCrossChainCall'].includes(parsed?.name)) return true;
+  const insideBatch = parsed?.name === 'postAndVerifyBatch' || batchContext && delegate && same(address, manager);
+  // executeL2Txs runs a queued L2-origin entry, whose reentrant calls are not sources.
+  if (chain === 'L1' && parsed?.name === 'executeL2Txs') return false;
+  return (node.calls || []).some(c => hasSourceCall(c, chain, manager, address, insideBatch));
+}
+
+// Decoded setup, administration and views have no source record. Unknown
+// manager calldata remains unresolved: absence of a decoded source is not proof.
+function isNonSourceManagerTrace(trace, chain, manager) {
+  let seen = false;
+  const administrative = new Set(['executeL2Txs', 'createCrossChainProxy', 'getOrCreateCrossChainProxy', 'registerRollup', 'setRoot']);
+  function walk(node, context = null) {
+    if (!node) return true;
+    const address = ['DELEGATECALL', 'CALLCODE'].includes(node.type) ? context : node.to;
+    if (same(address, manager)) {
+      const call = parseCall(protocol[chain], node.input);
+      if (!call || !(administrative.has(call.name) || ['view', 'pure'].includes(call.fragment.stateMutability))) return false;
+      seen = true;
+      if (chain === 'L1' && call.name === 'executeL2Txs') return true;
+    }
+    return (node.calls || []).every(c => walk(c, address));
+  }
+  return walk(trace) && seen;
+}
+
 // Links select transactions; calldata, receipts and call trees still prove what ran.
 export async function validateTransactionLinks(link, { readers, managers, rollupIds, origin }) {
   const records = new Map();
@@ -90,13 +136,8 @@ export async function validateTransactionLinks(link, { readers, managers, rollup
   let posted = same(post.transaction.to, managers.L1) && parseCall(protocol.L1, post.transaction.input)?.name === 'postAndVerifyBatch';
   if (!posted) {
     const trace = await readers.L1.trace(post);
-    function hasPost(node, context = null) {
-      if (!node || node.error) return false;
-      const address = ['DELEGATECALL', 'CALLCODE'].includes(node.type) ? context : node.to;
-      return same(address, managers.L1) && parseCall(protocol.L1, node.input)?.name === 'postAndVerifyBatch' ||
-        (node.calls || []).some(c => hasPost(c, address));
-    }
-    posted = hasPost(trace.trace);
+    posted = hasManagerCall(trace.trace, { chain: 'L1', manager: managers.L1,
+      names: ['postAndVerifyBatch'], committedOnly: true });
   }
   require(posted, 'Linked posting transaction does not post an EEZ batch');
   const tables = link.references.filter(r => r.role === 'l2-table-load' || r.role === 'l2-delivery')
@@ -150,13 +191,8 @@ export async function lookupTransactionLinks({ config, rpc, origin, chainIds }) 
   require(['auto', 'required', 'off'].includes(mode), 'txLinks must be auto, required, or off');
   if (mode === 'off' || config.noCorrelation) return { state: 'fallback', reason: 'disabled' };
   const manager = origin.chain === 'L1' ? config.rollups : config.managerL2;
-  function managerCall(node, names = null, context = null) {
-    if (!node) return false;
-    const address = ['DELEGATECALL', 'CALLCODE'].includes(node.type) ? context : node.to;
-    return same(address, manager) && (!names || names.includes(parseCall(protocol[origin.chain], node.input)?.name)) ||
-      (node.calls || []).some(c => managerCall(c, names, address));
-  }
-  if (mode === 'auto' && origin.traceResult?.trace && !managerCall(origin.traceResult.trace)) {
+  const trace = origin.traceResult?.trace, managerContext = { chain: origin.chain, manager };
+  if (mode === 'auto' && trace && !hasManagerCall(trace, managerContext)) {
     return { state: 'fallback', reason: 'local transaction has no EEZ calls' };
   }
   const url = config[origin.chain === 'L1' ? 'l1Front' : 'l2Front'] || config.correlationRpc;
@@ -164,7 +200,11 @@ export async function lookupTransactionLinks({ config, rpc, origin, chainIds }) 
     require(mode !== 'required', 'Required transaction links need the source frontend or --correlation-rpc');
     return { state: 'fallback', reason: 'source frontend not configured' };
   }
-  require(BigInt(await rpc(url, 'eth_chainId', [])).toString() === chainIds[origin.chain], 'Transaction link frontend has the wrong chain ID');
+  const frontendChain = BigInt(await rpc(url, 'eth_chainId', [])).toString();
+  if (frontendChain !== chainIds[origin.chain] && !config[origin.chain === 'L1' ? 'l1Front' : 'l2Front'] && mode === 'auto') {
+    return { state: 'fallback', reason: 'correlation endpoint is not a source-chain frontend' };
+  }
+  require(frontendChain === chainIds[origin.chain], 'Transaction link frontend has the wrong chain ID');
   let raw;
   try { raw = await rpc(url, METHOD, [origin.hash]); }
   catch (e) {
@@ -174,8 +214,14 @@ export async function lookupTransactionLinks({ config, rpc, origin, chainIds }) 
   // The method is keyed by source hash. A delivery/loader or a non-source batch
   // may have no source record; retain block correlation for those entry points.
   const fn = same(origin.transaction?.to, manager) ? parseCall(protocol[origin.chain], origin.transaction.input)?.name : null;
-  if (raw == null && mode === 'auto' && (['loadExecutionTable', 'executeIncomingCrossChainCall'].includes(fn) || fn === 'postAndVerifyBatch' && origin.traceResult?.trace && !managerCall(origin.traceResult.trace, ['executeCrossChainCall', 'staticCrossChainCall']))) {
+  const nonSourceBatch = origin.chain === 'L1' &&
+    hasManagerCall(trace, { ...managerContext, names: ['postAndVerifyBatch'], committedOnly: true }) &&
+    !hasSourceCall(trace, origin.chain, manager);
+  if (raw == null && mode === 'auto' && (['loadExecutionTable', 'executeIncomingCrossChainCall'].includes(fn) || nonSourceBatch)) {
     return { state: 'fallback', reason: 'system transaction has no source record' };
+  }
+  if (raw == null && mode === 'auto' && trace && isNonSourceManagerTrace(trace, origin.chain, manager)) {
+    return { state: 'fallback', reason: 'non-source manager transaction has no source record' };
   }
   const link = normalizeTransactionLinks(raw, origin, chainIds);
   if (link.state === 'legacy') {

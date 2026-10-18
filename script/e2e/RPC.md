@@ -120,6 +120,12 @@ fees directly. Uncertain submissions never cause a fallback resend.
 
 Staged evidence: `jobs/<job>/fee-quote-<index>.json`.
 Load-test evidence: `fee-quote-<worker>-<index>.json` in the run directory.
+Before validating an initial-send quote, the runner appends the RPC response to
+`fee-quote-<index>.responses.jsonl` beside its evidence file (load runs include
+the worker in the filename). Each record has the timestamp, requested intent,
+prepared nonce/type and `rawResponse` text, including malformed/non-JSON responses.
+Retries and resumes append; no signing key is recorded. RPC failures remain in
+the send log. Failure to save the response stops submission.
 Initial-send evidence records `feeSource` (`composer` or `node`), signed hash,
 gas and fees. Node fallback has no quote; recovery logs when it uses node fees.
 Local Anvil tests do not use this service. Node estimates do not guarantee

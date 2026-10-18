@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeCrossChainTrace } from '../src/engine.mjs';
+import { lookupTransactionLinks } from '../src/transaction-links.mjs';
 import { buildFlowModel } from '../flow/model.mjs';
 import { abiValue, hex, protocol } from '../src/protocol.mjs';
 import { scenario, hash, event, address, batch, frame, M, l1Entry } from './fixtures/scenarios.mjs';
@@ -49,7 +50,7 @@ for (const direction of ['L1', 'L2']) for (const repeat of [1, 2]) test(`exact $
   assert.ok(result.outgoing.every(o => o.status === 'matched' && o.matchEvidence.includes('verified transaction link scope')));
   assert.equal(new Set(result.outgoing.map(o => o.remoteFrameId)).size, repeat);
   assert.equal(result.metadata.search.length, 0);
-  assert.ok(!f.calls.some(c => c.method === 'eth_getLogs' || c.method.startsWith('eez_getSettlement')));
+  assert.ok(!f.calls.some(c => c.method === 'eth_getLogs' || /^eez_getSettle/.test(c.method)));
   assert.deepEqual(f.linkCalls, Array(2).fill({ url: direction.toLowerCase() + '-front', params: [f.trigger] }));
   assert.ok(result.transactionLinks[0].checks.includes('canonical-recheck'));
   const model = buildFlowModel(result);
@@ -155,6 +156,9 @@ test('missing call traces retain verified transaction links without inventing ex
   const result = await decodeCrossChainTrace(f.config, f.trigger);
   assert.equal(result.transactionLinks.length, 1, JSON.stringify(result.unresolved));
   assert.ok(result.transactions.some(t => t.hash === f.deliveries[0] && !t.trace.available));
+  const model = buildFlowModel(result);
+  assert.equal(model.stats.frames, model.nodes.filter(n => n.inFlow && n.frameId).length);
+  assert.ok(!model.roots.some(r => r.tx === f.deliveries[0]));
   assert.equal(result.edges.filter(e => e.type === 'cross-chain').length, 0);
 });
 
@@ -164,6 +168,11 @@ test('SourceCompleted with no delivery retains only source and posting transacti
   assert.equal(result.transactionLinks.length, 1, JSON.stringify(result.unresolved));
   assert.deepEqual(result.transactions.map(t => t.hash).sort(), [f.trigger, f.posting].sort());
   assert.equal(result.outgoing[0].resultKind, 'precomputed-result-only');
+  assert.equal(result.outgoing[0].status, 'prepared-result');
+  const model = buildFlowModel(result);
+  assert.equal(model.unresolved.length, 0);
+  assert.ok(!model.nodes.some(n => n.kind === 'ghost'));
+  assert.ok(model.nodes.some(n => n.preparedResult));
 });
 
 
@@ -214,6 +223,110 @@ test('system delivery without a source record retains settlement discovery', asy
 });
 
 
+function wrappedPosting() {
+  const f = linked({ direction: 'L2' }), post = f.txs.L1.get(f.posting);
+  const wrapper = address(700), inner = post.trace;
+  inner.from = wrapper;
+  post.trace = frame(post.transaction.from, wrapper, '0x12345678', [inner]);
+  Object.assign(post.transaction, { to: wrapper, input: post.trace.input });
+  post.receipt.to = wrapper;
+  // Block transactions share this transaction object, retaining inclusion identity.
+  f.status = null;
+  return f;
+}
+
+test('wrapped batch without a source record discovers the same flow in auto and off modes', async () => {
+  const f = wrappedPosting();
+  const auto = await decodeCrossChainTrace(f.config, f.posting);
+  assert.deepEqual(auto.metadata.transactionLinks, { state: 'fallback', reason: 'system transaction has no source record', observation: null });
+  assert.ok(!auto.unresolved.some(u => u.code === 'transaction-links-pending'));
+  assert.ok(f.calls.some(c => /^eez_getSettle/.test(c.method)), 'auto must use settlement discovery');
+  const off = await decodeCrossChainTrace({ ...f.config, txLinks: 'off' }, f.posting);
+  const ids = r => r.transactions.map(t => `${t.chain}:${t.hash}`).sort();
+  assert.deepEqual(ids(auto), [`L1:${f.posting}`, `L2:${f.trigger}`, `L2:${hash('table-load')}`].sort());
+  assert.deepEqual(ids(auto), ids(off));
+  for (const result of [auto, off]) {
+    assert.equal(result.outgoing.length, 1);
+    assert.equal(result.outgoing[0].status, 'matched');
+    assert.ok(result.outgoing[0].remoteFrameId.startsWith(`L1:${f.posting}:0.0.`));
+  }
+});
+
+
+const postingInput = protocol.L1.encodeFunctionData('postAndVerifyBatch', [batch([])]);
+const postFrame = () => frame(address(700), M.L1, postingInput);
+const wrapFrame = child => frame(address(99), address(700), '0x12345678', [child]);
+const sourceFrame = (name, extra = {}) => frame(address(20), M.L1,
+  protocol.L1.encodeFunctionData(name, [address(10), '0x']), [], extra);
+
+const postingCases = [
+  ['direct committed posting', () => postFrame(), 'system'],
+  ['deeply wrapped posting', () => wrapFrame(wrapFrame(wrapFrame(postFrame()))), 'system'],
+  ['wrong destination', () => ({ ...postFrame(), to: address(701) }), 'local'],
+  ['undecodable posting', () => ({ ...postFrame(), input: postingInput.slice(0, 10) }), 'pending'],
+  ['reverted posting', () => wrapFrame({ ...postFrame(), error: 'execution reverted' }), 'pending'],
+  ['reverted enclosing frame', () => wrapFrame({ ...wrapFrame(postFrame()), error: 'execution reverted' }), 'pending'],
+  ['reverted transaction', () => ({ ...wrapFrame(postFrame()), error: 'execution reverted' }), 'pending'],
+  ['caught attempt followed by committed posting', () => ({ ...wrapFrame(postFrame()),
+    calls: [{ ...wrapFrame(postFrame()), error: 'execution reverted' }, postFrame()] }), 'system'],
+];
+// Manager identity follows storage context, for both delegation opcodes.
+for (const type of ['DELEGATECALL', 'CALLCODE']) {
+  postingCases.push(
+    [`manager proxy using ${type}`, () => wrapFrame(frame(address(700), M.L1, '0x12345678', [
+      frame(M.L1, address(702), postingInput, [], { type }),
+    ])), 'system'],
+    [`wrapper using manager code via ${type}`, () => wrapFrame({ ...postFrame(), type }), 'local'],
+  );
+}
+for (const name of ['executeCrossChainCall', 'staticCrossChainCall']) {
+  for (const reverted of ['none', 'call', 'ancestor']) {
+    postingCases.push([`posting with ${name}, revert=${reverted}`, () => {
+      let source = sourceFrame(name, reverted === 'call' ? { error: 'execution reverted' } : {});
+      if (reverted === 'ancestor') source = { ...wrapFrame(source), error: 'execution reverted' };
+      return { ...wrapFrame(postFrame()), calls: [postFrame(), source] };
+    }, 'pending']);
+  }
+}
+for (const [name, makeTrace, expected] of postingCases) test(`batch fallback: ${name}`, async () => {
+  const f = wrappedPosting(), rec = f.txs.L1.get(f.posting), trace = makeTrace();
+  const result = await lookupTransactionLinks({ config: { ...f.config, rollups: M.L1 }, rpc: f.config.rpc,
+    origin: { ...rec, hash: f.posting, chain: 'L1', traceResult: { trace } }, chainIds: { L1: '100', L2: '200' } });
+  assert.equal(result.state, expected === 'pending' ? 'pending' : 'fallback');
+  if (expected !== 'pending') assert.equal(result.reason, expected === 'system'
+    ? 'system transaction has no source record' : 'local transaction has no EEZ calls');
+});
+
+for (const variant of ['required', 'incomplete', 'invalid', 'transport', 'missing trace', 'direct missing trace']) {
+  test(`wrapped posting keeps conservative link handling: ${variant}`, async () => {
+    const f = wrappedPosting();
+    if (variant === 'incomplete' || variant === 'invalid') {
+      f.status = { hash: f.posting, direction: 'inbound', transactions: { complete: variant === 'invalid' } };
+    }
+    if (variant === 'transport') {
+      const rpc = f.config.rpc;
+      f.config.rpc = (url, method, params) => method === 'eez_getCrossChainTransaction'
+        ? Promise.reject(new Error('timeout')) : rpc(url, method, params);
+    }
+    if (variant.includes('missing trace')) {
+      if (variant === 'direct missing trace') {
+        const post = f.txs.L1.get(f.posting);
+        post.transaction.to = post.receipt.to = M.L1;
+        post.transaction.input = post.trace.calls[0].input;
+        post.trace = post.trace.calls[0];
+      }
+      f.failure.allTrace.add(f.posting);
+    }
+    const result = await decodeCrossChainTrace({ ...f.config, ...(variant === 'required' ? { txLinks: 'required' } : {}) }, f.posting);
+    assert.equal(result.transactions.length, 1);
+    assert.equal(result.metadata.search.length, 0);
+    assert.ok(!f.calls.some(c => /^eez_getSettle/.test(c.method)));
+    assert.ok(result.unresolved.some(u => u.code === (['invalid', 'transport'].includes(variant)
+      ? 'invalid-transaction-links' : 'transaction-links-pending')), JSON.stringify(result.unresolved));
+  });
+}
+
+
 function orderedSources() {
   const f = linked({ direction: 'L2' }), block = f.blocks.L2.get(200);
   const secondSource = hash('second-source'), secondLoader = hash('second-loader');
@@ -251,9 +364,9 @@ test('ordered canonical source units distinguish identical calls after native an
   assert.equal(result.outgoing[0].status, 'matched');
   assert.ok(result.outgoing[0].remoteFrameId.startsWith(`L1:${f.posting}:0.3.`));
   assert.ok(!result.transactions.some(t => t.hash === f.trigger), 'other source units are verified without tracing their flows');
-  const model = buildFlowModel(result), nodes = [];
+  const model = buildFlowModel(result, { mode: 'physical' }), nodes = [];
   const walk = id => { nodes.push(model.nodes[id]); model.nodes[id].children.forEach(walk); };
-  walk(model.roots.find(r => r.isOrigin).node);
+  walk(model.roots.find(r => r.preferred).node);
   assert.ok(nodes.some(n => n.frameId?.startsWith(`L1:${f.posting}:0.3.`)));
   assert.ok(!nodes.some(n => /^0\.[012](\.|$)/.test(n.path) && n.chain === 'L1'));
 });
@@ -268,4 +381,88 @@ test('source-unit count or missing source evidence prevents an ordinal match', a
     assert.equal(result.edges.filter(e => e.type === 'cross-chain').length, 0);
     assert.ok(result.unresolved.some(u => /sequence|count/.test(u.message)), JSON.stringify(result.unresolved));
   }
+});
+
+
+test('physical entry rendering preserves every frame and its order without call associations', async () => {
+  const { f, secondSource } = orderedSources();
+  const trace = await decodeCrossChainTrace(f.config, secondSource);
+  const host = trace.transactionLinks[0].l1Execution.frameId;
+  // Pairing metadata may be ambiguous or absent; the observed subtree is complete.
+  for (const o of trace.outgoing) { delete o.remoteFrameId; o.status = 'ambiguous'; }
+  trace.unresolved.push({ code: 'ambiguous-remote-occurrence', message: 'Repeated calls', frameId: trace.outgoing.at(-1).frameId });
+  const model = buildFlowModel(trace, { mode: 'physical' }), root = model.roots.find(r => r.preferred);
+  assert.equal(model.mode, 'physical');
+  assert.equal(model.nodes[root.node].frameId, host);
+  const frames = new Map(trace.frames.map(f => [f.id, f])), expected = [], actual = [];
+  const walkFrames = id => { expected.push(id); frames.get(id).children.forEach(walkFrames); };
+  const walkNodes = id => { actual.push(model.nodes[id].frameId); model.nodes[id].children.forEach(walkNodes); };
+  walkFrames(host); walkNodes(root.node);
+  assert.deepEqual(actual, expected);
+  assert.ok(!model.nodes.some(n => n.kind === 'ghost'));
+  assert.equal(model.unresolved.length, 0);
+  assert.equal(model.matchingNotes.length, 1);
+  const { renderTrace } = await import('../src/logical.mjs');
+  const text = renderTrace(trace, { full: true, recorded: true });
+  assert.ok(text.includes('L1 entry 3'));
+  assert.ok(text.includes(host));
+  assert.ok(!text.includes(`L1:${f.posting}:0.2.`));
+});
+
+
+for (const name of ['executeCrossChainCall', 'staticCrossChainCall']) {
+  for (const placement of ['immediate', 'reverted immediate', 'meta hook', 'outside batch', 'foreign attempt']) {
+    test(`batch callback classification: ${name} in ${placement}`, async () => {
+      const f = wrappedPosting(), rec = f.txs.L1.get(f.posting), post = rec.trace.calls[0];
+      const parsed = protocol.L1.parseTransaction({ data: post.input });
+      const entry = abiValue(parsed.fragment.inputs[0], parsed.args[0]).entries[0];
+      const attempt = frame(M.L1, M.L1, protocol.L1.encodeFunctionData('_attemptExecuteImmediateL2Txs', [entry]),
+        [frame(M.L1, address(21), '0x', [sourceFrame(name)])]);
+      post.calls = [attempt];
+      if (placement === 'reverted immediate') attempt.error = 'execution reverted';
+      if (placement === 'meta hook') post.calls.push(frame(M.L1, rec.transaction.to, '0x12345678', [sourceFrame(name)]));
+      if (placement === 'outside batch') rec.trace.calls.push(sourceFrame(name));
+      if (placement === 'foreign attempt') attempt.from = address(999);
+      const result = await lookupTransactionLinks({ config: { ...f.config, rollups: M.L1 }, rpc: f.config.rpc,
+        origin: { ...rec, hash: f.posting, chain: 'L1', traceResult: { trace: rec.trace } }, chainIds: { L1: '100', L2: '200' } });
+      assert.equal(result.state, placement.includes('immediate') ? 'fallback' : 'pending');
+      if (result.state === 'fallback') assert.equal(result.reason, 'system transaction has no source record');
+    });
+  }
+}
+
+
+for (const [name,args] of [
+  ['executeL2Txs',[1]], ['createCrossChainProxy',[address(10),1]],
+  ['getOrCreateCrossChainProxy',[address(10),1]], ['registerRollup',[address(10),hash('root')]],
+  ['setRoot',[1,hash('root')]], ['authorizedProxies',[address(10)]],
+  ['computeCrossChainProxyAddress',[address(10),1]],
+]) test(`non-source manager transaction ${name} can use fallback`, async () => {
+  const f = wrappedPosting(), rec = f.txs.L1.get(f.posting);
+  const call = frame(address(700),M.L1,protocol.L1.encodeFunctionData(name,args));
+  const origin = { ...rec,hash:f.posting,chain:'L1',traceResult:{trace:wrapFrame(call)} };
+  const options = { config:{...f.config,rollups:M.L1},rpc:f.config.rpc,origin,chainIds:{L1:'100',L2:'200'} };
+  assert.equal((await lookupTransactionLinks(options)).reason,'non-source manager transaction has no source record');
+  assert.equal((await lookupTransactionLinks({...options,config:{...options.config,txLinks:'required'}})).state,'pending');
+  origin.traceResult.trace.calls.push(sourceFrame('executeCrossChainCall'));
+  assert.equal((await lookupTransactionLinks(options)).state,'pending');
+});
+
+test('correlation-only endpoint on the other chain is fallback in auto, not an invalid source record', async () => {
+  const f = linked({direction:'L2'}), rec = f.txs.L2.get(f.trigger);
+  const options = { config:{...f.config,l1Front:null,l2Front:null,correlationRpc:'l1-front',managerL2:M.L2},
+    rpc:f.config.rpc,origin:{...rec,hash:f.trigger,chain:'L2',traceResult:{trace:rec.trace}},chainIds:{L1:'100',L2:'200'} };
+  assert.equal((await lookupTransactionLinks(options)).reason,'correlation endpoint is not a source-chain frontend');
+  assert.equal(f.linkCalls.length,0);
+  await assert.rejects(lookupTransactionLinks({...options,config:{...options.config,txLinks:'required'}}),/wrong chain ID/);
+  await assert.rejects(lookupTransactionLinks({...options,config:{...options.config,l2Front:'l1-front'}}),/wrong chain ID/);
+});
+
+
+test('text CLI defaults to linked flow and offers recorded traces explicitly', async () => {
+  const f=linked({direction:'L2'}),trace=await decodeCrossChainTrace(f.config,f.trigger);
+  const {renderTrace}=await import('../src/logical.mjs');
+  assert.match(renderTrace(trace),/⇢ L1/);
+  assert.doesNotMatch(renderTrace(trace),/L1 l1-execution/);
+  assert.match(renderTrace(trace,{recorded:true}),/L1 l1-execution/);
 });
