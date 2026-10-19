@@ -280,7 +280,7 @@ contract ComputeExpected is ComputeExpectedBase, MultiCallTwiceL2Actions {
 
         console.log("EXPECTED_L2_HASHES=[%s,%s]", vm.toString(l2h0), vm.toString(l2h1));
         console.log("EXPECTED_L1_HASHES=[%s]", vm.toString(l1h));
-        console.log("EXPECTED_L2_CALL_HASHES=[%s]", vm.toString(l2[0].proxyEntryHash));
+        _printL2CallHashes(l2);
         _printL1Steps(l1, _l1Steps(counterL1Addr, callTwiceL2));
         _printL1Table(l1);
         _printL2Table(l2);

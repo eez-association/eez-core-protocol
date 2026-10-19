@@ -361,7 +361,7 @@ forge build --offline
 FOUNDRY_ISOLATE=false forge test --offline --summary
 ```
 
-The transient-storage harnesses require calls within one test to share a transaction. Keep this override local to that command; E2E execution and gas benchmarks that need separate transactions retain `--isolate`. Offline mode requires the compiler and dependencies to be installed already. The [runner guide](../script/e2e/COMMANDS.md) covers devnet workflows.
+The transient-storage harnesses require calls within one test to share a transaction. Keep this override local to that command; E2E execution and gas benchmarks that need separate transactions retain `--isolate`. Offline mode requires the compiler and dependencies to be installed already. The [runner guide](../script/e2e/RUNNER_GUIDE.md) covers devnet workflows.
 
 Local integration tests and mock verifiers exercise contract mechanics. Production cross-chain ordering and proving guarantees depend on the integrations described in [Integration Boundaries](INTEGRATION_BOUNDARIES.md).
 

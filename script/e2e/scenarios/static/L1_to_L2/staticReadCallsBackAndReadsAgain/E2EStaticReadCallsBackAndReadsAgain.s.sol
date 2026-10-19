@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -38,7 +40,7 @@ import {
 // Final: the user records 2. Neither value changes.
 // One read request is enough: its callback makes another read.
 // The actual L2 result is checked in setup; neither read has an L2 delivery.
-// Focused scenario: included in default/all runs.
+// Explicit selection only until validated on the live network.
 
 abstract contract StaticReadCallsBackAndReadsAgainActions is CallPatternHelpers {
     struct ScenarioTables {

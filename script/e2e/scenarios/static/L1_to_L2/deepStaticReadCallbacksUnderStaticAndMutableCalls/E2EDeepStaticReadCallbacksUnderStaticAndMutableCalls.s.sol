@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+// E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
