@@ -281,7 +281,7 @@ _recovery_one() {
     fi
 }
 
-# Cross-chain triggers try quotes on either chain; direct deployments never do.
+# Cross-chain triggers require quotes on either chain; direct deployments never do.
 _recovery_requires_quote() {
     [[ "$_rec_mode" == front ]]
 }
@@ -325,16 +325,9 @@ _recovery_send_pending() { # _rec_entry is owned by _recovery_one; quoted caller
         fee_tip=$(bc <<< "if ($tip > $fee_tip) $tip else $fee_tip")
     fi
     if _recovery_requires_quote; then
-        rc=0
-        plan=$(network_fee_quote "$tx" "$_rec_submit" "$_rec_rpc") || rc=$?
-        if (( rc == 75 )); then
-            _recovery_log 'eez_quoteFee unavailable; falling back to node fees'
-        elif (( rc != 0 )); then
-            _recovery_stop 'fee quote rejected, timed out, or invalid; no replacement sent'; return $?
-        else
-            quoted=true
-        fi
-        rc=0
+        plan=$(network_fee_quote "$tx" "$_rec_submit" "$_rec_rpc") || {
+            _recovery_stop 'fee quote rejected, timed out, or invalid; no replacement sent'; return $?; }
+        quoted=true
     fi
     if $quoted; then
         read -r quote_cap quote_tip < <(jq -r '[.cap,.tip] | @tsv' <<< "$plan") || return 1

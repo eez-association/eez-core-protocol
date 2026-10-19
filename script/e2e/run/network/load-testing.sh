@@ -16,7 +16,7 @@ load_worker() (
         for ((j=0; j<WINDOW && i<count; j++, i++)); do
             start=$(_now_ms)
             # Build an offline legacy candidate; cross-chain triggers on either chain
-            # try a quote and fall back to node fees immediately before submission.
+            # require a composer quote, retrying transient failures before submission.
             sign_rc=0
             raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
@@ -237,8 +237,8 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
    "$CALLDATA" =~ ^0x([0-9a-fA-F]{2})*$ && "$GAS" =~ ^[1-9][0-9]*$ ]] || {
     echo "Invalid trigger template; see $RUN_DIR/trigger.log"; exit 1;
 }
-# Ordinary fees build offline candidates; each cross-chain trigger tries
-# eez_quoteFee on its source front, with fresh node fees as fallback.
+# Ordinary fees build offline candidates; each cross-chain trigger requires
+# eez_quoteFee on its source front before submission, retrying transient failures.
 network_fee_cache_pair "$SEND_RPC" "$READ_RPC" "" CHAIN_ID || exit 1
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
 declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"

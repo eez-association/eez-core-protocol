@@ -69,7 +69,7 @@ and default local runs; named scenarios and category selections remain available
 
 ### Cross-chain trigger fees
 
-Follow the [L1/L2 cross-chain quote, fallback and recovery rules](RPC.md#eez_quotefee).
+Follow the [L1/L2 cross-chain quote, retry and recovery rules](RPC.md#eez_quotefee).
 
 ## Script layout
 

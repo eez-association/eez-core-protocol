@@ -119,10 +119,12 @@ than a capped number of forge processes, however many txs are in flight:
 fund → **prepare** (one forge plan run per job: simulated deploys + trigger
 presign + ComputeExpected, capped at `PREPARE_PARALLEL`; then all deploys fired
 and mined at once) → one block snapshot → **send** (`SEND_WORKERS` workers
-quote/sign cross-chain triggers on both chains with node-fee fallback, then record hashes) → **monitor** (batched
-receipt polls per chain with a source-RPC fallback, every 3 seconds, with recovery every `MINE_TIMEOUT` seconds) →
-**verify** (capped at `VERIFY_PARALLEL`, deferrable). Every artifact lives in
-`tmp/e2e-staged-net/RUN_DIRECTORY/` — per-job manifests + raw txs, `sent.csv`, `mined.csv`,
+obtain required composer quotes and sign cross-chain triggers on both chains,
+then record hashes) → **monitor** (batched receipt polls per chain with a
+source-RPC fallback, every 3 seconds, with recovery every `MINE_TIMEOUT`
+seconds) → **verify** (capped at `VERIFY_PARALLEL`, deferrable). Every artifact
+lives in `tmp/e2e-staged-net/RUN_DIRECTORY/` — per-job manifests + raw txs,
+`sent.csv`, `mined.csv`,
 `pending.csv` (what never mined), `timings.csv` — so verification can run later,
 slowly, or again.
 
@@ -192,9 +194,9 @@ It reconciles all saved mined attempts before querying the pool or fee oracles:
   the same nonce, payload, value, gas limit and access list. The fee cap and tip
   increase by at least **10%**, rounded up, and cover current estimates. Explicit
   fee rejection refreshes estimates and retries immediately within that budget.
-  Cross-chain replacements on both chains try a fresh composer quote preserving
-  nonce/gas and satisfying replacement pricing. An unavailable quote RPC falls
-  back to node fees; an invalid returned quote stops recovery. Deployment
+  Cross-chain replacements on both chains require a fresh composer quote preserving
+  nonce/gas and satisfying replacement pricing. Transient quote failures retry
+  within the quote deadline; exhaustion or an invalid quote stops recovery. Deployment
   replacements use node fees directly.
 - Insufficient funds stop the job. The report gives the required balance and
   available balance in ETH, with the shortfall when known. No automatic top-up.
@@ -311,17 +313,17 @@ baseline's last attempt.
 
 ## Cross-chain fees and recovery limits
 
-Follow the [L1/L2 cross-chain quote, fallback and recovery rules](RPC.md#eez_quotefee).
+Follow the [L1/L2 cross-chain quote, retry and recovery rules](RPC.md#eez_quotefee).
 
 Fresh sends decode the candidate and check endpoint identities before waiting for
 the lock. They skip the two known-hash lookups used by resume. The balance is read
 after queueing so funding checks remain fresh. The staged sender fires L1 jobs with
 its normal workers first, then processes L2 jobs with one sender. Both directions
-hold their source chain's quote lock through submission, including node-fee
-fallback. Different chains have separate locks. Same-chain sends remain
-serialized across workers and runs using the same `$TMPDIR`, so adding workers
-does not parallelize quote/sign/send on that chain. L1 serialization remains
-until the composer's concurrency requirements are established.
+hold their source chain's quote lock through submission, including quote retries.
+Different chains have separate locks. Same-chain sends remain serialized across
+workers and runs using the same `$TMPDIR`, so adding workers does not parallelize
+quote/sign/send on that chain. L1 serialization remains until the composer's
+concurrency requirements are established.
 
 Trying quotes for cross-chain triggers adds work compared with the old direct-send path. Composer
 reconciliation can delay a quote even after deployments are mined; client-side

@@ -3,8 +3,8 @@
 # them, so thousands of transactions can be in flight while the local machine
 # only runs a handful of lightweight workers. The heavy lifting (forge scripts)
 # is confined to the prepare and verify phases, each with its own concurrency
-# cap; cross-chain triggers try a fresh quote, with node-fee fallback only
-# for unsupported quote RPCs or transport failures, before signing/submission.
+# cap; cross-chain triggers require a fresh quote before signing/submission.
+# Transient quote failures retry within the deadline; there is no node-fee fallback.
 #
 # Phases:
 #   1. fund     — one pooled wallet per job via the run faucet + MultiSend

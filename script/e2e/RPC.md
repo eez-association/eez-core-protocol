@@ -28,8 +28,8 @@ On 2026-10-16, the composer rejected an unquoted L1 trigger with
 `l1_tip_underfunded` and returned a valid version-1 quote on L1. The staged runner
 now quotes both L1 and L2 triggers, retaining the same intent and fee checks.
 Standalone and load-test cross-chain triggers use the same policy. Older
-deployments may return `unsupported_direction`; an unavailable quote RPC falls
-back to source-node fee estimates.
+deployments may return `unsupported_direction`; without a supported quote RPC,
+cross-chain submission stops.
 
 For another schema change, retain the exact request, response and composer build
 version, compare them with this reference, and add a regression fixture before
@@ -83,25 +83,24 @@ Keep quote/sign/send together and save the quote. Only cross-chain trigger
 transactions on L1 and L2 use `eez_quoteFee`. Deployments, funding transfers and
 other ordinary transactions keep their existing node fee path.
 
-If the quote RPC is unsupported (-32601 or -32004/unsupported_direction) or
-fails with a recognized transport error (including HTTP 5xx), use fresh node fees from the source
-read RPC. Other composer errors, including invalid params and simulation
-reverts, are terminal.
-Legacy transactions use `eth_gasPrice`; EIP-1559 transactions also use the latest
-base fee and priority-fee oracle, with the existing gas-price-minus-base fallback
-when the priority oracle is unsupported. Preserve the prepared gas limit and
-transaction intent, and check funds before signing. Returned quotes that are
-malformed, expired or inconsistent with the candidate still stop submission.
+A valid composer quote is required before signing or submitting a cross-chain
+trigger. Recognized transport failures (including timeouts, connection errors and
+HTTP 5xx) retry the same quote request within `EEZ_QUOTE_TIMEOUT` (default 120
+seconds). Each RPC attempt is capped at 30 seconds or the remaining deadline,
+whichever is shorter; retries wait up to two seconds and are capped at 60 attempts.
+There is no node-fee fallback. Exhausting the deadline stops submission.
+Unsupported quote RPCs (-32601 or -32004/unsupported_direction), other composer
+errors including invalid params and simulation reverts, and malformed, expired
+or inconsistent returned quotes stop submission immediately.
 
 Serialize the full quote/sign/send sequence per source chain, holding
 `$TMPDIR/eez-e2e-fee-quote-<chainId>.lock` through submission. Different chains
 use independent locks; same-chain workers and recovery share a lock.
 Queue waiting is separate from `EEZ_QUOTE_TIMEOUT` (default 120
-seconds), which starts at the quote request. Retry only explicit `quote_busy`,
-`stale_context`, HTTP 429, or reconciliation-pending `quote_unavailable` responses within
-that deadline. Exhausting the quote deadline or retry count is terminal:
-a reachable composer that is still reconciling or rate-limiting must not trigger node-fee
-fallback. Invalid returned quotes and local failures also remain terminal.
+seconds), which starts at the quote request. In addition to transport failures,
+retry explicit `quote_busy`, `stale_context`, HTTP 429, or reconciliation-pending
+`quote_unavailable` responses within that deadline. Exhausting the quote deadline
+or retry count is terminal. Invalid returned quotes and local failures also remain terminal.
 
 A definite `-32003` / `quote_unavailable` reconciliation rejection during initial
 cross-chain submission waits two seconds, obtains a fresh quote, re-signs the same intent
@@ -117,9 +116,9 @@ the staged exit summary counts them. A pending-nonce `-32602` quote refusal stay
 terminal: waiting for mining would break same-account bursts (`counter-multi-tx`).
 
 Resume obtains fresh quotes for unsent transactions; a known saved transaction
-is adopted without resending. Stuck cross-chain triggers on either chain try a
-fresh composer quote, falling back to the existing node fee snapshot when the
-quote RPC is unavailable. A returned quote must preserve nonce/gas and satisfy
+is adopted without resending. Stuck cross-chain triggers on either chain require a
+fresh composer quote, using the same bounded retries for transient RPC failures.
+A returned quote must preserve nonce/gas and satisfy
 replacement pricing; otherwise recovery stops. Deployment recovery uses node
 fees directly. Uncertain submissions never cause a fallback resend.
 
@@ -131,10 +130,10 @@ the worker in the filename). Each record has the timestamp, requested intent,
 prepared nonce/type and `rawResponse` text, including malformed/non-JSON responses.
 Retries and resumes append; no signing key is recorded. RPC failures remain in
 the send log. Failure to save the response stops submission.
-Initial-send evidence records `feeSource` (`composer` or `node`), signed hash,
-gas and fees. Node fallback has no quote; recovery logs when it uses node fees.
-Local Anvil tests do not use this service. Node estimates do not guarantee
-coverage of a composer tariff, so a fallback trigger may still be rejected.
+Initial-send evidence records `feeSource: composer`, signed hash, gas and fees.
+Older run evidence may contain `feeSource: node` from the former fallback policy.
+Local Anvil tests do not use this service. Node fees remain applicable to ordinary
+deployments and funding transfers only.
 
 ## eez_getCrossChainTransaction
 

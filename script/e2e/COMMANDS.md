@@ -48,7 +48,7 @@ bash script/e2e/run/network/staged.sh --verify-only tmp/e2e-staged-net/RUN_DIREC
 - `all` skips excluded scenarios; explicit names still select them.
 - Run `bridge:1` successfully before `bridgeL2`; fund enough escrow for repeated withdrawals.
 - Use `--fund` and `--floor` to adjust wallet funding.
-- Cross-chain triggers on both chains try a fee quote, then node fees if unavailable. Deployments use node fees directly.
+- Cross-chain triggers on both chains require a fee quote; transient quote failures retry within the deadline, with no node-fee fallback. Deployments use node fees directly.
 - Avoid simultaneous runs sharing the same wallet pool.
 - [Funding](RUNNER_GUIDE.md#funding-and-bridge-setup) · [Recovery and saved runs](RUNNER_GUIDE.md#recovery-and-saved-artifacts).
 - [Fee request and response](RPC.md#eez_quotefee) · [Transaction status](RPC.md#eez_getcrosschaintransaction).

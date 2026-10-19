@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Composer fee quotes bind cross-chain triggers to their exact intent.
-# Both origins try quotes, then node fees if the quote RPC is unavailable.
+# Both origins require a quote; transient RPC failures retry within the deadline.
 # Deployments and funding transfers do not enter this trigger-only path.
-# Return 75 only for unsupported quote RPCs or transport failures.
 
 # Endpoint pair -> checked chain ID. In memory only; workers inherit it, each run rechecks.
 declare -gA _NETWORK_FEE_IDENTITIES=()
@@ -52,7 +51,7 @@ network_fee_chain() { # validate the candidate and endpoint identities before qu
     echo "$chain"
 }
 
-_network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|fallback|terminal
+_network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|terminal
     local response="$1" status="$2" code='' lower="${1,,}"
     if [[ "$response" == \{* ]]; then
         code=$(jq -er '(.error // .).code | numbers' <<< "$response" 2>/dev/null) || {
@@ -64,7 +63,7 @@ _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|fall
         echo terminal; return
     fi
     case "$code" in
-        -32601|-32004) echo fallback; return ;;
+        -32601|-32004) echo terminal; return ;;
         -32700|-32600|-32602) echo terminal; return ;;
     esac
     case "$response" in
@@ -77,20 +76,21 @@ _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|fall
         *'execution reverted'*|*'simulation revert'*|*'invalid params'*)
             echo terminal; return ;;
         *'http error 429'*) echo retry; return ;;
-        *unsupported_direction*|*'error sending request'*|*'connection refused'*|*'connection reset'*|*'connection closed'*|*'connection error'*|*'tcp connect error'*|*'dns error'*|*'dns resolution'*|*'failed to lookup address'*|*'timed out'*|*timeout*|*'http status server error'*|*'http error 5'*)
-            echo fallback; return ;;
+        *unsupported_direction*) echo terminal; return ;;
+        *'error sending request'*|*'connection refused'*|*'connection reset'*|*'connection closed'*|*'connection error'*|*'tcp connect error'*|*'dns error'*|*'dns resolution'*|*'failed to lookup address'*|*'timed out'*|*timeout*|*'http status server error'*|*'http error 5'*)
+            echo retry; return ;;
     esac
-    case "$status" in 28|124) echo fallback ;; *) echo terminal ;; esac
+    case "$status" in 28|124) echo retry ;; *) echo terminal ;; esac
 }
 
 network_fee_quote() { # transaction, front, read RPC, optional checked chain, shared deadline, evidence
     local tx="$1" front="$2" read_rpc="$3" chain="${4:-}" evidence="${6:-}"
     local intent quote option nonce kind gas cap tip value expires attempt deadline left rpc_timeout rc failure
-    local retry_reason=reconciliation
+    local retry_reason=reconciliation last_retry_reason='' retry_detail
     [[ -n "$chain" ]] || chain=$(network_fee_chain "$tx" "$front" "$read_rpc") || return 1
     intent=$(jq -c '{from:.signer,to:.to,data:.input,value:.value,nonce:.nonce}' <<< "$tx") || return 1
     # Quotes can be unavailable while earlier native/cross-chain activity is
-    # settling. Retry only those explicit transient responses under one deadline.
+    # settling, or the RPC may fail to respond. Retry transient failures under one deadline.
     [[ "${EEZ_QUOTE_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] || { echo 'EEZ_QUOTE_TIMEOUT must be positive seconds' >&2; return 1; }
     deadline="${5:-$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))}"
     for ((attempt=1; attempt<=60; attempt++)); do
@@ -104,17 +104,26 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
         fi
         failure=$(_network_quote_failure_kind "$quote" "$rc")
         if [[ "$failure" == retry ]]; then
-            retry_reason=reconciliation
+            retry_reason=transport
+            case "$quote" in
+                *quote_busy*|*stale_context*|*quote_unavailable*) retry_reason=reconciliation ;;
+            esac
             [[ "${quote,,}" != *'http error 429'* ]] || retry_reason=rate-limit
             left=$((deadline - SECONDS))
             if (( attempt < 60 && left > 0 )); then
-                (( attempt != 1 )) || echo "Waiting for composer fee-quote $retry_reason" >&2
+                if [[ "$retry_reason" != "$last_retry_reason" ]]; then
+                    retry_detail="${quote:0:200}"
+                    retry_detail="${retry_detail//$'\n'/ }"
+                    retry_detail="${retry_detail//$'\r'/ }"
+                    (( ${#quote} <= 200 )) || retry_detail+='...'
+                    printf 'eez_quoteFee retry (%s, attempt %s): %s\n' "$retry_reason" "$attempt" "$retry_detail" >&2
+                    last_retry_reason="$retry_reason"
+                fi
                 sleep "$((left < 2 ? left : 2))"; continue
             fi
             echo "eez_quoteFee $retry_reason timeout" >&2; return 1
         fi
         printf 'eez_quoteFee failed: %s\n' "$quote" >&2
-        [[ "$failure" != fallback ]] || return 75
         return 1
     done
     # Save the RPC response before parsing: malformed quotes never reach signed
@@ -164,36 +173,6 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
           chain:$chain,nonce:$nonce,gas:$gas,cap:$cap,tip:$tip,value:$value,expires:$expires}'
 }
 
-network_node_fee_plan() { # validated trigger, source read RPC, chain -> fresh node fees
-    local tx="$1" read_rpc="$2" chain="$3" price base tip=0 cap value nonce gas kind response rc=0
-    kind=$(jq -r .type <<< "$tx")
-    price=$(cast gas-price --rpc-url "$read_rpc") || return 1
-    [[ "$price" =~ ^[0-9]+$ ]] || return 1
-    cap="$price"
-    if [[ "$kind" == 0x2 ]]; then
-        response=$(cast rpc --rpc-timeout 15 --rpc-url "$read_rpc" eth_getBlockByNumber latest false) || return 1
-        base=$(cast to-dec "$(jq -er '.baseFeePerGas // "0x0"' <<< "$response")") || return 1
-        response=$(cast rpc --rpc-timeout 15 --rpc-url "$read_rpc" eth_maxPriorityFeePerGas 2>&1) || rc=$?
-        if (( rc == 0 )); then
-            tip=$(cast to-dec "$(jq -er 'strings' <<< "$response")") || return 1
-        elif [[ "$response" == *-32601* ]]; then
-            tip=$(bc <<< "if ($price > $base) $price-$base else 0")
-        else
-            echo 'Node priority-fee lookup failed' >&2; return 1
-        fi
-        cap=$(bc <<< "if (2*$base+$tip > $price) 2*$base+$tip else $price")
-    fi
-    nonce=$(cast to-dec "$(jq -r .nonce <<< "$tx")") || return 1
-    gas=$(cast to-dec "$(jq -r .gas <<< "$tx")") || return 1
-    value=$(cast to-dec "$(jq -r .value <<< "$tx")") || return 1
-    [[ $(bc <<< "$gas > 0 && $cap > 0 && $tip >= 0 && $cap >= $tip") == 1 ]] || return 1
-    jq -nc --argjson tx "$tx" --arg chain "$chain" --arg nonce "$nonce" \
-        --arg gas "$gas" --arg cap "$cap" --arg tip "$tip" --arg value "$value" \
-        '{feeSource:"node",transaction:$tx,intent:($tx|{from:.signer,to:.to,data:.input,value:.value,nonce:.nonce}),
-          quote:null,selectedOption:null,expires:null,
-          chain:$chain,nonce:$nonce,gas:$gas,cap:$cap,tip:$tip,value:$value}'
-}
-
 network_sign_quote() { # checked quote, key, balance in wei -> quote + signed bytes/hash
     local plan="$1" key="$2" balance="$3" tx kind chain nonce gas cap tip value needed signed decoded
     tx=$(jq -c .transaction <<< "$plan") || return 1
@@ -225,7 +204,7 @@ network_submit_quote() { # signed quote, front, evidence, submit, persist callba
     fi
     # The runner owns its files. Save exact signed bytes before risking an uncertain send.
     "$persist" "$plan" "$@" || return 70
-    [[ $(jq -r .feeSource <<< "$plan") == node || $(jq -r .expires <<< "$plan") -gt $(date +%s) ]] || {
+    [[ $(jq -r .expires <<< "$plan") -gt $(date +%s) ]] || {
         echo 'Fee quote expired before submission' >&2; return 70; }
     "$submit" "$front" "$(jq -r .raw <<< "$plan")"
 }
@@ -273,26 +252,17 @@ _network_submission_rejection_kind() {
 _network_quote_and_send() {
     local tx="$1" chain="$2" key="$3" front="$4" read_rpc="$5" evidence="$6" submit="$7" persist="$8"
     shift 8
-    local plan balance result rc deadline left rejection_kind retry_reason=reconciliation tariff_rejected=false
+    local plan balance result rc deadline left rejection_kind retry_reason=reconciliation
     [[ "${EEZ_QUOTE_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] || { echo 'EEZ_QUOTE_TIMEOUT must be positive seconds' >&2; return 1; }
     deadline=$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))
     while (( SECONDS < deadline )); do
         rc=0
         plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline" "$evidence") || rc=$?
-        if (( rc == 75 )); then
-            if $tariff_rejected; then
-                echo 'Fresh composer quote unavailable after tariff refusal; stopping without node-fee fallback' >&2
-                return 1
-            fi
-            echo 'eez_quoteFee unavailable; falling back to node fees' >&2
-            plan=$(network_node_fee_plan "$tx" "$read_rpc" "$chain") || return 1
-        elif (( rc != 0 )); then
-            return "$rc"
-        fi
+        (( rc == 0 )) || return "$rc"
         # Queue time is unbounded. Read funds after each quote, including retries.
         balance=$(cast balance --rpc-url "$read_rpc" "$(jq -r .signer <<< "$tx")") || return 1
         plan=$(network_sign_quote "$plan" "$key" "$balance") || return 1
-        [[ $(jq -r .feeSource <<< "$plan") == node ]] || (( SECONDS < deadline )) || break
+        (( SECONDS < deadline )) || break
         rc=0
         result=$(network_submit_quote "$plan" "$front" "$evidence" "$submit" "$persist" "$@" 2>&1) || rc=$?
         if (( rc == 0 )); then printf '%s\n' "$result"; return 0; fi
@@ -312,10 +282,7 @@ _network_quote_and_send() {
                 '{intent,quote,selectedOption,signedHash,rejectionKind:$kind,submissionError:$error}' \
                 <<< "$plan" >> "${evidence%.json}.rejections.jsonl" || return 70
         fi
-        # Node estimates cannot resolve a reachable composer's tariff refusal.
-        if [[ $(jq -r .feeSource <<< "$plan") == node ]]; then return "$rc"; fi
         retry_reason="$rejection_kind"
-        if [[ "$rejection_kind" == l1_tip_underfunded || "$rejection_kind" == l2_tip_underfunded ]]; then tariff_rejected=true; fi
         echo 'Retrying with a fresh composer quote in 2s (same intent and nonce; original deadline)' >&2
         left=$((deadline - SECONDS)); (( left > 0 )) || break
         sleep "$((left < 2 ? left : 2))"

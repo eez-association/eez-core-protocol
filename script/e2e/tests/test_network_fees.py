@@ -21,16 +21,11 @@ cast() {
         chain-id)
             if [[ "${!#}" == front ]]; then echo "${FRONT_CHAIN:-906969}"; else echo "${READ_CHAIN:-906969}"; fi ;;
         balance) echo "${BALANCE:-1000000000000000000}" ;;
-        gas-price) [[ "${NODE_ERROR:-0}" != 1 ]] || return 1; echo 300 ;;
+        gas-price) return 90 ;;  # Never contact a real fee oracle in these tests.
         rpc)
             if [[ "$*" == *eth_getTransactionByHash* ]]; then
                 if [[ "${KNOWN:-0}" == 1 ]]; then jq -nc --arg hash "${!#}" '{hash:$hash}'; else echo null; fi
                 return
-            fi
-            if [[ "$*" == *eth_getBlockByNumber* ]]; then echo '{"baseFeePerGas":"0x64"}'; return; fi
-            if [[ "$*" == *eth_maxPriorityFeePerGas* ]]; then
-                if [[ "${TIP_UNSUPPORTED:-0}" == 1 ]]; then echo 'error code -32601' >&2; return 1; fi
-                echo '"0x14"'; return
             fi
             [[ "$*" == *eez_quoteFee* ]] || return 90
             printf '%s\n' "${!#}" >> "$TEST_ROOT/intents"
@@ -38,7 +33,7 @@ cast() {
                 touch "$TEST_ROOT/busy"; echo "${TRANSIENT_ERROR:-error: quote_busy}" >&2; return 1
             fi
             if [[ "${PERSISTENT_TRANSIENT:-0}" == 1 ]]; then echo "${TRANSIENT_ERROR:-quote_unavailable: settlement reconciliation pending}" >&2; return 1; fi
-            if [[ "${RPC_ERROR:-0}" == 1 ]]; then echo "${RPC_ERROR_TEXT:-error sending request: connection refused}" >&2; return 1; fi
+            if [[ "${RPC_ERROR:-0}" == 1 ]]; then echo "${RPC_ERROR_TEXT:-error sending request: connection refused}" >&2; return "${RPC_ERROR_STATUS:-1}"; fi
             if [[ "${QUOTE_FAIL_AFTER_REFUSAL:-0}" == 1 && -f "$TEST_ROOT/send-refused" ]]; then
                 echo 'error sending request: connection refused' >&2; return 1
             fi
@@ -307,14 +302,51 @@ class NetworkFeeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / 'intents').exists())
 
-    def test_insufficient_balance_and_failed_node_oracle_never_send(self):
-        for env in ({'BALANCE': '1'}, {'RPC_ERROR': '1', 'BALANCE': '1'},
-                    {'RPC_ERROR': '1', 'NODE_ERROR': '1'}):
-            result = self.run_quote(send=True, **env)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse((self.root / 'signs').exists())
-            self.assertFalse((self.root / 'sends').exists())
-            self.assertNotIn(KEY, result.stderr)
+    def test_valid_quote_with_insufficient_balance_never_signs_or_sends(self):
+        result = self.run_quote(send=True, BALANCE='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Insufficient quote funding', result.stderr)
+        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 1)
+        self.assertIn('balance', (self.root / 'cast-calls').read_text().splitlines())
+        self.assertFalse((self.root / 'signs').exists())
+        self.assertFalse((self.root / 'sends').exists())
+        self.assertNotIn(KEY, result.stderr)
+
+    def test_failed_quote_stops_before_balance_check_or_signing(self):
+        result = self.run_quote(send=True, RPC_ERROR='1', EEZ_QUOTE_TIMEOUT='3')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('transport timeout', result.stderr)
+        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 2)
+        self.assertNotIn('balance', (self.root / 'cast-calls').read_text().splitlines())
+        self.assertFalse((self.root / 'signs').exists())
+        self.assertFalse((self.root / 'sends').exists())
+        self.assertNotIn(KEY, result.stderr)
+
+    def test_repeated_transport_errors_log_one_bounded_single_line(self):
+        error = 'Error: HTTP error 503\r\n<html>\n' + 'x' * 1000 + '</html>'
+        result = self.run_quote(send=True, PERSISTENT_TRANSIENT='1',
+                                TRANSIENT_ERROR=error, EEZ_QUOTE_TIMEOUT='7')
+        self.assertNotEqual(result.returncode, 0)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 2)
+        prefix = 'eez_quoteFee retry (transport, attempt 1): '
+        self.assertTrue(lines[0].startswith(prefix), result.stderr)
+        self.assertLessEqual(len(lines[0]), len(prefix) + 203)
+        self.assertTrue(lines[0].endswith('...'), result.stderr)
+        self.assertEqual(lines[1], 'eez_quoteFee transport timeout')
+        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 4)
+        self.assertFalse((self.root / 'sends').exists())
+
+    def test_retry_log_reports_reason_changes(self):
+        result = self.run_quote(send=True, BUSY='1', RPC_ERROR='1', EEZ_QUOTE_TIMEOUT='7')
+        self.assertNotEqual(result.returncode, 0)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn('retry (reconciliation, attempt 1)', lines[0])
+        self.assertIn('retry (transport, attempt 2)', lines[1])
+        self.assertEqual(lines[2], 'eez_quoteFee transport timeout')
+        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 4)
+        self.assertFalse((self.root / 'sends').exists())
 
     def test_explicit_busy_retries_quote_then_signs(self):
         result = self.run_quote(BUSY='1')
@@ -383,15 +415,29 @@ class NetworkFeeTests(unittest.TestCase):
                 self.assertFalse((self.root / 'signs').exists())
                 self.assertFalse((self.root / 'sends').exists())
 
-    def test_cast_http_5xx_uses_node_fees(self):
-        for status in (500, 502, 503, 504):
-            with self.subTest(status=status):
-                result = self.run_quote(RPC_ERROR='1',
-                    RPC_ERROR_TEXT=f'Error: HTTP error {status} with body: <html>Unavailable</html>')
+    def test_transport_failure_retries_then_uses_composer_quote(self):
+        errors = [
+            'Error: MPP HTTP request failed: error sending request: operation timed out',
+            'error sending request: connection refused',
+            'connection reset', 'connection closed', 'tcp connect error',
+            'dns resolution failed',
+            *[f'Error: HTTP error {status} with body: <html>Unavailable</html>'
+              for status in (500, 502, 503, 504)],
+        ]
+        for error in errors:
+            with self.subTest(error=error):
+                for name in ('busy', 'intents', 'sends', 'signs'):
+                    (self.root / name).unlink(missing_ok=True)
+                result = self.run_quote(send=True, BUSY='1', TRANSIENT_ERROR=error)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                intents = (self.root / 'intents').read_text().splitlines()
+                self.assertEqual(len(intents), 2)
+                self.assertEqual(intents[0], intents[1])
+                self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
+                self.assertEqual((self.root / 'sends').read_text().splitlines(), ['sent'])
+                self.assertNotIn('gas-price', (self.root / 'cast-calls').read_text().splitlines())
                 evidence = json.loads((self.root / 'evidence.json').read_text())
-                self.assertEqual(evidence['feeSource'], 'node')
-                self.assertEqual(int(self.decode(result.stdout.strip())['maxFeePerGas'], 16), 300)
+                self.assertEqual(evidence['feeSource'], 'composer')
 
     def test_other_chain_lock_does_not_block_quote_or_send(self):
         with (self.root / 'eez-e2e-fee-quote-10200.lock').open('w') as lock:
@@ -403,7 +449,7 @@ class NetworkFeeTests(unittest.TestCase):
                 ['flock', '-n', str(self.root / 'eez-e2e-fee-quote-10200.lock'), 'true']
             ).returncode, 0)
 
-    def test_rpc_unavailability_uses_node_fees_on_both_chains_and_formats(self):
+    def test_quote_unavailability_never_sends_on_either_chain_or_format(self):
         self.candidates = dict(self.candidates)
         for chain in (10200, 906969):
             for kind in ('0x0', '0x2'):
@@ -412,44 +458,49 @@ class NetworkFeeTests(unittest.TestCase):
                         '--gas-price', '100', '--value', '17']
                 args += ['--legacy'] if kind == '0x0' else ['--priority-gas-price', '1']
                 self.candidates[kind] = subprocess.check_output(args, text=True).strip()
-                for error in ('error code -32601: method not found', 'unsupported_direction',
-                              'error sending request: connection refused',
-                              '{"error":{"code":-32601,"message":"method not found"}}',
-                              'Error: server returned an error response: error code -32004: unsupported_direction'):
+                for error, attempts in (
+                        ('error code -32601: method not found', 1),
+                        ('unsupported_direction', 1),
+                        ('error sending request: connection refused', 2),
+                        ('operation timed out', 2),
+                        ('Error: HTTP error 503', 2),
+                        ('{"error":{"code":-32601,"message":"method not found"}}', 1),
+                        ('Error: server returned an error response: error code -32004: unsupported_direction', 1)):
                     with self.subTest(chain=chain, kind=kind, error=error):
-                        result = self.run_quote(kind, RPC_ERROR='1', RPC_ERROR_TEXT=error,
-                                                FRONT_CHAIN=str(chain), READ_CHAIN=str(chain))
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        tx = self.decode(result.stdout.strip())
-                        original = self.decode(self.candidates[kind])
-                        for key in ('signer', 'type', 'chainId', 'nonce', 'to', 'value', 'input', 'gas'):
-                            self.assertEqual(tx[key], original[key], key)
-                        self.assertEqual(int(tx.get('maxFeePerGas', tx.get('gasPrice')), 16), 300)
-                        if kind == '0x2':
-                            self.assertEqual(int(tx['maxPriorityFeePerGas'], 16), 20)
-                        evidence = json.loads((self.root / 'evidence.json').read_text())
-                        self.assertEqual(evidence['feeSource'], 'node')
-                        self.assertIsNone(evidence['quote'])
-                        self.assertEqual(evidence['signedHash'], tx['hash'])
+                        (self.root / 'intents').unlink(missing_ok=True)
+                        result = self.run_quote(kind, send=True, RPC_ERROR='1', RPC_ERROR_TEXT=error,
+                                                FRONT_CHAIN=str(chain), READ_CHAIN=str(chain),
+                                                EEZ_QUOTE_TIMEOUT='3')
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), attempts)
+                        self.assertFalse((self.root / 'signs').exists())
+                        self.assertFalse((self.root / 'sends').exists())
+                        self.assertNotIn('gas-price', (self.root / 'cast-calls').read_text().splitlines())
+                        self.assertEqual((self.root / 'rawtxs.txt').read_text().strip(), self.candidates[kind])
 
-    def test_node_fallback_supports_missing_priority_oracle(self):
-        result = self.run_quote(RPC_ERROR='1', TIP_UNSUPPORTED='1')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        tx = self.decode(result.stdout.strip())
-        self.assertEqual(int(tx['maxPriorityFeePerGas'], 16), 200)
-        self.assertEqual(int(tx['maxFeePerGas'], 16), 400)
+    def test_timeout_exit_status_retries_without_signing(self):
+        for status in ('28', '124'):
+            with self.subTest(status=status):
+                (self.root / 'intents').unlink(missing_ok=True)
+                result = self.run_quote(send=True, RPC_ERROR='1', RPC_ERROR_TEXT='request failed',
+                                        RPC_ERROR_STATUS=status, EEZ_QUOTE_TIMEOUT='3')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('transport timeout', result.stderr)
+                self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 2)
+                self.assertFalse((self.root / 'signs').exists())
+                self.assertFalse((self.root / 'sends').exists())
 
-    def test_fallback_uncertain_send_is_persisted_and_not_retried(self):
-        result = self.run_quote(send=True, RPC_ERROR='1', SEND_ERROR='1')
+    def test_quoted_uncertain_send_is_persisted_and_not_retried(self):
+        result = self.run_quote(send=True, SEND_ERROR='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 1)
         evidence = json.loads((self.root / 'evidence.json').read_text())
         tx = self.decode((self.root / 'rawtxs.txt').read_text().strip())
         self.assertEqual(tx['hash'], evidence['signedHash'])
-        self.assertEqual(evidence['feeSource'], 'node')
+        self.assertEqual(evidence['feeSource'], 'composer')
 
-    def test_fallback_persistence_failure_prevents_send(self):
-        result = self.run_quote(send=True, RPC_ERROR='1', PERSIST_ERROR='1')
+    def test_quoted_persistence_failure_prevents_send(self):
+        result = self.run_quote(send=True, PERSIST_ERROR='1')
         self.assertEqual(result.returncode, 70, result.stderr)
         self.assertFalse((self.root / 'sends').exists())
 
@@ -568,19 +619,11 @@ class NetworkFeeTests(unittest.TestCase):
 
     def test_tariff_retry_does_not_fall_back_to_node_fees_when_quote_fails(self):
         result = self.run_quote(send=True, SEND_RECONCILE="once", TARIFF_CODE="l2_tip_underfunded",
-                                QUOTE_FAIL_AFTER_REFUSAL="1")
+                                QUOTE_FAIL_AFTER_REFUSAL="1", EEZ_QUOTE_TIMEOUT="5")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("stopping without node-fee fallback", result.stderr)
+        self.assertIn("transport timeout", result.stderr)
         self.assertEqual(len((self.root / "sends").read_text().splitlines()), 1)
         self.assertNotIn("gas-price", (self.root / "cast-calls").read_text().splitlines())
-
-    def test_node_fallback_tariff_refusal_is_logged_once_without_retry(self):
-        result = self.run_quote(send=True, RPC_ERROR="1", SEND_RECONCILE="once",
-                                TARIFF_CODE="l2_tip_underfunded")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len((self.root / "sends").read_text().splitlines()), 1)
-        self.assertEqual(result.stderr.count("ERROR: submission refused (l2_tip_underfunded)"), 1)
-        self.assertEqual(json.loads((self.root / "evidence.rejections.jsonl").read_text())["rejectionKind"], "l2_tip_underfunded")
 
     def test_pending_nonce_quote_failure_does_not_wait_for_mining_or_send(self):
         error = 'Error: server returned an error response: error code -32602: invalid transaction: source nonce is already pending; queued predecessors are not simulated'
