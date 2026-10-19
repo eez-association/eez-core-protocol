@@ -146,6 +146,7 @@ export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined'
     requested: `${tx.chain}:${tx.hash}` === originTx,
   }));
   const scope = classifyTransactions(trace, transactions, frames);
+  const gas = flowGas(trace, transactions, frames, scope.frames, exactLink);
   const isolated = physical && exactLink.l1Execution?.frameId && frames.has(exactLink.l1Execution.frameId) ? exactLink.l1Execution : null;
   const unisolatedL1 = physical && exactLink.sourceChain === 'L2' && !isolated;
   const physicalRoots = [];
@@ -235,11 +236,69 @@ export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined'
     }])),
     settlements: (trace.settlements || []).map(s => ({ id: s.id, l1Tx: s.l1TransactionHash, l1Block: s.l1BlockNumber ?? null, firstL2Block: s.firstL2Block ?? null, lastL2Block: s.lastL2Block ?? null })),
     stateObservations: trace.metadata?.stateObservations || [],
-    transactions, roots, nodes,
+    transactions, roots, nodes, gas,
     matchingNotes: matchingNotes.map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
     unresolved: unresolved.map(u => ({ code: u.code, message: u.message, frameId: u.frameId || null })),
     stats: { frames: scope.frames.size, preparedResponses: nodes.filter(n => n.preparedResponse && scope.frames.has(n.frameId)).length, preparedResults: [...prepared].filter(id => scope.frames.has(id)).length, crossings: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId)).length, matched: (trace.outgoing || []).filter(o => scope.frames.has(o.frameId) && o.status === 'matched').length, events: (trace.events || []).filter(e => scope.frames.has(e.frameId)).length },
   };
+}
+
+// Gas follows physical ancestry, never the grafted logical graph or visibility
+// filters. A parent's inclusive gas already covers its children, including reverts.
+function flowGas(trace, transactions, frames, selectedFrames, exactLink) {
+  const keyOf = id => String(id).split(':').slice(0, 2).join(':');
+  const byKey = new Map(transactions.map(t => [`${t.chain}:${t.hash}`, t]));
+  const candidates = new Set(exactLink ? [] : selectedFrames);
+  const partial = { L1: false, L2: false };
+  if (exactLink) {
+    for (const r of exactLink.references || []) {
+      if (['source', 'l2-delivery', 'l2-table-load'].includes(r.role)) candidates.add(`${r.chain}:${r.hash}:0`);
+    }
+    const entry = exactLink.l1Execution?.frameId;
+    if (entry && frames.has(entry)) candidates.add(entry);
+    else if (exactLink.sourceChain === 'L2') {
+      for (const id of selectedFrames) if (frames.get(id)?.chain === 'L1') candidates.add(id);
+      partial.L1 = (exactLink.references || []).some(r => r.chain === 'L1');
+    }
+  } else {
+    for (const t of transactions) {
+      if (t.requested || t.inFlow && t.role === 'table-load') candidates.add(`${t.chain}:${t.hash}:0`);
+    }
+    // Matched remote calls alone do not measure their surrounding L1 entry.
+    partial.L1 = trace.origin?.chain === 'L2' && transactions.some(t => t.chain === 'L1' && (t.inFlow || t.relatedSettlement));
+  }
+  for (const out of trace.outgoing || []) {
+    if (selectedFrames.has(out.frameId) && out.status !== 'matched' && !isPreparedResult(out)) {
+      partial[out.chain === 'L1' ? 'L2' : 'L1'] = true;
+    }
+  }
+  const roots = [...candidates].filter(id => {
+    for (let f = frames.get(frames.get(id)?.parentId); f; f = frames.get(f.parentId)) {
+      if (candidates.has(f.id)) return false;
+    }
+    return true;
+  });
+  const amount = value => {
+    try { return value == null || BigInt(value) < 0n ? null : BigInt(value).toString(); } catch { return null; }
+  };
+  const total = rows => rows.length && rows.every(r => r.gasUsed == null) ? null
+    : rows.reduce((sum, r) => sum + BigInt(r.gasUsed ?? 0), 0n).toString();
+  return Object.fromEntries(['L1', 'L2'].map(chain => {
+    const contributions = roots.filter(id => id.startsWith(`${chain}:`)).map(id => {
+      const f = frames.get(id), t = byKey.get(keyOf(id)), whole = id === `${keyOf(id)}:0`;
+      return { frameId: id, hash: t?.hash || f?.transactionHash, basis: whole ? 'receipt' : 'frame',
+        label: whole ? t?.label || 'Transaction' : id === exactLink?.l1Execution?.frameId
+          ? `L1 execution · entry ${exactLink.l1Execution.entryIndex}` : 'Observed call subtree',
+        gasUsed: amount(whole ? t?.gasUsed : f?.gasUsed) };
+    });
+    const related = transactions.filter(t => t.chain === chain && (t.requested || t.inFlow || t.relatedSettlement ||
+      (exactLink?.references || []).some(r => r.chain === chain && r.hash === t.hash)));
+    const receipts = [...new Map(related.map(t => [t.hash, { hash: t.hash, label: t.label, gasUsed: amount(t.gasUsed) }])).values()];
+    const incomplete = partial[chain] || contributions.some(r => r.gasUsed == null);
+    return [chain, { gasUsed: contributions.length ? total(contributions) : incomplete ? null : '0',
+      partial: incomplete, contributions, transactionGasUsed: total(receipts),
+      transactionGasPartial: receipts.some(r => r.gasUsed == null), receipts }];
+  }));
 }
 
 const ZERO_HASH = '0x' + '0'.repeat(64);

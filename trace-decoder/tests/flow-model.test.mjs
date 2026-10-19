@@ -243,3 +243,65 @@ for(const quote of ["'",'"'])for(const newline of ['\n','\r\n'])test(`model inli
 test('model inlining rejects unbundled imports explicitly',()=>{
   assert.throws(()=>inlineModelSource('import x from "./unbundled.mjs";'),/Unbundled import/);
 });
+
+
+async function gasFixture() {
+  const { f, trace } = await decode({ direction: 'L2', repeat: 2 });
+  for (const frame of trace.frames) frame.gasUsed = '0x100';
+  const entry = trace.frames.find(frame => frame.chain === 'L1' && frame.path === '0.0');
+  entry.gasUsed = '0x64';
+  // A different entry in the same batch must not be charged to this source.
+  trace.frames.find(frame => frame.chain === 'L1' && frame.path === '0.1').gasUsed = '0xffff';
+  for (const t of trace.transactions) t.receipt.gasUsed = t.chain === 'L1' ? '0x3e8' : t.hash === f.trigger ? '0xc8' : '0x12c';
+  trace.transactionLinks = [{ state: 'complete', sourceChain: 'L2', sourceHash: f.trigger,
+    l1Execution: { frameId: entry.id, entryIndex: 0, basis: 'test isolation' },
+    references: trace.transactions.map(t => ({ chain: t.chain, hash: t.hash,
+      role: t.hash === f.trigger ? 'source' : t.chain === 'L1' ? 'l1-post-batch' : 'l2-table-load' })) }];
+  return { f, trace, entry };
+}
+
+test('flow gas counts isolated physical subtrees once and includes L2 table loading', async () => {
+  const { trace, entry } = await gasFixture();
+  trace.transactionLinks[0].references.push({ ...trace.transactionLinks[0].references[0] });
+  // Reverted children and hidden plumbing are already included by their parent.
+  trace.frames.find(f => f.parentId === entry.id).reverted = true;
+  const m = buildFlowModel(trace);
+  assert.equal(m.gas.L1.gasUsed, '100');
+  assert.equal(m.gas.L1.partial, false);
+  assert.equal(m.gas.L1.transactionGasUsed, '1000');
+  assert.deepEqual(m.gas.L1.contributions.map(r => r.frameId), [entry.id]);
+  assert.equal(m.gas.L2.gasUsed, '500');
+  assert.equal(m.gas.L2.transactionGasUsed, '500');
+  assert.equal(m.gas.L2.contributions.length, 2);
+  assert.deepEqual(m.gas, m.recordedView.gas);
+});
+
+test('missing entry attribution and missing gas are partial rather than zero or a full batch charge', async () => {
+  const { trace, entry } = await gasFixture();
+  delete entry.gasUsed;
+  let m = buildFlowModel(trace);
+  assert.equal(m.gas.L1.gasUsed, null);
+  assert.equal(m.gas.L1.partial, true);
+  delete trace.transactionLinks[0].l1Execution;
+  m = buildFlowModel(trace);
+  assert.equal(m.gas.L1.partial, true);
+  assert.ok(m.gas.L1.contributions.every(r => r.basis === 'frame'));
+  delete trace.transactions.find(t => t.chain === 'L2' && t.hash !== trace.txHash).receipt.gasUsed;
+  m = buildFlowModel(trace);
+  assert.equal(m.gas.L2.gasUsed, '200');
+  assert.equal(m.gas.L2.partial, true);
+  assert.equal(m.gas.L2.transactionGasPartial, true);
+});
+
+test('gas totals preserve integer precision and never add nested remote calls to delivery receipts', async () => {
+  const { trace } = await decode({ deep: true });
+  physicalLinks(trace);
+  for (const f of trace.frames) f.gasUsed = '999999999';
+  for (const t of trace.transactions) t.receipt.gasUsed = '9007199254740993';
+  const m = buildFlowModel(trace);
+  assert.equal(m.gas.L1.gasUsed, '9007199254740993');
+  assert.equal(m.gas.L2.gasUsed, '9007199254740993');
+  assert.equal(m.gas.L1.transactionGasUsed, '18014398509481986');
+  assert.equal(m.gas.L1.contributions.length, 1);
+  assert.equal(m.gas.L2.contributions.length, 1);
+});

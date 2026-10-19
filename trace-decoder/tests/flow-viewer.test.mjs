@@ -353,3 +353,25 @@ for(const direction of ['L1','L2'])test(`${direction} cross-chain reads and thei
   assert.match(p.el('inspector').innerHTML,/Crossing L[12] → L[12]/);
   p.tab('sequence');assert.match(p.el('graph').innerHTML,/class="edge cross/);
 });
+
+
+test('per-chain gas totals and their breakdown stay fixed across visibility and trace modes', async () => {
+  const f = scenario({ deep: true });
+  const trace = plain(await decodeCrossChainTrace(f.config, f.trigger));
+  for (const t of trace.transactions) t.receipt.gasUsed = t.chain === 'L1' ? '123456' : '654321';
+  trace.transactionLinks = [{ state: 'complete', sourceChain: 'L1', sourceHash: f.trigger,
+    references: trace.transactions.map(t => ({ chain: t.chain, hash: t.hash,
+      role: t.hash === f.trigger ? 'source' : t.chain === 'L1' ? 'l1-post-batch' : 'l2-delivery' })) }];
+  const p = page(renderFlowHtml([{ model: buildFlowModel(trace) }]));
+  const before = p.el('gas-summary').innerHTML;
+  assert.match(before, /L1 flow gas.*123,456/s);
+  assert.match(before, /L2 flow gas.*654,321/s);
+  assert.match(before, /Includes EEZ plumbing/);
+  assert.match(before, /Whole related transactions: L1 <b>246,912/);
+  for (const id of ['opt-protocol', 'opt-static']) {
+    p.el(id).checked = true; p.el(id).onchange();
+    assert.equal(p.el('gas-summary').innerHTML, before);
+  }
+  p.el('mode-select').onchange({ target: { value: 'physical' } });
+  assert.equal(p.el('gas-summary').innerHTML, before);
+});

@@ -47,6 +47,7 @@ h1{margin:4px 0 0;font-size:24px;line-height:1.2;letter-spacing:-.4px;font-weigh
 .stats{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--muted)}
 .stats b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:700}
 .stats .bad b{color:var(--bad)}
+.gas-summary{padding:12px 14px}.gas-totals{display:flex;flex-wrap:wrap;gap:12px 32px;margin-bottom:8px}.gas-totals b{font-size:20px;font-variant-numeric:tabular-nums}.gas-summary table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}.gas-summary th,.gas-summary td{text-align:left;padding:5px 10px 5px 0}.gas-summary td:last-child{text-align:right;font-variant-numeric:tabular-nums}.gas-summary p{margin:8px 0 0}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:14px;align-items:start}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);min-width:0}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line)}
@@ -296,6 +297,7 @@ details[open] summary{margin-bottom:6px}
     </div>
   </header>
   <div class="stats" id="stats"></div>
+  <section class="panel gas-summary" id="gas-summary" aria-label="Gas used by this flow"></section>
   <div class="workspace">
     <section class="panel" aria-label="Call flow diagram">
       <div class="notice" id="notice" role="status" hidden></div>

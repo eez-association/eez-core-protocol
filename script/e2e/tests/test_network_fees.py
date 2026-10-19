@@ -14,7 +14,78 @@ E2E = Path(__file__).resolve().parents[1]
 KEY = '0x' + '01'.zfill(64)  # Public test-only key.
 TARGET = '0x' + '11' * 20
 
+TEMPORARY_ERRORS = (
+    ("quote_busy", "another quote is running"),
+    ("stale_context", "quote context expired or changed"),
+    ("quote_unavailable", "quote unavailable: settlement reconciliation pending"),
+    ("quote_unavailable", "quote unavailable: unsettled native history requires reconciliation"),
+    ("quote_unavailable", "quote unavailable: queued predecessor is entering composition"),
+)
+
+
+def rpc_error(rpc_code, code, message, cast_format=False):
+    data = {"code": code, "message": message}
+    if cast_format:
+        return (f"Error: server returned an error response: error code {rpc_code}: "
+                f"composer request failed, data: {json.dumps(data)}")
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "error": {
+        "code": rpc_code, "message": "composer request failed", "data": data}})
+
+
+class NetworkFeeClassifierTests(unittest.TestCase):
+    def classify(self, response, submission=False):
+        classifier = '_network_submission_rejection_kind' if submission else '_network_quote_failure_kind'
+        return subprocess.run(
+            ['bash', '-c', 'source "$1"; ' + classifier + ' "$2" 1',
+             'test', str(E2E / 'lib/network-fees.sh'), response],
+            capture_output=True, text=True, timeout=5)
+
+    def test_typed_temporary_errors_override_generic_rpc_code(self):
+        for cast_format in (False, True):
+            for code, message in TEMPORARY_ERRORS:
+                for submission in (False, True):
+                    with self.subTest(cast=cast_format, code=code, message=message, submission=submission):
+                        response = rpc_error(-32003 if submission else -32004, code, message, cast_format)
+                        result = self.classify(response, submission)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        expected = ('reconciliation' if code == 'quote_unavailable' else code) if submission else 'retry'
+                        self.assertEqual(result.stdout.strip(), expected)
+
+    def test_disabled_unsupported_unknown_and_malformed_errors_stay_terminal(self):
+        terminal_details = (
+            ('quote_disabled', 'fee quotes are disabled'),
+            ('unsupported_direction', 'unsupported request'),
+            ('unknown', 'quote_busy: timeout'),
+            ('quote_unavailable', 'quote unavailable: unknown condition'),
+            ('quote_unavailable', 'quote unavailable: queued predecessor is entering composition; unknown condition'),
+        )
+        for cast_format in (False, True):
+            for submission in (False, True):
+                rpc_code = -32003 if submission else -32004
+                responses = [rpc_error(rpc_code, code, message, cast_format)
+                             for code, message in terminal_details]
+                responses += [rpc_error(-32601, *TEMPORARY_ERRORS[0], cast_format),
+                              rpc_error(-32602, *TEMPORARY_ERRORS[0], cast_format),
+                              rpc_error(rpc_code, *TEMPORARY_ERRORS[0], cast_format)[:-2],
+                              rpc_error(rpc_code, 'quote_unavailable', None, cast_format)]
+                for response in responses:
+                    with self.subTest(response=response, submission=submission):
+                        result = self.classify(response, submission)
+                        if submission:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertEqual(result.stdout, '')
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(result.stdout.strip(), 'terminal')
+
+
 MOCK = r'''
+# Keep simulated deadlines independent of host load. Real-sleep tests retain
+# Bash's wall clock to verify the deadline across quote/sign/send subshells.
+if [[ "${REAL_SLEEP:-0}" != 1 ]]; then
+    unset SECONDS
+    SECONDS=0
+fi
 cast() {
     echo "$1" >> "$TEST_ROOT/cast-calls"
     case "$1" in
@@ -64,10 +135,14 @@ submit() {
     if command flock -n "$TMPDIR/eez-e2e-fee-quote-${READ_CHAIN:-906969}.lock" true; then return 92; fi
     [[ "$(cat "$TEST_ROOT/rawtxs.txt")" == "$2" ]] || return 91
     echo sent >> "$TEST_ROOT/sends"
+    printf '%s\n' "$2" >> "$TEST_ROOT/submitted-raws"
     if [[ -n "${SUBMIT_ERROR_TEXT:-}" ]]; then printf '%s\n' "$SUBMIT_ERROR_TEXT" >&2; return "${SUBMIT_ERROR_RC:-1}"; fi
     if [[ "${SEND_RECONCILE:-0}" == always || ( "${SEND_RECONCILE:-0}" == once && ! -f "$TEST_ROOT/send-refused" ) ]]; then
         touch "$TEST_ROOT/send-refused"
-        if [[ -n "${TARIFF_CODE:-}" ]]; then
+        if [[ "${EXPIRE_AFTER_REFUSAL:-0}" == 1 ]]; then touch "$TEST_ROOT/expired"; fi
+        if [[ -n "${ADMISSION_ERROR:-}" ]]; then
+            printf '%s\n' "$ADMISSION_ERROR" >&2
+        elif [[ -n "${TARIFF_CODE:-}" ]]; then
             if [[ "${SEND_RECONCILE_CAST:-0}" == 1 ]]; then
                 printf 'Error: server returned an error response: error code -32003: settlement tariff admission failed, data: {"code":"%s","message":"underfunded"}\n' "$TARIFF_CODE" >&2
             else
@@ -361,6 +436,39 @@ class NetworkFeeTests(unittest.TestCase):
             result = self.run_quote(BUSY='1', TRANSIENT_ERROR=error)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_complete_temporary_quote_errors_retry_exact_prepared_intent(self):
+        for cast_format in (False, True):
+            for code, message in TEMPORARY_ERRORS:
+                with self.subTest(cast=cast_format, code=code, message=message):
+                    for name in ('busy', 'intents', 'sends', 'signs'):
+                        (self.root / name).unlink(missing_ok=True)
+                    result = self.run_quote(send=True, BUSY='1',
+                                            TRANSIENT_ERROR=rpc_error(-32004, code, message, cast_format))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    intents = (self.root / 'intents').read_text().splitlines()
+                    self.assertEqual(len(intents), 2)
+                    self.assertEqual(intents[0], intents[1])
+                    original = self.decode(self.candidates['0x2'])
+                    self.assertEqual(json.loads(intents[0]), {
+                        'from': original['signer'], 'nonce': original['nonce'], 'to': TARGET,
+                        'data': original['input'], 'value': original['value']})
+                    self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
+                    self.assertEqual((self.root / 'sends').read_text().splitlines(), ['sent'])
+
+    def test_complete_queued_predecessor_quote_errors_stop_at_deadline(self):
+        for cast_format in (False, True):
+            with self.subTest(cast=cast_format):
+                (self.root / 'intents').unlink(missing_ok=True)
+                result = self.run_quote(send=True, PERSISTENT_TRANSIENT='1', EEZ_QUOTE_TIMEOUT='3',
+                                        TRANSIENT_ERROR=rpc_error(-32004, *TEMPORARY_ERRORS[-1], cast_format))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('reconciliation timeout', result.stderr)
+                intents = (self.root / 'intents').read_text().splitlines()
+                self.assertEqual(len(intents), 2)
+                self.assertEqual(intents[0], intents[1])
+                self.assertFalse((self.root / 'signs').exists())
+                self.assertFalse((self.root / 'sends').exists())
+
     def test_rate_limit_retries_then_uses_composer_quote(self):
         result = self.run_quote(BUSY='1',
             TRANSIENT_ERROR='Max retries exceeded HTTP error 429')
@@ -556,25 +664,73 @@ class NetworkFeeTests(unittest.TestCase):
             self.assertFalse((self.root / 'sends').exists())
             subprocess.run(['flock', '-n', str(self.root / 'eez-e2e-fee-quote-906969.lock'), 'true'], check=True)
 
-    def test_send_reconciliation_refusal_requotes_same_nonce_under_lock(self):
+    def test_send_reconciliation_refusal_reuses_signed_bytes_under_lock(self):
         result = self.run_quote(send=True, SEND_RECONCILE='once')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 2)
         intents = (self.root / 'intents').read_text().splitlines()
-        self.assertEqual(len(intents), 2)
-        self.assertEqual(intents[0], intents[1])
+        self.assertEqual(len(intents), 1)
+        raws = (self.root / 'submitted-raws').read_text().splitlines()
+        self.assertEqual(raws[0], raws[1])
+        self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
         rejected = json.loads((self.root / 'evidence.rejections.jsonl').read_text())
         current = json.loads((self.root / 'evidence.json').read_text())
-        self.assertNotEqual(rejected['signedHash'], current['signedHash'])
+        self.assertEqual(rejected['signedHash'], current['signedHash'])
         final = self.decode((self.root / 'rawtxs.txt').read_text().strip())
         self.assertEqual(final['nonce'], '0x7')
-        self.assertEqual(int(final['maxFeePerGas'], 16), 8192)
+        self.assertEqual(int(final['maxFeePerGas'], 16), 5000)
         self.assertEqual(final['hash'], result.stdout.strip())
 
-    def test_cast_formatted_send_rejection_also_requotes(self):
+    def test_cast_formatted_send_rejection_also_retries(self):
         result = self.run_quote(send=True, SEND_RECONCILE='once', SEND_RECONCILE_CAST='1')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 2)
+
+    def test_complete_temporary_admission_errors_retry_identical_signed_bytes(self):
+        for cast_format in (False, True):
+            for code, message in TEMPORARY_ERRORS:
+                with self.subTest(cast=cast_format, code=code, message=message):
+                    for name in ('send-refused', 'sends', 'submitted-raws', 'intents', 'signs', 'evidence.rejections.jsonl'):
+                        (self.root / name).unlink(missing_ok=True)
+                    result = self.run_quote(send=True, SEND_RECONCILE='once',
+                                            ADMISSION_ERROR=rpc_error(-32003, code, message, cast_format))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    raws = (self.root / 'submitted-raws').read_text().splitlines()
+                    self.assertEqual(len(raws), 2)
+                    self.assertEqual(raws[0], raws[1])
+                    self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
+                    self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 1)
+                    final = self.decode(raws[-1])
+                    original = self.decode(self.candidates['0x2'])
+                    for field in ('signer', 'type', 'chainId', 'nonce', 'to', 'value', 'input'):
+                        self.assertEqual(final[field], original[field], field)
+                    rejected = json.loads((self.root / 'evidence.rejections.jsonl').read_text())
+                    self.assertEqual(rejected['signedHash'], result.stdout.strip())
+
+    def test_complete_queued_predecessor_admission_errors_share_quote_deadline(self):
+        for cast_format in (False, True):
+            with self.subTest(cast=cast_format):
+                for name in ('busy', 'sends', 'submitted-raws', 'intents', 'signs'):
+                    (self.root / name).unlink(missing_ok=True)
+                result = self.run_quote(send=True, BUSY='1', SEND_RECONCILE='always', EEZ_QUOTE_TIMEOUT='5', REAL_SLEEP='1',
+                                        ADMISSION_ERROR=rpc_error(-32003, *TEMPORARY_ERRORS[-1], cast_format))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('reconciliation timeout', result.stderr)
+                raws = (self.root / 'submitted-raws').read_text().splitlines()
+                self.assertGreaterEqual(len(raws), 1)
+                self.assertLessEqual(len(raws), 2)
+                self.assertEqual(len(set(raws)), 1)
+                self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
+                self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 2)
+
+    def test_temporary_admission_retry_stops_if_original_quote_expires(self):
+        result = self.run_quote(send=True, SEND_RECONCILE='once', EXPIRE_AFTER_REFUSAL='1',
+                                ADMISSION_ERROR=rpc_error(-32003, *TEMPORARY_ERRORS[-1]))
+        self.assertEqual(result.returncode, 70, result.stderr)
+        self.assertIn('Fee quote expired before submission', result.stderr)
+        self.assertEqual((self.root / 'sends').read_text().splitlines(), ['sent'])
+        self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign'])
+        self.assertEqual(len((self.root / 'intents').read_text().splitlines()), 1)
 
     def test_send_reconciliation_retries_share_original_deadline(self):
         result = self.run_quote(send=True, SEND_RECONCILE='always', EEZ_QUOTE_TIMEOUT='3')
@@ -594,7 +750,7 @@ class NetworkFeeTests(unittest.TestCase):
         for code in ("l1_tip_underfunded", "l2_tip_underfunded"):
             for cast_format in ("0", "1"):
                 with self.subTest(code=code, cast=cast_format):
-                    for name in ("send-refused", "sends", "intents", "evidence.rejections.jsonl"):
+                    for name in ("send-refused", "sends", "submitted-raws", "intents", "signs", "evidence.rejections.jsonl"):
                         (self.root / name).unlink(missing_ok=True)
                     result = self.run_quote(send=True, SEND_RECONCILE="once", TARIFF_CODE=code,
                                             SEND_RECONCILE_CAST=cast_format)
@@ -606,6 +762,9 @@ class NetworkFeeTests(unittest.TestCase):
                     self.assertEqual(self.decode((self.root / "rawtxs.txt").read_text().strip())["nonce"], "0x7")
                     evidence = json.loads((self.root / "evidence.rejections.jsonl").read_text())
                     self.assertEqual(evidence["rejectionKind"], code)
+                    raws = (self.root / 'submitted-raws').read_text().splitlines()
+                    self.assertNotEqual(raws[0], raws[1])
+                    self.assertEqual((self.root / 'signs').read_text().splitlines(), ['sign', 'sign'])
 
     def test_persistent_tariff_refusals_stop_and_log_each_attempt(self):
         result = self.run_quote(send=True, SEND_RECONCILE="always", TARIFF_CODE="l2_tip_underfunded",
@@ -653,7 +812,7 @@ class NetworkFeeTests(unittest.TestCase):
             '{"error":{"code":-32603,"data":{"code":"quote_unavailable","message":"quote unavailable: unsettled native history requires reconciliation"}}}',
             '{"error":{"code":-32003,"data":{"code":"quote_unavailable","message":"another failure"}}}',
             'quote_unavailable: unsettled native history requires reconciliation',
-            'Error: server returned an error response: error code -32003: bad tx, data: {"code":"quote_busy"}',
+            'Error: server returned an error response: error code -32003: bad tx, data: {"code":"unknown"}',
         ]
         for error in errors:
             with self.subTest(error=error):

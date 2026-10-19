@@ -89,8 +89,8 @@ HTTP 5xx) retry the same quote request within `EEZ_QUOTE_TIMEOUT` (default 120
 seconds). Each RPC attempt is capped at 30 seconds or the remaining deadline,
 whichever is shorter; retries wait up to two seconds and are capped at 60 attempts.
 There is no node-fee fallback. Exhausting the deadline stops submission.
-Unsupported quote RPCs (-32601 or -32004/unsupported_direction), other composer
-errors including invalid params and simulation reverts, and malformed, expired
+Unsupported quote RPCs (-32601 or -32004/unsupported_direction), disabled quotes,
+unknown composer errors, invalid params, simulation reverts, and malformed, expired
 or inconsistent returned quotes stop submission immediately.
 
 Serialize the full quote/sign/send sequence per source chain, holding
@@ -98,16 +98,23 @@ Serialize the full quote/sign/send sequence per source chain, holding
 use independent locks; same-chain workers and recovery share a lock.
 Queue waiting is separate from `EEZ_QUOTE_TIMEOUT` (default 120
 seconds), which starts at the quote request. In addition to transport failures,
-retry explicit `quote_busy`, `stale_context`, HTTP 429, or reconciliation-pending
-`quote_unavailable` responses within that deadline. Exhausting the quote deadline
+retry explicit `quote_busy`, `stale_context`, HTTP 429, or known temporary
+`quote_unavailable` responses within that deadline. Inspect typed `data.code` and
+`data.message` before treating generic `-32004` as terminal, for both JSON-RPC
+and Cast-formatted errors. The allowed `quote_unavailable` messages are
+`quote unavailable: settlement reconciliation pending`,
+`quote unavailable: unsettled native history requires reconciliation`, and
+`quote unavailable: queued predecessor is entering composition`.
+Other `quote_unavailable` reasons remain terminal. Exhausting the quote deadline
 or retry count is terminal. Invalid returned quotes and local failures also remain terminal.
 
-A definite `-32003` / `quote_unavailable` reconciliation rejection during initial
-cross-chain submission waits two seconds, obtains a fresh quote, re-signs the same intent
-and nonce, and retries under the original deadline while retaining the lock. Local persistence
-failures, uncertain sends and other submission errors do not take this retry path.
-Rejected quote evidence is retained in `fee-quote-*.rejections.jsonl` before the
-current quote file and candidate are replaced.
+A definite `-32003` admission rejection with `quote_busy`, `stale_context`, or one
+of those `quote_unavailable` messages waits up to two seconds and retries the
+identical signed bytes under the original deadline while retaining the lock.
+It does not obtain a fresh quote or change the prepared nonce, payload, or fees;
+quote expiry still stops submission. Local persistence failures, uncertain sends
+and other submission errors do not take this retry path. Every recognized refusal
+is retained in `fee-quote-*.rejections.jsonl`.
 
 Definite `-32003` refusals with `l1_tip_underfunded` / `l2_tip_underfunded` also
 retry with a fresh composer quote under the same deadline, never with node fees.

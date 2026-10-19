@@ -51,27 +51,64 @@ network_fee_chain() { # validate the candidate and endpoint identities before qu
     echo "$chain"
 }
 
+# Normalize complete JSON-RPC errors and Cast's server-error data without
+# treating words in an unrelated error message as a typed composer rejection.
+_network_rpc_error() {
+    local response="$1"
+    local cast_error='^Error: server returned an error response: error code (-?[0-9]+):.*, data: (.*)$'
+    if [[ "$response" =~ $cast_error ]]; then
+        response="{\"code\":${BASH_REMATCH[1]},\"data\":${BASH_REMATCH[2]}}"
+    fi
+    jq -ce '(.error // .) | select(type=="object" and (.code|type)=="number")' \
+        <<< "$response" 2>/dev/null
+}
+
+_network_temporary_quote_error() { # normalized error -> retry reason, or failure
+    jq -er '.data | select(type=="object") |
+        if .code == "quote_busy" or .code == "stale_context" then .code
+        elif .code == "quote_unavailable" and
+            (.message == "quote unavailable: unsettled native history requires reconciliation" or
+             .message == "quote unavailable: settlement reconciliation pending" or
+             .message == "quote unavailable: queued predecessor is entering composition") then "reconciliation"
+        else empty end' <<< "$1" 2>/dev/null
+}
+
 _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|terminal
-    local response="$1" status="$2" code='' lower="${1,,}"
-    if [[ "$response" == \{* ]]; then
-        code=$(jq -er '(.error // .).code | numbers' <<< "$response" 2>/dev/null) || {
-            echo terminal; return;
-        }
-    elif [[ "$response" =~ error[[:space:]]code[[:space:]](-?[0-9]+) ]]; then
-        code="${BASH_REMATCH[1]}"
-    elif [[ "$lower" == *'server returned an error response'* ]]; then
+    local response="$1" status="$2" error code lower="${1,,}"
+    local plain_error='^(error: )?(quote_busy|stale_context|quote_unavailable)(: (.*))?$'
+    if error=$(_network_rpc_error "$response"); then
+        code=$(jq -r .code <<< "$error")
+        case "$code" in
+            -32700|-32600|-32601|-32602) echo terminal; return ;;
+        esac
+        # -32004 covers temporary composer errors as well as disabled quotes.
+        # Only recognized data.code/details may override a generic RPC refusal.
+        if _network_temporary_quote_error "$error" >/dev/null; then
+            echo retry
+        else
+            echo terminal
+        fi
+        return
+    fi
+    # Missing/malformed typed data and unrecognized RPC errors are terminal,
+    # even when the message happens to contain transport or retry keywords.
+    if [[ "$response" =~ ^[[:space:]]*\{ ||
+          "$response" =~ error[[:space:]]code[[:space:]](-?[0-9]+) ||
+          "$lower" == *'server returned an error response'* ]]; then
         echo terminal; return
     fi
-    case "$code" in
-        -32601|-32004) echo terminal; return ;;
-        -32700|-32600|-32602) echo terminal; return ;;
-    esac
-    case "$response" in
-        *quote_busy*|*stale_context*|*quote_unavailable*'settlement reconciliation pending'*|*quote_unavailable*'unsettled native history requires reconciliation'*)
-            echo retry; return ;;
-    esac
-    # Composer rejections take precedence over transport words in their messages.
-    [[ -z "$code" ]] || { echo terminal; return; }
+    # Retain support for the older plain composer error format.
+    if [[ "$response" =~ $plain_error ]]; then
+        code="${BASH_REMATCH[2]}"
+        error=$(jq -nc --arg code "$code" --arg message "${BASH_REMATCH[4]:-}" \
+            '{data:{code:$code,message:(($code|gsub("_";" "))+": "+$message)}}')
+        if _network_temporary_quote_error "$error" >/dev/null; then
+            echo retry
+        else
+            echo terminal
+        fi
+        return
+    fi
     case "$lower" in
         *'execution reverted'*|*'simulation revert'*|*'invalid params'*)
             echo terminal; return ;;
@@ -232,36 +269,35 @@ network_send_quoted_trigger() { # raw, key, front, read RPC, evidence, submit, o
     network_with_fee_lock "$chain" _network_quote_and_send "$tx" "$chain" "$key" "$front" "$read_rpc" "$evidence" "$submit" "$persist" "$@"
 }
 
-# Recognize only a definite tariff admission refusal, in raw JSON-RPC or Cast's
-# server-error format. Timeouts, arbitrary text and other error codes never retry.
+# Retry only definite admission refusals, never uncertain sends or transport errors.
 _network_submission_rejection_kind() {
-    local response="$1"
-    if [[ "$response" != \{* ]]; then
-        response=$(sed -n 's/^Error: server returned an error response: error code -32003:.*, data: \(.*\)$/\1/p' <<< "$response")
-        [[ -n "$response" ]] || return 1
-        response="{\"code\":-32003,\"data\":$response}"
+    local error kind
+    error=$(_network_rpc_error "$1") || return 1
+    [[ "$(jq -r .code <<< "$error")" == -32003 ]] || return 1
+    kind=$(jq -er '.data.code | select(.=="l1_tip_underfunded" or .=="l2_tip_underfunded")' \
+        <<< "$error" 2>/dev/null) || kind=''
+    if [[ -n "$kind" ]]; then
+        echo "$kind"
+    else
+        _network_temporary_quote_error "$error"
     fi
-    jq -er '(.error // .) | select(.code == -32003) |
-        if .data.code == "l1_tip_underfunded" or .data.code == "l2_tip_underfunded" then .data.code
-        elif .data.code == "quote_unavailable" and
-            (.data.message == "quote unavailable: unsettled native history requires reconciliation" or
-             .data.message == "quote unavailable: settlement reconciliation pending") then "reconciliation"
-        else empty end' <<< "$response" 2>/dev/null
 }
 
 _network_quote_and_send() {
     local tx="$1" chain="$2" key="$3" front="$4" read_rpc="$5" evidence="$6" submit="$7" persist="$8"
     shift 8
-    local plan balance result rc deadline left rejection_kind retry_reason=reconciliation
+    local plan='' balance result rc deadline left rejection_kind retry_reason=reconciliation
     [[ "${EEZ_QUOTE_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] || { echo 'EEZ_QUOTE_TIMEOUT must be positive seconds' >&2; return 1; }
     deadline=$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))
     while (( SECONDS < deadline )); do
-        rc=0
-        plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline" "$evidence") || rc=$?
-        (( rc == 0 )) || return "$rc"
-        # Queue time is unbounded. Read funds after each quote, including retries.
-        balance=$(cast balance --rpc-url "$read_rpc" "$(jq -r .signer <<< "$tx")") || return 1
-        plan=$(network_sign_quote "$plan" "$key" "$balance") || return 1
+        if [[ -z "$plan" ]]; then
+            rc=0
+            plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline" "$evidence") || rc=$?
+            (( rc == 0 )) || return "$rc"
+            # Queue time is unbounded. Read funds after each new quote.
+            balance=$(cast balance --rpc-url "$read_rpc" "$(jq -r .signer <<< "$tx")") || return 1
+            plan=$(network_sign_quote "$plan" "$key" "$balance") || return 1
+        fi
         (( SECONDS < deadline )) || break
         rc=0
         result=$(network_submit_quote "$plan" "$front" "$evidence" "$submit" "$persist" "$@" 2>&1) || rc=$?
@@ -275,15 +311,20 @@ _network_quote_and_send() {
         fi
         printf 'ERROR: submission refused (%s) chain=%s nonce=%s hash=%s: %s\n' \
             "$rejection_kind" "$chain" "$(jq -r .nonce <<< "$plan")" "$(jq -r .signedHash <<< "$plan")" "$result" >&2
-        # Retain the rejected quote before the next attempt replaces the current
-        # evidence and signed candidate. The refused nonce/intent remain unchanged.
+        # Retain every refusal, including retries of the same signed candidate.
         if [[ -n "$evidence" ]]; then
             jq -c --arg error "$result" --arg kind "$rejection_kind" \
                 '{intent,quote,selectedOption,signedHash,rejectionKind:$kind,submissionError:$error}' \
                 <<< "$plan" >> "${evidence%.json}.rejections.jsonl" || return 70
         fi
         retry_reason="$rejection_kind"
-        echo 'Retrying with a fresh composer quote in 2s (same intent and nonce; original deadline)' >&2
+        case "$rejection_kind" in
+            l1_tip_underfunded|l2_tip_underfunded)
+                plan=''
+                echo 'Retrying with a fresh composer quote in 2s (same intent and nonce; original deadline)' >&2 ;;
+            *)
+                echo 'Retrying identical signed transaction in 2s (original deadline)' >&2 ;;
+        esac
         left=$((deadline - SECONDS)); (( left > 0 )) || break
         sleep "$((left < 2 ? left : 2))"
     done

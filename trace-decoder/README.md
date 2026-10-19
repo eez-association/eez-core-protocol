@@ -166,6 +166,18 @@ identified L1 entry is shown separately from other entries in its settlement bat
 If that entry cannot be isolated, a notice explains why and the full batch remains
 selectable. The complete physical trace is always retained in JSON.
 
+The gas summary shows separate **L1 flow gas** and **L2 flow gas** totals,
+including EEZ plumbing, hidden reads and reverted calls. Physical parent/child
+relationships prevent nested calls from being counted twice. Totals stay fixed
+across view, transaction and visibility selections: they describe the requested
+flow. The breakdown includes the source, linked L2 table loading and deliveries,
+and the isolated L1 entry when available. Whole transactions use receipt gas;
+isolated subtrees use inclusive call-trace gas. Full related transaction receipt
+totals are shown separately because settlement batches can contain other flows.
+Shared settlement work, transaction overhead and refunds cannot be allocated
+exactly to an isolated entry. Missing gas or incomplete attribution is marked
+partial; these are gas units, not fees.
+
 Recorded L2 proxy calls label their prepared table responses. State observations,
 when supplied, are values after a block, not per-transaction storage writes.
 Cross-chain reads always remain visible in both modes. **Local reads** controls

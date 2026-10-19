@@ -1045,6 +1045,23 @@
   }
   function rootOf(id, p) { let a = id; while (p.has(a)) a = p.get(a); return a; }
 
+  function renderGas() {
+    const summary = $('gas-summary');
+    summary.hidden = !M.gas;
+    if (!M.gas) return;
+    const number = v => v == null ? 'Unavailable' : BigInt(v).toLocaleString('en-US');
+    const chains = ['L1', 'L2'];
+    summary.innerHTML = `<div class="gas-totals">${chains.map(chain => {
+      const g = M.gas[chain];
+      return `<div><span class="eyebrow">${chain} flow gas</span><br><b>${number(g.gasUsed)}</b>${g.partial ? ' <span class="badge warn">partial</span>' : ''}</div>`;
+    }).join('')}</div><span class="note">Includes EEZ plumbing, nested calls and reverted calls, counted once. Totals cover the requested flow and stay the same when calls are hidden.</span>
+      <details><summary>Gas breakdown and whole transaction totals</summary>
+      <table><thead><tr><th>Chain</th><th>Contribution</th><th>Measurement</th><th>Gas used</th></tr></thead><tbody>${chains.flatMap(chain => M.gas[chain].contributions.map(r =>
+        `<tr><td>${chain}</td><td>${esc(r.label)} · <code>${esc(short(r.hash))}</code></td><td>${r.basis === 'receipt' ? 'Transaction receipt' : 'Call frame, including children'}</td><td>${number(r.gasUsed)}</td></tr>`)).join('')}</tbody></table>
+      <p class="note">Whole related transactions: ${chains.map(chain => `${chain} <b>${number(M.gas[chain].transactionGasUsed)}</b> gas${M.gas[chain].transactionGasPartial ? ' (partial)' : ''}`).join(' · ')}. These receipt totals include the full settlement batch, which may contain other flows.</p>
+      <p class="note">Flow totals include the source, linked L2 table loading and deliveries, and the isolated L1 entry when available. Whole transactions use receipt gas; subtrees use call-trace gas. Shared settlement work, transaction overhead and refunds cannot be allocated exactly to an isolated entry. Partial totals indicate missing gas or attribution. Gas units are shown separately for each chain, not fees.</p></details>`;
+  }
+
   // ---------- load ----------
   function load(i) {
     stop(); current = i;
@@ -1059,7 +1076,7 @@
     rootIndex = defaultRoot();
     defaultExpansion(); initMapState(); initFlowState();
     G = graphModel(); // contract tags are read by the inspector in every view
-    renderRootPicker(); renderStaticLabel(); renderVerify();
+    renderRootPicker(); renderStaticLabel(); renderVerify(); renderGas();
     $('trace-select').value = String(i);
     $('title').textContent = traces[i].label || M.label;
     $('kicker').textContent = traces[i].synthetic ? 'Synthetic example · EEZ call flow' : 'EEZ cross-chain call flow';
