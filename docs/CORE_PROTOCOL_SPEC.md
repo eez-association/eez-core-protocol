@@ -1,11 +1,24 @@
 # Core Protocol Specification
 
-**Source**: `src/`
-**Purpose**: Formal reference for implementing the Rust rollup node. Supersedes informal comments in source code.
+This page specifies how the EEZ contracts post, verify and execute cross-chain entries: the data model, the core functions on L1 and L2, how call hashes and the rolling hash are computed, the entry lifecycle, and the invariants and security considerations behind them. It is the formal reference for implementing the Rust rollup node against the contracts in `src/`, and supersedes informal comments in the source code.
 
-This document covers the **flat sequential execution model** layered with the **multi-prover / per-rollup-queue** model. Every cross-chain entry carries a flat list of top-level calls processed sequentially; each reentrant frame carries its **own** flat sub-array; reentrant calls resolve against a single unified expected-calls table content-addressed by the live rolling hash; and a single `rollingHash` per entry checks the surviving recorded observations. It does not directly hash all local state changes or successful nested saved answers; see §H.4 and [call-pattern limits](CALL_PATTERN_LIMITS.md). The execution structs are split per side: L1 (`src/interfaces/IEEZ.sol`) uses absolute directional names (`L2ToL1Call` / `l2ToL1Calls`, `ExpectedL1ToL2Call` / `expectedL1ToL2Calls`); L2 (`src/interfaces/IEEZL2.sol`) uses **self-relative** directional names (`CrossChainCall` / `incomingCalls`, `ExpectedOutgoingCrossChainCall` / `expectedOutgoingCalls`) because an L2's counterparty can be L1 OR another L2 — see §A.1. Entries are routed by `destinationRollupId` into per-rollup queues on L1. `postAndVerifyBatch` carries a single `ProofSystemBatchPerVerificationEntries` whose proofs verify atomically.
+**The model at a glance**
 
-For the multi-prover design (batch shape, per-PS public-inputs construction, threshold semantics), see `MULTI_PROVER_SPEC.md`.
+- **Flat sequential calls.** Every cross-chain entry carries a flat list of top-level calls, processed in order. Each reentrant frame carries its own flat sub-array.
+- **One reentrant table.** Reentrant calls resolve against a single expected-calls table, content-addressed by the live rolling hash.
+- **One rolling hash per entry.** `rollingHash` checks the surviving recorded observations.
+- **Per-rollup queues.** On L1, entries are routed by `destinationRollupId` into per-rollup queues.
+- **Atomic multi-prover verification.** `postAndVerifyBatch` carries a single `ProofSystemBatchPerVerificationEntries` whose proofs verify atomically. Batch shape, per-PS public inputs and thresholds are in the [Multi-Prover Specification](MULTI_PROVER_SPEC.md).
+
+> [!NOTE]
+> The rolling hash does not directly hash all local state changes or successful nested saved answers. See §H.4 and [call-pattern limits](CALL_PATTERN_LIMITS.md).
+
+**Naming per side.** L1 uses absolute directional names. L2 names are self-relative because an L2's counterparty can be L1 or another L2 (§A.1).
+
+| | L1 · `src/interfaces/IEEZ.sol` | L2 · `src/interfaces/IEEZL2.sol` |
+|---|---|---|
+| Call | `L2ToL1Call` / `l2ToL1Calls` | `CrossChainCall` / `incomingCalls` |
+| Expected reentrant call | `ExpectedL1ToL2Call` / `expectedL1ToL2Calls` | `ExpectedOutgoingCrossChainCall` / `expectedOutgoingCalls` |
 
 ---
 
