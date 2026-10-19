@@ -173,13 +173,15 @@ else
 # wallet.
 if [[ -n "${L1_FRONT:-}" && "${E2E_PREPARE_STEP:-}" != "plan" ]]; then
     _SENDER_ADDR=$(cast wallet address --private-key "$PK")
-    _FRONT_N=$(cast nonce "$_SENDER_ADDR" --rpc-url "$L1_FRONT" 2>/dev/null || echo 0)
+    _NONCE_DEADLINE=$(( $(date +%s) + 120 ))
+    _FRONT_N=$(network_checked_nonce "$_SENDER_ADDR" "$L1_FRONT" "$_NONCE_DEADLINE")
     for _i in $(seq 1 60); do
-        _RPC_N=$(cast nonce "$_SENDER_ADDR" --rpc-url "$RPC" 2>/dev/null || echo 0)
+        _RPC_N=$(network_checked_nonce "$_SENDER_ADDR" "$RPC" "$_NONCE_DEADLINE")
         [[ "$_RPC_N" -ge "$_FRONT_N" ]] && break
         echo "waiting for L1 RPC to catch up (rpc nonce $_RPC_N < front nonce $_FRONT_N)..."
         sleep 2
     done
+    [[ "$_RPC_N" -ge "$_FRONT_N" ]] || { echo 'L1 nonce consistency timeout' >&2; exit 1; }
 fi
 
 # Staged prepare steps (E2E_PREPARE_STEP, set by staged.sh):
@@ -195,6 +197,7 @@ if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
     plan_job_deploys "$SOL" "$RPC" "$L2_RPC" "$PK" "$E2E_JOB_DIR" || _RC=$?
     exit "$_RC"
 fi
+network_trigger_front "$SOL" >/dev/null || exit 1
 echo "====== Deploy ======"
 deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
 

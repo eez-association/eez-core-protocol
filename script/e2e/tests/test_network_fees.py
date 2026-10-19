@@ -212,11 +212,33 @@ class NetworkFeeTests(unittest.TestCase):
                 if kind == '0x2':
                     self.assertEqual(int(tx['maxPriorityFeePerGas'], 16), 4000)
                 intent = json.loads((self.root / 'intents').read_text().splitlines()[-1])
-                self.assertEqual(intent, {'from': original['signer'], 'to': TARGET,
+                self.assertEqual(intent, {'from': original['signer'], 'nonce': original['nonce'], 'to': TARGET,
                                           'data': '0x12345678', 'value': '0x11'})
                 evidence = json.loads((self.root / 'evidence.json').read_text())
                 self.assertEqual(evidence['selectedOption']['type'], kind)
                 self.assertEqual(evidence['signedHash'], tx['hash'])
+
+    def test_typed_option_error_preserves_diagnostic_without_signing_or_fallback(self):
+        for kind in ('0x0', '0x2'):
+            with self.subTest(kind=kind):
+                index = 0 if kind == '0x0' else 1
+                self.quote['options'][index] = {
+                    'type': kind, 'error': {
+                        'code': 'insufficient_funds', 'message': 'source balance is too small'}}
+                result = self.run_quote(kind, send=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('insufficient_funds: source balance is too small', result.stderr)
+                self.assertFalse((self.root / 'signs').exists())
+                self.assertFalse((self.root / 'sends').exists())
+                self.assertNotIn('gas-price', (self.root / 'cast-calls').read_text().splitlines())
+
+    def test_malformed_option_error_cannot_authorize_signing(self):
+        self.quote['options'][1]['error'] = {'code': 123, 'message': 'bad response'}
+        result = self.run_quote(send=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Malformed fee quote option error', result.stderr)
+        self.assertFalse((self.root / 'signs').exists())
+        self.assertFalse((self.root / 'sends').exists())
 
     def test_current_request_hash_quote_schema_signs_without_legacy_metadata(self):
         self.quote.pop('recoveryMode')

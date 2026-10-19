@@ -37,7 +37,9 @@ The text/JSON CLI uses the same decoder engine: `node trace-decoder/decode-trace
 ## Configuration
 
 Read from `--env-file`, then `DEVNET_ENV`, then `chain.env`; nonempty exported variables override
-the file and CLI flags override both. A minimal env file:
+the file and CLI flags override both. File references such as `L1_FRONT=$L1_RPC`
+also use nonempty exported values; exported values themselves are literal. CLI
+flags override individual options after file expansion. A minimal env file:
 
 ```sh
 export L1_RPC=https://<l1-rpc>
@@ -99,6 +101,8 @@ other contracts show as "Unknown contract" and function names come from validate
    using proxy identity, calldata, value, static context, return/revert data,
    execution tables and nested call structure. Identical occurrences remain
    ambiguous unless consumed-entry and delivery order establish their identity.
+   Every ordered pair must also agree on return/revert data and execution scope;
+   ordering alone never overrides a mismatch.
    For L2 sources executed through `_attemptExecuteImmediateL2Txs`, the decoder
    checks each attempt's calldata against its batch entry, excludes reverted
    attempts and native entries without L1 calls, and selects the matching L1
@@ -225,8 +229,11 @@ Update `src/protocol-abi.json` when the EEZ/EEZL2 ABI changes.
 
 ## Tests
 
+With decoder dependencies installed, build the contract ABIs before the tests:
+
 ```sh
-cd trace-decoder && npm test
+forge build
+npm --prefix trace-decoder test
 ```
 
 `tests/flow-viewer.test.mjs` runs the page script against a stub DOM and checks that

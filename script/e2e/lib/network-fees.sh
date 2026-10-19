@@ -88,7 +88,7 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
     local intent quote option nonce kind gas cap tip value expires attempt deadline left rpc_timeout rc failure
     local retry_reason=reconciliation
     [[ -n "$chain" ]] || chain=$(network_fee_chain "$tx" "$front" "$read_rpc") || return 1
-    intent=$(jq -c '{from:.signer,to:.to,data:.input,value:.value}' <<< "$tx") || return 1
+    intent=$(jq -c '{from:.signer,to:.to,data:.input,value:.value,nonce:.nonce}' <<< "$tx") || return 1
     # Quotes can be unavailable while earlier native/cross-chain activity is
     # settling. Retry only those explicit transient responses under one deadline.
     [[ "${EEZ_QUOTE_TIMEOUT:-120}" =~ ^[1-9][0-9]*$ ]] || { echo 'EEZ_QUOTE_TIMEOUT must be positive seconds' >&2; return 1; }
@@ -140,6 +140,12 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
     kind=$(jq -r .type <<< "$tx")
     option=$(jq -ce --arg kind "$kind" '[.options[] | select(.type==$kind)] | select(length==1) | .[0]' <<< "$quote") || {
         echo 'Fee quote must contain exactly one option matching the transaction type' >&2; return 1; }
+    if jq -e 'has("error")' <<< "$option" >/dev/null; then
+        jq -e '.error | type=="object" and (.code|type)=="string" and (.message|type)=="string"' \
+            <<< "$option" >/dev/null || { echo 'Malformed fee quote option error' >&2; return 1; }
+        jq -r '"Fee quote option rejected: \(.error.code): \(.error.message)"' <<< "$option" >&2
+        return 1
+    fi
     jq -e 'def quantity: type=="string" and test("^0x[0-9a-fA-F]+$");
         (.gas|quantity) and (.estimatedFee|quantity) and
         ((.requestHash // .intentHash)|type=="string" and test("^0x[0-9a-fA-F]{64}$")) and
@@ -183,7 +189,7 @@ network_node_fee_plan() { # validated trigger, source read RPC, chain -> fresh n
     [[ $(bc <<< "$gas > 0 && $cap > 0 && $tip >= 0 && $cap >= $tip") == 1 ]] || return 1
     jq -nc --argjson tx "$tx" --arg chain "$chain" --arg nonce "$nonce" \
         --arg gas "$gas" --arg cap "$cap" --arg tip "$tip" --arg value "$value" \
-        '{feeSource:"node",transaction:$tx,intent:($tx|{from:.signer,to:.to,data:.input,value:.value}),
+        '{feeSource:"node",transaction:$tx,intent:($tx|{from:.signer,to:.to,data:.input,value:.value,nonce:.nonce}),
           quote:null,selectedOption:null,expires:null,
           chain:$chain,nonce:$nonce,gas:$gas,cap:$cap,tip:$tip,value:$value}'
 }

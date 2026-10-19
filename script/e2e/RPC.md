@@ -49,8 +49,13 @@ Use discovery instead of copying deployment addresses from an older run.
 
 **Params:**
 ```json
-[{"from":"<funded sender>","to":"<deployed target>","data":"<exact calldata>","value":"0x0"}]
+[{"from":"<funded sender>","to":"<deployed target>","data":"<exact calldata>","value":"0x0","nonce":"0x2"}]
 ```
+
+`nonce` is the exact nonce of the prepared trigger, also for consecutive
+same-account bursts. Never let the quote select a different nonce. A selected
+option's `error.code` and `error.message` are terminal diagnostics; do not sign
+or fall back to node fees when an option is rejected.
 
 `value` is the native amount in wei as a hex quantity; replace `0x0` for a
 nonzero transfer. Quote after deployment, immediately before signing and sending.

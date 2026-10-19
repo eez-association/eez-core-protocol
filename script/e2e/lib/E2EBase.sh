@@ -625,6 +625,33 @@ get_block_from_broadcast() {
     printf "%d\n" "$(jq -r '.receipts[-1].blockNumber' "$json")"
 }
 
+# Read real nonces with bounded retries; an unavailable RPC never means zero.
+network_checked_nonce() { # sender, RPC, optional absolute deadline -> decimal nonce
+    local nonce left timeout="${E2E_NONCE_TIMEOUT:-30}"
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid E2E_NONCE_TIMEOUT' >&2; return 1; }
+    local NETWORK_VERIFY_DEADLINE="${3:-$(( $(date +%s) + timeout ))}"
+    while left=$(network_time_left); do
+        (( left <= 5 )) || left=5
+        if nonce=$(cast nonce "$1" --rpc-timeout "$left" --rpc-url "$2"); then
+            [[ "$nonce" =~ ^(0|[1-9][0-9]*)$ ]] &&
+                [[ $(bc <<< "$nonce <= 9223372036854775806") == 1 ]] || {
+                echo 'Invalid source nonce for runner arithmetic' >&2; return 1; }
+            printf '%s\n' "$nonce"
+            return 0
+        fi
+        network_retry 'source nonce read failed' || return 1
+    done
+    echo 'Source nonce read deadline expired' >&2
+    return 1
+}
+
+network_trigger_front() { # scenario -> required source front for classic network runs
+    local front="${L1_FRONT:-}" name=L1_FRONT
+    if grep -q 'contract ExecuteNetworkL2 ' "$1"; then front="${L2_FRONT:-}"; name=L2_FRONT; fi
+    [[ -n "$front" ]] || { echo "Network trigger preparation requires $name" >&2; return 1; }
+    printf '%s\n' "$front"
+}
+
 # ── Build the pre-signed trigger tx(s) from an ExecuteNetwork(L2) contract ──
 # Usage: build_trigger_txs SOL NONCE_MODE
 #   NONCE_MODE local   → rpc nonce + 1, quiet: the trigger follows one same-key
@@ -641,7 +668,8 @@ get_block_from_broadcast() {
 # RLP_ENCODED_TX (the first tx — ComputeExpected reads it from env for action
 # hashing).
 build_trigger_txs() {
-    local sol="$1" nonce_mode="$2"
+    local sol="$1" nonce_mode="$2" front
+    if [[ "$nonce_mode" == network ]]; then front=$(network_trigger_front "$sol") || return 1; fi
 
     if grep -q 'contract ExecuteNetworkL2 ' "$sol"; then
         _TRIGGER_CHAIN="L2"
@@ -673,7 +701,7 @@ build_trigger_txs() {
 
     local sender nonce_rpc nonce_front tx_nonce
     sender=$(cast wallet address --private-key "$PK")
-    nonce_rpc=$(cast nonce "$sender" --rpc-url "$_TRIGGER_RPC" 2>/dev/null || echo 0)
+    nonce_rpc=$(network_checked_nonce "$sender" "$_TRIGGER_RPC") || return 1
     if [[ "$nonce_mode" == "local" ]]; then
         tx_nonce=$((nonce_rpc + 1))
     else
@@ -682,26 +710,21 @@ build_trigger_txs() {
         echo "value: $value"
         echo "gas limit: $_TRIGGER_GAS"
         [[ "$_TX_COUNT" -gt 1 ]] && echo "trigger txs: $_TX_COUNT (consecutive nonces, fire-and-forget)"
-        if [[ "$_TRIGGER_CHAIN" == "L2" && -n "${L2_FRONT:-}" ]]; then
-            nonce_front=$(cast nonce "$sender" --rpc-url "$L2_FRONT" 2>/dev/null || echo 0)
-        elif [[ "$_TRIGGER_CHAIN" == "L1" && -n "${L1_FRONT:-}" ]]; then
-            nonce_front=$(cast nonce "$sender" --rpc-url "$L1_FRONT" 2>/dev/null || echo 0)
-        else
-            nonce_front=0
-        fi
+        nonce_front=$(network_checked_nonce "$sender" "$front") || return 1
         tx_nonce=$(( nonce_rpc > nonce_front ? nonce_rpc : nonce_front ))
         echo "nonce: $tx_nonce (rpc=$nonce_rpc front=$nonce_front)"
     fi
 
     RLP_ENCODED_TXS=()
-    local i
+    local i raw
     for (( i = 0; i < _TX_COUNT; i++ )); do
-        RLP_ENCODED_TXS+=("$(cast mktx "$target" "$calldata" \
+        raw=$(cast mktx "$target" "$calldata" \
             --value "${value}wei" \
             --gas-limit "$_TRIGGER_GAS" \
             --nonce "$(( tx_nonce + i ))" \
             --private-key "$PK" \
-            --rpc-url "$_TRIGGER_RPC")")
+            --rpc-url "$_TRIGGER_RPC") || return 1
+        RLP_ENCODED_TXS+=("$raw")
     done
     export RLP_ENCODED_TX="${RLP_ENCODED_TXS[0]}"
 }

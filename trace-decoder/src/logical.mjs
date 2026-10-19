@@ -256,6 +256,9 @@ export async function buildGraph({ config, transactions, managers, readers, roll
       // L2 -> L1 rows are in a single ordered execution table.
       if (first.chain === 'L1' && new Set(candidates.map(i => i.generationId)).size !== candidates.length) continue;
       if (first.chain === 'L2' && new Set(candidates.map(i => i.generationId)).size !== 1) continue;
+      // Ordering cannot override a later call's result or scope constraints.
+      // Validate the entire group before assigning any of its occurrences.
+      if (group.some((o,i) => !available(o).includes(candidates[i]))) continue;
       group.forEach((o,i) => assign(o,candidates[i], ['ordered consumed entries and complete delivery sequence'])); progress = true;
     }
   }

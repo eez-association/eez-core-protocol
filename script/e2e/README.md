@@ -57,6 +57,12 @@ Network verification uses exact composer transaction links by default, including
 full L2 static-table checks. See [transaction roles and compatibility modes](RPC.md#eez_getcrosschaintransaction)
 and [saved verification evidence](RUNNER_GUIDE.md#exact-transaction-links).
 
+Classic network preparation requires the source chain's front (`L1_FRONT` or
+`L2_FRONT`) and uses the greater of the node and front nonces. Failed nonce reads
+retry for up to `E2E_NONCE_TIMEOUT` seconds (default 30); they never substitute
+zero. The L1 catch-up loop shares a 120-second deadline across retries. The staged
+plan path retains its existing batched deployment barrier.
+
 The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
 validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
 and default local runs; named scenarios and category selections remain available.
@@ -99,7 +105,7 @@ remain in their existing `tmp/` directories.
 Run the network runner regression tests with:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s script/e2e/tests -v
+(cd script/e2e/tests && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v)
 ```
 
 ## Prerequisites
@@ -267,8 +273,8 @@ bash script/e2e/run/network/parallel.sh one_way:2 nested      # categories too
 
 Self-funding: `faucet.txt` (in `script/e2e/run/`, gitignored) is the orchestrator's faucet —
 created on first run and topped up from `SOURCE_PK` (default Anvil #2) when short.
-Workers below `FLOOR_ETH` (default 0.0005 ETH) are topped up to `FUND_ETH`
-(default 0.001 ETH) per chain via MultiSend. A `flock` serializes funding; it does
+Workers below `FLOOR_ETH` (default 0.0015 ETH) are topped up to `FUND_ETH`
+(default 0.003 ETH) per chain via MultiSend. A `flock` serializes funding; it does
 not reserve pool wallets for the duration of concurrent runs.
 
 Flags: `--direct` funds workers straight from the source key (anvil #2, or
@@ -456,8 +462,8 @@ bash script/e2e/run/network/load-testing.sh --workers 20 --txs-per-wallet 500 co
 bash script/e2e/run/network/load-testing.sh --workers 50 --txs-per-wallet 100 nestedCounter
 ```
 
-Funding matches the staged and parallel runners: wallets below **0.0005 ETH**
-are topped up to **0.001 ETH** on each chain before the run. Override with
+Funding matches the staged and parallel runners: wallets below **0.0015 ETH**
+are topped up to **0.003 ETH** on each chain before the run. Override with
 `--fund` / `FUND_ETH` and `--floor` / `FLOOR_ETH`; the floor defaults to half the
 target. Size the balance for the whole load run, including deployment gas on
 the first worker.

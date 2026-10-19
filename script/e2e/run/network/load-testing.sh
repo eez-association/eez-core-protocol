@@ -125,8 +125,8 @@ Usage: bash script/e2e/run/network/load-testing.sh [options] <scenario>
                     (mutually exclusive with --txs)
   --workers N       Concurrent sender wallets (default 20)
   --window N        Pending transactions per wallet (default 10)
-  --fund ETH        Worker balance target on each chain (default 0.001)
-  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0005)
+  --fund ETH        Worker balance target on each chain (default 0.003)
+  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0015)
   --direct          Fund directly from SOURCE_PK
   --fresh           Create new wallets instead of reusing the existing pool
   --gas N           Override trigger gas limit
@@ -145,7 +145,7 @@ EOF
 TXS=1000 WORKERS=20 WINDOW=10 DIRECT=false FRESH=false
 TXS_PER_WALLET=""
 TOTAL_EXPLICIT=false
-FUND_ETH="${FUND_ETH:-0.001}"
+FUND_ETH="${FUND_ETH:-0.003}"
 GAS_OVERRIDE=""
 TARGET_SCENARIO=""
 while (( $# )); do

@@ -102,6 +102,27 @@ for(const direction of ['L1','L2'])test(`${direction} repeated identical calls u
   assert.ok(result.outgoing.every(o=>o.matchEvidence.includes('ordered consumed entries and complete delivery sequence')));
 });
 
+for (const direction of ['L1', 'L2']) for (const mismatch of ['return', 'revert']) {
+  test(`${direction} ordered repeated calls reject a later ${mismatch} mismatch`, async () => {
+    const f = scenario({ direction, repeat: 2 });
+    const second = f.txs[direction].get(f.trigger).trace.calls[1];
+    const manager = second.calls[1];
+    if (mismatch === 'return') {
+      second.output = app.encodeFunctionResult('increment', [2]);
+      manager.output = ethers.AbiCoder.defaultAbiCoder().encode(['bytes'], [second.output]);
+    } else {
+      // Equal bytes must still not match a successful remote return to a revert.
+      second.error = manager.error = 'execution reverted';
+    }
+    const result = await decodeCrossChainTrace(f.config, f.trigger);
+    assert.equal(result.outgoing.length, 2);
+    assert.ok(result.outgoing.every(o => o.status !== 'matched'));
+    assert.equal(result.edges.filter(e => e.type === 'cross-chain').length, 0);
+    assert.equal(result.outgoing[1].rejectedCandidates.length, 2);
+    assert.ok(result.outgoing[1].rejectedCandidates.every(c => c.reason === 'return-or-revert-mismatch'));
+  });
+}
+
 test('repeated hashes alone leave candidates ambiguous',async()=>{
   const f=scenario({repeat:2,ambiguous:true});const result=await decodeCrossChainTrace(f.config,f.trigger);
   assert.ok(result.outgoing.every(o=>o.status==='ambiguous'&&o.candidates.length===2));
@@ -332,6 +353,27 @@ test('an unobserved remote call never inherits a local manager failure', async (
   assert.notEqual(out.remoteCall, out.localResponse);
 });
 
+
+test('file references use exported overrides, with empty exports falling back to the file', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decoder-config-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'chain.env'),
+      'L1_RPC=https://old.example\nL2_RPC=https://l2.example\nL1_FRONT=$L1_RPC\nL1_TRACE_RPC=${L1_FRONT}\n');
+    const overridden = loadConfig([hash('tx')], { L1_RPC: 'https://new.example' }, dir);
+    assert.equal(overridden.l1Rpc, 'https://new.example');
+    assert.equal(overridden.l1Front, overridden.l1Rpc);
+    assert.equal(overridden.l1TraceRpc, overridden.l1Rpc);
+    const empty = loadConfig([hash('tx')], { L1_RPC: '', L1_FRONT: '' }, dir);
+    assert.equal(empty.l1Front, 'https://old.example');
+    assert.equal(empty.l1TraceRpc, empty.l1Front);
+    const cli = loadConfig([hash('tx'), '--l1-front', 'https://cli.example'], { L1_RPC: 'https://new.example' }, dir);
+    assert.equal(cli.l1Front, 'https://cli.example');
+    // Exported URLs are literal, even if their paths contain a dollar sign.
+    const literal = 'https://new.example/$L2_RPC';
+    assert.equal(loadConfig([hash('tx')], { L1_RPC: literal }, dir).l1Front, literal);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('empty exported settings fall back to the file and env managers pin discovery', async () => {
   const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');

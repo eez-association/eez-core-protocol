@@ -42,6 +42,9 @@ export function parseEnv(text, exported = {}) {
     values[m[1]] = value;
   }
   function expand(key, seen = new Set()) {
+    // Exported values are already literal shell values. Use the same nonempty
+    // precedence for references as for top-level settings in loadConfig.
+    if (exported[key]) return exported[key];
     if (seen.has(key)) throw new Error(`Cyclic environment reference: ${key}`);
     seen.add(key);
     return (values[key] ?? exported[key] ?? "").replace(/\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g, (_, a, b) => {
