@@ -806,7 +806,7 @@ _send_raw_tx() {
     local rpc="$1" raw="$2"
     local rpc_out tx_hash
     if ! rpc_out=$(cast rpc eth_sendRawTransaction "$raw" --rpc-url "$rpc" 2>&1); then
-        echo "ERROR: eth_sendRawTransaction failed" >&2
+        echo "$_SEND_RAW_TX_FAILED" >&2
         echo "$rpc_out" >&2
         return 1
     fi

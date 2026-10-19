@@ -5,6 +5,8 @@
 
 # Endpoint pair -> checked chain ID. In memory only; workers inherit it, each run rechecks.
 declare -gA _NETWORK_FEE_IDENTITIES=()
+# First stderr line of a failed _send_raw_tx; _network_rpc_error strips it.
+_SEND_RAW_TX_FAILED='ERROR: eth_sendRawTransaction failed'
 
 network_fee_cache_pair() { # front, read RPC, optional expected ID and output variable; call in parent
     local front="$1" read_rpc="$2" expected="${3:-}" chain read_chain pair
@@ -55,6 +57,9 @@ network_fee_chain() { # validate the candidate and endpoint identities before qu
 # treating words in an unrelated error message as a typed composer rejection.
 _network_rpc_error() {
     local response="$1"
+    # Strip only the exact diagnostic wrapper emitted by _send_raw_tx.
+    # The remaining payload must still pass the typed RPC error checks below.
+    response=${response#"$_SEND_RAW_TX_FAILED"$'\n'}
     local cast_error='^Error: server returned an error response: error code (-?[0-9]+):.*, data: (.*)$'
     if [[ "$response" =~ $cast_error ]]; then
         response="{\"code\":${BASH_REMATCH[1]},\"data\":${BASH_REMATCH[2]}}"
