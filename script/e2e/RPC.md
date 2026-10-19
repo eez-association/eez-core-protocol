@@ -178,6 +178,9 @@ a logged compatibility fallback only for `-32601` or a legacy record without
 `transactions`; `off` uses the previous discovery path. Null/incomplete supported
 records wait under the verification deadline. Wrong complete links fail rather
 than being replaced with a different transaction found by scanning.
+The verifier caches chain IDs only after both chains' front/read endpoints pass
+identity checks. If initialization fails, the next verification attempt checks
+both chains again before validating transaction links.
 
 ## eez_getSettlementByL2Block
 

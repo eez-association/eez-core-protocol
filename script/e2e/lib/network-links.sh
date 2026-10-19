@@ -28,6 +28,8 @@ network_links_status() { # source hash -> validated references; keep every raw o
 
 network_links_chain_ids() {
     local chain rpc value expected id
+    local -A ids=()
+    unset NETWORK_LINK_L1_ID NETWORK_LINK_L2_ID
     for chain in L1 L2; do
         id=''
         while read -r rpc; do
@@ -39,8 +41,11 @@ network_links_chain_ids() {
         done < <(network_urls "$chain")
         expected="EXPECTED_${chain}_CHAIN_ID"
         [[ -z "${!expected:-}" || "${!expected}" == "$id" ]] || { echo 'Saved/current chain ID mismatch' >&2; return 1; }
-        printf -v "NETWORK_LINK_${chain}_ID" '%s' "$id"
+        ids[$chain]="$id"
     done
+    # Publish the pair only after both chains and their endpoints validate.
+    NETWORK_LINK_L1_ID="${ids[L1]}"
+    NETWORK_LINK_L2_ID="${ids[L2]}"
 }
 
 network_links_capture() {
@@ -73,7 +78,9 @@ network_links_capture() {
         fi
     fi
     # Cache identities within this process only. Resume always reads them again.
-    if [[ -z "${NETWORK_LINK_L1_ID:-}" ]]; then network_links_chain_ids || return $?; fi
+    if [[ -z "${NETWORK_LINK_L1_ID:-}" || -z "${NETWORK_LINK_L2_ID:-}" ]]; then
+        network_links_chain_ids || return $?
+    fi
     for source in "${TX_HASHES[@]}"; do
         rc=0; record=$(network_links_status "$source") || rc=$?
         if (( rc == 3 )) && [[ "${E2E_TX_LINKS:-required}" == auto ]]; then
