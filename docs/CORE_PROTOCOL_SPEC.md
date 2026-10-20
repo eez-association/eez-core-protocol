@@ -153,7 +153,15 @@ L1:
 L2:
 - `executeIncomingCrossChainCall`: `entries[0].incomingCalls[0]` equals the call that actually arrived from the source rollup — a cross-chain fact, *circuit-only*. Its `gas` is bound on-chain (folded into `proxyEntryHash`); the rest of `entries[0]` stays fully general — `success == false` reverts the whole delivery, and `revertNextNCalls` on the inbound call rolls back its destination effects while the delivery commits.
 - System funding must back the executed incoming transfers. The contract pools `msg.value`, permits partial consumption, and retains balance when tables are replaced; it does not enforce a per-load equality to committed or consumed values. The node/circuit must define aggregate inventory, funding and residual handling across loads/reverts before claiming conservation. See [L2 funding and inventory](#l2-funding-and-inventory).
-- **Lookups are never delivered.** L2 state and the L2 root change only for cross-chain work L1 can prove it executed. A top-level static read, an L1→L2 call that reverts on L2, and an L1→L2 call whose L1 frame is reverted afterwards are all *lookups*: the composer simulates the call, the prover signs its return or revert data (the L1 entry's `returnData`, and the blob so the user can read it), nothing is applied on L2, the root does not move, and no `executeIncomingCrossChainCall` tx exists for it in the sync block. The rule is uniform — there is no root-only checkpoint or synthetic entry that catches a root up after a failed delivery. On L1 the matching `success == false` entry unwinds its root update with its revert (above), so both sides agree the root did not move. The rule is direction-specific: an L2→L1 call that reverts on L1 IS delivered — the L2Tx entry runs it on L1 and `CALL_END(false, revertData)` records the revert — because L1 executes it itself. *Composer / circuit rule.*
+- **Lookups are never delivered.** L2 state and the L2 root change only for cross-chain work L1 can prove it executed. Three cases are *lookups*:
+  - a top-level static read
+  - an L1→L2 call that reverts on L2
+  - an L1→L2 call whose L1 frame is reverted afterwards
+
+  For a lookup, the composer simulates the call and the prover signs its return or revert data (the L1 entry's `returnData`, and the blob so the user can read it). Nothing is applied on L2, the root does not move, and the sync block has no `executeIncomingCrossChainCall` tx for it. The rule is uniform: no root-only checkpoint or synthetic entry catches a root up after a failed delivery. On L1 the matching `success == false` entry unwinds its root update with its revert (above), so both sides agree the root did not move.
+  - **Direction-specific:** an L2→L1 call that reverts on L1 *is* delivered. The L2Tx entry runs it on L1 and `CALL_END(false, revertData)` records the revert, because L1 executes it itself.
+
+  *Composer / circuit rule.*
 
 Both sides:
 - SUCCESS rows of the unified reentrant table carry `revertedOrStaticRollingHash == bytes32(0)` — the field is an expected-hash target only on the STATIC / REVERTED paths; SUCCESS resolution checks that it is zero. *(Defensive check at resolution: `SuccessRowWithRevertedOrStaticHash`.)*

@@ -44,7 +44,17 @@ Exception — L1 L2Tx entries (`proxyEntryHash == 0`) have no proxy consumer and
 
 ### IMMEDIATE entries (`proxyEntryHash == 0` — "L2Tx" entries)
 
-A leading run of the batch's immediate prefix (`entries[0..immediateEntryCount)`) may have `proxyEntryHash == 0`. Each such entry is executed inline by `postAndVerifyBatch` itself, **straight from calldata** (never SSTOREd whole; only its reentrant table is parked transiently), and represents the batch's immediate work — pure L2 transactions or L2 transactions that touch L1. Calls are processed, state deltas are applied, and the rolling hash is verified, all within `postAndVerifyBatch`. Each entry runs in a `try/catch` self-call (`_attemptExecuteImmediateL2Txs`); a nonempty caught revert emits `L2TxSkipped(entryIndex, revertData)` and advances. Empty revert data instead aborts with `ImmediateL2TxOutOfGas(entryIndex)` before emission (empty data does not prove OOG). Any later outer revert discards earlier skip logs. Other hard errors include: a non-empty leading L2Tx run where **every** entry reverted unwinds the whole post (`AllImmediateL2TxsFailed`), and an `immediateEntryCount` whose first deferred entry has zero `proxyEntryHash` is rejected at validation, even when that boundary follows proxy entries (`ImmediateCountStrandsLeadingL2Tx`). Immediate-prefix entries past the leading L2Tx run are meta-hook entries (see the Transaction Model section).
+A leading run of the batch's immediate prefix (`entries[0..immediateEntryCount)`) may have `proxyEntryHash == 0`. These entries are the batch's immediate work: pure L2 transactions, or L2 transactions that touch L1. `postAndVerifyBatch` runs each one inline, **straight from calldata**. It is never SSTOREd whole; only its reentrant table is parked transiently.
+
+Each entry runs in a `try/catch` self-call (`_attemptExecuteImmediateL2Txs`) that processes its calls, applies state deltas and verifies the rolling hash, all within `postAndVerifyBatch`. A caught revert with non-empty data emits `L2TxSkipped(entryIndex, revertData)` and advances. Any later outer revert discards earlier skip logs.
+
+| Condition | Result |
+|---|---|
+| Caught revert with empty revert data (empty data does not prove OOG) | Aborts with `ImmediateL2TxOutOfGas(entryIndex)` before emission |
+| Every entry in a non-empty leading L2Tx run reverted | Whole post unwinds: `AllImmediateL2TxsFailed` |
+| `immediateEntryCount` leaves a zero-`proxyEntryHash` entry as the first deferred entry, even when that boundary follows proxy entries | Rejected at validation: `ImmediateCountStrandsLeadingL2Tx` |
+
+Immediate-prefix entries past the leading L2Tx run are meta-hook entries (see the Transaction Model section).
 
 ### Proxy-consumed entries and deferred L2Txs
 
@@ -102,7 +112,17 @@ struct L2ToL1Call {
 
 L2's `CrossChainCall` (`IEEZL2.sol`) is field-for-field identical; only the struct name differs.
 
-The processor (`_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2) walks the given call array by a plain local index and, for each non-revert-span call, derives the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creates the proxy if it doesn't exist, and routes the call through `CrossChainProxy.executeOnBehalf(targetAddress, gas, data){value: value}` (the call's `gas` field caps the destination call; `0` forwards all remaining) — a plain `.call`, or a `staticcall` when `isStatic` (a static call carrying value is malformed and reverts `StaticCallWithValue`). If the destination call itself reverts, the proxy's `.call` returns `(success=false, retData=revertReason)` and that is hashed into `CALL_END` — natural reverts need no special wrapping. Each call's identity (its `crossChainCallHash`, with `targetRollupId` = the executing chain's ID) is folded into `CALL_BEGIN`, so the hash commits to *which* call ran, not just its result. Every call's `sourceRollupId` must be in the entry's proven set (its `rollupUpdates` on L1) — enforced at batch validation (`CallSourceNotVerified`).
+The processor (`_processL2ToL1Calls` on L1 / `_processIncomingCalls` on L2) walks the given call array by a plain local index. For each call outside a revert span:
+
+1. Fold the call's identity (its `crossChainCallHash`, with `targetRollupId` = the executing chain's ID) into `CALL_BEGIN`, so the hash commits to *which* call ran, not just its result.
+2. Derive the `sourceProxy` address from `(sourceAddress, sourceRollupId)`, auto-creating the proxy if it doesn't exist.
+3. Route the call through `CrossChainProxy.executeOnBehalf(targetAddress, gas, data){value: value}`: a plain `.call`, or a `staticcall` when `isStatic`. The call's `gas` field caps the destination call; `0` forwards all remaining gas.
+4. Hash the outcome into `CALL_END`. If the destination call itself reverts, the proxy's `.call` returns `(success=false, retData=revertReason)`, so natural reverts need no special wrapping.
+
+Two checks reject malformed calls:
+
+- A static call carrying value reverts `StaticCallWithValue`.
+- Every call's `sourceRollupId` must be in the entry's proven set (its `rollupUpdates` on L1), enforced at batch validation (`CallSourceNotVerified`).
 
 ### `revertNextNCalls`: forced-revert context
 
