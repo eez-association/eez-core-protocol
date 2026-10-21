@@ -17,6 +17,10 @@ network_deploy_setup() {
 network_wait_setup() {
     local rpc="$1" transactions="$2" timeout="${E2E_SETUP_TIMEOUT:-180}" hashes status
     [[ -s "$transactions" ]] || return 0
+    if [[ "${E2E_NO_WAIT_FOR_CONFIRMATION:-false}" == true ]]; then
+        echo 'Skipping L2 setup confirmation wait (--no-wait-for-confirmation)' >&2
+        return 0
+    fi
     [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid E2E_SETUP_TIMEOUT' >&2; return 1; }
     local NETWORK_VERIFY_DEADLINE=$(( $(date +%s) + timeout ))
     hashes=$(jq -Rsc 'split("\n") | map(select(length>0)) | unique' "$transactions") || return 1

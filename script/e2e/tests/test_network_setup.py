@@ -77,6 +77,7 @@ cast() {
 }
 forge() {
     if [[ "$*" == *' --broadcast '* ]]; then
+        [[ "${TEST_MODE:-}" != deploy_failed ]] || return 1
         local path="${FOUNDRY_BROADCAST:-broadcast}/scenario.sol/2"
         mkdir -p "$path"
         printf '{"transactions":[{"hash":"%s"}],"receipts":[{"transactionHash":"%s","blockHash":"%s","blockNumber":"0xa","status":"0x1"}]}\n' \
@@ -116,14 +117,20 @@ class NetworkSetupTests(unittest.TestCase):
         return subprocess.run(["bash", "-c", prefix + COMMANDS + script], cwd=self.root,
             env={**os.environ, "LIB":str(LIB), "TEST_ROOT":str(self.root), "TEST_MODE":mode,
                  "SETUP_TX":TX, "SECOND_TX":SECOND_TX, "OLD_BLOCK":OLD_BLOCK, "E2E_SETUP_TIMEOUT":"6",
+                 "E2E_NO_WAIT_FOR_CONFIRMATION":"false",
                  "TMPDIR":str(self.root), "PATH":str(self.root / "bin") + os.pathsep + os.environ["PATH"], **env},
             text=True, capture_output=True, timeout=15)
 
-    def prepare_trigger(self, mode="reorg", **env):
+    def prepare_trigger(self, mode="reorg", no_wait=False, **env):
         source = (LIB / "network-scenario.sh").read_text()
         start = source.index('network_trigger_front "$SOL" >/dev/null')
         end = source.index('\n# ═', source.index('build_trigger_txs "$SOL" network', start))
-        return self.run_shell(source[start:end], mode, **env)
+        parser = ""
+        if no_wait:
+            parse_start = source.index('while [[ $# -gt 0 ]]; do')
+            parse_end = source.index('\ndone', parse_start) + len('\ndone')
+            parser = 'set -- --no-wait-for-confirmation\n' + source[parse_start:parse_end] + '\n'
+        return self.run_shell(parser + source[start:end], mode, **env)
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "rpc-calls").read_text().splitlines()]
@@ -163,6 +170,47 @@ class NetworkSetupTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid E2E_SETUP_TIMEOUT", result.stderr)
         self.assertFalse((self.root / "signs").exists())
+
+    def test_no_wait_flag_signs_immediately_without_setup_rpc(self):
+        result = self.prepare_trigger("unsupported", no_wait=True, E2E_SETUP_TIMEOUT="0")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Skipping L2 setup confirmation wait", result.stderr)
+        self.assertIn("--nonce 3 ", (self.root / "signs").read_text())
+        self.assertEqual((self.root / "clock").read_text().strip(), "1000")
+        self.assertFalse((self.root / "rpc-calls").exists())
+        # Skipping the wait still isolates and cleans the broadcast files.
+        path = Path((self.root / "broadcast-paths").read_text().strip())
+        self.assertTrue(path.is_absolute())
+        self.assertFalse(path.exists())
+        self.assertFalse((self.root / "broadcast").exists())
+
+    def test_no_wait_environment_setting_skips_missing_receipts(self):
+        result = self.prepare_trigger("missing", E2E_NO_WAIT_FOR_CONFIRMATION="true")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--nonce 3 ", (self.root / "signs").read_text())
+        self.assertFalse((self.root / "rpc-calls").exists())
+
+    def test_no_wait_still_stops_on_deployment_failure(self):
+        result = self.prepare_trigger("deploy_failed", no_wait=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DEPLOY FAILED", result.stdout)
+        self.assertFalse((self.root / "signs").exists())
+
+    def test_orchestrator_flags_are_exported_to_workers(self):
+        for runner in ("sequential", "parallel", "staged"):
+            for no_wait in (False, True):
+                with self.subTest(runner=runner, no_wait=no_wait):
+                    source = (LIB.parent / "run/network" / (runner + ".sh")).read_text()
+                    start = source.index('while [[ $# -gt 0 && "$1" == --* ]]; do')
+                    end = source.index('\ndone', start) + len('\ndone')
+                    args = '--no-wait-for-confirmation counter' if no_wait else 'counter'
+                    script = 'unset E2E_NO_WAIT_FOR_CONFIRMATION\nset -- ' + args + '\n' + source[start:end] + '\n'
+                    # A new shell sees the exported option and the scenario survives parsing.
+                    script += "bash -c 'printf \"%s %s\\n\" \"${E2E_NO_WAIT_FOR_CONFIRMATION:-false}\" \"$1\"' worker \"$1\""
+                    result = self.run_shell(script)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    expected = "true counter" if no_wait else "false counter"
+                    self.assertEqual(result.stdout.strip(), expected)
 
     def test_repeated_scenarios_use_private_broadcast_directories_and_remove_them(self):
         result = self.run_shell('network_deploy_setup scenario.sol l1 l2 "$PK"\n'

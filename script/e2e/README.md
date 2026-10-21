@@ -64,8 +64,9 @@ zero. The L1 catch-up loop shares a 120-second deadline across retries. The stag
 plan path retains its existing batched deployment barrier.
 
 Classic network preparation records L2 setup transaction hashes in a private
-worker broadcast directory. Before signing a trigger, it refreshes their receipts
-and requires successful canonical inclusion at or below the L2 `safe` head.
+worker broadcast directory. By default, before signing a trigger it refreshes
+their receipts and requires successful canonical inclusion at or below the L2
+`safe` head.
 Settlement reconciliation can replace unsafe blocks, so a successful Forge
 broadcast alone is not a stable setup boundary. Missing or orphaned receipts wait
 for reinclusion; a settled revert fails preparation. `E2E_SETUP_TIMEOUT` bounds
@@ -73,6 +74,21 @@ this wait (default 180 seconds). The network must settle ordinary L2 activity
 without requiring the scenario's cross-chain trigger. Unsupported `safe` or stalled
 settlement fails preparation; it never falls back to a pending or invented nonce.
 This barrier does not provide L1 finality or change the staged plan path.
+
+To retain the earlier behavior of preparing triggers immediately after Forge
+broadcast succeeds, pass `--no-wait-for-confirmation` to `sequential.sh`,
+`parallel.sh`, `staged.sh` (with `PREPARE_MODE=classic`), or directly to
+`lib/network-scenario.sh`. The equivalent environment setting is
+`E2E_NO_WAIT_FOR_CONFIRMATION=true`. For example:
+
+```bash
+bash script/e2e/run/network/parallel.sh --no-wait-for-confirmation counter counterL2
+```
+
+This skips only the L2 setup safe-head wait and its timeout. Private broadcast
+capture, nonce checks, fee quoting, and post-trigger verification remain enabled.
+It restores the risk of preparing a trigger while setup is replaced during
+settlement, including nonce conflicts. The staged plan path is unaffected.
 
 The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
 validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`

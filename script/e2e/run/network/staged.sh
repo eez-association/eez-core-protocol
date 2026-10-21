@@ -55,6 +55,8 @@
 #                    and the same pre-signed raw txs go out again — usually with
 #                    SEND_PAUSE / --workers to avoid the burst that lost them
 #
+#   --no-wait-for-confirmation  skip the L2 setup safe-head wait in classic preparation
+#
 # Env knobs:
 #   PREPARE_MODE      plan (default) | classic — see phase 2 above
 #   DEPLOY_MINE_TIMEOUT  seconds between deploy recovery checks (default 60)
@@ -169,6 +171,7 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
         --verify-only) VERIFY_ONLY="${2:?--verify-only needs a run dir}"; shift 2 ;;
         --resume)      RESUME="${2:?--resume needs a run dir}"; shift 2 ;;
         --resend)      RESUME="${2:?--resend needs a run dir}"; RESEND=true; shift 2 ;;
+        --no-wait-for-confirmation) export E2E_NO_WAIT_FOR_CONFIRMATION=true; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done

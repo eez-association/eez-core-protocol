@@ -28,6 +28,7 @@
 #     --l1-rpc <L1_RPC> --l2-rpc <L2_RPC> --pk <PK> \
 #     --rollups <ROLLUPS> --manager-l2 <MANAGER_L2> [--l2-rollup-id <ID>]
 #
+# Add --no-wait-for-confirmation to skip the L2 setup safe-head wait.
 # Workers pass resolved addresses explicitly. Standalone runs read chain.env,
 # then apply command-line overrides and discover current deployment addresses.
 case "${E2E_PREPARE_STEP:-}" in
@@ -75,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         # cross-chain triggers and silently swallow ordinary transactions.
         --l1-front)     export L1_FRONT="$2"; shift 2;;
         --l2-front)     export L2_FRONT="$2"; shift 2;;
+        --no-wait-for-confirmation) export E2E_NO_WAIT_FOR_CONFIRMATION=true; shift;;
         *) echo "Unknown arg: $1"; exit 1;;
     esac
 done
