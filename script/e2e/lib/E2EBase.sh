@@ -12,6 +12,7 @@ PK="${PK:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 # ── PIDs to clean up on exit ──
 _E2E_PIDS=()
 _E2E_AUTOMINE_RPCS=()
+_E2E_TEMP_DIRS=()
 
 cleanup() {
     for pid in "${_E2E_PIDS[@]}"; do
@@ -19,6 +20,9 @@ cleanup() {
     done
     for rpc in "${_E2E_AUTOMINE_RPCS[@]}"; do
         cast rpc evm_setAutomine true --rpc-url "$rpc" > /dev/null 2>&1 || true
+    done
+    for directory in "${_E2E_TEMP_DIRS[@]}"; do
+        rm -rf -- "$directory"
     done
 }
 trap cleanup EXIT
@@ -116,6 +120,7 @@ _export_outputs() {
 # Contracts with "L2" in name → L2 RPC, others → L1 RPC
 deploy_contracts() {
     local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4"
+    local l2_transactions="${5:-}"
     local contracts
     contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}')
     [[ -z "$contracts" ]] && { echo "No Deploy* contracts found"; return 1; }
@@ -132,6 +137,14 @@ deploy_contracts() {
             echo "DEPLOY FAILED: $contract ($label) — forge output tail:"
             echo "$out" | tail -25
             return 1
+        fi
+        if [[ -n "$l2_transactions" && "$label" == L2 ]]; then
+            local broadcast
+            broadcast=$(_broadcast_json "$sol" "$rpc") || return 1
+            jq -er '.transactions | select(type=="array" and length>0) |
+                if all(.[]; (.hash|type)=="string" and (.hash|test("^0x[0-9a-fA-F]{64}$")))
+                then .[].hash else error("Invalid setup transaction hash") end' \
+                "$broadcast" >> "$l2_transactions" || return 1
         fi
         _export_outputs "$out" --echo
         # Staged prepare: persist the outputs — the deferred verify stage runs in
@@ -607,7 +620,7 @@ _broadcast_json() {
     local sol="$1" rpc="$2"
     local chain_id
     chain_id=$(cast chain-id --rpc-url "$rpc" 2>/dev/null) || return 1
-    echo "broadcast/$(basename "$sol")/${chain_id}/run-latest.json"
+    echo "${FOUNDRY_BROADCAST:-broadcast}/$(basename "$sol")/${chain_id}/run-latest.json"
 }
 
 # ── Get block number from forge broadcast JSON ──

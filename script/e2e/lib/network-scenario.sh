@@ -28,6 +28,7 @@
 #     --l1-rpc <L1_RPC> --l2-rpc <L2_RPC> --pk <PK> \
 #     --rollups <ROLLUPS> --manager-l2 <MANAGER_L2> [--l2-rollup-id <ID>]
 #
+# Add --no-wait-for-confirmation to skip the L2 setup safe-head wait.
 # Workers pass resolved addresses explicitly. Standalone runs read chain.env,
 # then apply command-line overrides and discover current deployment addresses.
 case "${E2E_PREPARE_STEP:-}" in
@@ -47,6 +48,7 @@ if [[ "$_CLI_ROLLUPS" != true || "$_CLI_MANAGER_L2" != true ]]; then
     load_network_env "${DEVNET_ENV:-}" || exit 1
 fi
 source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/network-setup.sh"
 source "$(dirname "$0")/settlement-target.sh"
 source "$(dirname "$0")/network-links.sh"
 
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         # cross-chain triggers and silently swallow ordinary transactions.
         --l1-front)     export L1_FRONT="$2"; shift 2;;
         --l2-front)     export L2_FRONT="$2"; shift 2;;
+        --no-wait-for-confirmation) export E2E_NO_WAIT_FOR_CONFIRMATION=true; shift;;
         *) echo "Unknown arg: $1"; exit 1;;
     esac
 done
@@ -199,7 +202,7 @@ if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
 fi
 network_trigger_front "$SOL" >/dev/null || exit 1
 echo "====== Deploy ======"
-deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+network_deploy_setup "$SOL" "$RPC" "$L2_RPC" "$PK"
 
 # ══════════════════════════════════════════════
 #  2. Create signed raw transaction
