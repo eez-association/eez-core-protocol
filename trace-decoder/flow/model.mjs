@@ -23,10 +23,62 @@ const CHAIN_NAMES = { 1: 'Ethereum', 100: 'Gnosis', 10200: 'Gnosis Chiado', 1115
 const PRECOMPILES = ['ecrecover', 'sha256', 'ripemd160', 'identity', 'modexp', 'ecAdd', 'ecMul', 'ecPairing', 'blake2f', 'pointEvaluation'];
 const lower = v => (v == null ? '' : String(v).toLowerCase());
 
+// Experimental ERC20 notes: require both a trace location and persisted receipt
+// evidence. Compare multiplicity so identical events are never assigned by guess.
+export function tokenTransfersByFrame(trace) {
+  const topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  const zero = '0x' + '0'.repeat(40), result = new Map(), groups = new Map(), metadata = new Map();
+  const frames = new Map((trace.frames || []).map(f => [f.id, f]));
+  const txKey = x => `${x.chain}:${lower(x.transactionHash || x.hash)}`;
+  const tokenKey = (x, address) => `${txKey(x)}:${lower(address)}`;
+  const successful = new Set((trace.transactions || []).filter(t => Number(t.receipt?.status) === 1).map(txKey));
+  // Metadata is local to the token, chain and transaction. Never assume 18
+  // decimals or copy a symbol from a similarly named token on another chain.
+  for (const f of frames.values()) {
+    if (f.reverted || f.error || !successful.has(txKey(f))) continue;
+    const key = tokenKey(f, f.contextAddress || f.to), value = f.decoded?.returns?.[0]?.value;
+    const field = lower(f.input) === '0x95d89b41' && typeof value === 'string' && value.length > 0 && value.length <= 80 ? 'symbol'
+      : lower(f.input) === '0x313ce567' && /^(0|[1-9][0-9]*)$/.test(String(value)) && Number(value) <= 255 ? 'decimals' : null;
+    if (!field) continue;
+    if (!metadata.has(key)) metadata.set(key, {});
+    const m = metadata.get(key);
+    if (!m[field]) m[field] = new Set();
+    m[field].add(String(value));
+  }
+  for (const e of trace.events || []) {
+    // ERC721 shares the signature but has four topics and no amount word.
+    if (e.removed || e.reverted || e.committed === false || !successful.has(txKey(e)) ||
+      e.topics?.length !== 3 || lower(e.topics[0]) !== topic || !/^0x[0-9a-f]{64}$/i.test(e.data || '') ||
+      !/^0x[0-9a-f]{40}$/i.test(e.address || '') || !e.topics.slice(1).every(t => /^0x0{24}[0-9a-f]{40}$/i.test(t))) continue;
+    const key = `${tokenKey(e, e.address)}:${e.topics.map(lower).join(':')}:${lower(e.data)}`;
+    if (!groups.has(key)) groups.set(key, { trace: [], receipt: [] });
+    if (e.provenance === 'trace') {
+      const f = frames.get(e.frameId);
+      if (f && !f.reverted && !f.error && txKey(f) === txKey(e) && lower(f.contextAddress || f.to) === lower(e.address)) groups.get(key).trace.push(e);
+    } else if (e.provenance === 'receipt' && e.committed === true) groups.get(key).receipt.push(e);
+  }
+  for (const group of groups.values()) {
+    if (!group.trace.length || group.trace.length !== group.receipt.length) continue;
+    for (const e of group.trace) {
+      const from = '0x' + e.topics[1].slice(-40).toLowerCase(), to = '0x' + e.topics[2].slice(-40).toLowerCase();
+      const m = metadata.get(tokenKey(e, e.address)), one = field => m?.[field]?.size === 1 ? [...m[field]][0] : null;
+      const decimals = one('decimals');
+      const note = { token: lower(e.address), from, to, amount: BigInt(e.data).toString(),
+        symbol: one('symbol'), decimals: decimals == null ? null : Number(decimals),
+        kind: from === zero ? 'mint' : to === zero ? 'burn' : 'transfer', eventId: e.id,
+        evidence: 'receipt-and-trace' };
+      if (!result.has(e.frameId)) result.set(e.frameId, []);
+      result.get(e.frameId).push(note);
+    }
+  }
+  return result;
+}
+
 export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined' } = {}) {
   if (!trace || !Array.isArray(trace.frames) || !Array.isArray(trace.logicalNodes)) {
     throw new Error('This file is not a trace-decoder JSON result: frames and logicalNodes are missing.');
   }
+  const transfers = tokenTransfersByFrame(trace);
   const frames = new Map(trace.frames.map(f => [f.id, f]));
   const logical = new Map(trace.logicalNodes.map(n => [n.id, n]));
   const outgoingByFrame = new Map((trace.outgoing || []).map(o => [o.frameId, o]));
@@ -65,6 +117,7 @@ export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined'
     if (contract === 'Unknown contract' && precompile && !(ln?.children || frame.children || []).length) contract = `Precompile · ${PRECOMPILES[parseInt(precompile[1], 16) - 1]}`;
     return {
       kind: 'call', frameId: frame.id, chain: frame.chain, role,
+      tokenTransfers: [...(transfers.get(frame.id) || [])],
       protocol: PROTOCOL_ROLES.has(role) || role === 'proxy-creation', callType: frame.type || 'CALL',
       contract, address: frame.to ?? null, from: frame.from ?? null,
       fn: role === 'system-value-transfer' ? 'Value to L2 system' : functionName(d, frame), signature: d.signature || null, args: (d.arguments || []).map(argument),
@@ -91,6 +144,7 @@ export function buildFlowModel(trace, { label, explorers = {}, mode = 'combined'
       const child = frames.get(children[i]);
       if (!child || child.type !== 'DELEGATECALL' || child.input !== frame.input || seen.has(child.id)) continue;
       seen.add(child.id);
+      node.tokenTransfers.push(...(transfers.get(child.id) || []));
       const inner = logical.get(child.id), d = inner?.decoded || child.decoded || {};
       node.impl = { contract: d.contractName || 'Unknown contract', address: child.to, frameId: child.id };
       if (!node.signature && d.signature) Object.assign(node, { fn: functionName(d, child), signature: d.signature, args: (d.arguments || []).map(argument), ret: returnInfo(d, child), abiSource: d.provenance?.source || null });

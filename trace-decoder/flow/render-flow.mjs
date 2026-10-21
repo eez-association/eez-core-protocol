@@ -6,7 +6,7 @@
 //
 // A tx hash is decoded first with decodeCrossChainTrace (same options and env files
 // as decode-trace.mjs), which also finds the related L1/L2 transactions. JSON files
-// are results of `decode-trace.mjs --json`. --views picks the diagram types
+// are decoder results or eez_debugQuoteFee results/envelopes. --views picks the diagram types
 // (flow, layers, sequence, timeline, or all; default flow,sequence). --open shows
 // the page in the default browser. --l1-explorer-url / --l2-explorer-url set the
 // explorer websites used for verify links (otherwise known chains or the configured explorers).
@@ -17,10 +17,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildFlowModel } from './model.mjs';
+import { buildQuoteModels, isQuoteTrace } from './quote-model.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const ALL_VIEWS = ['flow', 'layers', 'sequence', 'timeline'];
-export const DEFAULT_VIEWS = ['flow', 'sequence'];
+const ALL_VIEWS = ['flow', 'flame', 'layers', 'sequence', 'timeline'];
+export const DEFAULT_VIEWS = ['flow', 'flame', 'sequence'];
 
 const safeJson = value => JSON.stringify(value).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e').replaceAll('&', '\\u0026');
 
@@ -37,8 +38,11 @@ export function renderFlowHtml(traces, { fragment = false, views = ALL_VIEWS } =
   const data = safeJson(traces.map(t => ({ label: t.label || t.model.label, synthetic: !!t.synthetic, source: t.source || null, model: t.model })));
   const prepared = fs.readFileSync(path.join(here, '../src/prepared-result.mjs'), 'utf8').replace(/^export /gm, '');
   const model = inlineModelSource(fs.readFileSync(path.join(here, 'model.mjs'), 'utf8'));
+  const quoteModel = fs.readFileSync(path.join(here, 'quote-model.mjs'), 'utf8')
+    .replace(/^import \{ explorerSite, standardRevert \} from '\.\/model\.mjs';\n/m, '').replace(/^export /gm, '');
+  if (/^import\b/m.test(quoteModel)) throw new Error('Unbundled import in the quote model');
   const viewer = fs.readFileSync(path.join(here, 'viewer/viewer.js'), 'utf8');
-  const script = `${prepared}\n${model}\n${viewer}`.replace(/<\/script/gi, '<\\/script');
+  const script = `${prepared}\n${model}\n${quoteModel}\n${viewer}`.replace(/<\/script/gi, '<\\/script');
   const body = fs.readFileSync(path.join(here, 'viewer/template.html'), 'utf8')
     .replace('__FLOW_DATA__', () => data).replace('__FLOW_CONFIG__', () => safeJson({ views }))
     .replace('__FLOW_SCRIPT__', () => script);
@@ -68,6 +72,7 @@ export function preferSavedTrace(previous, current) {
 
 // What the decoder found, so the terminal says which transactions the page covers.
 function summary(model, source) {
+  if (model.mode === 'simulation') return `Simulation ${source}: ${model.label} · ${model.nodes.length} frames · ${model.stats.crossings} crossings · ${model.unresolved.length} warnings`;
   const lines = [`Trace ${source}: ${model.label}`];
   for (const tx of model.transactions) {
     lines.push(`  ${tx.chain}  ${tx.label.padEnd(38)} ${tx.hash}  block ${tx.block ?? '?'}  ${tx.status}${tx.requested ? '  [requested]' : ''}${tx.relatedSettlement ? '  [settles requested transaction]' : tx.inFlow === false && !tx.requested ? '  [not part of this flow]' : tx.inFlow === null ? '  [link unknown: no trace]' : ''}${tx.traced ? '' : ` (no trace: ${tx.traceReason || 'unavailable'})`}`);
@@ -144,6 +149,11 @@ async function main(argv) {
       trace = JSON.parse(fs.readFileSync(input, 'utf8'));
       const env = await explorersFromEnv(decoderArgs);
       explorers = { L1: siteFlags.L1 || env.L1, L2: siteFlags.L2 || env.L2 };
+    }
+    if (isQuoteTrace(trace) || trace?.error) {
+      const models = buildQuoteModels(trace, { explorers });
+      traces.push(...models.map(model => ({ model, source: path.basename(input), raw: null, explorers })));
+      continue;
     }
     const model = buildFlowModel(trace, { explorers });
     const source = isHash(input) ? input : path.basename(input);

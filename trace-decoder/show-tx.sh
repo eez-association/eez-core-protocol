@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shows the cross-chain call flow and sequence diagram for one transaction.
+# Shows the cross-chain call flow, flame chart and sequence diagram for one transaction.
 #
 #   trace-decoder/show-tx.sh <TX_HASH> [--env-file FILE] [decoder options]
 #
@@ -14,4 +14,4 @@ if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
 fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec node "$here/flow/render-flow.mjs" --views flow,sequence "$@" --open
+exec node "$here/flow/render-flow.mjs" --views flow,flame,sequence "$@" --open

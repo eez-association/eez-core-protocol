@@ -19,8 +19,14 @@ Incomplete or invalid supported transaction links also require `--allow-partial`
 
 Otherwise it prints the transactions it found and their roles, writes
 `tmp/flow-diagrams/<hash>.html` (plus the decoded `.json`) and opens the page with
-the **Call flow** and **Sequence** views. Any of the flow's transactions works as
+the **Call flow**, **Flame chart** and **Sequence** views. Any of the flow's transactions works as
 input: the trigger, the settlement batch or a delivery.
+
+The **Flame chart** draws call depth downwards and execution order left to right; bars
+are coloured by chain, so a crossing is a bar whose colour differs from the one above it.
+Bar widths count the calls inside, not gas (L1 and L2 gas come from different
+transactions); a bar's tooltip shows its gas. Crowded charts expand horizontally
+to keep bars separate; use scrolling and zoom to inspect individual calls.
 
 More options (same flags as `decode-trace.mjs`, plus):
 
@@ -29,10 +35,45 @@ node trace-decoder/flow/render-flow.mjs <TX_HASH> --env-file FILE --views all --
 node trace-decoder/flow/render-flow.mjs tmp/flow-diagrams/<hash>.json --env-file FILE --open   # re-render, no RPC calls
   --l1-rpc URL --l1-trace-rpc URL         # e.g. an archive endpoint for this run
   --l1-explorer-url URL --l2-explorer-url URL   # explorer websites for verify links
-  --views flow,layers,sequence,timeline|all
+  --views flow,flame,layers,sequence,timeline|all
 ```
 
 The text/JSON CLI uses the same decoder engine: `node trace-decoder/decode-trace.mjs <TX_HASH> [--json]`.
+
+## Show a debug-quote simulation
+
+The flow viewer also imports `eez_debugQuoteFee` responses requested with
+`{"transactionTypes":["0x2"],"trace":"calls"}`. Pass either the result object
+(the output of `cast rpc ... | jq`) or the full JSON-RPC response envelope:
+
+```sh
+node trace-decoder/flow/render-flow.mjs debug-quote.json -o tmp/debug-quote.html
+```
+
+Open the generated HTML, or use `--open` to launch it. You can also open/drop a
+raw debug-quote JSON into any newly generated viewer page. Import is offline:
+no RPC calls, explorer requests, signing or submission.
+
+The viewer opens on the last `final_validation` / `composition` run (or the last
+available composition). The **Trace / simulation run** selector exposes every
+run independently, including native-system, native-source, settlement and
+estimation passes. It preserves the composer's parent/child links across chains;
+it does not correlate these runs with mined transactions.
+
+Pages are marked **SIMULATION**. The inspector shows fee fields, context, raw
+calldata/output, per-frame gas and status. Contract names and ABI signatures are
+not inferred: quote imports currently show addresses, selectors and raw return
+bytes. Frame IDs are scoped to their run. Truncation, omitted parents and unknown
+statuses stay visible as capture warnings. Frames with unknown statuses are labeled
+unknown in the diagrams and inspector, never successful. Invalid graphs and
+unsupported trace versions fail explicitly. Only `eez-quote-call-trace` version 1 is supported.
+
+Inclusive frame gas and repeated passes are not summed into transaction gas.
+The page has no invented transaction hashes, receipts, settlement results or
+matched-transaction claims. A successful simulation does not prove a transaction
+was mined or settled. Existing transaction-hash decoding retains its receipt and
+content checks. See [dApp RPC guide](../dapps_RPC.md#debug-a-cross-chain-fee-quote)
+for the request and observed response.
 
 ## Configuration
 
@@ -147,6 +188,18 @@ not expand a supported exact transaction link set. Null historical block reads,
 including null batch slots, retry the configured archive trace RPC.
 
 ## Linked flow and recorded traces
+
+**Token notes · experimental** adds colored notes inside call-flow boxes for
+ERC20-style Transfer events: sent, minted or burned, with a compact amount and
+address preview inside the existing call box. Click a note to open a larger card
+in the inspector, showing **Token, From, To, Amount**, with full addresses and
+known contract names and diagram tags. Toggle notes off in the call-flow toolbar.
+Notes require matching trace and receipt events, preserving repeated transfers;
+reverted events, unmatched logs and ERC721 events are excluded. Delegatecall
+logs follow their folded call box. Symbol and decimals come only from successful
+metadata reads of that token on that chain in the captured transaction. Missing
+decimals display raw units. These are emitted amounts, not net balance changes
+or inferred cross-chain asset transfers. Quote simulations have no token notes.
 
 **Linked flow** is the default, including for verified transaction links. Confirmed
 cross-chain matches connect the local request to its remote execution with arrows.

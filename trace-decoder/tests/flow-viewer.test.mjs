@@ -5,6 +5,8 @@ import test from 'node:test';
 import { decodeCrossChainTrace } from '../src/engine.mjs';
 import { buildFlowModel } from '../flow/model.mjs';
 import { renderFlowHtml } from '../flow/render-flow.mjs';
+import { buildQuoteModels } from '../flow/quote-model.mjs';
+import { quoteFixture } from './fixtures/quote.mjs';
 import { buildSamples } from '../samples/build-samples.mjs';
 import { scenario, hash, address, frame } from './fixtures/scenarios.mjs';
 
@@ -14,18 +16,18 @@ function page(html) {
   const data = html.match(/id="flow-data">([\s\S]*?)<\/script>/)[1];
   const cfg = html.match(/id="flow-config">([\s\S]*?)<\/script>/)[1];
   const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
-  const tabs = ['flow', 'layers', 'sequence', 'timeline'].map(view => ({ dataset: { view }, hidden: false, setAttribute() {} }));
-  const els = {};
+  const tabs = ['flow', 'flame', 'layers', 'sequence', 'timeline'].map(view => ({ dataset: { view }, hidden: false, setAttribute() {} }));
+  const els = {}, listeners = new Map();
   const el = id => els[id] || (els[id] = { id, innerHTML: '', textContent: id === 'flow-data' ? data : id === 'flow-config' ? cfg : '', hidden: false, checked: false, value: '',
     style: { setProperty() {} }, dataset: {}, clientWidth: 1100, clientHeight: 700, scrollTop: 0, scrollLeft: 0, offsetTop: 0, offsetLeft: 0,
     setAttribute() {}, getAttribute() {}, insertAdjacentHTML() {}, addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; }, scrollTo() {} });
   const sandbox = {
-    document: { getElementById: el, addEventListener() {}, querySelector() { return null; }, querySelectorAll: s => s === '.view-tab' ? tabs : [] },
+    document: { getElementById: el, addEventListener: (event, handler) => listeners.set(event, handler), querySelector() { return null; }, querySelectorAll: s => s === '.view-tab' ? tabs : [] },
     addEventListener() {}, matchMedia: () => ({ matches: false }), requestAnimationFrame: () => 0, cancelAnimationFrame() {},
-    localStorage: { getItem: () => null, setItem() {} }, navigator: {}, FileReader: class {},
+    localStorage: { getItem: () => null, setItem() {} }, navigator: {}, FileReader: class { readAsText(file) { this.result = file.content; this.onload(); } },
   };
   new Function(...Object.keys(sandbox), script)(...Object.values(sandbox));
-  return { el, tab: v => tabs.find(t => t.dataset.view === v).onclick(), trace: i => el('trace-select').onchange({ target: { value: String(i) } }) };
+  return { el, token: (id, index = 0) => listeners.get('click')({ target: { closest: selector => selector === '[data-token-note]' ? { dataset: { tokenNote: `${id}:${index}` } } : null } }), tab: v => tabs.find(t => t.dataset.view === v).onclick(), trace: i => el('trace-select').onchange({ target: { value: String(i) } }) };
 }
 
 // Boxes never overlap, no line crosses a box, every call arrow points right.
@@ -133,7 +135,7 @@ test('a local L2 transaction exposes its L1 settlement without inventing a cross
 });
 
 test('the sequence and timeline views render every sample', async () => {
-  const p = page(renderFlowHtml(await samples, { views: ['flow', 'layers', 'sequence', 'timeline'] }));
+  const p = page(renderFlowHtml(await samples, { views: ['flow', 'flame', 'layers', 'sequence', 'timeline'] }));
   for (const i of (await samples).keys()) {
     p.trace(i);
     p.tab('sequence'); assert.ok(/class="lbl seq/.test(p.el('graph').innerHTML));
@@ -288,7 +290,7 @@ test('linked flow is the default and the recorded toggle preserves confirmed arr
   let checkedHeights = 0;
   for (const n of model.recordedView.nodes.filter(n=>!n.protocol)) {
     const match=html.match(new RegExp(`data-node="${n.id}"[^>]*height:([0-9]+)px`));
-    if(match) { checkedHeights++; assert.equal(Number(match[1]),n.preparedResponse?140:100); }
+    if(match) { checkedHeights++; assert.equal(Number(match[1]),n.preparedResponse?156:116); }
   }
   assert.ok(checkedHeights >= 2, 'both prepared and ordinary boxes are checked');
   assert.match(p.el('caption').innerHTML,/independently on each chain/);
@@ -374,4 +376,139 @@ test('per-chain gas totals and their breakdown stay fixed across visibility and 
   }
   p.el('mode-select').onchange({ target: { value: 'physical' } });
   assert.equal(p.el('gas-summary').innerHTML, before);
+});
+
+
+test('debug quotes render both chains as simulation in every view and keep runs selectable', () => {
+  const models = buildQuoteModels(quoteFixture());
+  const p = page(renderFlowHtml(models.map(model => ({ model })), { views: ['flow', 'flame', 'layers', 'sequence', 'timeline'] }));
+  assert.match(p.el('kicker').textContent, /SIMULATION/);
+  assert.match(p.el('notice').innerHTML, /not evidence of mining/);
+  assert.match(p.el('stats').innerHTML, /simulated crossings/);
+  assert.doesNotMatch(p.el('stats').innerHTML, /crossings matched|physical frames|transactions/);
+  assert.match(p.el('inspector').innerHTML, /Quote option/);
+  assert.match(p.el('verify').innerHTML, /Contracts in this simulation/);
+  assert.doesNotMatch(p.el('verify').innerHTML, /\/tx\//);
+  for (let i = 0; i < models.length; i++) {
+    p.trace(i);
+    for (const view of ['flow', 'flame', 'layers', 'sequence', 'timeline']) {
+      p.tab(view);
+      assert.ok((view === 'timeline' ? p.el('canvas') : p.el('graph')).innerHTML.length > 0);
+    }
+  }
+  p.trace(0); p.tab('flow');
+  p.el('next').onclick();
+  assert.match(p.el('inspector').innerHTML, /Simulation frame/);
+  assert.doesNotMatch(p.el('inspector').innerHTML, /No physical frame|Transaction on explorer/);
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems, []);
+});
+
+test('browser file import accepts a raw debug-quote envelope and selects final composition', async () => {
+  const p = page(renderFlowHtml(await samples, { views: ['flow', 'sequence'] }));
+  p.el('file').onchange({ target: { files: [{ name: 'quote.json', content: JSON.stringify({ result: quoteFixture() }) }] } });
+  assert.match(p.el('kicker').textContent, /SIMULATION/);
+  assert.match(p.el('title').textContent, /final_validation.*run 2/);
+  assert.match(p.el('stats').innerHTML, /3<\/b> simulation runs/);
+});
+
+
+test('experimental token notes expand call boxes without overlap and toggle off cleanly', async () => {
+  const list = plain(await samples);
+  for (const { model } of list) for (const n of model.nodes) if (!n.protocol && n.kind !== 'ghost') {
+    n.tokenTransfers = ['transfer', 'mint', 'burn'].map(kind => ({ kind, token: address(900), from: address(901), to: address(902), symbol: '<WETH>', decimals: 18, amount: '1000000000000000' }));
+  }
+  const p = page(renderFlowHtml(list, { views: ['flow', 'sequence'] }));
+  for (let i = 0; i < list.length; i++) {
+    p.trace(i);
+    assert.match(p.el('graph').innerHTML, /token-note transfer/);
+    assert.match(p.el('graph').innerHTML, /0\.001/);
+    assert.match(p.el('graph').innerHTML, /&lt;WETH&gt;/);
+    assert.doesNotMatch(p.el('graph').innerHTML, /<WETH>/);
+    assert.match(p.el('graph').innerHTML, /\+1 more/);
+    assert.deepEqual(geometry(p.el('graph').innerHTML).problems, []);
+  }
+  p.el('opt-tokens').checked = false; p.el('opt-tokens').onchange();
+  assert.doesNotMatch(p.el('graph').innerHTML, /class="token-note/);
+  assert.deepEqual(geometry(p.el('graph').innerHTML).problems, []);
+  p.el('opt-tokens').checked = true; p.el('opt-tokens').onchange();
+  assert.match(p.el('graph').innerHTML, /class="token-note/);
+  p.tab('sequence'); assert.equal(p.el('opt-tokens-wrap').hidden, true);
+  p.tab('flow'); assert.equal(p.el('opt-tokens-wrap').hidden, false);
+});
+
+test('token notes preserve large integer amounts and disclose unknown decimals', async () => {
+  const model = plain((await samples)[0].model);
+  for (const n of model.nodes) if (!n.protocol) n.tokenTransfers = [{ kind: 'transfer', token: address(900), from: address(901), to: address(902), symbol: null, decimals: null, amount: '123456789012345678901234567890' }];
+  const p = page(renderFlowHtml([{ model }], { views: ['flow'] }));
+  assert.match(p.el('graph').innerHTML, /123456789012345678901234567890 raw units/);
+});
+
+
+test('token parties use contract names on the same chain and retain the full address', async () => {
+  const model = plain((await samples)[0].model);
+  const node = model.nodes.find(n => !n.protocol && n.kind !== 'ghost' && n.inFlow !== false);
+  const from = address(950), to = address(951);
+  model.nodes.push({ ...node, id: model.nodes.length, address: from, impl: null, contract: 'Known sender', children: [] });
+  model.nodes.push({ ...node, id: model.nodes.length, chain: node.chain === 'L1' ? 'L2' : 'L1', address: to, impl: null, contract: 'Other chain recipient', children: [] });
+  node.tokenTransfers = [{ kind: 'transfer', token: node.address, from, to, symbol: 'TEST', decimals: 0, amount: '10' }];
+  const p = page(renderFlowHtml([{ model }], { views: ['flow'] }));
+  assert.doesNotMatch(p.el('graph').innerHTML, /token-detail-field/);
+  p.token(node.id);
+  const note = p.el('inspector').innerHTML;
+  assert.match(note, /Known sender/);
+  assert.doesNotMatch(note, /Other chain recipient/);
+  assert.ok(note.includes(from)); assert.ok(note.includes(to));
+  const fields = [...note.matchAll(/class="f-label">([^<]+)</g)].map(m => m[1]);
+  assert.deepEqual(fields, ['Token', 'From', 'To', 'Amount']);
+  assert.match(note, /Back to call details/);
+  assert.doesNotMatch(p.el('graph').innerHTML, /token-detail-field/);
+});
+
+
+test('unknown quote statuses remain unknown in the inspector and every diagram', () => {
+  for (const status of ['future-status', null, undefined]) {
+    const quote = quoteFixture();
+    quote.diagnostics.trace.runs[2].frames[0].status = status;
+    const p = page(renderFlowHtml(buildQuoteModels(quote).map(model => ({ model }))));
+    for (const view of ['flow', 'flame', 'layers', 'sequence', 'timeline']) {
+      p.tab(view);
+      p.el('next').onclick();
+      assert.match(p.el('inspector').innerHTML, /class="badge warn">Unknown simulation status/);
+      assert.match(p.el('inspector').innerHTML, /Success or failure could not be determined/);
+      assert.doesNotMatch(p.el('inspector').innerHTML, /Simulation succeeded|No unique remote execution/);
+      if (view === 'timeline') {
+        assert.match(p.el('canvas').innerHTML, /class="c-status warn" aria-label="Unknown simulation status">\?<\/span>/);
+      } else {
+        assert.match(p.el('graph').innerHTML, /Unknown simulation status/);
+      }
+    }
+  }
+  const p = page(renderFlowHtml(buildQuoteModels(quoteFixture()).map(model => ({ model }))));
+  p.el('next').onclick();
+  assert.match(p.el('inspector').innerHTML, /class="badge ok">Simulation succeeded/);
+});
+
+test('crowded flame charts reserve space for every sibling at narrow and wide viewport sizes', () => {
+  const quote = quoteFixture(), run = quote.diagnostics.trace.runs[2];
+  run.frames = [run.frames[0], ...Array.from({ length: 400 }, (_, i) => ({
+    ...structuredClone(run.frames[1]), id: i + 1, parentId: 0,
+  }))];
+  const p = page(renderFlowHtml(buildQuoteModels(quote).map(model => ({ model }))));
+  for (const viewport of [640, 1100]) {
+    p.el('graph-wrap').clientWidth = viewport;
+    p.tab('flame');
+    const bars = [...p.el('graph').innerHTML.matchAll(/class="fbar [^"]*" data-node="(\d+)" style="left:([\d.]+)px;top:([\d.]+)px;width:([\d.]+)px/g)]
+      .map(m => ({ id: +m[1], x: +m[2], y: +m[3], width: +m[4] }));
+    assert.equal(bars.length, 401, 'all calls remain independently selectable');
+    const parent = bars.find(b => b.id === 0), siblings = bars.filter(b => b.id !== 0);
+    siblings.forEach((bar, i) => {
+      assert.ok(bar.width >= 8, 'bar accommodates its padding and borders');
+      assert.ok(bar.x >= parent.x && bar.x + bar.width <= parent.x + parent.width, 'child stays inside parent span');
+      if (i) {
+        assert.equal(bar.y, siblings[i - 1].y);
+        assert.ok(siblings[i - 1].x + siblings[i - 1].width < bar.x, 'siblings have a gap instead of overlapping');
+      }
+    });
+    assert.ok(parseFloat(p.el('graph-size').style.width) > viewport, 'crowded chart can scroll even at fit zoom');
+  }
 });
