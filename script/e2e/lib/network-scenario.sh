@@ -47,6 +47,7 @@ if [[ "$_CLI_ROLLUPS" != true || "$_CLI_MANAGER_L2" != true ]]; then
     load_network_env "${DEVNET_ENV:-}" || exit 1
 fi
 source "$(dirname "$0")/E2EBase.sh"
+source "$(dirname "$0")/network-setup.sh"
 source "$(dirname "$0")/settlement-target.sh"
 source "$(dirname "$0")/network-links.sh"
 
@@ -199,7 +200,7 @@ if [[ "$E2E_STAGE" == "prepare" && "${E2E_PREPARE_STEP:-}" == "plan" ]]; then
 fi
 network_trigger_front "$SOL" >/dev/null || exit 1
 echo "====== Deploy ======"
-deploy_contracts "$SOL" "$RPC" "$L2_RPC" "$PK"
+network_deploy_setup "$SOL" "$RPC" "$L2_RPC" "$PK"
 
 # ══════════════════════════════════════════════
 #  2. Create signed raw transaction

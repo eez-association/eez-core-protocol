@@ -63,6 +63,17 @@ retry for up to `E2E_NONCE_TIMEOUT` seconds (default 30); they never substitute
 zero. The L1 catch-up loop shares a 120-second deadline across retries. The staged
 plan path retains its existing batched deployment barrier.
 
+Classic network preparation records L2 setup transaction hashes in a private
+worker broadcast directory. Before signing a trigger, it refreshes their receipts
+and requires successful canonical inclusion at or below the L2 `safe` head.
+Settlement reconciliation can replace unsafe blocks, so a successful Forge
+broadcast alone is not a stable setup boundary. Missing or orphaned receipts wait
+for reinclusion; a settled revert fails preparation. `E2E_SETUP_TIMEOUT` bounds
+this wait (default 180 seconds). The network must settle ordinary L2 activity
+without requiring the scenario's cross-chain trigger. Unsupported `safe` or stalled
+settlement fails preparation; it never falls back to a pending or invented nonce.
+This barrier does not provide L1 finality or change the staged plan path.
+
 The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
 validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
 and default local runs; named scenarios and category selections remain available.

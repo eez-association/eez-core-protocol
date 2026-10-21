@@ -34,6 +34,12 @@ jobs:
           version: v1.7.1
       - name: Build
         run: forge build
+      - name: E2E runner regressions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc jq
+          for script in script/e2e/lib/*.sh; do bash -n "$script"; done
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s script/e2e/tests -v
       # EEZ sits within ~1 KB of the EIP-170 runtime limit. `forge build --sizes`
       # cannot be used directly: BlobTranslator (script-side tooling, never
       # deployed) is far over the limit, so check only the deployable contracts.
