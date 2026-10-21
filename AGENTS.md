@@ -95,6 +95,8 @@ Read [BUILD_AND_REVIEW_E2E_TESTS](script/e2e/BUILD_AND_REVIEW_E2E_TESTS.md) befo
   Discover addresses via `eez_composerInfo` on `L1_FRONT`; resume from the saved run snapshot.
   RPC endpoints handle deployment/reads; fronts receive cross-chain triggers. Never expose keys or
   commit env files, wallet pools or run artifacts.
+- For local classic network, default to `--no-wait-for-confirmation`
+  for speed; disable this opt-out when testing setup settlement protection.
 
 ## Cross-chain trigger fees
 
