@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Worker and progress helpers. Sourcing this file only defines functions.
+_load_publish_raw() { timeout "$SEND_TIMEOUT" cast publish "$2" --async --rpc-url "$1"; }
 load_worker() (
     set -euo pipefail
     local worker="$1" count="$2" address="$3" key="$4"
@@ -14,8 +15,8 @@ load_worker() (
         hashes=(); starts=(); nonces=(); indexes=()
         for ((j=0; j<WINDOW && i<count; j++, i++)); do
             start=$(_now_ms)
-            # Explicit fees/chain ID make signing offline. Legacy transactions match
-            # the devnet's gas-price model and avoid fee-estimation RPCs per trigger.
+            # Build an offline legacy candidate; cross-chain triggers on either chain
+            # require a composer quote, retrying transient failures before submission.
             sign_rc=0
             raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
@@ -29,7 +30,8 @@ load_worker() (
             # Never advance past an uncertain send: doing so could leave a nonce gap.
             # stderr is retained in worker-N.log by the worker launcher.
             send_rc=0
-            hash=$(timeout "$SEND_TIMEOUT" cast publish "$raw" --async --rpc-url "$SEND_RPC") || send_rc=$?
+            hash=$(EEZ_FRESH_SEND=1 network_send_quoted_trigger "$raw" "$key" "$SEND_RPC" "$READ_RPC" \
+                "$RUN_DIR/fee-quote-$worker-$i.json" _load_publish_raw) || send_rc=$?
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 printf 'send_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$send_rc" "$SEND_TIMEOUT" >&2
                 if (( send_rc == 124 )); then
@@ -123,8 +125,8 @@ Usage: bash script/e2e/run/network/load-testing.sh [options] <scenario>
                     (mutually exclusive with --txs)
   --workers N       Concurrent sender wallets (default 20)
   --window N        Pending transactions per wallet (default 10)
-  --fund ETH        Worker balance target on each chain (default 0.001)
-  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0005)
+  --fund ETH        Worker balance target on each chain (default 0.003)
+  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0015)
   --direct          Fund directly from SOURCE_PK
   --fresh           Create new wallets instead of reusing the existing pool
   --gas N           Override trigger gas limit
@@ -143,7 +145,7 @@ EOF
 TXS=1000 WORKERS=20 WINDOW=10 DIRECT=false FRESH=false
 TXS_PER_WALLET=""
 TOTAL_EXPLICIT=false
-FUND_ETH="${FUND_ETH:-0.001}"
+FUND_ETH="${FUND_ETH:-0.003}"
 GAS_OVERRIDE=""
 TARGET_SCENARIO=""
 while (( $# )); do
@@ -235,8 +237,9 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
    "$CALLDATA" =~ ^0x([0-9a-fA-F]{2})*$ && "$GAS" =~ ^[1-9][0-9]*$ ]] || {
     echo "Invalid trigger template; see $RUN_DIR/trigger.log"; exit 1;
 }
-# Resolve fees once on the ordinary RPC; front endpoints only receive signed triggers.
-CHAIN_ID=$(cast chain-id --rpc-url "$READ_RPC")
+# Ordinary fees build offline candidates; each cross-chain trigger requires
+# eez_quoteFee on its source front before submission, retrying transient failures.
+network_fee_cache_pair "$SEND_RPC" "$READ_RPC" "" CHAIN_ID || exit 1
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
 declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"
 echo "Sending $TXS transactions to $TARGET ($TRIGGER_CONTRACT), $WORKERS wallets, window $WINDOW"

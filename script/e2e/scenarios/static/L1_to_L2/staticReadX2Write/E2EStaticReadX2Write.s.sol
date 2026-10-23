@@ -52,7 +52,6 @@ contract StaticReadX2WriteTarget is IStaticReadX2WriteTarget {
 
 /// @notice One transaction: two static reads, one remote increment, two static reads.
 contract StaticReadX2WriteReader {
-    uint256 private constant PROXY_CALL_GAS = 5_000_000;
     StaticReadX2WriteTarget public immutable target;
     uint256 public beforeRead;
     uint256 public incrementResult;
@@ -66,7 +65,7 @@ contract StaticReadX2WriteReader {
     function run() external {
         beforeRead = target.counter();
         require(target.counter() == beforeRead, "repeated before read differs");
-        incrementResult = target.increment{gas: PROXY_CALL_GAS}();
+        incrementResult = target.increment();
         afterRead = target.counter();
         require(target.counter() == afterRead, "repeated after read differs");
         require(incrementResult == beforeRead + 1, "increment result differs");

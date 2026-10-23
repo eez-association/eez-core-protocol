@@ -48,7 +48,6 @@ contract StaticReadX2WriteTargetL2 is IStaticReadX2WriteTargetL2 {
 
 /// @notice One transaction: two static reads, one remote increment, two static reads.
 contract StaticReadX2WriteReaderL2 {
-    uint256 private constant PROXY_CALL_GAS = 5_000_000;
     StaticReadX2WriteTargetL2 public immutable target;
     uint256 public beforeRead;
     uint256 public incrementResult;
@@ -62,7 +61,7 @@ contract StaticReadX2WriteReaderL2 {
     function run() external {
         beforeRead = target.counter();
         require(target.counter() == beforeRead, "repeated before read differs");
-        incrementResult = target.increment{gas: PROXY_CALL_GAS}();
+        incrementResult = target.increment();
         afterRead = target.counter();
         require(target.counter() == afterRead, "repeated after read differs");
         require(incrementResult == beforeRead + 1, "increment result differs");
@@ -266,6 +265,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticReadX2WriteL2Actions {
         _printL2Table(l2);
         _logL2Entry(0, l2[0]);
         StaticExecutionEntryL2[] memory statics = _l2Statics(counter, reader);
+        _printL2StaticTable(statics);
         for (uint256 i; i < statics.length; i++) {
             _logStaticLookup(i, statics[i]);
         }

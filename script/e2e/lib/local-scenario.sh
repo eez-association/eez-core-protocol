@@ -27,9 +27,16 @@ L2_CHAIN_ID="${L2_CHAIN_ID:-}"
 export L2_ROLLUP_ID=1
 SYSTEM_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
+# Stress fixtures may need room for Forge's padded delivery gas limits.
+LOCAL_L2_BLOCK_GAS_LIMIT=$(sed -n 's|^// E2E_LOCAL_L2_BLOCK_GAS_LIMIT:[[:space:]]*||p' "$SOL")
+if [[ -n "$LOCAL_L2_BLOCK_GAS_LIMIT" && ! "$LOCAL_L2_BLOCK_GAS_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: E2E_LOCAL_L2_BLOCK_GAS_LIMIT must be one positive decimal integer"
+    exit 1
+fi
+
 # 1. Start anvils
 start_anvil "$L1_PORT" L1_PID "$L1_CHAIN_ID"
-start_anvil "$L2_PORT" L2_PID "$L2_CHAIN_ID"
+start_anvil "$L2_PORT" L2_PID "$L2_CHAIN_ID" "$LOCAL_L2_BLOCK_GAS_LIMIT"
 
 # 2. Deploy infrastructure
 deploy_infra "$L1_RPC" "$PK" "$L2_RPC" "$L2_ROLLUP_ID" "$SYSTEM_ADDRESS"
@@ -46,7 +53,7 @@ echo "====== Deploy App ======"
 deploy_contracts "$SOL" "$L1_RPC" "$L2_RPC" "$PK"
 
 # 4. For L2-starting tests: create signed raw tx (RLP_ENCODED_TX)
-if grep -q 'contract ExecuteNetworkL2 ' "$SOL"; then
+if scenario_has_contract "$SOL" ExecuteNetworkL2; then
     echo ""
     echo "====== Create Signed Transaction ======"
     build_trigger_txs "$SOL" local
@@ -57,7 +64,7 @@ FAILED=false
 L2_BLOCK=""
 L1_BLOCK=""
 
-if grep -q 'contract ExecuteL2 ' "$SOL"; then
+if scenario_has_contract "$SOL" ExecuteL2; then
     echo ""
     echo "====== Execute L2 (same-block) ======"
     set +e
@@ -81,7 +88,7 @@ else
     echo "====== Execute L2 (skipped — no contract ExecuteL2) ======"
 fi
 
-if grep -q 'contract Execute ' "$SOL"; then
+if scenario_has_contract "$SOL" Execute; then
     echo ""
     echo "====== Execute L1 (same-block) ======"
     set +e
@@ -111,37 +118,40 @@ fi
 [[ -n "$L2_BLOCK" ]] && decode_block "$L2_RPC" "$L2_BLOCK" "$MANAGER_L2" "L2 "
 [[ -n "$L1_BLOCK" ]] && decode_block "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "L1 "
 
+_SENDER=$(cast wallet address --private-key "$PK")
+
 # 7. Verify on-chain events match expected hashes from ComputeExpected.
 #    Asserts the cryptographic tie between off-chain prediction and on-chain reality.
 #    Skipped (with a notice) if the scenario has no ComputeExpected contract.
-if grep -q 'contract ComputeExpected ' "$SOL"; then
+if scenario_has_contract "$SOL" ComputeExpected; then
     echo ""
     echo "====== Compute Expected Entries ======"
-    _SENDER=$(cast wallet address --private-key "$PK")
     COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$L1_RPC" --sender "$_SENDER" 2>&1)
 
-    extract_expected_outputs "$COMPUTE_OUT"
+    extract_expected_outputs "$COMPUTE_OUT" || exit 1
+    require_eventless_l1_state_check "$SOL" || exit 1
 
     VERIFIERS_RUN=0
 
     # ── Verify L1 batch consumption ──
     # Proxy-consumed entries (EXPECTED_L1_CALL_HASHES): ExecutionConsumed carries the call
-    # hash — verify_l1_batch on the execution block. System-driven zero-hash entries
-    # (EXPECTED_L1_HASHES only): no call hash exists — match EntryExecuted rolling hashes
-    # via verify_l1_zero_hash, same as network mode.
+    # hash — verify_l1_batch checks those identities only. With an expected table,
+    # the calldata verifier below owns completion checks, including erased entries.
+    # Scenarios with only zero-hash L2Tx entries check their declared hashes, even
+    # with a table. Mixed scenarios rely on the calldata verifier for those entries.
     if [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_CALL_HASHES" && "$EXPECTED_L1_CALL_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Batch (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L1" inline verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" "$EXPECTED_L1_TABLE"
+        run_verify_step "L1" inline verify_l1_batch "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_CALL_HASHES" 0x
     elif [[ -n "$L1_BLOCK" && -n "$EXPECTED_L1_HASHES" && "$EXPECTED_L1_HASHES" != "[]" ]]; then
         echo ""
         echo "====== Verify L1 Zero-Hash Entries (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L1" inline verify_l1_zero_hash "$L1_RPC" "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_HASHES" "$EXPECTED_L1_TABLE"
+        run_verify_step "L1" inline verify_l1_zero_hash "$L1_RPC" "$L1_BLOCK" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_HASHES" 0x
     else
         echo ""
-        echo "====== Verify L1 (SKIP: no L1 block or no EXPECTED_L1_[CALL_]HASHES printed) ======"
+        echo "====== Verify L1 Events (SKIP: no event-only check needed) ======"
     fi
 
     # ── Compare all expected L1 content with the posted batch ──
@@ -153,11 +163,11 @@ if grep -q 'contract ComputeExpected ' "$SOL"; then
         echo ""
         echo "====== Verify L1 Posted Batch Calldata (block $L1_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
-        run_verify_step "L1 CALLDATA" inline verify_l1_calldata "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE"
+        run_verify_step "L1 CALLDATA" inline verify_l1_calldata "$L1_RPC" "$L1_BLOCK" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" "$EVENTLESS_L1_CALL_HASHES"
     fi
 
     # ── Verify L2 ExecutionTableLoaded entries ──
-    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && "$EXPECTED_L2_HASHES" != "[]" ]]; then
+    if [[ -n "$L2_BLOCK" && -n "$EXPECTED_L2_HASHES" && ( "$EXPECTED_L2_HASHES" != "[]" || "${EXPECTED_L2_STATIC_TABLE:-0x}" != 0x ) ]]; then
         echo ""
         echo "====== Verify L2 Table (block $L2_BLOCK) ======"
         VERIFIERS_RUN=$((VERIFIERS_RUN + 1))
@@ -200,6 +210,20 @@ else
     echo ""
     echo "====== Verify (skipped — no contract ComputeExpected) ======"
 fi
+
+# 8. Check persisted state on both chains, including sides with no delivery.
+# Execute assertions run during simulation; these checks read the mined state.
+_verify_local_state() {
+    VERIFY_OUT=$(forge script "$SOL:$1" --rpc-url "$2" --sender "$_SENDER" 2>&1)
+}
+for _VN_NAME in VerifyNetwork VerifyNetworkL2; do
+    scenario_has_contract "$SOL" "$_VN_NAME" || continue
+    _VN_RPC="$L1_RPC"
+    [[ "$_VN_NAME" != VerifyNetworkL2 ]] || _VN_RPC="$L2_RPC"
+    echo ""
+    echo "====== Scenario Self-Verification ($_VN_NAME) ======"
+    run_verify_step "$_VN_NAME" inline _verify_local_state "$_VN_NAME" "$_VN_RPC"
+done
 
 if $FAILED; then
     echo ""

@@ -142,6 +142,14 @@ struct ExecutionEntry {
 
 A top-level entry carries a `success` flag. When `success == true`, the entry runs, verifies, and the top-level call returns `entry.returnData`. When `success == false`, the entry is run and verified (rolling hash + ether invariant) exactly as a successful one, then **reverted with `entry.returnData`** so all of its state effects roll back — the top-level call fails and the caller may try/catch it. Because the revert also rolls back the cursor advance, a `success == false` entry is re-callable; the forward-scan consumption (§D.1) reaches past it once a later successful consumption advances beyond it. A top-level reverting *read* is a `StaticExecutionEntry` instead.
 
+**Lookups and state updates.** L1→L2 static reads, reverted calls (top-level or nested), and calls undone by an enclosing revert are lookups: they return prepared results without persistent L2 changes or a separate L2 delivery.
+
+- **Top-level revert:** keep the nonempty `rollupUpdates` array. EEZ checks the starting roots and applies the updates, then the revert undoes them.
+- **Nested revert:** the row has no separate `rollupUpdates`; its changes roll back, but the containing entry may still succeed and update the root.
+- **Top-level static read:** uses `expectedRoots`, with no `rollupUpdates`.
+
+L2→L1 reverted calls still execute on L1 within an L2Tx entry, which may succeed and update the root.
+
 #### Prover constraints
 
 These obligations include remote truth, canonical encoding and funding policy. Local structural checks cannot establish circuit soundness or remote execution truth. Where a cheap local check exists the contracts check defensively (error in parentheses); other guarantees depend on the actual circuit/system implementation.
@@ -355,6 +363,12 @@ struct RollupIdWithProofSystems {
 ```
 
 `immediateEntryCount` / `immediateStaticEntryCount` are **unproven dispatch params** — not folded into the public input, so the immediate/persistent split can be re-tuned within the structural constraints without re-proving. The batch-level `expectedRootPerRollup` assertions are also outside the commitment; entry-level root fields remain committed. `blockNumber` is forwarded to every rollup's `getCustomData(blockNumber)`. See `MULTI_PROVER_SPEC.md` for the multi-prover model.
+
+**Execution order and composer responsibilities.** The intended workflow is pure L2 transactions, then L2 transactions calling L1, then top-level L1→L2 proxy transactions. The first two groups form the leading immediate L2Tx run. EEZ attempts that complete run in supplied order; it does not enforce pure L2 transactions first. A nonempty run requires at least one successful execution, not success of every entry (failure handling below).
+
+L1→L2 proxy transactions execute through the AA meta hook or later transactions consuming deferred entries. Their execution depends on the composer's callback and submitted bundle being included. EEZ does not guarantee consumption; applications requiring specific entries must enforce that requirement.
+
+Proving the immediate counts would prevent another submitter from changing the immediate/deferred split, but would not force the composer to execute the entries. Sender binding likewise restricts submission without guaranteeing consumption (§I.3).
 
 **Preconditions** (composer pins + `_validateBatchStructure`, no external calls):
 - Reentry guard: `_insideExecution() || _transientEntriesLength != 0` reverts `PostBatchReentry`.

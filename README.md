@@ -6,7 +6,7 @@ Smart contracts to manage synchronous rollups on Ethereum.
 
 ## Overview
 
-Sync Rollups enables synchronous composability between based rollups sharing the same L1 sequencer. State transitions are pre-computed off-chain and verified on-chain by a configurable set of proof systems, enabling atomic cross-rollup calls (e.g. cross-rollup flash loans) within a single L1 block.
+Sync Rollups enables synchronous composability between based rollups sharing the same L1 sequencer. State transitions and remote results are pre-computed off-chain. L1 verifies batches through a configurable set of proof systems, while L2 executes tables supplied by its trusted system integration. Applications receive prepared remote results synchronously; cross-chain consistency and delivery depend on the prover and node integration. EVM rollback provides atomicity within each local execution frame.
 
 Proofs authorize entries subject to execution checks; L1 execution determines settlement order. Deferred entries in different rollup queues can execute in either order when their checks pass. See the core protocol's [Settlement Model](docs/CORE_PROTOCOL_SPEC.md#settlement-model).
 
@@ -45,5 +45,8 @@ Start with the [EEZ walkthrough](docs/EEZ_WALKTHROUGH.md) for the execution mode
 - [`docs/STATIC_ENTRY.md`](docs/STATIC_ENTRY.md) — static entries + reverted-call resolution semantics (nested + top-level)
 - [`docs/MULTI_PROVER_SPEC.md`](docs/MULTI_PROVER_SPEC.md) — multi-prover design rationale
 - [`docs/CAVEATS.md`](docs/CAVEATS.md) — edge cases
+- [`docs/CALL_PATTERN_LIMITS.md`](docs/CALL_PATTERN_LIMITS.md) — supported retries and remaining call-pattern limits
+- [`docs/INTEGRATION_BOUNDARIES.md`](docs/INTEGRATION_BOUNDARIES.md) — builder, prover, node and deployment responsibilities
+- [`docs/EVENTS.md`](docs/EVENTS.md) — event signatures, rollback and reconstruction limits
 - [`script/blob/README.md`](script/blob/README.md) — blob ⇄ table framework: wire codec, table derivation, scenario DSL, file-based tools
 - [`test/blob/SCENARIO_CATALOG.md`](test/blob/SCENARIO_CATALOG.md) — the L1 batch every basic cross-chain shape produces, case by case

@@ -5,7 +5,7 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {EEZ} from "../src/EEZ.sol";
 import {EEZL2} from "../src/L2/EEZL2.sol";
 import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
-import {VerifyHelpers} from "../script/e2e/scenarios/shared/Verify.s.sol";
+import {VerifyHelpers, VerifyL1BatchCalldata} from "../script/e2e/scenarios/shared/Verify.s.sol";
 import {ExecutionEntry as L2Entry, ExpectedOutgoingCrossChainCall} from "../src/interfaces/IEEZL2.sol";
 import {DecodeExecutions} from "../script/tools/DecodeExecutions.s.sol";
 
@@ -34,6 +34,49 @@ contract E2EEventVerificationHarness is VerifyHelpers {
 
     function fields(Vm.EthGetLogs[] memory logs, ExecutionEntry[] memory entries) external pure returns (bool) {
         return _verifyL1EntryFields(logs, abi.encode(entries));
+    }
+
+    function eventless(
+        Vm.EthGetLogs[] memory logs,
+        ExecutionEntry[] memory entries,
+        bytes32[] memory keys
+    )
+        external
+        pure
+        returns (bool, ExecutionEntry[] memory)
+    {
+        _validateEventlessL1(entries, keys);
+        return _filterEventlessL1(logs, entries, keys);
+    }
+
+    function eventlessPartial(
+        Vm.EthGetLogs[] memory logs,
+        ExecutionEntry[] memory matched,
+        ExecutionEntry[] memory expected,
+        bytes32[] memory keys
+    )
+        external
+        pure
+        returns (bool, ExecutionEntry[] memory)
+    {
+        _validateEventlessL1(expected, keys);
+        return _filterEventlessL1(logs, matched, keys);
+    }
+
+    function updateChain(ExecutionEntry[] memory entries, bytes32[] memory keys) external pure returns (bool) {
+        return _checkPostedUpdateChain(entries, true, keys);
+    }
+
+    function roots(
+        address registry,
+        ExecutionEntry[] memory entries,
+        bytes32[] memory keys
+    )
+        external
+        view
+        returns (bool)
+    {
+        return _checkLiveRoots(registry, entries, entries, keys);
     }
 
     function content(ExecutionEntry memory posted, ExecutionEntry memory expected) external pure returns (bool) {
@@ -131,6 +174,177 @@ contract E2EEventVerificationTest is Test {
         assertFalse(verifier.fields(logs, entries));
         logs[1].topics[2] = bytes32(uint256(1));
         assertTrue(verifier.fields(logs, entries));
+    }
+
+    function test_ExplicitParentRollbackDoesNotRequireCompletion() public view {
+        ExecutionEntry[] memory entries = _entries(1);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        (bool ok, ExecutionEntry[] memory committed) = verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+        assertTrue(ok);
+        assertEq(committed.length, 0);
+        assertFalse(verifier.fields(new Vm.EthGetLogs[](0), entries), "absence alone must not imply rollback");
+    }
+
+    function test_ParentRollbackDeclarationRejectsSurvivingEvents() public view {
+        ExecutionEntry[] memory entries = _entries(1);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        Vm.EthGetLogs[] memory logs = new Vm.EthGetLogs[](1);
+        logs[0] = _log(EEZ.EntryExecuted.selector, abi.encode(HASH));
+        (bool ok,) = verifier.eventless(logs, entries, keys);
+        assertFalse(ok);
+        logs[0].topics = new bytes32[](4);
+        logs[0].topics[0] = EEZ.ExecutionConsumed.selector;
+        logs[0].topics[1] = keys[0];
+        logs[0].data = "";
+        (ok,) = verifier.eventless(logs, entries, keys);
+        assertFalse(ok);
+    }
+
+    function test_ParentRollbackCannotExemptUnrelatedEntry() public view {
+        ExecutionEntry[] memory entries = _entries(2);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        entries[1].proxyEntryHash = keccak256("committing call");
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        (bool ok, ExecutionEntry[] memory committed) = verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+        assertTrue(ok);
+        assertEq(committed.length, 1);
+        assertEq(committed[0].proxyEntryHash, entries[1].proxyEntryHash);
+        assertFalse(verifier.fields(new Vm.EthGetLogs[](0), committed));
+    }
+
+    function test_ParentRollbackDeclarationCanBelongToAnotherBatch() public {
+        ExecutionEntry[] memory expected = _entries(2);
+        expected[0].proxyEntryHash = keccak256("erased call in first batch");
+        expected[1].proxyEntryHash = keccak256("committing call in second batch");
+        expected[1].rollingHash = keccak256("second batch hash");
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = expected[0].proxyEntryHash;
+        ExecutionEntry[] memory matched = new ExecutionEntry[](1);
+        matched[0] = expected[1];
+
+        Vm.EthGetLogs[] memory logs = new Vm.EthGetLogs[](2);
+        logs[0] = _log(EEZ.EntryExecuted.selector, abi.encode(expected[1].rollingHash));
+        logs[1].topics = new bytes32[](4);
+        logs[1].topics[0] = EEZ.ExecutionConsumed.selector;
+        logs[1].topics[1] = expected[1].proxyEntryHash;
+        logs[1].topics[2] = bytes32(uint256(1));
+        (bool ok, ExecutionEntry[] memory committed) = verifier.eventlessPartial(logs, matched, expected, keys);
+        assertTrue(ok);
+        assertEq(committed.length, 1);
+        assertTrue(verifier.fields(logs, committed));
+        assertFalse(verifier.fields(new Vm.EthGetLogs[](0), committed), "other batch still needs completion");
+
+        matched[0] = expected[0];
+        (ok, committed) = verifier.eventlessPartial(new Vm.EthGetLogs[](0), matched, expected, keys);
+        assertTrue(ok);
+        assertEq(committed.length, 0);
+
+        keys[0] = keccak256("unknown in every batch");
+        vm.expectRevert("eventless L1 key is not a successful expected entry");
+        verifier.eventlessPartial(new Vm.EthGetLogs[](0), matched, expected, keys);
+    }
+
+    function test_ParentRollbackStillChecksLiveRootWithoutCommittingEntries() public {
+        ExecutionEntry[] memory entries = _entries(1);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        entries[0].rollupUpdates[0].currentRoot = bytes32(uint256(1));
+        entries[0].rollupUpdates[0].newRoot = bytes32(uint256(2));
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        address registry = address(0x1234);
+        bytes memory callData = abi.encodeWithSignature("rollups(uint64)", uint64(1));
+        vm.mockCall(registry, callData, abi.encode(address(0), bytes32(uint256(1)), uint256(0)));
+        assertTrue(verifier.roots(registry, entries, keys));
+        vm.mockCall(registry, callData, abi.encode(address(0), bytes32(uint256(2)), uint256(0)));
+        assertFalse(verifier.roots(registry, entries, keys), "erased entry must not advance live root");
+    }
+
+    function test_ParentRollbackDoesNotWeakenRootChecksForTheRestOfItsBatch() public {
+        ExecutionEntry[] memory entries = _entries(2);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        entries[0].rollupUpdates[0].currentRoot = bytes32(uint256(1));
+        entries[0].rollupUpdates[0].newRoot = bytes32(uint256(2));
+        entries[1].proxyEntryHash = keccak256("committing call");
+        entries[1].rollupUpdates[0].currentRoot = bytes32(uint256(1));
+        entries[1].rollupUpdates[0].newRoot = bytes32(uint256(3));
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        assertTrue(verifier.updateChain(entries, keys));
+        entries[1].rollupUpdates[0].currentRoot = bytes32(uint256(2));
+        assertFalse(verifier.updateChain(entries, keys), "next entry must start at the restored root");
+        entries[1].rollupUpdates[0].currentRoot = bytes32(uint256(1));
+
+        address registry = address(0x1234);
+        bytes memory callData = abi.encodeWithSignature("rollups(uint64)", uint64(1));
+        vm.mockCall(registry, callData, abi.encode(address(0), bytes32(uint256(3)), uint256(0)));
+        assertTrue(verifier.roots(registry, entries, keys));
+        vm.mockCall(registry, callData, abi.encode(address(0), bytes32(uint256(2)), uint256(0)));
+        assertFalse(verifier.roots(registry, entries, keys), "whole matched batch still needs exact final root");
+    }
+
+    function test_ParentRollbackRejectsAmbiguousRepeatedCalls() public {
+        ExecutionEntry[] memory entries = _entries(2);
+        bytes32 key = keccak256("repeated call");
+        entries[0].proxyEntryHash = key;
+        entries[1].proxyEntryHash = key;
+        // Different results do not distinguish occurrences in a call-hash declaration.
+        entries[0].returnData = abi.encode(uint256(1));
+        entries[1].returnData = abi.encode(uint256(2));
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = key;
+        vm.expectRevert("ambiguous eventless L1 key");
+        verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+
+        // Splitting the repeated occurrences across batches cannot hide the ambiguity.
+        ExecutionEntry[] memory matched = new ExecutionEntry[](1);
+        matched[0] = entries[0];
+        vm.expectRevert("ambiguous eventless L1 key");
+        verifier.eventlessPartial(new Vm.EthGetLogs[](0), matched, entries, keys);
+
+        // A failed twin must not inherit the successful entry's exemption either.
+        entries[1].success = false;
+        vm.expectRevert("ambiguous eventless L1 key");
+        verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+    }
+
+    function test_EventlessPreflightValidatesWithoutCandidateOrRpc() public {
+        VerifyL1BatchCalldata preflight = new VerifyL1BatchCalldata();
+        ExecutionEntry[] memory entries = _entries(1);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        bytes32[] memory keys = new bytes32[](1);
+        keys[0] = entries[0].proxyEntryHash;
+        preflight.validateExpectations(abi.encode(entries), keys);
+        preflight.validateExpectations("", new bytes32[](0));
+        vm.expectRevert("eventless L1 keys require EXPECTED_L1_TABLE");
+        preflight.validateExpectations("", keys);
+        keys[0] = keccak256("unknown");
+        vm.expectRevert("eventless L1 key is not a successful expected entry");
+        preflight.validateExpectations(abi.encode(entries), keys);
+        keys[0] = entries[0].proxyEntryHash;
+        entries[0].success = false;
+        vm.expectRevert("eventless L1 key is not a successful expected entry");
+        preflight.validateExpectations(abi.encode(entries), keys);
+    }
+
+    function test_InvalidParentRollbackDeclarationsRevert() public {
+        ExecutionEntry[] memory entries = _entries(1);
+        entries[0].proxyEntryHash = keccak256("erased call");
+        bytes32[] memory keys = new bytes32[](1);
+        vm.expectRevert("eventless L1 key cannot be zero");
+        verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+        keys[0] = keccak256("unknown call");
+        vm.expectRevert("eventless L1 key is not a successful expected entry");
+        verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
+        keys = new bytes32[](2);
+        keys[0] = entries[0].proxyEntryHash;
+        keys[1] = keys[0];
+        vm.expectRevert("duplicate eventless L1 key");
+        verifier.eventless(new Vm.EthGetLogs[](0), entries, keys);
     }
 
     function test_PostedCallArrayIsCheckedWithoutEmittedCount() public view {
