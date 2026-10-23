@@ -74,6 +74,9 @@ if name=="date":
 if name=="sleep":
     (root/"clock").write_text(str(clock+int(args[0]))); sys.exit()
 if name=="cast":
+    if args[0]=="abi-encode":
+        assert args[1:]==["table(uint256[])", "[]"],args
+        print("0x"+format(32,"064x")+format(0,"064x")); sys.exit()
     if args[0]=="to-dec": print(int(args[1],16)); sys.exit()
     if args[0]=="keccak":
         print("0xa17dc82da628b280737819918ee433b966773121ff974c081d8cbac4c6199d7d" if args[1].startswith("ExecutionConsumed(") else
@@ -101,7 +104,16 @@ if name=="forge":
             assert pathlib.Path(evidence)==root/"job/cross-chain/evidence.json"
             state.setdefault("filters",[]).append({"evidence":evidence,"l2":parsed["l2"],
                 "calldata_env":os.environ.get("E2E_L2_TABLE_INPUTS")})
+    if "validateExpectations(bytes,bytes32[])" in args:
+        state.setdefault("validations", []).append(([] if args[-1]=="[]" else args[-1][1:-1].split(",")))
+        save()
+        if os.environ.get("TEST_BAD_EVENTLESS") == "1":
+            print("Error: eventless L1 key is not a successful expected entry"); sys.exit(1)
+        sys.exit()
+    if ":VerifyNetwork" in text:
+        save(); print("PASS: persisted rollback evidence"); sys.exit()
     if ":VerifyL1BatchCalldata" in text:
+        state.setdefault("eventless_l1", []).append(([] if args[-2]=="[]" else args[-2][1:-1].split(",")))
         state["decodes"]=state.get("decodes",0)+1
         if mode in ("reorg_same_height","reorg_move") and not state.get("changed"):
             state["changed"]=True; save()
@@ -120,6 +132,11 @@ if name=="forge":
         print("L1_BATCH_TX="+post())
         print("L1_BATCH_TX_CANDIDATE="+post())
         if mode.startswith("split"): print("L1_BATCH_TX_CANDIDATE="+post(1))
+    elif ":VerifyL2Absent" in text:
+        state.setdefault("absence_checks", []).append(args)
+        if os.environ.get("TEST_FAIL_ABSENT") == "1":
+            save(); print("FAIL: forbidden L2 delivery found"); sys.exit(1)
+        print("PASS: absent keys left no L2 trace")
     elif ":VerifyL2CallsInRange" in text:
         if mode=="discovery_missing":
             save(); print("FAIL: expected L2 calls missing"); sys.exit(1)
@@ -129,6 +146,8 @@ if name=="forge":
         print("L2_MATCH_BLOCKS="+("invalid" if mode=="discovery_malformed" else json.dumps(matches, separators=(",", ":"))))
         if mode=="discovery_reorg" and not state.get("changed"): state["changed"]=True
     elif ":VerifyL2Blocks" in text or ":VerifyL2Calls " in text:
+        if ":VerifyL2Blocks" in text and os.environ.get("TEST_FAIL_L2_TABLE") == "1":
+            save(); print("FAIL: expected L2 table mismatch"); sys.exit(1)
         if mode=="links_wrong_function":
             save(); print("FAIL: Wrong linked L2 function"); sys.exit(1)
         if mode.startswith("split"):
@@ -264,7 +283,7 @@ print(json.dumps(response))
 
 
 class NetworkEvidenceTests(unittest.TestCase):
-    def run_verifier(self, mode="normal", direction="L2", runner=None, links=None):
+    def run_verifier(self, mode="normal", direction="L2", runner=None, links=None, empty_static=False, eventless=False, bad_eventless=False, legacy=False, verifier_separator=" ", absent=False, fail_absent=False, fail_l2_table=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "clock").write_text("1000")
@@ -290,8 +309,26 @@ class NetworkEvidenceTests(unittest.TestCase):
                 f"EXPECTED_L2_CALL_HASHES='{('[]' if mode=='padded_table_only' or static else '[0x02]')}'\n"
                 f"EXPECTED_L2_STATIC_TABLE={'0x01' if mode=='links_static' else '0x'}\n"
                 "EXPECTED_L2_TABLE=0x01\nEVENTLESS_L2_HASHES='[]'\nABSENT_L2_HASHES='[]'\n")
+            if absent:
+                with (job / "manifest.env").open("a") as manifest:
+                    manifest.write("ABSENT_L2_HASHES='[" + h(99) + "]'\n")
+            if empty_static:
+                manifest = job / "manifest.env"
+                manifest.write_text(manifest.read_text().replace(
+                    "EXPECTED_L2_STATIC_TABLE=0x\n", "EXPECTED_L2_STATIC_TABLE=" +
+                    "0x" + format(32, "064x") + "0" * 64 + "\n"))
+            if eventless:
+                expectation = json.dumps([h(50), h(51)])  # deliberately includes spaces
+                if not legacy:
+                    with (job / "manifest.env").open("a") as manifest:
+                        manifest.write("EVENTLESS_L1_CALL_HASHES='" + expectation + "'\n")
+                # Saved output/deploy-env must not override a current manifest.
+                saved = expectation if legacy else json.dumps([h(99)])
+                (job / "compute.out").write_text("EVENTLESS_L1_CALL_HASHES=" + saved + "\n")
+                (job / "deploy-env.env").write_text("EVENTLESS_L1_CALL_HASHES=" + expectation + "\n")
             (root / "snapshot.env").write_text("L1_BLOCK_BEFORE=90\nL2_BLOCK_BEFORE=190\n")
-            (root / "Scenario.sol").write_text("contract ComputeExpected {}\n")
+            (root / "Scenario.sol").write_text("contract ComputeExpected {}\n" +
+                (f"contract VerifyNetwork{verifier_separator}{{}}\n" if eventless else ""))
             cache = root / "cache"
             cache.mkdir()
             if mode=="stale_metadata":
@@ -303,6 +340,9 @@ class NetworkEvidenceTests(unittest.TestCase):
                  "--rollups", "0x" + "a" * 40, "--manager-l2", "0x" + "b" * 40],
                 cwd=REPO, env={**os.environ, "PATH": str(binaries) + ":" + os.environ["PATH"],
                     "TEST_ROOT": directory, "TEST_MODE": mode, "TEST_DIRECTION": direction,
+                    "TEST_BAD_EVENTLESS": "1" if bad_eventless else "0",
+                    "TEST_FAIL_ABSENT": "1" if fail_absent else "0",
+                    "TEST_FAIL_L2_TABLE": "1" if fail_l2_table else "0",
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "E2E_STAGE": "verify", "E2E_JOB_DIR": str(job),
                     "E2E_SNAPSHOT": str(root / "snapshot.env"), "E2E_L1TX_CACHE": str(cache),
@@ -366,6 +406,76 @@ class NetworkEvidenceTests(unittest.TestCase):
     def test_source_only_links_do_not_invent_deliveries(self):
         result, _, _ = self.assert_passes("links_source_only", "L1")
         self.assertIn("No L2 delivery: expected and verified", result.stdout)
+
+    def test_absence_is_checked_with_deliveries_static_tables_or_no_delivery(self):
+        cases = (("normal", "L1"), ("links_normal", "L1"),
+                 ("links_static", "L2"), ("links_source_only", "L1"))
+        for mode, direction in cases:
+            for forbidden_delivery in (False, True):
+                with self.subTest(mode=mode, forbidden_delivery=forbidden_delivery):
+                    result, state, _ = self.run_verifier(
+                        mode, direction, absent=True, fail_absent=forbidden_delivery)
+                    self.assertEqual(result.returncode, 1 if forbidden_delivery else 0,
+                                     result.stdout + result.stderr)
+                    checks = state["absence_checks"]
+                    self.assertEqual(len(checks), 1)
+                    self.assertEqual(checks[0][-4:], ["190", "202", "0x" + "b" * 40, "[" + h(99) + "]"])
+                    if mode != "links_source_only":
+                        self.assertTrue(any(any(a.endswith(":VerifyL2Blocks") for a in args)
+                                            for args in state["forge"]))
+                    if forbidden_delivery:
+                        self.assertIn("L2 ABSENT VERIFICATION FAILED", result.stdout)
+                        self.assertIn("--- L2 ABSENT DIAGNOSTICS ---", result.stdout)
+                        self.assertIn("forbidden L2 delivery found", result.stdout)
+                        self.assertNotIn("====== Done ======", result.stdout)
+                    else:
+                        self.assertIn("====== Done ======", result.stdout)
+
+    def test_successful_absence_check_does_not_hide_failed_table_check(self):
+        result, state, _ = self.run_verifier("normal", "L1", absent=True, fail_l2_table=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(state["absence_checks"]), 1)
+        self.assertIn("PASS: absent keys left no L2 trace", result.stdout)
+        self.assertIn("--- L2 TABLE DIAGNOSTICS ---", result.stdout)
+        self.assertIn("expected L2 table mismatch", result.stdout)
+        self.assertNotIn("====== Done ======", result.stdout)
+
+    def test_source_only_encoded_empty_static_table_does_not_require_delivery(self):
+        result, _, _ = self.run_verifier("links_source_only", "L1", empty_static=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No L2 delivery: expected and verified", result.stdout)
+
+    def test_eventless_l1_json_survives_plan_environment_reload(self):
+        result, state, _ = self.run_verifier("links_source_only", "L1", eventless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(state["eventless_l1"], [[h(50), h(51)]])
+        self.assertEqual(state["validations"], [[h(50), h(51)]])
+
+    def test_eventless_state_check_runs_with_tabs_and_line_breaks(self):
+        for separator in ("\t", "\n"):
+            with self.subTest(separator=separator):
+                result, state, _ = self.run_verifier(
+                    "links_source_only", "L1", eventless=True, verifier_separator=separator)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(any(
+                    any(arg.endswith(":VerifyNetwork") for arg in args)
+                    for args in state["forge"]), "required persisted state check was skipped")
+
+    def test_legacy_eventless_keys_use_complete_saved_json(self):
+        result, state, _ = self.run_verifier("links_source_only", "L1", eventless=True, legacy=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(state["eventless_l1"], [[h(50), h(51)]])
+
+    def test_bad_eventless_configuration_stops_before_discovery_without_retry(self):
+        for direction in ("L1", "L2"):
+            result, state, clock = self.run_verifier("normal", direction, eventless=True, bad_eventless=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid EVENTLESS_L1_CALL_HASHES configuration", result.stdout)
+            self.assertIn("not a successful expected entry", result.stdout)
+            self.assertEqual(clock, 1000)
+            self.assertEqual(len(state["validations"]), 1)
+            self.assertNotIn("decodes", state)
+            self.assertFalse(state.get("calls"), state)
 
     def test_supported_incomplete_links_never_fall_back(self):
         for mode in ("links_null", "links_incomplete"):

@@ -604,6 +604,76 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         }
     }
 
+    function _validateEventlessL1(ExecutionEntry[] memory expected, bytes32[] memory keys) internal pure {
+        for (uint256 k; k < keys.length; k++) {
+            require(keys[k] != bytes32(0), "eventless L1 key cannot be zero");
+            for (uint256 previous; previous < k; previous++) {
+                require(keys[previous] != keys[k], "duplicate eventless L1 key");
+            }
+            uint256 matchIndex = type(uint256).max;
+            // Validate against the whole expected table, including other batches.
+            // Call hashes cannot select individual occurrences of repeated calls.
+            for (uint256 i; i < expected.length; i++) {
+                if (expected[i].proxyEntryHash != keys[k]) continue;
+                require(matchIndex == type(uint256).max, "ambiguous eventless L1 key");
+                matchIndex = i;
+            }
+            require(
+                matchIndex != type(uint256).max && expected[matchIndex].success,
+                "eventless L1 key is not a successful expected entry"
+            );
+        }
+    }
+
+    function _hasConsumedEvent(Vm.EthGetLogs[] memory logs, bytes32 key) internal pure returns (bool) {
+        for (uint256 j; j < logs.length; j++) {
+            if (
+                logs[j].topics.length >= 2 && logs[j].topics[0] == SIG_EXECUTION_CONSUMED_L1 && logs[j].topics[1] == key
+            ) return true;
+        }
+        return false;
+    }
+
+    /// @dev Explicit successful calls erased by a source-parent revert. Keep posted
+    /// content/hash checks, but require absence of both consumption and completion.
+    /// Only completion checks use the filtered list; root checks retain every entry.
+    /// Keys must already be validated against the full expected table, before matching.
+    /// This opt-in does not infer rollback from missing events.
+    function _filterEventlessL1(
+        Vm.EthGetLogs[] memory logs,
+        ExecutionEntry[] memory entries,
+        bytes32[] memory keys
+    )
+        internal
+        pure
+        returns (bool ok, ExecutionEntry[] memory remaining)
+    {
+        if (keys.length == 0) return (true, entries);
+        ok = true;
+        bytes32[] memory executed = _collectL1ExecutedHashes(logs);
+        remaining = new ExecutionEntry[](entries.length);
+        uint256 count;
+        for (uint256 i; i < entries.length; i++) {
+            if (!_containsHash(keys, entries[i].proxyEntryHash)) {
+                remaining[count++] = entries[i];
+                continue;
+            }
+            bool hasEvent =
+                _containsHash(executed, entries[i].rollingHash) || _hasConsumedEvent(logs, entries[i].proxyEntryHash);
+            if (hasEvent) {
+                console.log(
+                    "FAIL: erased L1 call %s emitted consumption/completion", vm.toString(entries[i].proxyEntryHash)
+                );
+                ok = false;
+            } else {
+                console.log(
+                    "PASS: erased L1 call %s has no consumption/completion", vm.toString(entries[i].proxyEntryHash)
+                );
+            }
+        }
+        assembly { mstore(remaining, count) }
+    }
+
     function _checkL1Entry(
         Vm.EthGetLogs[] memory logs,
         uint256 i,
@@ -649,8 +719,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     }
 
     /// @dev Simulates the root cursor per rollup over OUR matched entries in entry order:
-    ///      every matched update must start at the cursor; success advances it, failure
-    ///      leaves it unchanged. When the posted batch contains ONLY our matched entries,
+    ///      every matched update must start at the cursor; success advances it unless
+    ///      its parent reverted. Failure and parent rollback leave the cursor unchanged.
+    ///      When the posted batch contains ONLY our matched entries,
     ///      live must equal the final cursor exactly (the runner pins the verifier at the
     ///      settlement block). A live batch can also interleave OTHER actors' entries on
     ///      the same rollup; execution order is not reconstructible from calldata alone,
@@ -659,7 +730,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     function _checkLiveRoots(
         address rollupsAddr,
         ExecutionEntry[] memory posted,
-        ExecutionEntry[] memory matched
+        ExecutionEntry[] memory matched,
+        bytes32[] memory eventlessKeys
     )
         internal
         view
@@ -675,6 +747,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         uint256 n;
         ok = true;
         for (uint256 i = 0; i < matched.length; i++) {
+            bool commits = matched[i].success && !_containsHash(eventlessKeys, matched[i].proxyEntryHash);
             for (uint256 d = 0; d < matched[i].rollupUpdates.length; d++) {
                 RollupUpdate memory sd = matched[i].rollupUpdates[d];
                 uint256 k;
@@ -686,9 +759,9 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                     cursor[n] = sd.currentRoot;
                     n++;
                 }
-                // A failed entry observes the current cursor but its write unwinds.
+                // A failed or parent-reverted entry observes the cursor but its write unwinds.
                 // Only a committing entry advances the simulated live root.
-                if (matched[i].success) cursor[k] = sd.newRoot;
+                if (commits) cursor[k] = sd.newRoot;
             }
         }
         for (uint256 k = 0; k < n; k++) {
@@ -779,7 +852,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         address rollupsAddr,
         bytes memory expectedTable,
         bytes memory expectedSteps,
-        bool allowPartial
+        bool allowPartial,
+        bytes32[] memory eventlessKeys
     )
         internal
         view
@@ -841,7 +915,10 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // Matching posted content alone does not establish that a queued entry ran.
         Vm.EthGetLogs[] memory completionLogs =
             vm.eth_getLogs(block.number, block.number, rollupsAddr, new bytes32[](0));
-        if (!_verifyL1EntryFields(completionLogs, abi.encode(matched))) ok = false;
+        (bool eventlessOk, ExecutionEntry[] memory completionEntries) =
+            _filterEventlessL1(completionLogs, matched, eventlessKeys);
+        if (!eventlessOk) ok = false;
+        if (!_verifyL1EntryFields(completionLogs, abi.encode(completionEntries))) ok = false;
         if (allowPartial) {
             console.log("L1_CALLDATA_EXPECTED=%s", expected.length);
             console.log("L1_CALLDATA_MATCHED=[%s]", matchedIdx);
@@ -853,7 +930,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // Contiguity across OUR matched entries only — a live devnet batch also carries other
         // actors' entries (and possibly stacked alternatives, see docs/CAVEATS.md) whose
         // updates legitimately don't chain with ours.
-        if (!_checkPostedUpdateChain(matched, posted.length == matched.length)) ok = false;
+        if (!_checkPostedUpdateChain(matched, posted.length == matched.length, eventlessKeys)) ok = false;
         // structural invariants the contracts enforce on every posted entry
         for (uint256 i = 0; i < matched.length; i++) {
             if (!_checkPostedEntryStructure(matched[i], i)) ok = false;
@@ -861,7 +938,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         // live-root check against the REAL posted updates (exact roots, unlike the expected
         // blob's local placeholders); the full posted set lets the cursor follow other
         // actors' interleaved updates on the same rollup.
-        if (!_checkLiveRoots(rollupsAddr, posted, matched)) ok = false;
+        if (!_checkLiveRoots(rollupsAddr, posted, matched, eventlessKeys)) ok = false;
         if (ok) {
             console.log(
                 "PASS: posted batch calldata matches expected table (%s of %s entries, field-by-field)",
@@ -1079,7 +1156,8 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     }
 
     /// @dev Per-rollup update-chain contiguity across the MATCHED posted entries, in posting
-    ///      order: every update must continue from the previous one (pre == previous post).
+    ///      order: each update starts at the previous committed root. Failed entries and
+    ///      explicitly declared parent-reverted entries leave that root unchanged.
     ///      This is a composer convention for e2e batches, not a contract invariant — the
     ///      contracts only require `currentRoot == live root` at consumption, and
     ///      docs/CAVEATS.md blesses stacked alternatives that share a pre-state. It can only
@@ -1087,7 +1165,15 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
     ///      other-actor updates on the same rollup legitimately break our entries' chain,
     ///      so a mixed batch reports divergence as a NOTE. Live settlement is asserted
     ///      separately in _checkLiveRoots.
-    function _checkPostedUpdateChain(ExecutionEntry[] memory posted, bool pureBatch) internal pure returns (bool ok) {
+    function _checkPostedUpdateChain(
+        ExecutionEntry[] memory posted,
+        bool pureBatch,
+        bytes32[] memory eventlessKeys
+    )
+        internal
+        pure
+        returns (bool ok)
+    {
         ok = true;
         uint256 maxUpdates;
         for (uint256 i = 0; i < posted.length; i++) {
@@ -1097,6 +1183,7 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
         bytes32[] memory lastPost = new bytes32[](maxUpdates);
         uint256 n;
         for (uint256 i = 0; i < posted.length; i++) {
+            bool commits = posted[i].success && !_containsHash(eventlessKeys, posted[i].proxyEntryHash);
             for (uint256 d = 0; d < posted[i].rollupUpdates.length; d++) {
                 RollupUpdate memory sd = posted[i].rollupUpdates[d];
                 bool seen = false;
@@ -1119,12 +1206,12 @@ abstract contract VerifyHelpers is ComputeExpectedBase {
                             );
                         }
                     }
-                    if (posted[i].success) lastPost[k] = sd.newRoot;
+                    if (commits) lastPost[k] = sd.newRoot;
                     break;
                 }
                 if (!seen) {
                     rids[n] = sd.rollupId;
-                    lastPost[n] = posted[i].success ? sd.newRoot : sd.currentRoot;
+                    lastPost[n] = commits ? sd.newRoot : sd.currentRoot;
                     n++;
                 }
             }
@@ -1837,7 +1924,22 @@ contract VerifyL1SettlementTxsInRange is VerifyHelpers {
 // ══════════════════════════════════════════════════════════════════════
 
 contract VerifyL1BatchCalldata is VerifyHelpers {
-    function runLinked(string calldata path, bytes32 txHash, address rollups, bool allowPartial) external view {
+    function validateExpectations(bytes memory expectedTable, bytes32[] memory eventlessKeys) public pure {
+        if (eventlessKeys.length == 0) return;
+        require(expectedTable.length > 0, "eventless L1 keys require EXPECTED_L1_TABLE");
+        _validateEventlessL1(abi.decode(expectedTable, (ExecutionEntry[])), eventlessKeys);
+    }
+
+    function runLinked(
+        string calldata path,
+        bytes32 txHash,
+        address rollups,
+        bytes32[] memory eventlessKeys,
+        bool allowPartial
+    )
+        external
+        view
+    {
         string memory evidence = vm.readFile(path);
         bytes32[] memory hashes = vm.parseJsonBytes32Array(evidence, ".l1.hashes");
         bytes[] memory inputs = vm.parseJsonBytesArray(evidence, ".l1.inputs");
@@ -1850,6 +1952,7 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
                 vm.parseJsonBytes(evidence, ".expected.l1Table"),
                 vm.parseJsonBytes(evidence, ".expected.l1Steps"),
                 vm.parseJsonBytes(evidence, ".expected.l1StaticTable"),
+                eventlessKeys,
                 allowPartial
             );
             return;
@@ -1867,11 +1970,13 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
         bytes memory expectedTable,
         bytes memory expectedSteps,
         bytes memory expectedStaticTable,
+        bytes32[] memory eventlessKeys,
         bool allowPartial
     )
         public
         view
     {
+        validateExpectations(expectedTable, eventlessKeys);
         require(expectedTable.length > 0 || expectedStaticTable.length > 0, "expected table required");
         require(batchInput.length > 4, "batch input too short");
         bytes4 sel = bytes4(batchInput);
@@ -1910,7 +2015,9 @@ contract VerifyL1BatchCalldata is VerifyHelpers {
         }
         if (
             expectedTable.length > 0
-                && !_verifyL1PostedEntries(b.entries, rollups, expectedTable, expectedSteps, allowPartial)
+                && !_verifyL1PostedEntries(
+                    b.entries, rollups, expectedTable, expectedSteps, allowPartial, eventlessKeys
+                )
         ) {
             revert("Posted-batch calldata verification failed");
         }

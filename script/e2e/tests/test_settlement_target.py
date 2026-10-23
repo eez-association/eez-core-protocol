@@ -9,8 +9,8 @@ REGISTRY = "0x" + "a" * 40
 BATCHER = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
 RUNNER = (E2E / "lib/network-scenario.sh").read_text()
-CALLDATA_PHASE = RUNNER.split("_L1_TABLES_PRESENT=false", 1)[1].split("\n# ═", 1)[0]
-CALLDATA_PHASE = "_L1_TABLES_PRESENT=false" + CALLDATA_PHASE
+CALLDATA_PHASE = RUNNER[RUNNER.index("_EVENTLESS_L1_ABI_KEYS="):]
+CALLDATA_PHASE = CALLDATA_PHASE[:CALLDATA_PHASE.index('\nL2_BLOCKS="[]"')]
 
 
 class SettlementTargetTests(unittest.TestCase):
@@ -18,11 +18,13 @@ class SettlementTargetTests(unittest.TestCase):
         env = {
             "PATH": os.environ["PATH"], "TARGET": BATCHER, "BOUND": REGISTRY,
             "ROLLUPS": REGISTRY, "RPC": "fixture-rpc", "EEZ_POST_BATCHER": "",
+            "BASE": str(E2E / "lib/E2EBase.sh"),
             "HELPER": str(E2E / "lib/settlement-target.sh"),
             "EVIDENCE": str(E2E / "lib/network-evidence.sh"), **settings,
         }
         script = r"""
 set -euo pipefail
+source "$BASE"
 source "$HELPER"
 source "$EVIDENCE"
 NETWORK_VERIFY_DEADLINE=$(( $(date +%s) + 60 ))
@@ -124,7 +126,7 @@ verify_settlement_target fixture-rpc 123 "$TARGET" "$ROLLUPS"
                     self.assertIn("FAILED=false", result.stdout)
                     self.assertIn("Matched settlement tx 0xtx", result.stdout)
                     self.assertIn('DECODE script', result.stdout)
-                    self.assertIn(f"0xe4a480e400 {REGISTRY} 0x01 0x 0x false", result.stdout)
+                    self.assertIn(f"0xe4a480e400 {REGISTRY} 0x01 0x 0x [] false", result.stdout)
 
     def test_calldata_phase_forwards_expected_steps_in_both_directions(self):
         for chain in ("L1", "L2"):
@@ -132,7 +134,7 @@ verify_settlement_target fixture-rpc 123 "$TARGET" "$ROLLUPS"
                 result = self.run_check(phase=True, TRIGGER_CHAIN=chain, STEP_BLOB="0x1234abcd")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("FAILED=false", result.stdout)
-                self.assertIn(f"0xe4a480e400 {REGISTRY} 0x01 0x1234abcd 0x false", result.stdout)
+                self.assertIn(f"0xe4a480e400 {REGISTRY} 0x01 0x1234abcd 0x [] false", result.stdout)
 
     def test_rejected_or_missing_candidates_cannot_pass_in_either_direction(self):
         for settings in ({"BOUND": OTHER}, {"GETTER_FAIL": "1"}, {"INPUT": "0x"},

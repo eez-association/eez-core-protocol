@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
@@ -11,7 +11,6 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../../src/interfaces/IEEZL2.sol";
-import {Counter, SelfCallerWithRevert} from "../../../../../../test/mocks/CounterContracts.sol";
 import {ComputeExpectedBase} from "../../../shared/ComputeExpectedBase.sol";
 import {
     output,
@@ -39,7 +38,7 @@ import {
 //           ├─ try this.innerCall()
 //           │    ├─ counterProxy.increment() ─▶ consumes expectedOutgoingCalls[0] → 1 (cached)
 //           │    └─ revert("inner scope revert")   ◀── frame dies: cursor + hash UNWIND
-//           ├─ catch {}
+//           ├─ catch: check exact revert bytes and record reverted = true
 //           └─ lastResult = counterProxy.increment() ─▶ RE-consumes the SAME row → 1
 //    result: lastResult == 1; committed hash records exactly ONE nested frame
 //
@@ -58,6 +57,45 @@ import {
 
 uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
+
+contract Counter {
+    uint256 public counter;
+
+    function increment() external returns (uint256) {
+        return ++counter;
+    }
+}
+
+contract SelfCallerWithRevert {
+    Counter public immutable target;
+    bool public reverted;
+    uint256 public lastResult;
+
+    constructor(Counter target_) {
+        target = target_;
+    }
+
+    function execute() external {
+        require(!reverted, "one trigger only");
+        try this.innerCall() {
+            revert("inner frame unexpectedly committed");
+        } catch (bytes memory reason) {
+            require(
+                keccak256(reason) == keccak256(abi.encodeWithSignature("Error(string)", "inner scope revert")),
+                "wrong inner revert"
+            );
+            reverted = true;
+        }
+        lastResult = target.increment();
+        require(lastResult == 1, "wrong retry result");
+    }
+
+    function innerCall() external {
+        require(msg.sender == address(this), "self only");
+        require(target.increment() == 1, "wrong callback result");
+        revert("inner scope revert");
+    }
+}
 
 abstract contract RevertFromOtherChainActions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
@@ -327,6 +365,25 @@ contract ExecuteL2 is Script, RevertFromOtherChainActions {
         console.log("done");
         console.log("selfCallerL2.lastResult=%s (expected 1)", lastResult);
         vm.stopBroadcast();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VerifyNetwork — persisted state checks
+// ═══════════════════════════════════════════════════════════════════════
+
+contract VerifyNetwork is Script {
+    function run() external view {
+        require(Counter(vm.envAddress("COUNTER_L1")).counter() == 1, "unexpected L1 counter");
+        console.log("VERIFY_PASS L1 counter=1");
+    }
+}
+
+contract VerifyNetworkL2 is Script {
+    function run() external view {
+        SelfCallerWithRevert caller = SelfCallerWithRevert(vm.envAddress("SELF_CALLER_L2"));
+        require(caller.reverted() && caller.lastResult() == 1, "unexpected L2 result");
+        console.log("VERIFY_PASS L2 result");
     }
 }
 

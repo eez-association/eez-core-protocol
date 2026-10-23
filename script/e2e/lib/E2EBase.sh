@@ -30,19 +30,101 @@ trap cleanup EXIT
 # ── Extract KEY=VALUE from forge script output (returns "" if not found) ──
 extract() { echo "$1" | grep "$2=" | sed "s/.*$2=//" | awk '{print $1}' || true; }
 
+# Treat an ABI-encoded empty table like an omitted table on either chain.
+normalize_empty_table() {
+    local value="${1:-0x}" empty_table
+    if [[ "$value" != 0x ]]; then
+        empty_table=$(cast abi-encode 'table(uint256[])' '[]') || return 1
+        if [[ "${value,,}" == "$empty_table" ]]; then value=0x; fi
+    fi
+    printf '%s\n' "$value"
+}
+
+canonical_eventless_l1_keys() {
+    local value
+    if ! value=$(jq -ces '
+        if length == 1 and (.[0] | type == "array" and all(.[];
+            type == "string" and test("^0x[0-9a-fA-F]{64}$")))
+        then .[0] | map(ascii_downcase)
+        else error("expected one JSON array of bytes32 strings") end' <<< "$1" 2>/dev/null); then
+        echo 'ERROR: EVENTLESS_L1_CALL_HASHES must be a JSON array of quoted bytes32 hashes' >&2
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+# Preserve raw structured output; normalize_expected_outputs validates it once,
+# using the same rules as saved manifest values.
+extract_eventless_l1_keys() {
+    if ! grep -qE '^[[:space:]]*EVENTLESS_L1_CALL_HASHES=' <<< "$1"; then
+        printf '[]\n'
+        return 0
+    fi
+    sed -n 's/^[[:space:]]*EVENTLESS_L1_CALL_HASHES=//p' <<< "$1"
+}
+
+# Apply the same boundary rules to fresh output and restored manifest values.
+normalize_expected_outputs() {
+    EXPECTED_L1_STATIC_TABLE=$(normalize_empty_table "${EXPECTED_L1_STATIC_TABLE:-0x}") || return 1
+    EXPECTED_L2_STATIC_TABLE=$(normalize_empty_table "${EXPECTED_L2_STATIC_TABLE:-0x}") || return 1
+    EVENTLESS_L1_CALL_HASHES=$(canonical_eventless_l1_keys "${EVENTLESS_L1_CALL_HASHES-[]}") || return 1
+}
+
+# Forge's bytes32[] arguments omit the quotes retained in saved JSON.
+eventless_l1_abi_keys() {
+    local keys="${1:-[]}"
+    printf '%s\n' "${keys//\"/}"
+}
+
+# Use the same declaration rule when requiring and running a scenario contract.
+scenario_has_contract() {
+    grep -qE "^[[:blank:]]*contract[[:blank:]]+$2([[:space:]]|[{]|$)" "$1"
+}
+
+# Names of declared contracts starting with a prefix, in file order.
+scenario_contracts_with_prefix() {
+    sed -nE "s/^[[:blank:]]*contract[[:blank:]]+($2[A-Za-z0-9_]*)([[:space:]{].*)?\$/\1/p" "$1"
+}
+
+# Validate configuration before candidate discovery; no RPC or fork is needed.
+validate_l1_eventless_expectations() {
+    local table="$1" keys="$2" out
+    [[ "$keys" != '[]' ]] || return 0
+    keys=$(eventless_l1_abi_keys "$keys")
+    if ! out=$(forge script script/e2e/scenarios/shared/Verify.s.sol:VerifyL1BatchCalldata \
+        --sig 'validateExpectations(bytes,bytes32[])' "$table" "$keys" 2>&1); then
+        echo 'ERROR: invalid EVENTLESS_L1_CALL_HASHES configuration'
+        printf '%s\n' "$out"
+        return 1
+    fi
+}
+
+require_eventless_l1_state_check() {
+    [[ "${EVENTLESS_L1_CALL_HASHES:-[]}" != '[]' ]] || return 0
+    scenario_has_contract "$1" VerifyNetwork || {
+        echo 'ERROR: eventless L1 calls require VerifyNetwork to check persisted trigger/rollback evidence' >&2
+        return 1
+    }
+}
+
 # ── Start an anvil instance, return PID via variable name ──
-# Usage: start_anvil PORT PID_VAR [CHAIN_ID]
+# Usage: start_anvil PORT PID_VAR [CHAIN_ID] [BLOCK_GAS_LIMIT]
 # If CHAIN_ID is omitted, anvil's default (31337) is used.
 start_anvil() {
     local port="$1"
     local pid_var="$2"
     local chain_id="${3:-}"
+    local block_gas_limit="${4:-}"
     local chain_arg=()
     if [[ -n "$chain_id" ]]; then
         chain_arg=(--chain-id "$chain_id")
         echo "Starting anvil (port $port, chain-id $chain_id)..."
     else
         echo "Starting anvil (port $port)..."
+    fi
+    if [[ -n "$block_gas_limit" ]]; then
+        chain_arg+=(--gas-limit "$block_gas_limit")
+        echo "Local block gas limit: $block_gas_limit"
     fi
     anvil --port "$port" "${chain_arg[@]}" --silent &
     local pid=$!
@@ -122,7 +204,7 @@ deploy_contracts() {
     local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4"
     local l2_transactions="${5:-}"
     local contracts
-    contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}')
+    contracts=$(scenario_contracts_with_prefix "$sol" Deploy)
     [[ -z "$contracts" ]] && { echo "No Deploy* contracts found"; return 1; }
     while IFS= read -r contract; do
         local rpc label
@@ -229,14 +311,14 @@ _check_contiguous_nonces() {
 plan_job_deploys() {
     local sol="$1" l1_rpc="$2" l2_rpc="$3" pk="$4" out_dir="$5"
     local contracts l1_chain l2_chain trigger_contract has_compute sender
-    contracts=$(grep -oE '^contract Deploy[A-Za-z0-9_]* ' "$sol" | awk '{print $2}' | paste -sd,)
+    contracts=$(scenario_contracts_with_prefix "$sol" Deploy | paste -sd,)
     [[ -n "$contracts" ]] || { echo "No Deploy* contracts found"; return 1; }
-    if grep -qE '^contract ExecuteNetworkL2\b' "$sol"; then trigger_contract=ExecuteNetworkL2; else trigger_contract=ExecuteNetwork; fi
-    if grep -qE '^contract ComputeExpected\b' "$sol"; then
+    if scenario_has_contract "$sol" ExecuteNetworkL2; then trigger_contract=ExecuteNetworkL2; else trigger_contract=ExecuteNetwork; fi
+    if scenario_has_contract "$sol" ComputeExpected; then
         has_compute=true
     else
         has_compute=false
-        grep -qE '^contract VerifyNetwork(L2)?\b' "$sol" \
+        scenario_has_contract "$sol" VerifyNetwork || scenario_has_contract "$sol" VerifyNetworkL2 \
             || { echo "scenario has neither ComputeExpected nor VerifyNetwork*"; return 1; }
     fi
     sender=$(cast wallet address --private-key "$pk") || return 1
@@ -266,7 +348,7 @@ plan_job_deploys() {
     done
     local vars
     vars=$(echo "$out" | sed 's/^[[:space:]]*//' | grep -E '^[A-Z0-9_]+=' | grep -v '^==' || true)
-    [[ -n "$vars" ]] && { echo "$vars"; echo "$vars" >> "$out_dir/deploy-env.env"; }
+    [[ -n "$vars" ]] && { echo "$vars"; printf '%s\n' "$vars" | sed '/^\(EXPECTED_\|EVENTLESS_\|ABSENT_\)/d' >> "$out_dir/deploy-env.env"; }
 
     local json="$out_dir/broadcast/multi/dry-run/PrepareJob.s.sol-latest/run.json"
     [[ -f "$json" ]] || { echo "planned-tx JSON missing: $json"; find "$out_dir/broadcast" -name '*.json' 2>/dev/null; return 1; }
@@ -315,17 +397,19 @@ plan_job_deploys() {
     done
     printf '%s\n' "$out" > "$out_dir/compute.out"
     if $has_compute; then
-        extract_expected_outputs "$out"
+        extract_expected_outputs "$out" || return 1
+        require_eventless_l1_state_check "$sol" || return 1
+        validate_l1_eventless_expectations "$EXPECTED_L1_TABLE" "$EVENTLESS_L1_CALL_HASHES" || return 1
     else
         EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"; EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
         EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"; EXPECTED_L2_STATIC_TABLE="0x"
-        EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
+        EVENTLESS_L1_CALL_HASHES="[]"; EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
     fi
     E2E_MANIFEST_VERSION=2
     declare -p E2E_MANIFEST_VERSION _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
         EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
         EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EXPECTED_L2_STATIC_TABLE \
-        EVENTLESS_L2_HASHES ABSENT_L2_HASHES > "$out_dir/manifest.env"
+        EVENTLESS_L1_CALL_HASHES EVENTLESS_L2_HASHES ABSENT_L2_HASHES > "$out_dir/manifest.env"
 }
 
 # ── Strip forge execution traces ──
@@ -361,7 +445,7 @@ verify_l1_batch() { _run_verifier VerifyL1BatchInRange "$1" "run(uint256,uint256
 # matches EntryExecuted rolling hashes as keccak(0, rollingHash) entry identities.
 verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(uint256,uint256,address,bytes32[],bytes)" "$2" "$3" "$4" "$5" "${6:-0x}"; }
 
-# Usage: verify_l1_calldata RPC BLOCK ROLLUPS EXPECTED_TABLE EXPECTED_STEPS EXPECTED_STATIC_TABLE
+# Usage: verify_l1_calldata RPC BLOCK ROLLUPS EXPECTED_TABLE EXPECTED_STEPS EXPECTED_STATIC_TABLE [EVENTLESS_KEYS]
 # L1 input and completion check. A success=false entry unwinds its events with
 # its revert and a top-level static entry never emits one; committing entries
 # must have distinct completions matching the actual posted hashes.
@@ -371,15 +455,17 @@ verify_l1_zero_hash() { _run_verifier VerifyL1ZeroHashEntriesInRange "$1" "run(u
 # entries and static entries. Fills VERIFY_OUT; rc 1 when none matched.
 verify_l1_calldata() {
     local rpc="$1" block="$2" rollups="$3" table="${4:-0x}" steps="${5:-0x}" static_table="${6:-0x}"
-    local list tx input last="" rc
+    local list tx input last="" rc keys="${7:-[]}"
+    if ! VERIFY_OUT=$(validate_l1_eventless_expectations "$table" "$keys"); then return 1; fi
+    keys=$(eventless_l1_abi_keys "$keys")
     _run_verifier VerifyL1SettlementTxsInRange "$rpc" "run(uint256,uint256,address)" "$block" "$block" "$rollups" || return 1
     list=$(echo "$VERIFY_OUT" | grep -oE 'L1_BATCH_TX_CANDIDATE=0x[0-9a-fA-F]{64}' | cut -d= -f2 | sort -u)
     for tx in $list; do
         input=$(cast tx "$tx" input --rpc-url "$rpc" 2>/dev/null) || continue
         rc=0
         VERIFY_OUT=$(forge script script/e2e/scenarios/shared/Verify.s.sol:VerifyL1BatchCalldata --rpc-url "$rpc" \
-            --fork-block-number "$block" --sig "run(bytes,address,bytes,bytes,bytes,bool)" \
-            "$input" "$rollups" "$table" "$steps" "$static_table" false 2>&1) || rc=$?
+            --fork-block-number "$block" --sig "run(bytes,address,bytes,bytes,bytes,bytes32[],bool)" \
+            "$input" "$rollups" "$table" "$steps" "$static_table" "$keys" false 2>&1) || rc=$?
         if [[ $rc -eq 0 ]]; then
             VERIFY_OUT="NOTE: matched settlement tx $tx"$'\n'"$VERIFY_OUT"
             return 0
@@ -660,7 +746,7 @@ network_checked_nonce() { # sender, RPC, optional absolute deadline -> decimal n
 
 network_trigger_front() { # scenario -> required source front for classic network runs
     local front="${L1_FRONT:-}" name=L1_FRONT
-    if grep -q 'contract ExecuteNetworkL2 ' "$1"; then front="${L2_FRONT:-}"; name=L2_FRONT; fi
+    if scenario_has_contract "$1" ExecuteNetworkL2; then front="${L2_FRONT:-}"; name=L2_FRONT; fi
     [[ -n "$front" ]] || { echo "Network trigger preparation requires $name" >&2; return 1; }
     printf '%s\n' "$front"
 }
@@ -684,7 +770,7 @@ build_trigger_txs() {
     local sol="$1" nonce_mode="$2" front
     if [[ "$nonce_mode" == network ]]; then front=$(network_trigger_front "$sol") || return 1; fi
 
-    if grep -q 'contract ExecuteNetworkL2 ' "$sol"; then
+    if scenario_has_contract "$sol" ExecuteNetworkL2; then
         _TRIGGER_CHAIN="L2"
         _TRIGGER_CONTRACT="ExecuteNetworkL2"
         _TRIGGER_RPC="$L2_RPC"
@@ -750,11 +836,16 @@ build_trigger_txs() {
 # (recorded fold steps for the calldata verifier; "0x" = content-match only),
 # EXPECTED_L1_STATIC_TABLE (top-level static entries the L1 batch must carry,
 # matched from the posted calldata; "0x" = none),
+# EVENTLESS_L1_CALL_HASHES (quoted JSON call hashes erased by an L1 parent revert),
 # EVENTLESS_L2_HASHES (loaded entries whose enclosing frame's revert unwinds their
 # EntryExecuted event) and ABSENT_L2_HASHES; prints the field-level ON/OFF notes
 # and the scenario's EXPECTED SUMMARY block if present.
 extract_expected_outputs() {
     local out="$1"
+    EXPECTED_L1_STATIC_TABLE=$(extract "$out" "EXPECTED_L1_STATIC_TABLE")
+    EXPECTED_L2_STATIC_TABLE=$(extract "$out" "EXPECTED_L2_STATIC_TABLE")
+    EVENTLESS_L1_CALL_HASHES=$(extract_eventless_l1_keys "$out") || return 1
+    normalize_expected_outputs || return 1
 
     EXPECTED_L1_CALL_HASHES=$(extract "$out" "EXPECTED_L1_CALL_HASHES")
     echo "L1 expected calls: $EXPECTED_L1_CALL_HASHES"
@@ -774,8 +865,6 @@ extract_expected_outputs() {
     EXPECTED_L1_TABLE="${EXPECTED_L1_TABLE:-0x}"
     EXPECTED_L1_STEPS=$(extract "$out" "EXPECTED_L1_STEPS")
     EXPECTED_L1_STEPS="${EXPECTED_L1_STEPS:-0x}"
-    EXPECTED_L1_STATIC_TABLE=$(extract "$out" "EXPECTED_L1_STATIC_TABLE")
-    EXPECTED_L1_STATIC_TABLE="${EXPECTED_L1_STATIC_TABLE:-0x}"
     if [[ "$EXPECTED_L1_STATIC_TABLE" != "0x" ]]; then
         echo "L1 expected static table: $((${#EXPECTED_L1_STATIC_TABLE} / 2 - 1)) bytes (posted static entries matched from calldata)"
     fi
@@ -784,8 +873,6 @@ extract_expected_outputs() {
     else
         echo "NOTE: no EXPECTED_L1_TABLE printed - L1 field-level checks OFF (hash-only)"
     fi
-    EXPECTED_L2_STATIC_TABLE=$(extract "$out" "EXPECTED_L2_STATIC_TABLE")
-    EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}"
     EXPECTED_L2_TABLE=$(extract "$out" "EXPECTED_L2_TABLE")
     EXPECTED_L2_TABLE="${EXPECTED_L2_TABLE:-0x}"
     if [[ "$EXPECTED_L2_TABLE" != "0x" ]]; then
@@ -794,6 +881,9 @@ extract_expected_outputs() {
         echo "NOTE: no EXPECTED_L2_TABLE printed - L2 field-level checks OFF (hash-only)"
     fi
 
+    if [[ "$EVENTLESS_L1_CALL_HASHES" != "[]" ]]; then
+        echo "L1 eventless after enclosing rollback: $EVENTLESS_L1_CALL_HASHES"
+    fi
     EVENTLESS_L2_HASHES=$(extract "$out" "EVENTLESS_L2_HASHES")
     EVENTLESS_L2_HASHES="${EVENTLESS_L2_HASHES:-[]}"
     if [[ "$EVENTLESS_L2_HASHES" != "[]" ]]; then

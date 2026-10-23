@@ -106,7 +106,12 @@ RLP_ENCODED_TXS=(raw) COMPUTE_OUT=expected
 _TRIGGER_CHAIN=L1 _TX_COUNT=1 _HAS_COMPUTE=true _SENDER=sender
 EXPECTED_L1_CALL_HASHES=[] EXPECTED_L1_HASHES=[] EXPECTED_L2_CALL_HASHES=[] EXPECTED_L2_HASHES=[]
 EXPECTED_L1_TABLE=0x EXPECTED_L1_STEPS=0x EXPECTED_L1_STATIC_TABLE=0x EXPECTED_L2_TABLE=0x EXPECTED_L2_STATIC_TABLE=0x EVENTLESS_L2_HASHES=[] ABSENT_L2_HASHES=[]
+EVENTLESS_L1_CALL_HASHES='["0x1111111111111111111111111111111111111111111111111111111111111111"]'
 ''' + source[start:end], root)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('E2E_MANIFEST_VERSION="2"', (Path(root) / 'job/manifest.env').read_text())
             self.assertTrue((Path(root) / 'job/.deploys-done').exists())
+            restored = subprocess.run(
+                ['bash', '-c', 'source job/manifest.env; printf %s "$EVENTLESS_L1_CALL_HASHES"'],
+                cwd=root, capture_output=True, text=True, check=True)
+            self.assertEqual(restored.stdout, '["0x' + '1' * 64 + '"]')

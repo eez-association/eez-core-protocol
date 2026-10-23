@@ -20,6 +20,8 @@ The mechanism combines **precomputation, proof verification, and local execution
 3. L1's `EEZ` verifies those proofs. As entries are consumed, it executes the calls belonging on L1 and checks their observed results.
 4. Each L2's `EEZL2` executes tables supplied by its trusted node/system integration. It checks local execution against those tables, without verifying proofs itself.
 
+The reference deployment uses `ECDSAProofSystem`: an authorized signer attests the batch digest, and the contract verifies that signature. This provides signer authorization; it does not cryptographically prove EVM execution.
+
 A proxy call therefore resolves locally using prepared data. The two chains do not share an EVM call stack. Cross-chain consistency depends on the proofs and node integration connecting the local executions correctly. Solidity rollback supplies atomicity within an execution frame; it does not independently guarantee delivery of every posted entry across chains.
 
 For the formal model, see [Core Protocol Specification](CORE_PROTOCOL_SPEC.md). External obligations are collected in [Integration Boundaries](INTEGRATION_BOUNDARIES.md).
@@ -128,6 +130,13 @@ The key combines the request with the current rolling hash. A forward cursor con
 One L2 user transaction can produce several L2 proxy consumptions while being represented by one L1 L2Tx entry. Conversely, several completed top-level L1-to-L2 calls can require separate L2 deliveries. Nested activity stays inside its open frame. See the [E2E frame-coherence guide](../script/e2e/BUILD_AND_REVIEW_E2E_TESTS.md#the-frame-coherence-invariant).
 
 ### Loading and consuming on L2
+
+For an L2-originated user transaction, the trusted system calls `loadExecutionTable`
+to install the mutable and static tables, reset `entryIndex` to zero, and set
+`lastLoadBlock`. The user transaction then runs in the same L2 block. Its top-level
+outgoing proxy calls consume matching mutable entries, advancing the cursor after
+each successful consumption; nested calls use the active entry's expected-call
+table. Loading alone does not execute the user transaction.
 
 `executeIncomingCrossChainCall` loads its table and sets `lastLoadBlock` itself; it
 does not require an earlier same-block load. Entry zero's identity must match its

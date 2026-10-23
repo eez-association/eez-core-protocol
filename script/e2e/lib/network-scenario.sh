@@ -111,6 +111,7 @@ if [[ "$E2E_STAGE" == "verify" ]]; then
 [[ -n "${E2E_JOB_DIR:-}" && -f "$E2E_JOB_DIR/manifest.env" ]] || {
     echo "E2E_STAGE=verify needs E2E_JOB_DIR containing manifest.env"; exit 1; }
 # shellcheck disable=SC1091
+unset EVENTLESS_L1_CALL_HASHES
 source "$E2E_JOB_DIR/manifest.env"
 EXPECTED_L1_STATIC_TABLE="${EXPECTED_L1_STATIC_TABLE:-0x}"   # manifests written before the static table existed
 COMPUTE_OUT=$(cat "$E2E_JOB_DIR/compute.out")
@@ -123,8 +124,13 @@ EXPECTED_L2_STATIC_TABLE="${EXPECTED_L2_STATIC_TABLE:-0x}"
 if [[ -f "$E2E_JOB_DIR/deploy-env.env" ]]; then
     set -a
     # shellcheck disable=SC1091
-    source "$E2E_JOB_DIR/deploy-env.env"
+    # Old plan files also contain expectations. Keep the manifest authoritative.
+    source <(grep -vE '^[[:space:]]*(EXPECTED_|EVENTLESS_|ABSENT_)' "$E2E_JOB_DIR/deploy-env.env")
     set +a
+fi
+# Legacy manifests may omit this field; only then recover it from saved output.
+if [[ ! -v EVENTLESS_L1_CALL_HASHES ]]; then
+    EVENTLESS_L1_CALL_HASHES=$(extract_eventless_l1_keys "$COMPUTE_OUT") || exit 1
 fi
 # ComputeExpected is a read-only function of saved deployment addresses. Older
 # manifests predate static exports and the repeated-call fix; refresh them without
@@ -146,6 +152,9 @@ if $_REFRESH_EXPECTATIONS && $_HAS_COMPUTE; then
     fi
     EXPECTED_L2_CALL_HASHES="$_current"
 fi
+normalize_expected_outputs || exit 1
+require_eventless_l1_state_check "$SOL" || exit 1
+validate_l1_eventless_expectations "$EXPECTED_L1_TABLE" "$EVENTLESS_L1_CALL_HASHES" || exit 1
 # Pre-send block snapshot, recorded ONCE by the orchestrator right before its
 # send phase — it bounds every job's scan ranges (the per-run analogue of the
 # per-job *_BLOCK_BEFORE snapshots the full run takes).
@@ -228,10 +237,12 @@ build_trigger_txs "$SOL" network
 echo ""
 echo "====== Compute Expected Entries ======"
 _SENDER=$(cast wallet address --private-key "$PK")
-if grep -qE '^contract ComputeExpected\b' "$SOL"; then
+if scenario_has_contract "$SOL" ComputeExpected; then
     _HAS_COMPUTE=true
     COMPUTE_OUT=$(forge script "$SOL:ComputeExpected" --rpc-url "$RPC" --sender "$_SENDER" 2>&1)
-    extract_expected_outputs "$COMPUTE_OUT"
+    extract_expected_outputs "$COMPUTE_OUT" || exit 1
+    require_eventless_l1_state_check "$SOL" || exit 1
+    validate_l1_eventless_expectations "$EXPECTED_L1_TABLE" "$EVENTLESS_L1_CALL_HASHES" || exit 1
 else
     # Self-verifying scenario: a pure view-path flow (e.g. a top-level static
     # read) resolves without emitting events, so there are no expected entries
@@ -242,8 +253,8 @@ else
     EXPECTED_L1_CALL_HASHES="[]"; EXPECTED_L1_HASHES="[]"
     EXPECTED_L2_CALL_HASHES="[]"; EXPECTED_L2_HASHES="[]"
     EXPECTED_L1_TABLE="0x"; EXPECTED_L1_STEPS="0x"; EXPECTED_L1_STATIC_TABLE="0x"; EXPECTED_L2_TABLE="0x"; EXPECTED_L2_STATIC_TABLE="0x"
-    EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
-    if ! grep -qE '^contract VerifyNetwork(L2)? ' "$SOL"; then
+    EVENTLESS_L1_CALL_HASHES="[]"; EVENTLESS_L2_HASHES="[]"; ABSENT_L2_HASHES="[]"
+    if ! scenario_has_contract "$SOL" VerifyNetwork && ! scenario_has_contract "$SOL" VerifyNetworkL2; then
         echo "ERROR: scenario has neither ComputeExpected nor a VerifyNetwork/VerifyNetworkL2 contract - nothing would be verified"
         exit 1
     fi
@@ -259,7 +270,7 @@ if [[ "$E2E_STAGE" == "prepare" ]]; then
     E2E_MANIFEST_VERSION=2
     declare -p E2E_MANIFEST_VERSION _TRIGGER_CHAIN _TX_COUNT _HAS_COMPUTE _SENDER \
         EXPECTED_L1_CALL_HASHES EXPECTED_L1_HASHES EXPECTED_L2_CALL_HASHES EXPECTED_L2_HASHES \
-        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EXPECTED_L2_STATIC_TABLE EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
+        EXPECTED_L1_TABLE EXPECTED_L1_STEPS EXPECTED_L1_STATIC_TABLE EXPECTED_L2_TABLE EXPECTED_L2_STATIC_TABLE EVENTLESS_L1_CALL_HASHES EVENTLESS_L2_HASHES ABSENT_L2_HASHES \
         > "$E2E_JOB_DIR/manifest.env"
     touch "$E2E_JOB_DIR/.deploys-done"
     echo ""
@@ -338,7 +349,7 @@ cast() {
 while true; do
 NETWORK_BLOCKS=(); NETWORK_RECEIPTS=(); NETWORK_UNSTABLE=false
 VERIFY_STEP_OUT=()
-FAILED=false; L1_OK=true; L2_OK=true; L2_CALL_OK=true; RETRY_OUT=""
+FAILED=false; L1_OK=true; L2_OK=true; L2_ABSENT_OK=true; L2_CALL_OK=true; RETRY_OUT=""
 L1_BATCH_TXS=()
 _CORR_TX=""; _CORR_BLOCK=""; _CORR_LAST=""; _CORRELATIONS='[]'
 _Batch_RC=0
@@ -467,6 +478,8 @@ fi
 #      range scan emitted, and (L2 trigger) re-scan the growing range for
 #      late settlements until the deadline.
 # ══════════════════════════════════════════════
+# Canonical saved JSON becomes Forge's unquoted bytes32[] argument at this boundary.
+_EVENTLESS_L1_ABI_KEYS=$(eventless_l1_abi_keys "${EVENTLESS_L1_CALL_HASHES:-[]}")
 _L1_TABLES_PRESENT=false
 [[ "$EXPECTED_L1_TABLE" != "0x" || "$EXPECTED_L1_STATIC_TABLE" != "0x" ]] && _L1_TABLES_PRESENT=true
 if $_HAS_COMPUTE && [[ -n "${EXPECTED_L1_CALL_HASHES:-}" && "$EXPECTED_L1_CALL_HASHES" != "[]" && "$EXPECTED_L1_TABLE" == "0x" ]]; then
@@ -572,10 +585,10 @@ if [[ "${FAILED:-false}" != true && -n "${L1_BATCH_TX:-}" ]] && $_L1_TABLES_PRES
                 continue
             fi
             [[ -z "$_TARGET_CHECK" ]] || echo "NOTE: $_TARGET_CHECK"
-            _batch_args=(--sig "run(bytes,address,bytes,bytes,bytes,bool)"
-                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" "$_CD_PARTIAL")
+            _batch_args=(--sig "run(bytes,address,bytes,bytes,bytes,bytes32[],bool)"
+                "$_BATCH_INPUT" "$ROLLUPS" "$EXPECTED_L1_TABLE" "$EXPECTED_L1_STEPS" "$EXPECTED_L1_STATIC_TABLE" "$_EVENTLESS_L1_ABI_KEYS" "$_CD_PARTIAL")
             if $NETWORK_LINKS_ACTIVE; then
-                _batch_args=(--sig "runLinked(string,bytes32,address,bool)" "$E2E_LINK_EVIDENCE" "$_TX" "$ROLLUPS" "$_CD_PARTIAL")
+                _batch_args=(--sig "runLinked(string,bytes32,address,bytes32[],bool)" "$E2E_LINK_EVIDENCE" "$_TX" "$ROLLUPS" "$_EVENTLESS_L1_ABI_KEYS" "$_CD_PARTIAL")
             fi
             if BATCH_VERIFY=$(forge script script/e2e/scenarios/shared/Verify.s.sol:VerifyL1BatchCalldata \
                 --rpc-url "$RPC" --fork-block-number "$((_BATCH_BLOCK))" "${_batch_args[@]}" 2>&1); then
@@ -721,36 +734,7 @@ if [[ -z "${EXPECTED_L2_HASHES:-}" ]]; then
     L2_OK=false
 elif [[ "$EXPECTED_L2_HASHES" == "[]" && "${EXPECTED_L2_STATIC_TABLE:-0x}" == 0x && "${NETWORK_LINK_HAS_L2_TABLES:-false}" != true ]]; then
     echo "No L2 entry events expected (lookup, terminal revert, or an eventless static pool)"
-    # ABSENT_L2_HASHES: call keys that must have left NO trace on L2 — the active proof
-    # that a lookup (a call that reverts on L2, a top-level static read) was never
-    # delivered. Correlated blocks have already been checked against the chain.
-    # Without correlation retain the grace period; pin the scan's upper block
-    # so a replacement invalidates a negative result as well as a positive one.
-    if [[ -n "${ABSENT_L2_HASHES:-}" && "$ABSENT_L2_HASHES" != "[]" ]]; then
-        _ABS_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
-        if [[ "$_CORRELATIONS" == '[]' ]]; then
-            _grace="${L2_ABSENT_GRACE:-60}"
-            _left=$(network_time_left) || exit 1
-            (( _grace > _left )) && _grace="$_left"
-            sleep "$_grace"
-        fi
-        _abs_header=$(network_header L2 latest) || {
-            network_retry "L2 absence-check head unavailable" || exit 1
-            continue
-        }
-        _ABS_TO=$(( $(jq -r .number <<< "$_abs_header") ))
-        if ! network_track_block L2 "$_ABS_TO" "$(jq -r .hash <<< "$_abs_header")"; then
-            network_retry "L2 absence-check head changed" || exit 1
-            continue
-        fi
-        echo ""
-        echo "====== Verify L2 Absent (keys must not appear in blocks $_ABS_FROM..$_ABS_TO) ======"
-        run_verify_step "L2 ABSENT" full verify_l2_absent "$L2_RPC" "$_ABS_FROM" "$_ABS_TO" "$MANAGER_L2" "$ABSENT_L2_HASHES"
-        L2_OK=$VERIFY_STEP_OK
-    else
-        echo "SKIP: no absent keys to verify"
-        L2_OK=true
-    fi
+    L2_OK=true
 elif [[ "$L2_BLOCKS" == "[]" ]]; then
     echo "ERROR: No L2 blocks found"
     FAILED=true
@@ -758,6 +742,33 @@ elif [[ "$L2_BLOCKS" == "[]" ]]; then
 else
     run_verify_step "L2 TABLE" defer verify_l2_table "$L2_RPC" "$L2_BLOCKS" "$MANAGER_L2" "$EXPECTED_L2_HASHES" "$EXPECTED_L2_TABLE" "$EVENTLESS_L2_HASHES"
     L2_OK=$VERIFY_STEP_OK
+fi
+
+# ABSENT_L2_HASHES is independent of expected deliveries and static tables.
+# Scan the whole bounded range, including transactions omitted from node links.
+# Without correlation retain the grace period; pin the upper block so a reorg
+# invalidates a negative result as well as a positive one.
+if [[ -n "${ABSENT_L2_HASHES:-}" && "$ABSENT_L2_HASHES" != "[]" ]]; then
+    _ABS_FROM="${L2_BLOCK_BEFORE:-${L2_BLOCK:-0}}"
+    if [[ "$_CORRELATIONS" == '[]' ]]; then
+        _grace="${L2_ABSENT_GRACE:-60}"
+        _left=$(network_time_left) || exit 1
+        (( _grace > _left )) && _grace="$_left"
+        sleep "$_grace"
+    fi
+    _abs_header=$(network_header L2 latest) || {
+        network_retry "L2 absence-check head unavailable" || exit 1
+        continue
+    }
+    _ABS_TO=$(( $(jq -r .number <<< "$_abs_header") ))
+    if ! network_track_block L2 "$_ABS_TO" "$(jq -r .hash <<< "$_abs_header")"; then
+        network_retry "L2 absence-check head changed" || exit 1
+        continue
+    fi
+    echo ""
+    echo "====== Verify L2 Absent (keys must not appear in blocks $_ABS_FROM..$_ABS_TO) ======"
+    run_verify_step "L2 ABSENT" full verify_l2_absent "$L2_RPC" "$_ABS_FROM" "$_ABS_TO" "$MANAGER_L2" "$ABSENT_L2_HASHES"
+    L2_ABSENT_OK=$VERIFY_STEP_OK
 fi
 
 # ══════════════════════════════════════════════
@@ -791,7 +802,7 @@ fi
 # ══════════════════════════════════════════════
 _run_verify_network() {  # $1=contract $2=rpc $3=chain label
     local _VN_NAME="$1" _VN_RPC="$2" _VN_LABEL="$3"
-    grep -qE "^contract $_VN_NAME " "$SOL" || return 0
+    scenario_has_contract "$SOL" "$_VN_NAME" || return 0
     echo ""
     echo "====== Scenario Self-Verification ($_VN_NAME, $_VN_LABEL) ======"
     if retry_until_deadline "${VERIFY_NETWORK_TIMEOUT:-60}" 5 \
@@ -864,8 +875,12 @@ if $FAILED; then
     if ! $L2_OK; then
         echo ""
         echo "--- L2 TABLE DIAGNOSTICS ---"
-        # L2_OK is shared by the table check and the absent check — print whichever ran.
-        echo "${VERIFY_STEP_OUT[L2 TABLE]:-${VERIFY_STEP_OUT[L2 ABSENT]:-no L2 table verification output}}" | strip_traces
+        echo "${VERIFY_STEP_OUT[L2 TABLE]:-no L2 table verification output}" | strip_traces
+    fi
+    if ! $L2_ABSENT_OK; then
+        echo ""
+        echo "--- L2 ABSENT DIAGNOSTICS ---"
+        echo "${VERIFY_STEP_OUT[L2 ABSENT]:-no L2 absence verification output}" | strip_traces
     fi
     if ! $L2_CALL_OK; then
         echo ""

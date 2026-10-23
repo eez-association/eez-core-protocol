@@ -397,13 +397,67 @@ Every scenario must satisfy all of these; they are what the suite is audited aga
    comment saying what pins that side instead: trigger assertions locally, the posted
    table on the network).
 
-6. **Structure.** One shared `<Scenario>Actions` abstract builds BOTH sides' hashes
+6. **Structure.** Keep the application contracts, trigger logic, calldata builders and
+   scenario-specific assertions in the scenario file, even when another scenario repeats
+   a small amount of code. Include only the behavior that scenario exercises; avoid
+   shared multi-scenario actors or flags that switch between different test flows.
+   The call-pattern family is the exception: keep `CallPatternHelpers.sol` and
+   `test/mocks/CallPatternContracts.sol` shared across those scenarios. Other generic
+   hash/table utilities also remain shared. One local `<Scenario>Actions` abstract
+   builds BOTH sides' hashes
    from the same env addresses (no inlined duplicate `crossChainCallHash` calls that
    can drift); each contract role deployed on exactly one chain; the file header
    carries the ASCII call-flow schema (topology, one tree per side, final state) —
    copy the shape from `revert/L1_to_L2/nestedCallRevert`. Create proxies with the
    shared `getOrCreateProxy` helper, not inline try/create/catch (the inline form
    breaks forge's simulation replay when the proxy already exists).
+
+## Eventless L1 verification
+
+A successful cross-chain call erased by its L1 parent may export
+`EVENTLESS_L1_CALL_HASHES` as a JSON array of quoted bytes32 call hashes.
+Whitespace inside the array is accepted. Every key must identify exactly one
+successful entry in the whole expected L1 table, including split batches.
+Zero, duplicate, unknown, failed-entry, and ambiguous keys are configuration
+errors; runners validate them before settlement discovery and do not retry them
+as missing batches. Mixed committed/erased repetitions of one call hash need
+occurrence-based expectations and are not supported by this opt-in.
+
+The root checks support independently rolled-back calls: each erased entry
+observes the current committed root and leaves it unchanged for the next entry.
+They do not reconstruct parent frames. Multiple calls that temporarily advance
+roots inside one parent and are then erased together are unsupported; declaring
+their keys does not supply the missing rollback boundaries.
+
+Runners pass the keys explicitly to the calldata verifier. Staged runs retain
+manifest expectations; deployment outputs cannot replace them. Legacy manifests
+without the field recover it from saved `compute.out`. Static tables encoded as
+empty arrays are normalized to `0x` on extraction and manifest reload on both
+chains; they do not require a posting or delivery by themselves.
+With an expected L1 table, the calldata verifier owns completion checks; local
+event discovery checks call identities without demanding completions for erased
+rows. When a scenario declares no `EXPECTED_L1_CALL_HASHES`, local zero-hash
+checks still enforce its `EXPECTED_L1_HASHES` even when a table is present, so
+an incomplete table cannot discard those expectations. Scenarios that mix proxy
+calls with zero-hash entries rely on the calldata verifier for the zero-hash
+entries. Scenarios without a table retain event-only verification.
+
+The verifier still checks posted content, rolling hashes, and root continuity.
+Erased entries must have neither consumption nor completion events and must not
+advance the root cursor. `ABSENT_L2_HASHES` independently checks nondelivery,
+including scenarios that also expect committed deliveries or static tables.
+Network absence checks scan the bounded L2 block range even when exact transaction
+links are available, so omitted deliveries cannot evade the absence check.
+These checks do not prove that the trigger attempted the erased call: the runner
+also requires `VerifyNetwork`, whose assertions must check persisted evidence
+from the intended trigger and exact return/revert bytes. A generic caught-error
+flag that also accepts missing tables or an unrelated revert is insufficient.
+Local runs execute both available state verifiers after mining, including
+`VerifyNetworkL2` when no L2 delivery occurred; a failed assertion fails the run.
+
+Where no delivery exists, a fork-only producer call can establish the cached
+result for the fixture. Restore its state afterward and describe it as a fixture
+check, not as evidence of remote execution or live settlement.
 
 ## Cross-chain mapping checklist
 
