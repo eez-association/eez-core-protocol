@@ -79,7 +79,7 @@
 #   E2E_TIMING_BASELINE  timings.csv of a reference run: run phases more than
 #                     TIMING_REGRESSION_PCT (default 20) % slower are reported
 #   FUND_ETH / FLOOR_ETH / SOURCE_PK / MULTISEND_BATCH / DEVNET_ENV  as in
-#   parallel.sh.
+#   parallel.sh, except SOURCE_PK falls back to PK before Anvil #2.
 #
 # Run dir: tmp/e2e-staged-net/<ts>/ — jobs.csv, wallets.csv, snapshot.env,
 # timings.csv (run phases per attempt) / job-timings.csv (per-job plan / prepare
@@ -135,7 +135,8 @@ DEFAULT_SOURCE_PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab
 # ══════════════════════════════════════════════════════════════════════════════
 
 FUND_ETH="${FUND_ETH:-$DEFAULT_FUND_ETH}"
-SOURCE_PK="${SOURCE_PK:-$DEFAULT_SOURCE_PK}"
+# Same key as setup.sh funds: SOURCE_PK, then PK, then Anvil #2.
+SOURCE_PK="${SOURCE_PK:-${PK:-$DEFAULT_SOURCE_PK}}"
 PREPARE_PARALLEL="${PREPARE_PARALLEL:-40}"
 PREPARE_JOB_TIMEOUT="${PREPARE_JOB_TIMEOUT:-300}"
 SEND_WORKERS="${SEND_WORKERS:-80}"

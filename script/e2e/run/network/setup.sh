@@ -11,11 +11,12 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     exit 0
 fi
 [[ $# -le 2 ]] || { echo "Expected an ETH amount and optional env file" >&2; exit 1; }
-for tool in cast python3 timeout; do
+for tool in cast python3 timeout jq bc flock; do
     command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }
 done
 ENV_FILE="${2:-${DEVNET_ENV:-chain.env}}"
 source "$SCRIPT_DIR/../../lib/network-config.sh"
+source "$SCRIPT_DIR/../../lib/network-fees.sh"
 load_network_config "${2:-${DEVNET_ENV:-}}" || exit 1
 SETUP_PK="${SOURCE_PK:-${PK:-}}"
 for name in L1_RPC L1_FRONT L2_RPC ROLLUPS SETUP_PK; do
@@ -34,11 +35,36 @@ done
 rpc_cast() { timeout "$RPC_TIMEOUT" cast "$@"; }
 send_and_check() {
     local label="$1" receipt_rpc="$2"; shift 2
-    local hash receipt status deadline
+    local hash
     log "$label: submitting transaction..."
     if ! hash=$(rpc_cast send "$@" --async); then
         fail "$label: submission failed or timed out. Check the wallet nonce before retrying; submission may have reached the RPC."
     fi
+    wait_receipt "$label" "$receipt_rpc" "$hash"
+}
+# The bridge is a cross-chain trigger: it needs an eez_quoteFee quote for its exact intent.
+publish_raw() { rpc_cast publish "$2" --async --rpc-url "$1"; }
+send_quoted_and_check() { # label, front, read RPC, target, value in wei
+    local label="$1" front="$2" read_rpc="$3" target="$4" value="$5"
+    local chain_id nonce front_nonce gas_price raw hash
+    network_fee_cache_pair "$front" "$read_rpc" "" chain_id || fail "$label: front/read chain ID check failed"
+    nonce=$(rpc_cast nonce "$ADDR" --block pending --rpc-url "$read_rpc") || fail "$label: nonce query failed"
+    front_nonce=$(rpc_cast nonce "$ADDR" --block pending --rpc-url "$front") || fail "$label: front nonce query failed"
+    (( front_nonce <= nonce )) || nonce=$front_nonce
+    gas_price=$(rpc_cast gas-price --rpc-url "$read_rpc") || fail "$label: gas price query failed"
+    # Offline legacy candidate; the quote supplies the gas and gas price actually signed.
+    raw=$(cast mktx "$target" 0x --legacy --value "${value}wei" --gas-limit 500000 \
+        --gas-price "$gas_price" --chain-id "$chain_id" --nonce "$nonce" --private-key "$SETUP_PK") ||
+        fail "$label: could not build the candidate transaction"
+    log "$label: quoting fee and submitting transaction (nonce $nonce)..."
+    hash=$(EEZ_FRESH_SEND=1 network_send_quoted_trigger "$raw" "$SETUP_PK" "$front" "$read_rpc" \
+        "tmp/e2e-network/setup-fee-quote-$nonce.json" publish_raw) ||
+        fail "$label: quote/sign/send failed. Check the wallet nonce before retrying; submission may have reached the RPC."
+    wait_receipt "$label" "$read_rpc" "$hash"
+}
+wait_receipt() { # label, receipt RPC, hash
+    local label="$1" receipt_rpc="$2" hash="$3"
+    local receipt status deadline
     [[ "$hash" =~ ^0x[[:xdigit:]]{64}$ ]] || fail "$label: unexpected transaction hash: $hash"
     LAST_TX="$hash"
     log "$label: sent (tx $hash)"
@@ -79,8 +105,7 @@ if [[ "$MISSING" != 0 ]]; then
         log "Proxy already deployed: $PROXY"
     fi
     log "Bridging $(cast from-wei "$MISSING") ETH to the source wallet on L2..."
-    send_and_check "Bridge" "$L1_RPC" "$PROXY" --value "$MISSING" --gas-limit 500000 \
-        --private-key "$SETUP_PK" --rpc-url "$L1_FRONT"
+    send_quoted_and_check "Bridge" "$L1_FRONT" "$L1_RPC" "$PROXY" "$MISSING"
     DEADLINE=$((SECONDS + BRIDGE_TIMEOUT))
     while true; do
         BALANCE=$(rpc_cast balance "$ADDR" --rpc-url "$L2_RPC") || fail "L2 balance query failed (bridge tx $LAST_TX). Check delivery before rerunning."
