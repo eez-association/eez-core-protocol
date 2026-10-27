@@ -44,6 +44,16 @@ Returns `version`, `eezContracts` and `supportedNetworks`. Contract fields are
 `eezRegistryAddress`, `eezRollupManagerAddress` and `eezL2Address`.
 Network fields `eezL1` and `eezL2` are Ethereum chain IDs, not EEZ rollup IDs.
 Use discovery instead of copying deployment addresses from an older run.
+The network harness then calls `ROLLUP_ID()` on `eezL2Address` through the L2
+read RPC. It requires a nonzero uint64 ID and checks that L1 registry
+`rollups(id).rollupContract` equals `eezRollupManagerAddress`. This validated ID
+is exported as canonical decimal `L2_ROLLUP_ID`; an explicit decimal value must
+agree numerically. These reads retry transient transport failures at most three
+times (20 seconds per attempt, one-second delays); invalid identities fail immediately.
+The expected manager assertion is bound to the validated network configuration
+when inherited by workers.
+The rollup ID is distinct from
+`supportedNetworks.eezL2`, which is the Ethereum chain ID.
 
 ## eez_quoteFee
 

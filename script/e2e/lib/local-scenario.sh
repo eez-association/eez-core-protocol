@@ -24,7 +24,6 @@ L2_RPC="http://localhost:$L2_PORT"
 # so forge's broadcast/<basename>/<chain_id>/ directories don't collide.
 L1_CHAIN_ID="${L1_CHAIN_ID:-}"
 L2_CHAIN_ID="${L2_CHAIN_ID:-}"
-export L2_ROLLUP_ID=1
 SYSTEM_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 # Stress fixtures may need room for Forge's padded delivery gas limits.
@@ -39,7 +38,7 @@ start_anvil "$L1_PORT" L1_PID "$L1_CHAIN_ID"
 start_anvil "$L2_PORT" L2_PID "$L2_CHAIN_ID" "$LOCAL_L2_BLOCK_GAS_LIMIT"
 
 # 2. Deploy infrastructure
-deploy_infra "$L1_RPC" "$PK" "$L2_RPC" "$L2_ROLLUP_ID" "$SYSTEM_ADDRESS"
+deploy_infra "$L1_RPC" "$PK" "$L2_RPC" "" "$SYSTEM_ADDRESS"
 export ROLLUPS
 export PROOF_SYSTEM
 export L2_MANAGER

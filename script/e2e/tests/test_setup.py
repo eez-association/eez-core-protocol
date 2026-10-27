@@ -17,7 +17,7 @@ class SetupTests(RpcFixture):
         self.env_file.write_text(self.env_file.read_text().replace(
             "fake-key", "0x" + "01".zfill(64)))  # Public test-only key.
 
-    def run_setup(self, initial_balance, reject_quote=False):
+    def run_setup(self, initial_balance, reject_quote=False, proxy_deployed=True):
         script = r'''
 forge() { echo UNEXPECTED_FORGE >> "$CALLS"; return 99; }
 timeout() { shift; "$@"; }
@@ -44,8 +44,12 @@ cast() {
             if [[ "$*" == *l1* ]]; then echo 1000000000000000000; return; fi
             if [[ -f "$BALANCE_COUNT" ]]; then echo 100
             else touch "$BALANCE_COUNT"; echo "$INITIAL_BALANCE"; fi ;;
-        call) echo 0x5555555555555555555555555555555555555555 ;;
-        code) echo "CODE $*" >> "$CALLS"; echo 0x6000 ;;
+        call)
+            case "$*" in
+                *'ROLLUP_ID()(uint64)'*|*'rollups(uint64)'*) _fixture_rollup_call "$@" ;;
+                *) echo "PROXY $*" >> "$CALLS"; echo 0x5555555555555555555555555555555555555555 ;;
+            esac ;;
+        code) echo "CODE $*" >> "$CALLS"; if [[ "$PROXY_DEPLOYED" == 1 ]]; then echo 0x6000; else echo 0x; fi ;;
         send) echo "SEND $*" >> "$CALLS"; printf '0x%064d\n' 1 ;;
         receipt) echo '{"status":"0x1"}' ;;
         *) echo "UNEXPECTED_CAST $*" >> "$CALLS"; return 99 ;;
@@ -57,7 +61,7 @@ bash "$1" 0.1 "$2"
         result = self.run_bash(script, self.runner, self.env_file,
                                BALANCE_COUNT=str(self.root / "balance-count"),
                                INITIAL_BALANCE=str(initial_balance),
-                               REJECT_QUOTE=str(int(reject_quote)), TMPDIR=str(self.root))
+                               REJECT_QUOTE=str(int(reject_quote)), PROXY_DEPLOYED=str(int(proxy_deployed)), TMPDIR=str(self.root))
         if reject_quote:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("eez_quoteFee failed", result.stderr)
@@ -93,6 +97,7 @@ bash "$1" 0.1 "$2"
         log = self.run_setup(40)
         self.assertEqual(log.count("PUBLISH"), 1)
         self.assertIn("eez_quoteFee", log)
+        self.assertIn(" 2 --rpc-url l1", log)
         self.assertIn("--rpc-url front1", log)
         self.assertNotIn("SEND", log)
         published = json.loads((self.root / "published.json").read_text())
@@ -106,6 +111,13 @@ bash "$1" 0.1 "$2"
         evidence = json.loads((self.root / "tmp/e2e-network/setup-fee-quote-0.json").read_text())
         self.assertEqual(evidence["feeSource"], "composer")
         self.assertEqual(evidence["intent"]["from"].lower(), published["signer"].lower())
+
+    def test_creates_proxy_for_discovered_rollup_before_bridging(self):
+        log = self.run_setup(40, proxy_deployed=False)
+        self.assertIn("createCrossChainProxy(address,uint64)", log)
+        creation = next(line for line in log.splitlines() if line.startswith("SEND "))
+        self.assertIn(" 2 --private-key", creation)
+        self.assertEqual(log.count("PUBLISH"), 1)
 
     def test_quote_failure_stops_bridge_submission(self):
         log = self.run_setup(40, reject_quote=True)

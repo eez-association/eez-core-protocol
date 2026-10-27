@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 // E2E_EXCLUDE_FROM_ALL: Explicit selection only pending live validation.
 
 import {Script, console} from "forge-std/Script.sol";
@@ -115,8 +117,6 @@ contract StaticThenNestedWritesActor {
 
 /// @dev Both chain views of this L1-originating flow use the same call identities.
 abstract contract StaticThenNestedWritesActions is Script {
-    uint64 internal constant L2_ID = 1;
-
     struct Tables {
         ExecutionEntry[] l1;
         L2ExecutionEntry[] l2;
@@ -137,29 +137,29 @@ abstract contract StaticThenNestedWritesActions is Script {
         return abi.encodeCall(StaticThenNestedWritesActor.writeCallback, ());
     }
 
-    function _readHash(address actorL1, address actorL2) internal pure returns (bytes32) {
-        return crossChainCallHash(true, actorL1, 0, actorL2, L2_ID, 0, _readData());
+    function _readHash(address actorL1, address actorL2) internal view returns (bytes32) {
+        return crossChainCallHash(true, actorL1, 0, actorL2, e2eRollupId(), 0, _readData());
     }
 
-    function _remoteHash(address actorL1, address actorL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, actorL1, 0, actorL2, L2_ID, 0, _remoteData());
+    function _remoteHash(address actorL1, address actorL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, actorL1, 0, actorL2, e2eRollupId(), 0, _remoteData());
     }
 
-    function _callbackHash(address actorL1, address actorL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, actorL2, L2_ID, actorL1, 0, 0, _callbackData());
+    function _callbackHash(address actorL1, address actorL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, actorL2, e2eRollupId(), actorL1, 0, 0, _callbackData());
     }
 
-    function _updates() internal pure returns (RollupUpdate[] memory updates) {
+    function _updates() internal view returns (RollupUpdate[] memory updates) {
         updates = new RollupUpdate[](1);
         updates[0] = RollupUpdate({
-            rollupId: L2_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("static-then-nested-writes-final"),
             etherDelta: 0
         });
     }
 
-    function _l1Steps(address actorL1, address actorL2) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address actorL1, address actorL2) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](1);
         // L1 executes only the callback inside the mutable source entry.
         steps[0] = new HashStep[](2);
@@ -167,7 +167,7 @@ abstract contract StaticThenNestedWritesActions is Script {
         steps[0][1] = RollingHashBuilder.stepCallEnd(true, abi.encode(uint256(1)));
     }
 
-    function _l1Entries(address actorL1, address actorL2) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address actorL1, address actorL2) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory updates = _updates();
         bytes32 key = _remoteHash(actorL1, actorL2);
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
@@ -176,7 +176,7 @@ abstract contract StaticThenNestedWritesActions is Script {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: actorL2,
-            sourceRollupId: L2_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: actorL1,
             value: 0,
             data: _callbackData()
@@ -186,7 +186,7 @@ abstract contract StaticThenNestedWritesActions is Script {
         entries[0] = ExecutionEntry({
             rollupUpdates: updates,
             proxyEntryHash: key,
-            destinationRollupId: L2_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.foldSteps(seed, _l1Steps(actorL1, actorL2)[0]),
@@ -195,7 +195,7 @@ abstract contract StaticThenNestedWritesActions is Script {
         });
     }
 
-    function _l2Entries(address actorL1, address actorL2) internal pure returns (L2ExecutionEntry[] memory entries) {
+    function _l2Entries(address actorL1, address actorL2) internal view returns (L2ExecutionEntry[] memory entries) {
         bytes32 key = _remoteHash(actorL1, actorL2);
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         // Only the mutable remote frame is delivered; the static read is a lookup.
@@ -242,19 +242,19 @@ abstract contract StaticThenNestedWritesActions is Script {
         bytes memory predictedRead
     )
         internal
-        pure
+        view
         returns (StaticExecutionEntry[] memory entries)
     {
         require(keccak256(predictedRead) == keccak256(abi.encode(uint256(0))), "initial producer result");
         ExpectedRootPerRollup[] memory roots = new ExpectedRootPerRollup[](1);
-        roots[0] = ExpectedRootPerRollup({rollupId: L2_ID, root: _updates()[0].currentRoot});
+        roots[0] = ExpectedRootPerRollup({rollupId: e2eRollupId(), root: _updates()[0].currentRoot});
         entries = new StaticExecutionEntry[](1);
         entries[0] = StaticExecutionEntry({
             expectedRoots: roots,
             proxyEntryHash: _readHash(actorL1, actorL2),
             l2ToL1Calls: noCalls(),
             rollingHash: bytes32(0),
-            destinationRollupId: L2_ID,
+            destinationRollupId: e2eRollupId(),
             success: true,
             returnData: predictedRead // Raw bytes from the actual L2 producer during deployment.
         });
@@ -298,7 +298,7 @@ contract DeployConfigure is Script {
     function run() external {
         vm.startBroadcast();
         StaticThenNestedWritesActor(vm.envAddress("ACTOR_L1"))
-            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), 1));
+            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), e2eRollupId()));
         vm.stopBroadcast();
     }
 }
@@ -323,15 +323,15 @@ contract Execute is StaticThenNestedWritesActions {
         Tables memory t = _expected();
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
         StaticThenNestedWritesActor actor = StaticThenNestedWritesActor(vm.envAddress("ACTOR_L1"));
-        (,, uint256 balance) = manager.rollups(1);
+        (,, uint256 balance) = manager.rollups(e2eRollupId());
         ProofSystemBatchPerVerificationEntries memory batch =
-            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), 1, t.l1, t.l1Static);
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), e2eRollupId(), t.l1, t.l1Static);
         vm.startBroadcast();
         manager.postAndVerifyBatch(batch);
         require(actor.run() == 3, "source return bytes");
         actor.assertSource();
         vm.stopBroadcast();
-        (, bytes32 root, uint256 afterBalance) = manager.rollups(1);
+        (, bytes32 root, uint256 afterBalance) = manager.rollups(e2eRollupId());
         require(root == t.l1[0].rollupUpdates[0].newRoot, "wrong final root");
         require(balance == afterBalance, "unexpected ether delta");
         console.log("done: L1 state, exact results and root checked");

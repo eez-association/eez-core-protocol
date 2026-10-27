@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -45,7 +47,6 @@ import {
 // Static resolvers cannot create the callback proxy:
 // _processStaticL2ToL1Calls cannot deploy a proxy inside its static frame.
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract TopLevelStaticReentrantCounterActions {
@@ -57,13 +58,13 @@ abstract contract TopLevelStaticReentrantCounterActions {
 
     /// Static read key: `EEZ.staticCrossChainCall` folds isStatic = true, source = the proxy's
     /// caller (the reader) at MAINNET, target = (ForwarderL2, L2), value 0, callGas 0.
-    function _staticKey(address counterL2, address readerL1) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL1, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _counterCallData());
+    function _staticKey(address counterL2, address readerL1) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL1, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _counterCallData());
     }
 
     /// L2 callback helper -> L1 producer: the prediction and real callback share this preimage.
-    function _callbackKey(address producerL1, address callbackL2) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(callbackL2, L2_ROLLUP_ID, producerL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
+    function _callbackKey(address producerL1, address callbackL2) internal view returns (bytes32) {
+        return crossChainCallHashStatic(callbackL2, e2eRollupId(), producerL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
     }
 
     /// The ONE top-level static entry, keyed to the reader (the key folds the proxy caller):
@@ -78,11 +79,11 @@ abstract contract TopLevelStaticReentrantCounterActions {
         bytes memory predicted
     )
         internal
-        pure
+        view
         returns (StaticExecutionEntry[] memory entries)
     {
         ExpectedRootPerRollup[] memory pins = new ExpectedRootPerRollup[](1);
-        pins[0] = ExpectedRootPerRollup({rollupId: L2_ROLLUP_ID, root: keccak256("l2-initial-state")});
+        pins[0] = ExpectedRootPerRollup({rollupId: e2eRollupId(), root: keccak256("l2-initial-state")});
 
         entries = new StaticExecutionEntry[](1);
         entries[0] = StaticExecutionEntry({
@@ -90,20 +91,20 @@ abstract contract TopLevelStaticReentrantCounterActions {
             proxyEntryHash: _staticKey(counterL2, readerL1),
             l2ToL1Calls: _returnCalls(counterL1, callbackL2),
             rollingHash: RollingHashBuilder.appendStatic(bytes32(0), true, predicted),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             success: true,
             returnData: predicted
         });
     }
 
-    function _returnCalls(address counterL1, address callbackL2) internal pure returns (L2ToL1Call[] memory calls) {
+    function _returnCalls(address counterL1, address callbackL2) internal view returns (L2ToL1Call[] memory calls) {
         calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
             gas: 0,
             revertNextNCalls: 0,
             isStatic: true,
             sourceAddress: callbackL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _counterCallData()
@@ -141,13 +142,13 @@ contract DeployL2 is Script {
 contract Deploy2 is Script {
     function run() external {
         vm.startBroadcast();
-        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("COUNTER_L2"), L2_ROLLUP_ID);
+        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("COUNTER_L2"), e2eRollupId());
         address callbackProxy =
-            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), L2_ROLLUP_ID);
+            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), e2eRollupId());
         require(callbackProxy.code.length == 0, "callback source proxy must start undeployed");
         output("CALLBACK_PROXY", callbackProxy);
         StaticRoundTripReader reader = new StaticRoundTripReader(
-            proxy, vm.envAddress("ROLLUPS"), vm.envAddress("CALLBACK_L2"), L2_ROLLUP_ID, true
+            proxy, vm.envAddress("ROLLUPS"), vm.envAddress("CALLBACK_L2"), e2eRollupId(), true
         );
         output("COUNTER_PROXY", proxy);
         output("READER_L1", address(reader));
@@ -197,7 +198,7 @@ contract Execute is Script, TopLevelStaticReentrantCounterActions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     new ExecutionEntry[](0),
                     _staticEntries(
                         vm.envAddress("COUNTER_L1"),
@@ -213,7 +214,7 @@ contract Execute is Script, TopLevelStaticReentrantCounterActions {
         require(reader.lastRead() == predictedValue, "static read returned wrong value");
         require(reader.counter() == 1, "reader did not run");
         address callbackProxy =
-            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), L2_ROLLUP_ID);
+            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), e2eRollupId());
         require(callbackProxy.code.length != 0, "callback proxy not deployed");
         require(
             keccak256(reader.missingProxyError())
@@ -221,7 +222,7 @@ contract Execute is Script, TopLevelStaticReentrantCounterActions {
             "missing-proxy evidence mismatch"
         );
         require(Counter(vm.envAddress("COUNTER_L1")).counter() == predictedValue, "L1 producer changed");
-        (, bytes32 root,) = EEZ(vm.envAddress("ROLLUPS")).rollups(L2_ROLLUP_ID);
+        (, bytes32 root,) = EEZ(vm.envAddress("ROLLUPS")).rollups(e2eRollupId());
         require(root == keccak256("l2-initial-state"), "lookup moved L2 root");
         vm.stopBroadcast();
 
@@ -263,7 +264,7 @@ contract VerifyNetwork is Script {
         require(reader.lastRead() == predictedValue, "static read returned wrong value");
         require(reader.counter() == 1, "reader did not run");
         address callbackProxy =
-            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), L2_ROLLUP_ID);
+            IEEZ(vm.envAddress("ROLLUPS")).computeCrossChainProxyAddress(vm.envAddress("CALLBACK_L2"), e2eRollupId());
         require(callbackProxy.code.length != 0, "callback proxy not deployed");
         require(
             keccak256(reader.missingProxyError())

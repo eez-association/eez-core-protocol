@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -57,7 +59,6 @@ import {
 //  printed for later inspection.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 uint256 constant NUM_TXS = 3;
 
@@ -69,11 +70,10 @@ abstract contract CounterMultiTxActions {
 
     /// @dev The proxy-entry hash of the inbound cross-chain call (CAP L1 -> Counter L2). Same on
     ///      both sides and for EVERY transaction — the calls are byte-identical.
-    function _callHash(address counterL2, address counterAndProxy) internal pure returns (bytes32) {
-        return
-            crossChainCallHash(
-                false, counterAndProxy, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData()
-            );
+    function _callHash(address counterL2, address counterAndProxy) internal view returns (bytes32) {
+        return crossChainCallHash(
+            false, counterAndProxy, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementCallData()
+        );
     }
 
     /// @dev Placeholder root after the n-th increment; n = 0 is the registered initial root.
@@ -91,7 +91,7 @@ abstract contract CounterMultiTxActions {
         address counterAndProxy
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         bytes32 ah = _callHash(counterL2, counterAndProxy);
@@ -100,13 +100,13 @@ abstract contract CounterMultiTxActions {
         for (uint256 n = 1; n <= NUM_TXS; n++) {
             RollupUpdate[] memory deltas = new RollupUpdate[](1);
             deltas[0] = RollupUpdate({
-                rollupId: L2_ROLLUP_ID, currentRoot: _rootAfter(n - 1), newRoot: _rootAfter(n), etherDelta: 0
+                rollupId: e2eRollupId(), currentRoot: _rootAfter(n - 1), newRoot: _rootAfter(n), etherDelta: 0
             });
 
             entries[n - 1] = ExecutionEntry({
                 rollupUpdates: deltas,
                 proxyEntryHash: ah,
-                destinationRollupId: L2_ROLLUP_ID,
+                destinationRollupId: e2eRollupId(),
                 l2ToL1Calls: noCalls(),
                 expectedL1ToL2Calls: noNestedActions(),
                 rollingHash: RollingHashBuilder.entryBegin(deltas, ah),
@@ -125,7 +125,7 @@ abstract contract CounterMultiTxActions {
         uint256 n
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry memory)
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -162,7 +162,7 @@ abstract contract CounterMultiTxActions {
         uint256 n
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         entries = new L2ExecutionEntry[](1);
@@ -175,7 +175,7 @@ abstract contract CounterMultiTxActions {
         address counterAndProxy
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         entries = new L2ExecutionEntry[](NUM_TXS);
@@ -211,7 +211,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, e2eRollupId());
 
         CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
 
@@ -267,7 +267,7 @@ contract Execute is Script, CounterMultiTxActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, capAddr), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(counterL2Addr, capAddr), noStaticEntries()
                 )
             );
         for (uint256 n = 1; n <= NUM_TXS; n++) {

@@ -183,7 +183,7 @@ FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
 # that chain's nonces and contract addresses. Fresh runs record the resolved
 # endpoints in <run-dir>/devnet.env; --resume / --verify-only reload them, so
 # forgetting DEVNET_ENV later cannot point the run at a different devnet.
-_NET_VARS=(L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2 EEZ_POST_BATCHER)
+_NET_VARS=(L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2 EEZ_POST_BATCHER L2_ROLLUP_ID EEZ_ROLLUP_MANAGER)
 _save_run_network() {  # $1=run dir
     local v
     { echo "# resolved from $DEVNET_ENV"; for v in "${_NET_VARS[@]}"; do printf '%s=%q\n' "$v" "${!v:-}"; done; } > "$1/devnet.env"

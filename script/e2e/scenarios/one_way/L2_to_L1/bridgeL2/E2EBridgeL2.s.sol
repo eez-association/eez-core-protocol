@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -38,7 +40,6 @@ import {
 //  does (`bridge` deposits the same 0.00001 ether and sorts first).
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 // Kept small on purpose — the scenario is meant to run on real testnets too.
 uint256 constant BRIDGE_AMOUNT = 0.00001 ether;
@@ -62,19 +63,19 @@ contract BridgeReceiverL1 {
 
 abstract contract BridgeL2Actions {
     /// Identity of the release call as executed ON L1.
-    function _l1CallHash(address receiverL1, address senderL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, senderL2, L2_ROLLUP_ID, receiverL1, MAINNET_ROLLUP_ID, BRIDGE_AMOUNT, "");
+    function _l1CallHash(address receiverL1, address senderL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, senderL2, e2eRollupId(), receiverL1, MAINNET_ROLLUP_ID, BRIDGE_AMOUNT, "");
     }
 
     /// L2-outgoing key the source L2 matches the bridge call with.
-    function _l2EntryKey(address receiverL1, address senderL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(senderL2, L2_ROLLUP_ID, receiverL1, MAINNET_ROLLUP_ID, BRIDGE_AMOUNT, "");
+    function _l2EntryKey(address receiverL1, address senderL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(senderL2, e2eRollupId(), receiverL1, MAINNET_ROLLUP_ID, BRIDGE_AMOUNT, "");
     }
 
     /// The SOURCE entry alice's bridge call consumes on L2 (no incoming calls).
     function _l2Entries(address receiverL1, address senderL2)
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 proxyEntryHash = _l2EntryKey(receiverL1, senderL2);
@@ -90,14 +91,14 @@ abstract contract BridgeL2Actions {
     }
 
     /// The L2 user tx as ONE immediate zero-hash L2Tx entry releasing the escrow on L1.
-    function _l1Entries(address receiverL1, address senderL2) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address receiverL1, address senderL2) internal view returns (ExecutionEntry[] memory entries) {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
             gas: 0,
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: senderL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: receiverL1,
             value: BRIDGE_AMOUNT,
             data: ""
@@ -105,7 +106,7 @@ abstract contract BridgeL2Actions {
 
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge-l2"),
             etherDelta: -int192(int256(BRIDGE_AMOUNT))
@@ -119,7 +120,7 @@ abstract contract BridgeL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -195,7 +196,7 @@ contract Execute is Script, BridgeL2Actions {
         vm.startBroadcast();
         rollups.postAndVerifyBatch(
             immediateSingleRollupBatch(
-                vm.envAddress("PROOF_SYSTEM"), L2_ROLLUP_ID, _l1Entries(receiverL1, senderL2), noStaticEntries()
+                vm.envAddress("PROOF_SYSTEM"), e2eRollupId(), _l1Entries(receiverL1, senderL2), noStaticEntries()
             )
         );
 
@@ -212,18 +213,18 @@ contract Execute is Script, BridgeL2Actions {
         string memory amount = vm.toString(bytes32(BRIDGE_AMOUNT));
         vm.rpc("anvil_setBalance", string.concat('["', registry, '","', amount, '"]'));
 
-        bytes32 escrowSlot = bytes32(uint256(keccak256(abi.encode(uint256(L2_ROLLUP_ID), ROLLUPS_MAPPING_SLOT))) + 2);
+        bytes32 escrowSlot = bytes32(uint256(keccak256(abi.encode(uint256(e2eRollupId()), ROLLUPS_MAPPING_SLOT))) + 2);
         vm.rpc("anvil_setStorageAt", string.concat('["', registry, '","', vm.toString(escrowSlot), '","', amount, '"]'));
 
-        (,, uint256 escrow) = rollups.rollups(L2_ROLLUP_ID);
+        (,, uint256 escrow) = rollups.rollups(e2eRollupId());
         require(escrow == BRIDGE_AMOUNT, "escrow cheat missed - EEZ storage layout moved?");
         require(address(rollups).balance == BRIDGE_AMOUNT, "balance cheat did not reach the node");
     }
 }
 
 /// @title ExecuteNetworkL2 — network mode: user tx fields for the L2 bridge trigger.
-/// @dev PRECONDITION: rollup 1 must already hold escrow >= BRIDGE_AMOUNT on the devnet
-///      (ether in the registry + `rollups(1).etherBalance`) — run `one_way/L1_to_L2/bridge`
+/// @dev PRECONDITION: the discovered L2 rollup must already hold escrow >= BRIDGE_AMOUNT on the devnet
+///      (ether in the registry + `rollups(L2_ROLLUP_ID).etherBalance`) — run `one_way/L1_to_L2/bridge`
 ///      first if unsure; a full sequential run satisfies it automatically.
 /// Env: BRIDGE_SENDER_L2
 contract ExecuteNetworkL2 is Script {

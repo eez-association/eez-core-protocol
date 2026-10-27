@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -70,13 +72,12 @@ import {
 //    L2: CAP2.counter == 2, CAP2.targetCounter == 2,  CounterL2.counter == 1
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract MCNActions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
     ///      The third entry is seed-only: its counter executes entirely on L2.
-    function _l1Steps(address counterL1, address cap2L2) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address counterL1, address cap2L2) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](3);
         steps[0] = new HashStep[](2);
         steps[0][0] = RollingHashBuilder.stepCallBegin(_l1TopCallCounterL1(counterL1, cap2L2));
@@ -97,18 +98,18 @@ abstract contract MCNActions {
 
     // ── L1 proxy-entry hashes (sourceRollup=MAINNET; the trigger lives on L1) ──
 
-    function _l1HashCAP2(address cap2L2, address app) internal pure returns (bytes32) {
-        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, cap2L2, L2_ROLLUP_ID, 0, _incrementProxyData());
+    function _l1HashCAP2(address cap2L2, address app) internal view returns (bytes32) {
+        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, cap2L2, e2eRollupId(), 0, _incrementProxyData());
     }
 
-    function _l1HashCounterL2(address counterL2, address app) internal pure returns (bytes32) {
-        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _l1HashCounterL2(address counterL2, address app) internal view returns (bytes32) {
+        return crossChainCallHash(false, app, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementData());
     }
 
     /// @dev L1 top-level call hash: CAP2 (logically on L2) reentrant-calls CounterL1 on L1.
     ///      Executes ON L1, so targetRollupId = MAINNET; source = CAP2 @ L2.
-    function _l1TopCallCounterL1(address counterL1, address cap2L2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, cap2L2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+    function _l1TopCallCounterL1(address counterL1, address cap2L2) internal view returns (bytes32) {
+        return crossChainCallHash(false, cap2L2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     // ── L2 hashes ──
@@ -116,8 +117,8 @@ abstract contract MCNActions {
     /// @dev Inner reentrant (outgoing) hash on L2: CAP2 (on L2) calls CounterL1 MAINNET — the call
     ///      LEAVES the L2, so it keys with the L2-outgoing hash (callGas=0; devnet deploys
     ///      EEZL2 with useGasLeft=false). The L2 manager forces sourceRollupId = ROLLUP_ID (=L2).
-    function _l2InnerHashCounterL1(address counterL1, address cap2L2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(cap2L2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+    function _l2InnerHashCounterL1(address counterL1, address cap2L2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(cap2L2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     // ── L1 entries (3) ──
@@ -129,7 +130,7 @@ abstract contract MCNActions {
         address app
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         // Inner call shared by entries [0] and [1]: CAP2 (logically on L2) reentrant-calls
@@ -139,7 +140,7 @@ abstract contract MCNActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: cap2L2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _incrementData()
@@ -151,21 +152,21 @@ abstract contract MCNActions {
 
         RollupUpdate[] memory d0 = new RollupUpdate[](1);
         d0[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-mcn-step-1"),
             etherDelta: 0
         });
         RollupUpdate[] memory d1 = new RollupUpdate[](1);
         d1[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-mcn-step-1"),
             newRoot: keccak256("l2-mcn-step-2"),
             etherDelta: 0
         });
         RollupUpdate[] memory d2 = new RollupUpdate[](1);
         d2[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-mcn-step-2"),
             newRoot: keccak256("l2-mcn-step-3"),
             etherDelta: 0
@@ -184,7 +185,7 @@ abstract contract MCNActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: d0,
             proxyEntryHash: outerCAP2,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls0,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh0,
@@ -198,7 +199,7 @@ abstract contract MCNActions {
         entries[1] = ExecutionEntry({
             rollupUpdates: d1,
             proxyEntryHash: outerCAP2, // same hash, sequential consumption
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls1,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh1,
@@ -210,7 +211,7 @@ abstract contract MCNActions {
         entries[2] = ExecutionEntry({
             rollupUpdates: d2,
             proxyEntryHash: outerCounterL2,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(d2, outerCounterL2),
@@ -228,7 +229,7 @@ abstract contract MCNActions {
         address app
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         entries = new L2ExecutionEntry[](3);
@@ -245,7 +246,7 @@ abstract contract MCNActions {
         uint256 n
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory table)
     {
         table = new L2ExecutionEntry[](1);
@@ -255,7 +256,7 @@ abstract contract MCNActions {
     /// @dev 1-entry table for the CounterL2 delivery.
     function _l2TableForCounter(address counterL2, address app)
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory table)
     {
         table = new L2ExecutionEntry[](1);
@@ -272,7 +273,7 @@ abstract contract MCNActions {
         uint256 n
     )
         private
-        pure
+        view
         returns (L2ExecutionEntry memory)
     {
         bytes32 entryHash = _l1HashCAP2(cap2L2, app);
@@ -316,7 +317,7 @@ abstract contract MCNActions {
     }
 
     /// @dev CounterL2 delivery entry: simple inbound increment, no nesting.
-    function _l2CounterEntry(address counterL2, address app) private pure returns (L2ExecutionEntry memory) {
+    function _l2CounterEntry(address counterL2, address app) private view returns (L2ExecutionEntry memory) {
         bytes32 entryHash = _l1HashCounterL2(counterL2, app);
 
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -397,8 +398,8 @@ contract Deploy2 is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address cap2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), cap2, L2_ROLLUP_ID);
-        address counterL2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), counterL2, L2_ROLLUP_ID);
+        address cap2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), cap2, e2eRollupId());
+        address counterL2ProxyL1 = getOrCreateProxy(IEEZ(address(rollups)), counterL2, e2eRollupId());
 
         output("CAP2_PROXY_L1", cap2ProxyL1);
         output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
@@ -428,7 +429,7 @@ contract Execute is Script, MCNActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, cap2, counterL2, app), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(counterL1, cap2, counterL2, app), noStaticEntries()
                 )
             );
 

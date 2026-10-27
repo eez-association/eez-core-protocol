@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "./E2EHelpers.sol";
+
 import {RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call, ExecutionEntry} from "../../../../src/interfaces/IEEZ.sol";
 import {
     CrossChainCall,
@@ -13,7 +15,7 @@ import {RollingHashBuilder as RH, HashStep, crossChainCallHash, expectedL1toL2Ha
 
 /// @dev Both views use the SAME calldata, actors, outcomes and call hashes.
 /// Scenario-specific tables and expectations live beside their Execute contracts.
-abstract contract CallPatternHelpers {
+abstract contract CallPatternHelpers is E2ERollupConfig {
     struct L2OriginTables {
         ExecutionEntry[] l1;
         L2Entry[] l2;
@@ -82,12 +84,12 @@ abstract contract CallPatternHelpers {
         return abi.encodeWithSelector(Actor.PriceUnavailable.selector, uint256(0));
     }
 
-    function _l2ToL1CallHash(address a1, address a2, bytes memory data, bool isStatic) internal pure returns (bytes32) {
-        return crossChainCallHash(isStatic, a2, 1, a1, 0, 0, data);
+    function _l2ToL1CallHash(address a1, address a2, bytes memory data, bool isStatic) internal view returns (bytes32) {
+        return crossChainCallHash(isStatic, a2, _e2eRollupId(), a1, 0, 0, data);
     }
 
-    function _l1ToL2CallHash(address a1, address a2, bytes memory data, bool isStatic) internal pure returns (bytes32) {
-        return crossChainCallHash(isStatic, a1, 0, a2, 1, 0, data);
+    function _l1ToL2CallHash(address a1, address a2, bytes memory data, bool isStatic) internal view returns (bytes32) {
+        return crossChainCallHash(isStatic, a1, 0, a2, _e2eRollupId(), 0, data);
     }
 
     function _l1Call(
@@ -98,10 +100,10 @@ abstract contract CallPatternHelpers {
         uint16 span
     )
         internal
-        pure
+        view
         returns (L2ToL1Call memory)
     {
-        return L2ToL1Call(span, isStatic, 0, a2, 1, a1, 0, data);
+        return L2ToL1Call(span, isStatic, 0, a2, _e2eRollupId(), a1, 0, data);
     }
 
     function _l2Call(
@@ -124,7 +126,7 @@ abstract contract CallPatternHelpers {
         bool isStatic
     )
         internal
-        pure
+        view
         returns (L2ToL1Call[] memory calls)
     {
         calls = new L2ToL1Call[](1);
@@ -145,11 +147,11 @@ abstract contract CallPatternHelpers {
         calls[0] = _l2Call(a1, a2, data, isStatic);
     }
 
-    function _newL1Entry(address a1, address a2) internal pure returns (L1EntryBuilder memory h) {
+    function _newL1Entry(address a1, address a2) internal view returns (L1EntryBuilder memory h) {
         h.a1 = a1;
         h.a2 = a2;
         h.updates = new RollupUpdate[](1);
-        h.updates[0] = RollupUpdate(1, 0, keccak256("l2-initial-state"), keccak256("call-pattern-final"));
+        h.updates[0] = RollupUpdate(_e2eRollupId(), 0, keccak256("l2-initial-state"), keccak256("call-pattern-final"));
         h.calls = new L2ToL1Call[](12);
         h.rows = new ExpectedL1ToL2Call[](8);
         h.steps = new HashStep[](32);
@@ -170,7 +172,7 @@ abstract contract CallPatternHelpers {
         uint16 span
     )
         internal
-        pure
+        view
         returns (bytes32)
     {
         h.calls[h.callCount++] = _l1Call(h.a1, h.a2, data, isStatic, span);
@@ -190,7 +192,7 @@ abstract contract CallPatternHelpers {
         uint256 result
     )
         internal
-        pure
+        view
     {
         _beginL1Call(h, data, isStatic, span);
         _endL1Call(h, true, _result(result));
@@ -207,14 +209,14 @@ abstract contract CallPatternHelpers {
         bytes memory result
     )
         internal
-        pure
+        view
     {
         h.rows[h.nestedCount++] = ExpectedL1ToL2Call(
             expectedL1toL2Hash(_l1ToL2CallHash(h.a1, h.a2, data, isStatic), fire), callbacks, subHash, success, result
         );
     }
 
-    function _finishL1Entry(L1EntryBuilder memory h, L2OriginTables memory t) internal pure {
+    function _finishL1Entry(L1EntryBuilder memory h, L2OriginTables memory t) internal view {
         L2ToL1Call[] memory calls = new L2ToL1Call[](h.callCount);
         ExpectedL1ToL2Call[] memory rows = new ExpectedL1ToL2Call[](h.nestedCount);
         HashStep[] memory steps = new HashStep[](h.stepCount);
@@ -228,7 +230,7 @@ abstract contract CallPatternHelpers {
             steps[i] = h.steps[i];
         }
         t.l1 = new ExecutionEntry[](1);
-        t.l1[0] = ExecutionEntry(h.updates, bytes32(0), calls, rows, h.rh, 1, true, "");
+        t.l1[0] = ExecutionEntry(h.updates, bytes32(0), calls, rows, h.rh, _e2eRollupId(), true, "");
         t.steps = new HashStep[][](1);
         t.steps[0] = steps;
     }
@@ -247,7 +249,7 @@ abstract contract CallPatternHelpers {
         bytes memory callbackResult
     )
         internal
-        pure
+        view
         returns (L2Entry memory e)
     {
         e.proxyEntryHash = _l2ToL1CallHash(a1, a2, data, false);
@@ -270,7 +272,7 @@ abstract contract CallPatternHelpers {
         uint256 result
     )
         internal
-        pure
+        view
         returns (L2Entry memory)
     {
         return _l2SourceEntry(a1, a2, data, true, _result(result), "", false, true, "");
@@ -287,7 +289,7 @@ abstract contract CallPatternHelpers {
         bytes memory result
     )
         internal
-        pure
+        view
         returns (L2Static memory)
     {
         return L2Static(cursor, _l2ToL1CallHash(a1, a2, data, true), callbacks, callbackHash, success, result);

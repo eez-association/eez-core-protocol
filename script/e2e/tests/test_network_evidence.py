@@ -51,7 +51,7 @@ def receipt(chain,tx):
         incoming="0xfadc5c8956d764aece83e7d2607b05b34acd6c3787d9891a4d155a74a4d52642"
         consumed="0xa17dc82da628b280737819918ee433b966773121ff974c081d8cbac4c6199d7d"
         if chain==1 and tx==h(1) and direction=="L1" and mode!="links_source_only":
-            logs=[{"address":"0x"+"a"*40,"topics":[consumed,h(50),h(1)],"logIndex":"0x0"}]
+            logs=[{"address":"0x"+"a"*40,"topics":[consumed,h(50),h(2)],"logIndex":"0x0"}]
             if mode=="links_multi": logs.append({**logs[0],"logIndex":"0x1"})
         if chain==2 and tx in (h(21),h(22)) and direction=="L1":
             logs=[{"address":"0x"+"b"*40,"topics":[incoming,h(50)],"logIndex":"0x0"}]
@@ -74,6 +74,11 @@ if name=="date":
 if name=="sleep":
     (root/"clock").write_text(str(clock+int(args[0]))); sys.exit()
 if name=="cast":
+    if args[0]=="call":
+        if args[2]=="ROLLUP_ID()(uint64)": print(2); sys.exit()
+        if args[2]=="rollups(uint64)(address,bytes32,uint256)":
+            assert args[3]=="2", args
+            print("0x"+"c"*40); print(h(0)); print(0); sys.exit()
     if args[0]=="abi-encode":
         assert args[1:]==["table(uint256[])", "[]"],args
         print("0x"+format(32,"064x")+format(0,"064x")); sys.exit()

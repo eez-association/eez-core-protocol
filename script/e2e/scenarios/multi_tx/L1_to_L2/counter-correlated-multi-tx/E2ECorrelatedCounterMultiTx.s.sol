@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ, RollupUpdate, ExecutionEntry} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -37,7 +39,6 @@ import {
 // the same block. Network mode repeats the parameterless trigger with consecutive
 // nonces, as in counter-multi-tx; the composer supplies actual tables and roots.
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 uint256 constant NUM_TXS = 3;
 
@@ -79,8 +80,8 @@ abstract contract CorrelatedCounterMultiTxActions {
         return abi.encodeCall(CorrelatedCounter.receiveCount, (input));
     }
 
-    function _callHash(address target, address caller, uint256 input) internal pure returns (bytes32) {
-        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, target, L2_ROLLUP_ID, 0, _callData(input));
+    function _callHash(address target, address caller, uint256 input) internal view returns (bytes32) {
+        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, target, e2eRollupId(), 0, _callData(input));
     }
 
     function _returnData(uint256 input) internal pure returns (bytes memory) {
@@ -92,18 +93,18 @@ abstract contract CorrelatedCounterMultiTxActions {
         return keccak256(abi.encode("l2-correlated-counter-multi-tx", count));
     }
 
-    function _l1Entries(address target, address caller) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address target, address caller) internal view returns (ExecutionEntry[] memory entries) {
         entries = new ExecutionEntry[](NUM_TXS);
         for (uint256 i; i < NUM_TXS; ++i) {
             RollupUpdate[] memory updates = new RollupUpdate[](1);
             updates[0] = RollupUpdate({
-                rollupId: L2_ROLLUP_ID, currentRoot: _rootAfter(i), newRoot: _rootAfter(i + 1), etherDelta: 0
+                rollupId: e2eRollupId(), currentRoot: _rootAfter(i), newRoot: _rootAfter(i + 1), etherDelta: 0
             });
             bytes32 key = _callHash(target, caller, i);
             entries[i] = ExecutionEntry({
                 rollupUpdates: updates,
                 proxyEntryHash: key,
-                destinationRollupId: L2_ROLLUP_ID,
+                destinationRollupId: e2eRollupId(),
                 l2ToL1Calls: noCalls(),
                 expectedL1ToL2Calls: noNestedActions(),
                 rollingHash: RollingHashBuilder.entryBegin(updates, key),
@@ -113,7 +114,7 @@ abstract contract CorrelatedCounterMultiTxActions {
         }
     }
 
-    function _l2Entry(address target, address caller, uint256 input) internal pure returns (L2ExecutionEntry memory) {
+    function _l2Entry(address target, address caller, uint256 input) internal view returns (L2ExecutionEntry memory) {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
             gas: 0,
@@ -170,7 +171,7 @@ contract Deploy is Script {
     function run() external {
         IEEZ manager = IEEZ(vm.envAddress("ROLLUPS"));
         vm.startBroadcast();
-        address proxy = getOrCreateProxy(manager, vm.envAddress("COUNTER_L2"), L2_ROLLUP_ID);
+        address proxy = getOrCreateProxy(manager, vm.envAddress("COUNTER_L2"), e2eRollupId());
         CorrelatedCounterCaller caller = new CorrelatedCounterCaller(CorrelatedCounter(proxy));
         vm.stopBroadcast();
         output("COUNTER_PROXY", proxy);
@@ -202,14 +203,14 @@ contract Execute is Script, CorrelatedCounterMultiTxActions {
         ExecutionEntry[] memory entries = _l1Entries(vm.envAddress("COUNTER_L2"), caller);
         vm.broadcast();
         manager.postAndVerifyBatch(
-            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), L2_ROLLUP_ID, entries, noStaticEntries())
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), e2eRollupId(), entries, noStaticEntries())
         );
         for (uint256 i; i < NUM_TXS; ++i) {
             vm.broadcast();
             CorrelatedCounterCaller(caller).execute();
             _checkCaller(caller, i + 1);
-            require(manager.entryQueueIndex(L2_ROLLUP_ID) == i + 1, "wrong L1 consumption count");
-            (, bytes32 root,) = manager.rollups(L2_ROLLUP_ID);
+            require(manager.entryQueueIndex(e2eRollupId()) == i + 1, "wrong L1 consumption count");
+            (, bytes32 root,) = manager.rollups(e2eRollupId());
             require(root == _rootAfter(i + 1), "wrong L1 root");
         }
         console.log("done: L1 counter=3; results=0,2,4");

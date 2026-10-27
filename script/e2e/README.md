@@ -209,16 +209,30 @@ source script/e2e/lib/network-config.sh
 load_network_config
 ```
 
-Discovery uses only `L1_FRONT`; inspect the current response for the environment
-you are running against rather than relying on an earlier deployment snapshot.
+Composer metadata discovery (`composer-info.sh`) needs only `L1_FRONT`.
+`load_composer_info` and `load_network_config` additionally require `L1_RPC` and
+`L2_RPC` to validate chain and rollup identities. Inspect the current response for
+the environment you are running against rather than relying on an earlier deployment snapshot.
 The response contains no endpoint URLs, keys, or EEZ rollup IDs. Ethereum chain
-IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` still defaults to 1).
+IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` is read from the discovered L2 manager's `ROLLUP_ID()` and
+checked against the L1 registry and composer rollup manager). An explicitly set
+ID must match discovery. All scenario hashes, tables and proxies use this ID;
+staged snapshots preserve it for resume. Local runs use the ID returned by registration.
 
 Staged resume/verify uses the saved run network snapshot rather than rediscovering
 a potentially different deployment. The single-scenario runner (`lib/network-scenario.sh`) loads `chain.env` (or
 `DEVNET_ENV`) before applying CLI overrides and discovery.
 Fully explicit address arguments on the single-scenario runner remain supported
-for workers and historical deployments; these bypass env-file loading and discovery.
+for workers and historical deployments; these bypass env-file loading and composer
+metadata discovery, but still validate the rollup against both read RPCs.
+Manager assertions inherited by workers are bound to the validated endpoints and
+manager addresses; changing that configuration discards the inherited assertion.
+Automatically discovered IDs are also bound to that configuration and are
+rediscovered after a network change. Explicit env-file/CLI IDs and saved snapshot
+IDs remain assertions and must match discovery.
+The two rollup identity reads retry transient transport failures up to three times,
+with a 20-second timeout per attempt and a one-second delay between attempts.
+Invalid results, contract reverts and identity mismatches fail immediately.
 Decoder invocations discover missing addresses through an exported `L1_FRONT`,
 or accept explicit `--rollups` and `--manager-l2` addresses.
 

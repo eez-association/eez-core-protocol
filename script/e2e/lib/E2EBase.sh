@@ -5,6 +5,7 @@
 set -euo pipefail
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
 source "$(dirname "${BASH_SOURCE[0]}")/network-fees.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/rollup-id.sh"
 
 # Default values
 PK="${PK:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
@@ -140,18 +141,38 @@ deploy_infra() {
     local l1_rpc="$1"
     local pk="$2"
     local l2_rpc="${3:-}"
-    local l2_rollup_id="${4:-1}"
+    local l2_rollup_id="${4:-}"
     local system_address="${5:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
     local recovery_address="${6:-$system_address}"
 
     echo ""
     echo "====== Deploy EEZ (L1) ======"
     local output
-    output=$(forge script script/e2e/scenarios/shared/DeployInfra.s.sol:DeployEEZL1 \
-        --rpc-url "$l1_rpc" --broadcast --private-key "$pk" 2>&1)
+    if ! output=$(forge script script/e2e/scenarios/shared/DeployInfra.s.sol:DeployEEZL1 \
+        --rpc-url "$l1_rpc" --broadcast --private-key "$pk" 2>&1); then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
     ROLLUPS=$(extract "$output" "ROLLUPS")
     PROOF_SYSTEM=$(extract "$output" "PROOF_SYSTEM")
     L2_MANAGER=$(extract "$output" "L2_MANAGER")
+    local registered_id
+    registered_id=$(extract "$output" "L2_ROLLUP_ID")
+    if ! registered_id=$(_canonical_rollup_id "$registered_id"); then
+        echo 'L1 deployment did not return a valid L2_ROLLUP_ID' >&2
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    if [[ -n "$l2_rollup_id" ]]; then
+        l2_rollup_id=$(_canonical_rollup_id "$l2_rollup_id") || {
+            echo "Invalid requested local rollup ID" >&2; return 1;
+        }
+    fi
+    [[ -z "$l2_rollup_id" || "$l2_rollup_id" == "$registered_id" ]] || {
+        echo "Requested local rollup ID disagrees with registration" >&2; return 1;
+    }
+    l2_rollup_id="$registered_id"
+    export L2_ROLLUP_ID="$registered_id"
     echo "ROLLUPS=$ROLLUPS"
     echo "PROOF_SYSTEM=$PROOF_SYSTEM"
     echo "L2_MANAGER=$L2_MANAGER"
@@ -159,9 +180,12 @@ deploy_infra() {
     if [[ -n "$l2_rpc" ]]; then
         echo ""
         echo "====== Deploy EEZL2 (L2) ======"
-        output=$(forge script script/e2e/scenarios/shared/DeployInfra.s.sol:DeployManagerL2 \
+        if ! output=$(forge script script/e2e/scenarios/shared/DeployInfra.s.sol:DeployManagerL2 \
             --rpc-url "$l2_rpc" --broadcast --private-key "$pk" \
-            --sig "run(uint64,address,address)" "$l2_rollup_id" "$system_address" "$recovery_address" 2>&1)
+            --sig "run(uint64,address,address)" "$l2_rollup_id" "$system_address" "$recovery_address" 2>&1); then
+            printf '%s\n' "$output" >&2
+            return 1
+        fi
         MANAGER_L2=$(extract "$output" "MANAGER_L2")
         echo "MANAGER_L2=$MANAGER_L2"
     fi

@@ -70,7 +70,10 @@ while [[ $# -gt 0 ]]; do
         --l1-rpc)       export L1_RPC="$2"; export RPC="$2"; shift 2;;
         --l2-rpc)       export L2_RPC="$2"; shift 2;;
         --manager-l2)   export MANAGER_L2="$2"; shift 2;;
-        --l2-rollup-id) export L2_ROLLUP_ID="$2"; shift 2;;
+        --l2-rollup-id)
+            export L2_ROLLUP_ID="$2"
+            unset EEZ_DISCOVERED_ROLLUP_ID
+            shift 2 ;;
         # Cross-chain fronts publish triggers and expose Composer correlation/status.
         # Deploys/reads must go to the normal chain RPCs: the fronts intercept
         # cross-chain triggers and silently swallow ordinary transactions.
@@ -83,10 +86,10 @@ done
 
 if [[ "$_CLI_ROLLUPS" != true || "$_CLI_MANAGER_L2" != true ]]; then
     load_composer_info || exit 1
+else
+    resolve_network_rollup_id || exit 1
 fi
 export RPC="${L1_RPC:-${RPC:-}}"
-
-export L2_ROLLUP_ID="${L2_ROLLUP_ID:-1}"
 
 for var in RPC PK ROLLUPS L2_RPC MANAGER_L2; do
     if [[ -z "${!var:-}" ]]; then

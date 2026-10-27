@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -59,7 +61,6 @@ import {
 //               L1 CounterL1.counter == 1 (unchanged by the flow).
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract StaticCounterL2Actions {
@@ -74,8 +75,8 @@ abstract contract StaticCounterL2Actions {
     /// (CounterL1, MAINNET), value 0, callGas 0 (static keys never fold gas, even under
     /// USE_GAS_LEFT) — and L1's `_processL2ToL1Calls` folds the identical preimage for the
     /// executed isStatic call.
-    function _staticKey(address counterL1, address readerL2) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
+    function _staticKey(address counterL1, address readerL2) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
     }
 
     /// The ONE pool static entry, keyed to the reader (the key folds the proxy caller):
@@ -86,7 +87,7 @@ abstract contract StaticCounterL2Actions {
         address readerL2
     )
         internal
-        pure
+        view
         returns (L2StaticExecutionEntry[] memory entries)
     {
         entries = new L2StaticExecutionEntry[](1);
@@ -104,10 +105,10 @@ abstract contract StaticCounterL2Actions {
     /// the static read, EXECUTED for real here — l2ToL1Calls[0] carries isStatic = true, so
     /// `_processL2ToL1Calls` dispatches it via STATICCALL against the live CounterL1 and folds
     /// the real returndata.
-    function _l1Entries(address counterL1, address readerL2) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address counterL1, address readerL2) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-static-l2"),
             etherDelta: 0
@@ -119,7 +120,7 @@ abstract contract StaticCounterL2Actions {
             revertNextNCalls: 0,
             isStatic: true,
             sourceAddress: readerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _counterCallData()
@@ -133,7 +134,7 @@ abstract contract StaticCounterL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — executed as an immediate L2Tx
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -219,7 +220,7 @@ contract Execute is Script, StaticCounterL2Actions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(counterL1Addr, vm.envAddress("READER_L2")),
                     noStaticEntries()
                 )

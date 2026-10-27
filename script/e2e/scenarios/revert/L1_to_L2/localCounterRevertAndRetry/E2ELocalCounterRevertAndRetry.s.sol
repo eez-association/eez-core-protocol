@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ, ExecutionEntry, RollupUpdate} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -33,7 +35,6 @@ import {
 // L2: one delivery for the retry; Counter.counter == 1.
 // No L2-to-L1 callbacks: l2ToL1Calls and expectedL1ToL2Calls are empty.
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 contract Counter {
@@ -83,14 +84,14 @@ abstract contract LocalCounterRevertAndRetryActions {
         return abi.encodeCall(Counter.increment, ());
     }
 
-    function _callHash(address counterL2, address callerL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, callerL1, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _callHash(address counterL2, address callerL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, callerL1, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementData());
     }
 
-    function _l1Entries(address counterL2, address callerL1) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address counterL2, address callerL1) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory updates = new RollupUpdate[](1);
         updates[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             etherDelta: 0,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-local-counter-increment")
@@ -103,13 +104,13 @@ abstract contract LocalCounterRevertAndRetryActions {
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(updates, key),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             success: true,
             returnData: abi.encode(uint256(1))
         });
     }
 
-    function _l2Entries(address counterL2, address callerL1) internal pure returns (L2Entry[] memory entries) {
+    function _l2Entries(address counterL2, address callerL1) internal view returns (L2Entry[] memory entries) {
         bytes32 key = _callHash(counterL2, callerL1);
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
@@ -156,7 +157,7 @@ contract Deploy is Script {
     function run() external {
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
         vm.startBroadcast();
-        address proxy = getOrCreateProxy(IEEZ(address(manager)), vm.envAddress("COUNTER_L2"), L2_ROLLUP_ID);
+        address proxy = getOrCreateProxy(IEEZ(address(manager)), vm.envAddress("COUNTER_L2"), e2eRollupId());
         LocalCounterRevertAndRetryCaller caller = new LocalCounterRevertAndRetryCaller(Counter(proxy));
         output("COUNTER_PROXY", proxy);
         output("CALLER_L1", address(caller));
@@ -183,15 +184,15 @@ contract Execute is Script, LocalCounterRevertAndRetryActions {
         ExecutionEntry[] memory entries = _l1Entries(vm.envAddress("COUNTER_L2"), caller);
         vm.startBroadcast();
         manager.postAndVerifyBatch(
-            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), L2_ROLLUP_ID, entries, noStaticEntries())
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), e2eRollupId(), entries, noStaticEntries())
         );
         LocalCounterRevertAndRetryCaller(caller).execute();
         vm.stopBroadcast();
 
         _checkCaller(caller);
-        (, bytes32 root,) = manager.rollups(L2_ROLLUP_ID);
+        (, bytes32 root,) = manager.rollups(e2eRollupId());
         require(root == entries[0].rollupUpdates[0].newRoot, "retry root not committed");
-        require(manager.entryQueueIndex(L2_ROLLUP_ID) == 1, "wrong surviving consumption count");
+        require(manager.entryQueueIndex(e2eRollupId()) == 1, "wrong surviving consumption count");
         console.log("done: one retry committed");
     }
 }

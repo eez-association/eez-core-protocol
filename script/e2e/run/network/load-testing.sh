@@ -194,7 +194,6 @@ for name in L1_RPC L2_RPC ROLLUPS MANAGER_L2; do
     [[ -n "${!name:-}" ]] || { echo "Missing $name"; exit 1; }
 done
 export L1_RPC L2_RPC ROLLUPS MANAGER_L2
-export L2_ROLLUP_ID="${L2_ROLLUP_ID:-1}"
 SOURCE_PK="${SOURCE_PK:-0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a}"
 (( WORKERS <= TXS )) || WORKERS=$TXS
 # Reuse the same sender pool and funding helper as the existing orchestrators.

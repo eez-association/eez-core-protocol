@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 // E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
 
 import {Script, console} from "forge-std/Script.sol";
@@ -62,13 +64,13 @@ abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsActions is Ca
         HashStep[][] steps;
     }
 
-    function _tables(address a1, address a2) internal pure returns (ScenarioTables memory t) {
+    function _tables(address a1, address a2) internal view returns (ScenarioTables memory t) {
         t.l1 = new ExecutionEntry[](1);
         t.l2 = new L2Entry[](1);
         t.steps = new HashStep[][](1);
         t.statics = new StaticExecutionEntry[](2);
         ExpectedRootPerRollup[] memory pins = new ExpectedRootPerRollup[](1);
-        pins[0] = ExpectedRootPerRollup(1, keccak256("l2-initial-state"));
+        pins[0] = ExpectedRootPerRollup(_e2eRollupId(), keccak256("l2-initial-state"));
 
         // Top-level read(3) -> callback read(2) -> read(1) -> callback read(0).
         // Static callbacks do not open a mutable execution context on L1:
@@ -78,7 +80,7 @@ abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsActions is Ca
             _l1ToL2CallHash(a1, a2, _read(3), true),
             _l1Callback(a1, a2, _read(2), true),
             RH.appendStatic(0, true, _result(2)),
-            1,
+            _e2eRollupId(),
             true,
             _result(3)
         );
@@ -87,7 +89,7 @@ abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsActions is Ca
             _l1ToL2CallHash(a1, a2, _read(1), true),
             _l1Callback(a1, a2, _read(0), true),
             RH.appendStatic(0, true, _result(0)),
-            1,
+            _e2eRollupId(),
             true,
             _result(1)
         );
@@ -96,9 +98,9 @@ abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsActions is Ca
         // L2 read(1) -> L1 read(0). read(1) now belongs to a nested STATIC row.
         ExecutionEntry memory source;
         source.rollupUpdates = new RollupUpdate[](1);
-        source.rollupUpdates[0] = RollupUpdate(1, 0, pins[0].root, keccak256("l2-after-deep-reads"));
+        source.rollupUpdates[0] = RollupUpdate(_e2eRollupId(), 0, pins[0].root, keccak256("l2-after-deep-reads"));
         source.proxyEntryHash = _l1ToL2CallHash(a1, a2, _under(), false);
-        source.destinationRollupId = 1;
+        source.destinationRollupId = _e2eRollupId();
         source.l2ToL1Calls = _l1Callback(a1, a2, _read(2), true);
         bytes32 fire = RH.appendCallBegin(
             RH.entryBegin(source.rollupUpdates, source.proxyEntryHash), _l2ToL1CallHash(a1, a2, _read(2), true)
@@ -201,11 +203,11 @@ contract DeployL2 is Script, DeepStaticReadCallbacksUnderStaticAndMutableCallsAc
     }
 }
 
-contract DeployConfigure is Script {
+contract DeployConfigure is Script, E2ERollupConfig {
     function run() external {
         vm.startBroadcast();
         Actor(vm.envAddress("ACTOR_L1"))
-            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), 1));
+            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), _e2eRollupId()));
         vm.stopBroadcast();
     }
 }
@@ -234,13 +236,15 @@ contract Execute is Script, DeepStaticReadCallbacksUnderStaticAndMutableCallsAct
             "source table must use real producer result"
         );
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
-        (,, uint256 beforeBalance) = manager.rollups(1);
+        (,, uint256 beforeBalance) = manager.rollups(_e2eRollupId());
         vm.startBroadcast();
-        manager.postAndVerifyBatch(immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), 1, t.l1, t.statics));
+        manager.postAndVerifyBatch(
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), _e2eRollupId(), t.l1, t.statics)
+        );
         Actor(vm.envAddress("ACTOR_L1")).runDeepStaticReadCallbacksUnderStaticAndMutableCalls();
         vm.stopBroadcast();
         _checkSource(Actor(vm.envAddress("ACTOR_L1")));
-        (, bytes32 root, uint256 afterBalance) = manager.rollups(1);
+        (, bytes32 root, uint256 afterBalance) = manager.rollups(_e2eRollupId());
         require(root == t.l1[t.l1.length - 1].rollupUpdates[0].newRoot, "wrong final root");
         require(beforeBalance == afterBalance, "unexpected ether delta");
         console.log("done: successful L1 source transaction");

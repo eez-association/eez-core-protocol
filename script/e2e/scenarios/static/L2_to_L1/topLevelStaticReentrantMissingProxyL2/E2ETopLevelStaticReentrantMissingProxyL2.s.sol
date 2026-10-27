@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -39,7 +41,6 @@ import {
 // resolves from a position-pinned nested static row. No later L2 delivery is allowed.
 // Final state: reader.counter=1, lastRead=1; producer.counter remains 1.
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract TopLevelStaticReentrantCounterL2Actions {
@@ -54,13 +55,13 @@ abstract contract TopLevelStaticReentrantCounterL2Actions {
     /// (ForwarderL1, MAINNET), value 0, callGas 0. This fixture requires USE_GAS_LEFT = false;
     /// L1's `_processL2ToL1Calls` folds the identical preimage for the
     /// executed isStatic call.
-    function _staticKey(address counterL1, address readerL2) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
+    function _staticKey(address counterL1, address readerL2) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
     }
 
     /// L1 callback helper -> L2 producer: keyed at the parent CALL_BEGIN on L1.
-    function _callbackKey(address producerL2, address callbackL1) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(callbackL1, MAINNET_ROLLUP_ID, producerL2, L2_ROLLUP_ID, 0, _counterCallData());
+    function _callbackKey(address producerL2, address callbackL1) internal view returns (bytes32) {
+        return crossChainCallHashStatic(callbackL1, MAINNET_ROLLUP_ID, producerL2, e2eRollupId(), 0, _counterCallData());
     }
 
     /// The ONE pool static entry, keyed to the reader (the key folds the proxy caller):
@@ -73,7 +74,7 @@ abstract contract TopLevelStaticReentrantCounterL2Actions {
         address readerL2
     )
         internal
-        pure
+        view
         returns (L2StaticExecutionEntry[] memory entries)
     {
         entries = new L2StaticExecutionEntry[](1);
@@ -112,12 +113,12 @@ abstract contract TopLevelStaticReentrantCounterL2Actions {
         address readerL2
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-static-l2"),
             etherDelta: 0
@@ -129,7 +130,7 @@ abstract contract TopLevelStaticReentrantCounterL2Actions {
             revertNextNCalls: 0,
             isStatic: true,
             sourceAddress: readerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _counterCallData()
@@ -152,7 +153,7 @@ abstract contract TopLevelStaticReentrantCounterL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — executed as an immediate L2Tx
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -178,7 +179,7 @@ contract DeployProducerL2 is Script {
 contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
-        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PRODUCER_L2"), L2_ROLLUP_ID);
+        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("PRODUCER_L2"), e2eRollupId());
         StaticCounterCallback callback = new StaticCounterCallback(proxy);
         output("CALLBACK_L1", address(callback));
         output("COUNTER_L1", address(new StaticCounterForwarder(address(callback))));
@@ -262,7 +263,7 @@ contract Execute is Script, TopLevelStaticReentrantCounterL2Actions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(
                         vm.envAddress("PRODUCER_L2"),
                         vm.envAddress("CALLBACK_L1"),

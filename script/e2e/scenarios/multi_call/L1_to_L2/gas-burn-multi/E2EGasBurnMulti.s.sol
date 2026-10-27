@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ, ExecutionEntry, RollupUpdate} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -80,17 +82,17 @@ abstract contract GasBurnActions {
         return abi.encodeCall(GasBurner.burn, (GasBurnPlan.BUDGET));
     }
 
-    function _burnHash(address target, address caller) internal pure returns (bytes32) {
-        return crossChainCallHash(false, caller, 0, target, 1, 0, _burnData());
+    function _burnHash(address target, address caller) internal view returns (bytes32) {
+        return crossChainCallHash(false, caller, 0, target, e2eRollupId(), 0, _burnData());
     }
 
-    function _burnL1Entries(address target, address caller) internal pure returns (ExecutionEntry[] memory entries) {
+    function _burnL1Entries(address target, address caller) internal view returns (ExecutionEntry[] memory entries) {
         entries = new ExecutionEntry[](GasBurnPlan.COUNT);
         bytes32 root = keccak256("l2-initial-state");
         for (uint256 i; i < entries.length; ++i) {
             bytes32 nextRoot = keccak256(abi.encode("gas-burn-state", i + 1));
             RollupUpdate[] memory updates = new RollupUpdate[](1);
-            updates[0] = RollupUpdate({rollupId: 1, currentRoot: root, newRoot: nextRoot, etherDelta: 0});
+            updates[0] = RollupUpdate({rollupId: e2eRollupId(), currentRoot: root, newRoot: nextRoot, etherDelta: 0});
             bytes32 h = _burnHash(target, caller);
             entries[i] = ExecutionEntry({
                 rollupUpdates: updates,
@@ -98,7 +100,7 @@ abstract contract GasBurnActions {
                 l2ToL1Calls: noCalls(),
                 expectedL1ToL2Calls: noNestedActions(),
                 rollingHash: RollingHashBuilder.entryBegin(updates, h),
-                destinationRollupId: 1,
+                destinationRollupId: e2eRollupId(),
                 success: true,
                 returnData: abi.encode(i + 1)
             });
@@ -106,7 +108,7 @@ abstract contract GasBurnActions {
         }
     }
 
-    function _burnL2Entry(address target, address caller, uint256 index) internal pure returns (L2Entry memory entry) {
+    function _burnL2Entry(address target, address caller, uint256 index) internal view returns (L2Entry memory entry) {
         bytes32 h = _burnHash(target, caller);
         CrossChainCall[] memory calls = new CrossChainCall[](1);
         calls[0] = CrossChainCall({
@@ -145,7 +147,7 @@ contract DeployL2 is Script {
 contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
-        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("BURNER_L2"), 1);
+        address proxy = getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("BURNER_L2"), e2eRollupId());
         output("BURN_PROXY", proxy);
         output("BURN_TRIGGER", address(new GasBurnTrigger(proxy)));
         vm.stopBroadcast();
@@ -172,7 +174,7 @@ contract Execute is Script, GasBurnActions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    1,
+                    e2eRollupId(),
                     _burnL1Entries(vm.envAddress("BURNER_L2"), vm.envAddress("BURN_TRIGGER")),
                     noStaticEntries()
                 )

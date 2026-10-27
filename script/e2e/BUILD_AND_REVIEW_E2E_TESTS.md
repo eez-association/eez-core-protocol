@@ -62,6 +62,16 @@ ordered `l2ToL1Calls[]` preimage, result, and nesting in the single L1 entry. Re
 nested frames may also erase their event evidence, so table content and rolling hashes
 remain part of the proof even when no paired event survives.
 
+All scenario proxies, hashes, root pins and table routing must use
+`e2eRollupId()` from `E2EHelpers.sol` for the L2 identity. Network runners discover
+and validate `L2_ROLLUP_ID`; local runners export the ID returned by registration.
+Do not embed `1` or an Ethereum chain ID, and do not add a fallback when the
+runner configuration is missing. L1 remains rollup ID 0.
+For Solidity tests that exercise scenario builders or deployment scripts, use
+the `E2ERollupConfig` accessor and override `_e2eRollupId()` in the test harness.
+Do not set `L2_ROLLUP_ID` with `vm.setEnv`: Foundry shares that environment across
+parallel tests. The default accessor still calls `e2eRollupId()` with no fallback.
+
 ## Deriving the tables from the real transaction
 
 Before constructing structs:

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 // E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
 
 import {Script, console} from "forge-std/Script.sol";
@@ -62,7 +64,7 @@ abstract contract CatchRemoteAndNestedRevertsAfterSuccessfulCallbacksActions is 
         HashStep[][] steps;
     }
 
-    function _tables(address a1, address a2) internal pure returns (ScenarioTables memory t) {
+    function _tables(address a1, address a2) internal view returns (ScenarioTables memory t) {
         t.l1 = new ExecutionEntry[](3);
         t.l2 = new L2Entry[](2);
         t.statics = new StaticExecutionEntry[](0);
@@ -139,13 +141,13 @@ abstract contract CatchRemoteAndNestedRevertsAfterSuccessfulCallbacksActions is 
         bytes memory result
     )
         private
-        pure
+        view
         returns (ExecutionEntry memory e)
     {
         e.rollupUpdates = new RollupUpdate[](1);
-        e.rollupUpdates[0] = RollupUpdate(1, 0, beforeRoot, afterRoot);
+        e.rollupUpdates[0] = RollupUpdate(_e2eRollupId(), 0, beforeRoot, afterRoot);
         e.proxyEntryHash = key;
-        e.destinationRollupId = 1;
+        e.destinationRollupId = _e2eRollupId();
         e.l2ToL1Calls = callbacks;
         e.expectedL1ToL2Calls = new ExpectedL1ToL2Call[](0);
         e.rollingHash = RH.entryBegin(e.rollupUpdates, key);
@@ -160,7 +162,7 @@ abstract contract CatchRemoteAndNestedRevertsAfterSuccessfulCallbacksActions is 
         uint256 result
     )
         private
-        pure
+        view
         returns (L2Entry memory e)
     {
         e.proxyEntryHash = _l1ToL2CallHash(a1, a2, data, false);
@@ -217,11 +219,11 @@ contract DeployL2 is Script, CatchRemoteAndNestedRevertsAfterSuccessfulCallbacks
     }
 }
 
-contract DeployConfigure is Script {
+contract DeployConfigure is Script, E2ERollupConfig {
     function run() external {
         vm.startBroadcast();
         Actor(vm.envAddress("ACTOR_L1"))
-            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), 1));
+            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), _e2eRollupId()));
         vm.stopBroadcast();
     }
 }
@@ -250,13 +252,15 @@ contract Execute is Script, CatchRemoteAndNestedRevertsAfterSuccessfulCallbacksA
             "source table must use real producer result"
         );
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
-        (,, uint256 beforeBalance) = manager.rollups(1);
+        (,, uint256 beforeBalance) = manager.rollups(_e2eRollupId());
         vm.startBroadcast();
-        manager.postAndVerifyBatch(immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), 1, t.l1, t.statics));
+        manager.postAndVerifyBatch(
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), _e2eRollupId(), t.l1, t.statics)
+        );
         Actor(vm.envAddress("ACTOR_L1")).runCatchRemoteAndNestedRevertsAfterSuccessfulCallbacks();
         vm.stopBroadcast();
         _checkSource(Actor(vm.envAddress("ACTOR_L1")));
-        (, bytes32 root, uint256 afterBalance) = manager.rollups(1);
+        (, bytes32 root, uint256 afterBalance) = manager.rollups(_e2eRollupId());
         require(root == t.l1[t.l1.length - 1].rollupUpdates[0].newRoot, "wrong final root");
         require(beforeBalance == afterBalance, "unexpected ether delta");
         console.log("done: successful L1 source transaction");

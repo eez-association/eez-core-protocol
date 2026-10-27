@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 // E2E_EXCLUDE_FROM_ALL: PR #54 call-pattern scenarios; explicit selection only pending live validation.
 
 import {Script, console} from "forge-std/Script.sol";
@@ -46,7 +48,7 @@ import {
 // Included in default/all runs; live composer failures remain failures.
 
 abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsL2Actions is CallPatternHelpers {
-    function _tables(address actorL1, address actorL2) internal pure returns (L2OriginTables memory t) {
+    function _tables(address actorL1, address actorL2) internal view returns (L2OriginTables memory t) {
         L1EntryBuilder memory h = _newL1Entry(actorL1, actorL2);
         t.statics = new L2Static[](0);
         address a1 = h.a1;
@@ -95,7 +97,7 @@ abstract contract DeepStaticReadCallbacksUnderStaticAndMutableCallsL2Actions is 
         _finishL1Entry(h, t);
     }
 
-    function _deepRows(L1EntryBuilder memory h, bytes32 fire) private pure {
+    function _deepRows(L1EntryBuilder memory h, bytes32 fire) private view {
         // STATIC resolution does not modify the host hash: the grandchild
         // read(0) has the SAME firing position as read(2), with a different key.
         _expectedL1ToL2Call(
@@ -144,11 +146,11 @@ contract DeployL2 is Script {
     }
 }
 
-contract DeployConfigure is Script {
+contract DeployConfigure is Script, E2ERollupConfig {
     function run() external {
         vm.startBroadcast();
         Actor(vm.envAddress("ACTOR_L1"))
-            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), 1));
+            .configure(getOrCreateProxy(IEEZ(vm.envAddress("ROLLUPS")), vm.envAddress("ACTOR_L2"), _e2eRollupId()));
         vm.stopBroadcast();
     }
 }
@@ -174,16 +176,16 @@ contract Execute is Script, DeepStaticReadCallbacksUnderStaticAndMutableCallsL2A
     function run() external {
         L2OriginTables memory t = _tables(vm.envAddress("ACTOR_L1"), vm.envAddress("ACTOR_L2"));
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
-        (,, uint256 beforeBalance) = manager.rollups(1);
+        (,, uint256 beforeBalance) = manager.rollups(_e2eRollupId());
         ProofSystemBatchPerVerificationEntries memory batch =
-            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), 1, t.l1, noStaticEntries());
+            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), _e2eRollupId(), t.l1, noStaticEntries());
         // The entire signed L2 transaction and its tables share ONE L1 host.
         batch.callData = vm.envBytes("RLP_ENCODED_TX");
         vm.startBroadcast();
         manager.postAndVerifyBatch(batch);
         vm.stopBroadcast();
         _checkDestination(Actor(vm.envAddress("ACTOR_L1")));
-        (, bytes32 root, uint256 afterBalance) = manager.rollups(1);
+        (, bytes32 root, uint256 afterBalance) = manager.rollups(_e2eRollupId());
         require(root == t.l1[0].rollupUpdates[0].newRoot, "wrong final root");
         require(beforeBalance == afterBalance, "unexpected ether delta");
         console.log("done: real destination results and rollback checked");

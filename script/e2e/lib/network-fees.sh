@@ -119,7 +119,11 @@ _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|term
             echo terminal; return ;;
         *'http error 429'*) echo retry; return ;;
         *unsupported_direction*) echo terminal; return ;;
-        *'error sending request'*|*'connection refused'*|*'connection reset'*|*'connection closed'*|*'connection error'*|*'tcp connect error'*|*'dns error'*|*'dns resolution'*|*'failed to lookup address'*|*'timed out'*|*timeout*|*'http status server error'*|*'http error 5'*)
+        *'error sending request'*|*'connection refused'*|*'connection reset'*|\
+            *'connection closed'*|*'connection error'*|*'tcp connect error'*|\
+            *'dns error'*|*'dns resolution'*|*'failed to lookup address'*|\
+            *'timed out'*|*timeout*|*'http status server error'*|\
+            *'http error 5'*)
             echo retry; return ;;
     esac
     case "$status" in 28|124) echo retry ;; *) echo terminal ;; esac

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -46,7 +48,6 @@ import {
 //  the blob); nothing on L2 records the call.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract RevertActions {
@@ -68,10 +69,10 @@ abstract contract RevertActions {
 
     /// @dev Proxy-entry identity: safeCaller (on L1) calls the L1 proxy for (RevertCounter@L2).
     ///      Same hash on both sides (L2's executeIncomingCrossChainCall folds targetRollupId = L2).
-    function _proxyEntryHash(address revCounterL2, address safeCaller) internal pure returns (bytes32) {
+    function _proxyEntryHash(address revCounterL2, address safeCaller) internal view returns (bytes32) {
         return
             crossChainCallHash(
-                false, safeCaller, MAINNET_ROLLUP_ID, revCounterL2, L2_ROLLUP_ID, 0, _incrementCallData()
+                false, safeCaller, MAINNET_ROLLUP_ID, revCounterL2, e2eRollupId(), 0, _incrementCallData()
             );
     }
 
@@ -83,12 +84,12 @@ abstract contract RevertActions {
         address safeCaller
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-reverted-call"),
             etherDelta: 0
@@ -100,7 +101,7 @@ abstract contract RevertActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(deltas, proxyEntryHash),
@@ -134,7 +135,7 @@ contract Deploy is Script {
         EEZ rollups = EEZ(rollupsAddr);
 
         // Trigger proxy: proxy for (RevertCounter@L2, L2_ROLLUP_ID) on L1
-        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), revCounterL2, L2_ROLLUP_ID);
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), revCounterL2, e2eRollupId());
 
         // The caller: try/catches the reverting cross-chain call so the trigger tx succeeds.
         SafeCounterAndProxy safeCaller = new SafeCounterAndProxy(Counter(counterProxy));
@@ -163,7 +164,7 @@ contract Execute is Script, RevertActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(revCounterL2, safeCallerAddr), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(revCounterL2, safeCallerAddr), noStaticEntries()
                 )
             );
 
