@@ -129,6 +129,8 @@ _network_quote_failure_kind() { # Cast/raw JSON error, exit status -> retry|term
     case "$status" in 28|124) echo retry ;; *) echo terminal ;; esac
 }
 
+# Return 75 only when transient quote retries exhaust their budget. Load tests
+# may reuse cached fees in that case; terminal errors must never authorize reuse.
 network_fee_quote() { # transaction, front, read RPC, optional checked chain, shared deadline, evidence
     local tx="$1" front="$2" read_rpc="$3" chain="${4:-}" evidence="${6:-}"
     local intent quote option nonce kind gas cap tip value expires attempt deadline left rpc_timeout rc failure
@@ -141,7 +143,7 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
     deadline="${5:-$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))}"
     for ((attempt=1; attempt<=60; attempt++)); do
         left=$((deadline - SECONDS))
-        (( left > 0 )) || { echo "eez_quoteFee $retry_reason timeout" >&2; return 1; }
+        (( left > 0 )) || { echo "eez_quoteFee $retry_reason timeout" >&2; return 75; }
         rpc_timeout=$left; (( rpc_timeout <= 30 )) || rpc_timeout=30
         if quote=$(cast rpc --rpc-timeout "$rpc_timeout" --rpc-url "$front" eez_quoteFee "$intent" 2>&1); then
             break
@@ -167,7 +169,7 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
                 fi
                 sleep "$((left < 2 ? left : 2))"; continue
             fi
-            echo "eez_quoteFee $retry_reason timeout" >&2; return 1
+            echo "eez_quoteFee $retry_reason timeout" >&2; return 75
         fi
         printf 'eez_quoteFee failed: %s\n' "$quote" >&2
         return 1
@@ -219,6 +221,23 @@ network_fee_quote() { # transaction, front, read RPC, optional checked chain, sh
           chain:$chain,nonce:$nonce,gas:$gas,cap:$cap,tip:$tip,value:$value,expires:$expires}'
 }
 
+# Load tests may explicitly reuse only the gas/fee numbers for the same worker
+# and call template. The original quote remains evidence, not a new valid quote.
+network_cached_fee_plan() { # cache file, current transaction, checked chain
+    local cached tx="$2" chain="$3" nonce value
+    cached=$(cat "$1") || return 1
+    jq -en --argjson old "$cached" --argjson tx "$tx" --arg chain "$chain" '
+        def template: {signer,type,chainId,to,value,input,accessList:(.accessList // [])};
+        $old.feeSource == "composer" and $old.chain == $chain and
+        (($old.transaction | template) == ($tx | template))' >/dev/null || return 1
+    nonce=$(cast to-dec "$(jq -r .nonce <<< "$tx")") || return 1
+    value=$(cast to-dec "$(jq -r .value <<< "$tx")") || return 1
+    jq -c --argjson tx "$tx" --arg nonce "$nonce" --arg value "$value" '
+        del(.raw,.signedHash) | . + {feeSource:"cached-load-test",transaction:$tx,
+        intent:($tx | {from:.signer,to:.to,data:.input,value:.value,nonce:.nonce}),
+        nonce:$nonce,value:$value}' <<< "$cached"
+}
+
 network_sign_quote() { # checked quote, key, balance in wei -> quote + signed bytes/hash
     local plan="$1" key="$2" balance="$3" tx kind chain nonce gas cap tip value needed signed decoded
     tx=$(jq -c .transaction <<< "$plan") || return 1
@@ -250,7 +269,7 @@ network_submit_quote() { # signed quote, front, evidence, submit, persist callba
     fi
     # The runner owns its files. Save exact signed bytes before risking an uncertain send.
     "$persist" "$plan" "$@" || return 70
-    [[ $(jq -r .expires <<< "$plan") -gt $(date +%s) ]] || {
+    [[ $(jq -r .feeSource <<< "$plan") == cached-load-test || $(jq -r .expires <<< "$plan") -gt $(date +%s) ]] || {
         echo 'Fee quote expired before submission' >&2; return 70; }
     "$submit" "$front" "$(jq -r .raw <<< "$plan")"
 }
@@ -302,7 +321,16 @@ _network_quote_and_send() {
         if [[ -z "$plan" ]]; then
             rc=0
             plan=$(network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "$deadline" "$evidence") || rc=$?
-            (( rc == 0 )) || return "$rc"
+            if (( rc != 0 )); then
+                # Never retry a send here: only quote acquisition can use the cache.
+                [[ "$rc" == 75 && -n "${EEZ_LOAD_FEE_CACHE:-}" && -s "$EEZ_LOAD_FEE_CACHE" ]] || return "$rc"
+                plan=$(network_cached_fee_plan "$EEZ_LOAD_FEE_CACHE" "$tx" "$chain") || return 1
+                printf 'LOAD FEE FALLBACK: reusing cached gas/fees for nonce %s (original quote may be expired)\n' "$(jq -r .nonce <<< "$plan")" >&2
+                # A quote retry may have exhausted its deadline; allow one cached send.
+                deadline=$((SECONDS + 30))
+            elif [[ -n "${EEZ_LOAD_FEE_CACHE:-}" ]]; then
+                printf '%s\n' "$plan" > "$EEZ_LOAD_FEE_CACHE" || return 70
+            fi
             # Queue time is unbounded. Read funds after each new quote.
             balance=$(cast balance --rpc-url "$read_rpc" "$(jq -r .signer <<< "$tx")") || return 1
             plan=$(network_sign_quote "$plan" "$key" "$balance") || return 1
@@ -311,6 +339,9 @@ _network_quote_and_send() {
         rc=0
         result=$(network_submit_quote "$plan" "$front" "$evidence" "$submit" "$persist" "$@" 2>&1) || rc=$?
         if (( rc == 0 )); then printf '%s\n' "$result"; return 0; fi
+        if [[ $(jq -r .feeSource <<< "$plan") == cached-load-test ]]; then
+            printf '%s\n' "$result" >&2; return "$rc"
+        fi
         rejection_kind=''
         if (( rc == 1 || rc == 2 )); then
             rejection_kind=$(_network_submission_rejection_kind "$result") || rejection_kind=''

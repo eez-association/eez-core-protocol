@@ -119,7 +119,8 @@ cast() {
                 '{version:1,chainId:"0x1",nonce:"0x0",expiresAt:$expires,
                   options:[{type:"0x2",gas:$gas,maxFeePerGas:$cap,maxPriorityFeePerGas:$tip,
                   estimatedFee:"0x1",intentHash:("0x" + ("ab" * 32))}]}' ;;
-        *) command cast "$@" ;;
+        mktx|decode-transaction|keccak|to-dec|from-wei) command cast "$@" ;;
+        *) echo "Unexpected cast subcommand: $1" >&2; return 90 ;;
     esac
 }
 '''

@@ -509,4 +509,49 @@ are topped up to **0.003 ETH** on each chain before the run. Override with
 target. Size the balance for the whole load run, including deployment gas on
 the first worker.
 
+`--wallet-offset N` (or `WALLET_OFFSET`) starts at line N of
+`run/wallet-pool.csv`, minting wallets if the pool is shorter. N must be at most
+nine decimal digits with no leading zeros (except 0). Give concurrent
+load runs disjoint ranges so their nonces never collide:
+
+```bash
+bash script/e2e/run/network/load-testing.sh --workers 10 --txs-per-wallet 100 counter                     # wallets 0–9
+bash script/e2e/run/network/load-testing.sh --wallet-offset 10 --workers 10 --txs-per-wallet 100 counter  # wallets 10–19
+```
+
+For concurrent submission, add `--burst`:
+
+```bash
+RECEIPT_TIMEOUT=1800 DEVNET_ENV=chain.envtestnet bash script/e2e/run/network/load-testing.sh --burst --wallet-offset 0 --workers 20 --txs-per-wallet 20 --window 20 counter
+```
+
+Burst mode obtains one initial quote and shares its gas and fee values across
+wallets for the same call template. `--fee-multiplier N` optionally multiplies
+fee prices by a positive integer (default 1); gas stays at the quoted limit.
+These sends are labeled `cached-load-test`, not valid quotes for each new intent.
+Wallets submit concurrently without the per-chain fee lock, in nonce order within
+each wallet. One shared receipt poller collects accepted sends across wallets and queries the
+read RPC in JSON-RPC batches of up to 100 hashes, repeating after a one-second
+pause. Each wallet waits for its window before starting another. Responses are
+matched by ID; missing receipts and individual RPC errors remain pending until
+the receipt timeout. Queue files are `worker-N.pending`, outcomes are
+`worker-N.receipts.csv`, and poller diagnostics are in `receipts.log`. Explicit underfunded refusals retry the same nonce with up to three successive
+1.18× fee increases (each rounded up to whole wei). If the third bump is still
+explicitly underfunded, the transaction enters the normal locked fresh-quote
+retry path. Each worker retains its last accepted gas/fee values, including
+fresh-quote results, for subsequent transactions in this run.
+Uncertain sends stop the wallet. Reused estimates can become insufficient as state or tariffs change.
+Initial quote evidence is in `burst-quote.responses.jsonl`, shared values in
+`burst-plan.json`, and any refusal and refreshed quote in per-transaction files.
+
+By default, load workers try a fresh quote for every transaction. After their first valid
+quote, exhausted transient quote retries fall back to that worker's last validated gas and fee
+numbers for the same call template, preserving the current nonce. This load-only
+fallback ignores the original quote's expiry and logs `LOAD FEE FALLBACK`; saved
+transaction evidence marks `feeSource: cached-load-test` and retains the original
+quote. It is fee reuse, not a valid quote for the new nonce. Balance checks still
+apply. Explicit quote rejections and malformed quotes stop the worker without
+fallback. A failed or uncertain submission stops the worker without a fallback resend.
+Other runners retain strict per-transaction quoting.
+
 Reports trigger receipts and throughput; full settlement verification stays in the e2e runners.

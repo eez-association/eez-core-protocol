@@ -4,7 +4,8 @@
 #
 # Callers source this file and must set beforehand:
 #   SCRIPT_DIR RUN_DIR FUND_ETH FLOOR_ETH SOURCE_PK DIRECT FRESH L1_RPC L2_RPC
-# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain).
+# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain),
+#   WALLET_OFFSET (default 0; first pool line used, ignored with FRESH).
 #
 # expand_jobs "<target>[:count]" ...   → JOB_NAMES[] JOB_SOLS[] NJOBS
 # fund_workers                         → WALLET_ADDRS[] WALLET_PKS[] (one per job),
@@ -229,18 +230,29 @@ fund_workers() {
         echo "$addr"
     }
 
-    # Take the first NJOBS wallets from the persistent pool, minting (and
-    # appending) new ones only when the pool runs short.
+    # Take NJOBS wallets from the persistent pool starting at WALLET_OFFSET.
+    # A short pool is extended up to the needed line, so a given offset always
+    # maps to the same wallets across runs.
+    local offset="${WALLET_OFFSET:-0}"
+    [[ "$offset" =~ ^(0|[1-9][0-9]*)$ && ${#offset} -le 9 ]] || { echo "WALLET_OFFSET must be at most 9 decimal digits with no leading zeros"; exit 1; }
+    $FRESH && offset=0
     touch "$POOL_FILE"; chmod 600 "$POOL_FILE"
     local POOL_LINES=() new waddr wpk i
     $FRESH || mapfile -t POOL_LINES < "$POOL_FILE"
-    echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed$($FRESH && echo ' (--fresh: minting new)')"
+    echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed from line $offset$($FRESH && echo ' (--fresh: minting new)')"
     WALLET_PKS=(); WALLET_ADDRS=()
     echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
     chmod 600 "$RUN_DIR/wallets.csv"
+    while ! $FRESH && (( ${#POOL_LINES[@]} < offset )); do
+        new=$(cast wallet new)
+        waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
+        wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+        echo "$waddr,$wpk" >> "$POOL_FILE"
+        POOL_LINES+=("$waddr,$wpk")
+    done
     for ((i = 0; i < NJOBS; i++)); do
-        if (( i < ${#POOL_LINES[@]} )); then
-            waddr="${POOL_LINES[$i]%%,*}"; wpk="${POOL_LINES[$i]##*,}"
+        if (( offset + i < ${#POOL_LINES[@]} )); then
+            waddr="${POOL_LINES[$((offset + i))]%%,*}"; wpk="${POOL_LINES[$((offset + i))]##*,}"
         else
             new=$(cast wallet new)
             waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')

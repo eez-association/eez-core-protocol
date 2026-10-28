@@ -110,7 +110,8 @@ cast() {
             fi
             cat "$TEST_ROOT/quote.json" ;;
         mktx) echo sign >> "$TEST_ROOT/signs"; command cast "$@" ;;
-        *) command cast "$@" ;;
+        decode-transaction|keccak|to-dec) command cast "$@" ;;
+        *) echo "Unexpected cast subcommand: $1" >&2; return 90 ;;
     esac
 }
 sleep() { if [[ "${REAL_SLEEP:-0}" == 1 ]]; then command sleep "$1"; else SECONDS=$((SECONDS + $1)); fi; }
@@ -211,6 +212,278 @@ class NetworkFeeTests(unittest.TestCase):
     def decode(self, raw):
         value = json.loads(subprocess.check_output(['cast', 'decode-transaction', raw], text=True))
         return json.loads(value) if isinstance(value, str) else value
+
+    def test_burst_first_send_failure_does_not_wait_for_nonexistent_receipts(self):
+        script = r'''set -euo pipefail
+source "$LOADER"
+_now_ms() { echo 1; }
+cast() { if [[ "$1" == nonce ]]; then echo 7; else echo raw; fi; }
+timeout() { shift; "$@"; }
+load_burst_send() { return 1; }
+RECEIPT_POLLER_PID=$$
+load_worker 0 2 address key
+'''
+        env = {'PATH': os.environ['PATH'], 'TMPDIR': str(self.root), 'LOADER': str(E2E / 'run/network/load-testing.sh'),
+               'RUN_DIR': str(self.root), 'BURST': 'true', 'WINDOW': '2',
+               'READ_RPC': 'direct', 'SEND_RPC': 'front', 'SEND_TIMEOUT': '1',
+               'RECEIPT_TIMEOUT': '2', 'TARGET': TARGET, 'CALLDATA': '0x',
+               'VALUE': '0', 'GAS': '100000', 'GAS_PRICE': '100', 'CHAIN_ID': '1'}
+        result = subprocess.run(['bash', '-c', script], env=env,
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(',send_error,', (self.root / 'worker-0.csv').read_text())
+
+    def test_burst_polls_receipts_before_window_finishes_sending(self):
+        script = r'''set -euo pipefail
+source "$LOADER"
+_now_ms() { date +%s%3N; }
+cast() {
+    case "$1" in
+        nonce) echo 7 ;;
+        mktx) echo raw ;;
+        receipt) echo '{"status":"0x1"}' ;;
+    esac
+}
+timeout() { shift; "$@"; }
+load_burst_send() {
+    if [[ -f "$RUN_DIR/first-send" ]]; then
+        # The second send cannot complete unless the first receipt is polled.
+        for ((n=0; n<100; n++)); do
+            [[ -s "$RUN_DIR/worker-0.receipts.csv" ]] && break
+            sleep 0.02
+        done
+        [[ -s "$RUN_DIR/worker-0.receipts.csv" ]] || return 1
+    fi
+    touch "$RUN_DIR/first-send"
+    printf '0x%064d\n' 1
+}
+# Model the shared poller's queue/results protocol independently of sending.
+(
+    for ((n=0; n<200; n++)); do
+        if [[ -f "$RUN_DIR/worker-0.pending" ]]; then
+            awk -F, '{print $1","$2","$3","$4",success,1"}' "$RUN_DIR/worker-0.pending" >"$RUN_DIR/receipts.next"
+            mv "$RUN_DIR/receipts.next" "$RUN_DIR/worker-0.receipts.csv"
+            (( $(wc -l <"$RUN_DIR/worker-0.receipts.csv") < 2 )) || exit 0
+        fi
+        sleep 0.02
+    done
+    exit 1
+) &
+RECEIPT_POLLER_PID=$!
+load_worker 0 2 address key
+wait "$RECEIPT_POLLER_PID"
+'''
+        env = {'PATH': os.environ['PATH'], 'TMPDIR': str(self.root), 'LOADER': str(E2E / 'run/network/load-testing.sh'),
+               'RUN_DIR': str(self.root), 'BURST': 'true', 'WINDOW': '2',
+               'READ_RPC': 'direct', 'SEND_RPC': 'front', 'SEND_TIMEOUT': '1',
+               'RECEIPT_TIMEOUT': '2', 'TARGET': TARGET, 'CALLDATA': '0x',
+               'VALUE': '0', 'GAS': '100000', 'GAS_PRICE': '100', 'CHAIN_ID': '1'}
+        result = subprocess.run(['bash', '-c', script], env=env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = (self.root / 'worker-0.receipts.csv').read_text().splitlines()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row.split(',')[2] for row in rows}, {'7', '8'})
+        self.assertTrue(all(',success,' in row for row in rows))
+
+    def test_burst_shares_fees_across_wallets_without_lock_or_quote(self):
+        cache = str(self.root / 'burst-plan.json')
+        result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        key = '0x' + '02'.zfill(64)
+        raw = subprocess.check_output([
+            'cast', 'mktx', TARGET, '0x12345678', '--private-key', key,
+            '--chain', '906969', '--nonce', '12', '--gas-limit', '1000000',
+            '--gas-price', '100', '--priority-gas-price', '1', '--value', '17'], text=True).strip()
+        script = r'''set -euo pipefail
+source "$HELPER"
+source "$LOADER"
+cast() {
+    case "$1" in
+        balance) echo 999999999999999999 ;;
+        mktx|decode-transaction|keccak|to-dec) command cast "$@" ;;
+        *) echo "Unexpected cast subcommand: $1" >&2; return 90 ;;
+    esac
+}
+network_with_fee_lock() { echo 'unexpected lock' >&2; return 99; }
+network_send_quoted_trigger() {
+    echo retry >>"$RUN_DIR/retries"
+    [[ "$FAIL" == refreshed ]] || return 98
+    jq '.gas="300000" | .cap="10000" | .tip="8000"' "$RUN_DIR/burst-evidence.json" >"$5"
+    printf '0x%064d\n' 2
+}
+_load_publish_raw() {
+    echo attempt >>"$RUN_DIR/burst-attempts"
+    case "$FAIL" in
+        transport) echo 'connection timeout' >&2; return 124 ;;
+        underfunded|refreshed|once)
+            if [[ "$FAIL" == underfunded || "$FAIL" == refreshed || ! -f "$RUN_DIR/bump-refused" ]]; then
+                touch "$RUN_DIR/bump-refused"
+                echo '{"error":{"code":-32003,"data":{"code":"l1_tip_underfunded","message":"underfunded"}}}' >&2
+                return 1
+            fi ;;
+    esac
+    printf '%s\n' "$2" >"$RUN_DIR/burst-signed"
+    command cast keccak "$2"
+}
+load_burst_send "$RAW" "$KEY" "$RUN_DIR/burst-evidence.json"
+'''
+        env = {'PATH': os.environ['PATH'], 'TMPDIR': str(self.root), 'HELPER': str(E2E / 'lib/network-fees.sh'),
+               'LOADER': str(E2E / 'run/network/load-testing.sh'),
+               'RUN_DIR': str(self.root), 'READ_RPC': 'direct', 'SEND_RPC': 'front',
+               'RAW': raw, 'KEY': key, 'FAIL': ''}
+        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        signed = self.decode((self.root / 'burst-signed').read_text().strip())
+        self.assertEqual(signed['signer'], self.decode(raw)['signer'])
+        self.assertEqual(int(signed['nonce'], 16), 12)
+        self.assertEqual(int(signed['gas'], 16), 250000)
+        self.assertEqual(int(signed['maxFeePerGas'], 16), 5000)
+        evidence = json.loads((self.root / 'burst-evidence.json').read_text())
+        self.assertEqual(evidence['feeSource'], 'cached-load-test')
+        result = subprocess.run(['bash', '-c', script], env={**env, 'FAIL': 'once'},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bumped = self.decode((self.root / 'burst-signed').read_text().strip())
+        self.assertEqual(int(bumped['maxFeePerGas'], 16), 5900)
+        self.assertEqual(int(bumped['maxPriorityFeePerGas'], 16), 4720)
+        self.assertEqual(int(bumped['nonce'], 16), 12)
+        self.assertFalse((self.root / 'retries').exists())
+        # The next send reuses the accepted bump without another refusal.
+        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        retained = self.decode((self.root / 'burst-signed').read_text().strip())
+        self.assertEqual(int(retained['maxFeePerGas'], 16), 5900)
+        for failure, expected in [('transport', 124), ('underfunded', 98)]:
+            (self.root / 'burst-attempts').write_text('')
+            result = subprocess.run(['bash', '-c', script], env={**env, 'FAIL': failure},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected, result.stderr)
+            self.assertEqual((self.root / 'retries').exists(), failure == 'underfunded')
+            self.assertEqual(len((self.root / 'burst-attempts').read_text().splitlines()),
+                             4 if failure == 'underfunded' else 1)
+        result = subprocess.run(['bash', '-c', script], env={**env, 'FAIL': 'refreshed'},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        refreshed = self.decode((self.root / 'burst-signed').read_text().strip())
+        self.assertEqual(int(refreshed['gas'], 16), 300000)
+        self.assertEqual(int(refreshed['maxFeePerGas'], 16), 10000)
+        self.assertEqual(int(refreshed['maxPriorityFeePerGas'], 16), 8000)
+
+    def test_load_cache_reuses_fees_with_new_nonce_and_expired_quote(self):
+        cache = str(self.root / 'worker-cache.json')
+        result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cached = json.loads(Path(cache).read_text())
+        cached['expires'] = '1'
+        Path(cache).write_text(json.dumps(cached))
+        self.candidates = dict(self.candidates)
+        self.candidates['0x2'] = subprocess.check_output([
+            'cast', 'mktx', TARGET, '0x12345678', '--private-key', KEY,
+            '--chain', '906969', '--nonce', '8', '--gas-limit', '1000000',
+            '--gas-price', '100', '--priority-gas-price', '1', '--value', '17'], text=True).strip()
+        result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache,
+                                RPC_ERROR='1', RPC_ERROR_TEXT='connection reset')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('LOAD FEE FALLBACK', result.stderr)
+        tx = self.decode((self.root / 'submitted-raws').read_text().splitlines()[-1])
+        self.assertEqual(int(tx['nonce'], 16), 8)
+        self.assertEqual(int(tx['gas'], 16), 250000)
+        self.assertEqual(int(tx['maxFeePerGas'], 16), 5000)
+        evidence = json.loads((self.root / 'evidence.json').read_text())
+        self.assertEqual(evidence['feeSource'], 'cached-load-test')
+        self.assertEqual(evidence['quote']['nonce'], '0x7')
+        self.assertEqual(evidence['intent']['nonce'], '0x8')
+
+    def test_load_cache_never_overrides_terminal_quote_failures(self):
+        cache = str(self.root / 'worker-cache.json')
+        result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cached = Path(cache).read_text()
+        failures = [
+            dict(RPC_ERROR='1', RPC_ERROR_TEXT=rpc_error(-32004, 'quote_disabled', 'disabled')),
+            dict(RPC_ERROR='1', RPC_ERROR_TEXT='execution reverted'),
+            dict(quote_text='not json'),
+        ]
+        rejected = copy.deepcopy(self.quote)
+        rejected['options'][1] = {'type': '0x2', 'error': {'code': 'simulation_reverted', 'message': 'reverted'}}
+        failures.append(dict(quote_text=json.dumps(rejected)))
+        wrong_chain = copy.deepcopy(self.quote)
+        wrong_chain['chainId'] = '0x1'
+        failures.append(dict(quote_text=json.dumps(wrong_chain)))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache, **failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('LOAD FEE FALLBACK', result.stderr)
+                self.assertEqual(Path(cache).read_text(), cached)
+                self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 1)
+                self.assertEqual(len((self.root / 'signs').read_text().splitlines()), 1)
+
+    def test_wallet_offsets_reject_octal_and_overflow_before_setup(self):
+        # Validation must fail without touching real tools or loading local credentials,
+        # even if the guard being tested regresses.
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        for tool in ('cast', 'forge', 'curl', 'wget', 'anvil'):
+            stub = binaries / tool
+            stub.write_text('#!/bin/sh\nprintf blocked >> "$BLOCKED_CALLS"\nexit 97\n')
+            stub.chmod(0o755)
+        blocked = self.root / 'blocked-calls'
+        env = {'PATH': str(binaries) + os.pathsep + os.environ['PATH'],
+               'HOME': str(self.root), 'TMPDIR': str(self.root),
+               'DEVNET_ENV': str(self.root / 'missing.env'), 'BLOCKED_CALLS': str(blocked)}
+        for offset in ('010', '08', '00', '-1', '1000000000'):
+            for use_env in (False, True):
+                with self.subTest(offset=offset, env=use_env):
+                    args = ['bash', str(E2E / 'run/network/load-testing.sh')]
+                    settings = {**env, 'WALLET_OFFSET': offset if use_env else '0'}
+                    if not use_env:
+                        args += ['--wallet-offset', offset]
+                    result = subprocess.run(args + ['counter'], env=settings,
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('no leading zeros', result.stdout)
+                    self.assertFalse(blocked.exists())
+        # Bypass validation with a valid offset: the isolation guard still stops setup.
+        result = subprocess.run(['bash', str(E2E / 'run/network/load-testing.sh'),
+                                 '--wallet-offset', '0', 'counter'], env=env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing environment file:', result.stdout + result.stderr)
+        self.assertFalse(blocked.exists())
+
+    def test_fee_mock_rejects_unexpected_cast_subcommands(self):
+        for subcommand in ('publish', 'send', 'call', 'nonce'):
+            with self.subTest(subcommand=subcommand):
+                result = subprocess.run(['bash', '-c', MOCK + '\ncast "$1"', 'test', subcommand],
+                                        env={'PATH': os.environ['PATH'], 'TEST_ROOT': str(self.root)},
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 90)
+                self.assertIn('Unexpected cast subcommand:', result.stderr)
+
+    def test_load_cache_requires_first_quote_and_checks_balance_and_send(self):
+        cache = str(self.root / 'worker-cache.json')
+        errors = dict(RPC_ERROR='1', RPC_ERROR_TEXT='connection reset', EEZ_LOAD_FEE_CACHE=cache)
+        result = self.run_quote(send=True, **errors)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'sends').exists())
+        result = self.run_quote(send=True, EEZ_LOAD_FEE_CACHE=cache)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_quote(send=True, BALANCE='1', **errors)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 1)
+        result = self.run_quote(send=True, SEND_ERROR='1', **errors)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 2)
+        cached = json.loads(Path(cache).read_text())
+        cached['transaction']['to'] = '0x' + '22' * 20
+        Path(cache).write_text(json.dumps(cached))
+        result = self.run_quote(send=True, **errors)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len((self.root / 'sends').read_text().splitlines()), 2)
 
     def test_prechecked_endpoints_are_read_once_for_multiple_triggers(self):
         result = self.run_quote(send=True, PRECHECK="1", REPEAT_SENDS="3", EEZ_FRESH_SEND="1")

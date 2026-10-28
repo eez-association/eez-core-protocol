@@ -93,7 +93,21 @@ Keep quote/sign/send together and save the quote. Only cross-chain trigger
 transactions on L1 and L2 use `eez_quoteFee`. Deployments, funding transfers and
 other ordinary transactions keep their existing node fee path.
 
-A valid composer quote is required before signing or submitting a cross-chain
+The load-test runner has an explicit cached-fee exception described in
+[the load-test guide](README.md): after a valid worker quote, it may
+reuse fee numbers when transient retries for a later quote are exhausted.
+Explicit rejections and malformed quotes remain terminal. Such sends are labeled
+`cached-load-test` and do not carry a valid quote for their new nonce.
+
+With `--burst`, the load runner instead shares one initial quote's gas/fee
+numbers across wallets for the same call template, optionally multiplying fee
+prices. Burst sends bypass the per-chain lock and are marked `cached-load-test`;
+definite underfunded refusals allow up to three successive 1.18× fee bumps
+(rounded up), preserving the nonce. Underfunding after the third bump enters
+the normal fresh-quote retry path. Workers retain successfully accepted
+gas/fee values for subsequent sends, including refreshed quote values. Uncertain sends are never repriced or resent.
+
+For all other paths, a valid composer quote is required before signing or submitting a cross-chain
 trigger. Recognized transport failures (including timeouts, connection errors and
 HTTP 5xx) retry the same quote request within `EEZ_QUOTE_TIMEOUT` (default 120
 seconds). Each RPC attempt is capped at 30 seconds or the remaining deadline,
