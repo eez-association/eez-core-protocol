@@ -46,8 +46,8 @@ jobs:
       - name: Size guard for deployable contracts (EIP-170)
         run: |
           forge build --sizes --json > sizes.json || true
-          jq '{EEZ, EEZL2, CrossChainProxy, Rollup, ECDSAProofSystem} | map_values({runtime_size, runtime_margin})' sizes.json
-          jq -e '[.EEZ, .EEZL2, .CrossChainProxy, .Rollup, .ECDSAProofSystem] | all(.runtime_margin >= 0)' sizes.json > /dev/null \
+          jq '{EEZ, EEZL2, CrossChainProxy, Rollup, ECDSAProofSystem, Bridge} | map_values({runtime_size, runtime_margin})' sizes.json
+          jq -e '[.EEZ, .EEZL2, .CrossChainProxy, .Rollup, .ECDSAProofSystem, .Bridge] | all(.runtime_margin >= 0)' sizes.json > /dev/null \
             || { echo "::error::a deployable contract exceeds the EIP-170 runtime size limit"; exit 1; }
       - name: Unit + integration tests
         run: forge test -vvv

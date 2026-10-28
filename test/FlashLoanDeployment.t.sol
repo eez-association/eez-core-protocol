@@ -46,8 +46,8 @@ contract FlashLoanDeploymentTest is Test {
         Bridge l1 = Bridge(vm.envAddress("BRIDGE_L1"));
         Bridge l2 = Bridge(vm.envAddress("BRIDGE_L2"));
         assertNotEq(address(l1), address(l2));
-        assertEq(address(l1.manager()), managerL1);
-        assertEq(address(l2.manager()), managerL2);
+        assertEq(address(l1.EEZContract()), managerL1);
+        assertEq(address(l2.EEZContract()), managerL2);
         assertEq(l1.rollupId(), 0);
         assertEq(l2.rollupId(), 3);
         assertEq(l1.canonicalBridgeAddress(), address(l2));

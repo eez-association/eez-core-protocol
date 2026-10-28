@@ -54,7 +54,64 @@ forge script deployment/Deploy.s.sol:RegisterRollup \
 
 For multiple proof systems, use parallel arrays: `"[$PS1,$PS2]"`, `"[$VK1,$VK2]"`.
 `RollupDeployment.sol` is a Solidity helper for tests/devnets, not a CLI script.
-Optional test bridges: [DeployBridge.s.sol](../script/DeployBridge.s.sol).
+[DeployBridge.s.sol](../script/DeployBridge.s.sol) now CREATE2-deploys the implementation
+and transparent proxy, setting its bridge admin atomically during construction.
+`ConfigureBridge` then sets EEZ, counterpart and rollup ID once, as that admin.
+
+The bridge admin is always the broadcasting wallet. Select the same wallet for
+address prediction and deployment; there is no separate deployer/admin argument.
+Prediction does not send transactions:
+
+```bash
+forge script script/DeployBridge.s.sol:BridgeComputeAddress --offline \
+  --account deployer --sig 'run(bytes32,bytes32,address)' \
+  "$IMPLEMENTATION_SALT" "$PROXY_SALT" "$UPGRADE_OWNER"
+```
+
+### Bridge Bash runner
+
+Build the artifacts first, then use the Bash/cast runner. It uses `jq` for JSON;
+it does not execute Python or Solidity deployment scripts.
+
+```bash
+forge build
+bash deployment/deploy-bridge.sh chain.envtestnet              # read-only plan
+bash deployment/deploy-bridge.sh chain.envtestnet --broadcast  # deploy + configure
+```
+
+With no filename, the runner loads `chain.env`. It reads `PK`/`SOURCE_PK` and RPC
+endpoints there, discovers EEZ addresses and the L2 rollup ID from the composer
+and contracts, and reads the owner of each EEZ proxy's ProxyAdmin. Those owners
+become the corresponding bridge upgrade owners; the signer becomes bridge admin.
+Existing env address hints are superseded by verified composer discovery.
+
+Defaults: salt prefix `eez.bridge` (hashed with `.implementation.v1` and
+`.proxy.v1`), receipt wait 120 seconds, run directory
+`tmp/bridge-deploy/<env filename>`. Override with `--salt-prefix`, `--wait` or
+`--run-dir`. `--upgrade-owner ADDRESS` optionally asserts that both discovered
+owners equal that address. `--help` lists the options.
+
+New transactions use EIP-1559: the node's priority fee and gas estimate are left
+unchanged. `maxFeePerGas` is `(baseFee + priorityFee) + 10%`, rounded up to whole
+wei, capped by `MAX_FEE_GWEI` (default 200). Saved EIP-1559 transactions must also
+fit the current cap; saved legacy transactions are not automatically replaced.
+Arachnid's fixed, pre-signed factory-bootstrap transaction remains unchanged.
+
+The runner bootstraps missing Arachnid factories, deploys both implementations,
+then both proxies, and calls the admin-only configuration once per bridge.
+Equal proxy addresses use a zero counterpart; otherwise it links the two proxies.
+It saves signed transactions before sending and verifies receipt contents,
+canonical inclusion, implementation/proxy bytecode and final configuration.
+Keep the private run directory when rerunning: completed deployments are reused,
+and pending submissions use the same signed transaction instead of a fresh nonce.
+`result.json` records the final public addresses and configuration. No private key
+is printed or saved in the journal. Bridge cross-chain transfers and explorer
+source verification are separate checks.
+
+For explorer verification, use `script/tools/verify-from-txs.sh` with each chain's
+implementation and proxy deployment transaction hashes. Supply its Blockscout
+backend with `-e`; `-n` identifies contracts without submitting verification.
+Its `-m` Etherscan mode applies only to Ethereum mainnet.
 
 ## Upgrades
 

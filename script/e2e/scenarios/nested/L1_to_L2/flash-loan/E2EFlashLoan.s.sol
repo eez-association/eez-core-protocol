@@ -18,6 +18,7 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../../src/interfaces/IEEZL2.sol";
+import {InitializedBridge} from "../../../../../DeployInitializedBridge.s.sol";
 import {Bridge} from "../../../../../../src/periphery/Bridge.sol";
 import {WrappedToken} from "../../../../../../src/periphery/WrappedToken.sol";
 import {FlashLoan} from "../../../../../../src/periphery/defiMock/FlashLoan.sol";
@@ -333,8 +334,7 @@ contract Deploy is Script {
 
         // Read the broadcast wallet even when PrepareJob calls this script.
         (, address admin,) = vm.readCallers();
-        Bridge bridge = new Bridge();
-        bridge.initialize(rollupsAddr, MAINNET_ROLLUP_ID, admin);
+        Bridge bridge = new InitializedBridge(rollupsAddr, MAINNET_ROLLUP_ID, admin);
 
         output("TOKEN", address(token));
         output("BRIDGE_L1", address(bridge));
@@ -352,9 +352,8 @@ contract DeployL2 is Script, FlashLoanActions {
 
         vm.startBroadcast();
         (, address admin,) = vm.readCallers();
-        Bridge deployedBridge = new Bridge();
-        deployedBridge.initialize(managerAddr, _e2eRollupId(), admin);
-        deployedBridge.setCanonicalBridgeAddress(bridgeL1);
+        Bridge deployedBridge = new InitializedBridge(managerAddr, _e2eRollupId(), admin);
+        InitializedBridge(address(deployedBridge)).setCanonicalBridgeAddress(bridgeL1);
         address bridge = address(deployedBridge);
 
         // Config args unused on the L2 side — claimAndBridgeBack takes everything as parameters.
@@ -397,7 +396,7 @@ contract Deploy2 is Script, FlashLoanActions {
         address nftAddr = vm.envAddress("FLASH_LOANERS_NFT");
 
         vm.startBroadcast();
-        Bridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
+        InitializedBridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
         FlashLoan pool = new FlashLoan();
         IERC20(tokenAddr).transfer(address(pool), AMOUNT);
 

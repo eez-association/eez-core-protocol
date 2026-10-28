@@ -110,7 +110,7 @@ contract EEZBridgeTest is Test {
         vm.expectRevert(EEZBridge.InvalidManager.selector);
         new EEZBridge(address(0x123), 1, address(this));
         vm.expectRevert(Bridge.AlreadyInitialized.selector);
-        bridge.initialize(address(manager), 1, alice);
+        bridge.initialize(alice);
     }
 
     function testFuzz_remoteTransferConservesBridgeSupply(uint96 requested) public {

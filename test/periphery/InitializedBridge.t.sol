@@ -10,11 +10,11 @@ contract InitializedBridgeTest is Test {
         address manager = makeAddr("manager");
         address admin = makeAddr("admin");
         Bridge bridge = new InitializedBridge(manager, 1, admin);
-        assertEq(address(bridge.manager()), manager);
+        assertEq(address(bridge.EEZContract()), manager);
         assertEq(bridge.rollupId(), 1);
         assertEq(bridge.admin(), admin);
         vm.expectRevert(Bridge.AlreadyInitialized.selector);
-        bridge.initialize(manager, 1, address(this));
+        bridge.initialize(address(this));
     }
 
     function test_invalidConfigurationRevertsCreation() public {
