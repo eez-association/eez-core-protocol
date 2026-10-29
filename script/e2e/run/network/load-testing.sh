@@ -1,5 +1,80 @@
 #!/usr/bin/env bash
 # Worker and progress helpers. Sourcing this file only defines functions.
+_load_publish_raw() { timeout "$SEND_TIMEOUT" cast publish "$2" --async --rpc-url "$1"; }
+load_prepare_burst_quote() {
+    network_fee_quote "$burst_tx" "$SEND_RPC" "$READ_RPC" "$CHAIN_ID" \
+        "$((SECONDS + ${EEZ_QUOTE_TIMEOUT:-120}))" "$RUN_DIR/burst-quote.json" \
+        >"$RUN_DIR/burst-plan.json"
+}
+
+# Burst fees are estimates shared across wallets, not quotes for their intents.
+load_burst_send() {
+    local raw="$1" key="$2" evidence="$3" tx plan balance result rc=0 kind cache source_plan
+    tx=$(cast decode-transaction "$raw" | jq 'if type=="string" then fromjson else . end') || return 1
+    cache="$RUN_DIR/burst-fees-$(jq -r .signer <<<"$tx").json"
+    source_plan="$RUN_DIR/burst-plan.json"
+    [[ ! -s "$cache" ]] || source_plan="$cache"
+    plan=$(jq -ce --argjson tx "$tx" '
+        def template: {type,chainId,to,value,input,accessList:(.accessList // [])};
+        select((.transaction | template) == ($tx | template)) |
+        . + {feeSource:"cached-load-test",mode:"burst",transaction:$tx,
+        intent:($tx | {from:.signer,to:.to,data:.input,value:.value,nonce:.nonce})}
+        ' "$source_plan") || return 1
+    plan=$(jq --arg nonce "$(cast to-dec "$(jq -r .nonce <<<"$tx")")" '.nonce=$nonce' <<<"$plan") || return 1
+    balance=$(cast balance --rpc-url "$READ_RPC" "$(jq -r .signer <<<"$tx")") || return 1
+    local attempt attempt_evidence cap tip
+    for attempt in 0 1 2 3; do
+        attempt_evidence="$evidence"
+        (( attempt == 0 )) || attempt_evidence="${evidence%.json}.bump-$attempt.json"
+        plan=$(network_sign_quote "$plan" "$key" "$balance") || return 1
+        rc=0
+        result=$(network_submit_quote "$plan" "$SEND_RPC" "$attempt_evidence" _load_publish_raw : 2>&1) || rc=$?
+        if (( rc == 0 )); then
+            [[ "$result" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+            load_burst_save_fees "$plan" "$cache"
+            printf '%s\n' "$result"
+            return 0
+        fi
+        printf '%s\n' "$result" >&2
+        # Only definite underfunding allows a newly signed candidate at this nonce.
+        [[ "$rc" == 1 || "$rc" == 2 ]] || return "$rc"
+        kind=$(_network_submission_rejection_kind "$result") || return "$rc"
+        case "$kind" in
+            l1_tip_underfunded|l2_tip_underfunded) ;;
+            *) return "$rc" ;;
+        esac
+        printf '%s\n' "$result" >"${attempt_evidence%.json}.burst-rejection.log" || return 70
+        if (( attempt < 3 )); then
+            # Round each 18% increase up, preserving wei precision.
+            cap=$(BC_LINE_LENGTH=0 bc <<<"($(jq -r .cap <<<"$plan") * 118 + 99) / 100") || return 1
+            tip=$(BC_LINE_LENGTH=0 bc <<<"($(jq -r .tip <<<"$plan") * 118 + 99) / 100") || return 1
+            plan=$(jq --arg cap "$cap" --arg tip "$tip" \
+                'del(.raw,.signedHash) | .cap=$cap | .tip=$tip' <<<"$plan") || return 1
+            echo "Burst underfunded: retrying the same nonce with 1.18x fees (bump $((attempt + 1))/3)" >&2
+        fi
+    done
+    result=$(EEZ_LOAD_FEE_CACHE='' EEZ_FRESH_SEND=1 network_send_quoted_trigger \
+        "$raw" "$key" "$SEND_RPC" "$READ_RPC" "${evidence%.json}.retry.json" _load_publish_raw) || return $?
+    [[ "$result" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+    # The retry evidence contains the final accepted quote's gas/fee values.
+    if plan=$(jq -s '.[0] + .[1]' <(printf '%s\n' "$plan") "${evidence%.json}.retry.json"); then
+        load_burst_save_fees "$plan" "$cache"
+    else
+        echo 'Could not retain refreshed burst fees; transaction was submitted' >&2
+    fi
+    printf '%s\n' "$result"
+}
+
+load_burst_save_fees() {
+    # One sender owns each cache. Never hide an accepted hash if caching fails.
+    if jq 'del(.raw,.signedHash)' <<<"$1" >"$2.next" && mv "$2.next" "$2"; then
+        return 0
+    fi
+    echo 'Could not retain burst fees; transaction was submitted' >&2
+    return 0
+}
+
+
 load_worker() (
     set -euo pipefail
     local worker="$1" count="$2" address="$3" key="$4"
@@ -14,8 +89,7 @@ load_worker() (
         hashes=(); starts=(); nonces=(); indexes=()
         for ((j=0; j<WINDOW && i<count; j++, i++)); do
             start=$(_now_ms)
-            # Explicit fees/chain ID make signing offline. Legacy transactions match
-            # the devnet's gas-price model and avoid fee-estimation RPCs per trigger.
+            # Build an offline legacy candidate for quoted or shared burst fees.
             sign_rc=0
             raw=$(timeout "$SEND_TIMEOUT" cast mktx "$TARGET" "$CALLDATA" --legacy \
                 --value "${VALUE}wei" --gas-limit "$GAS" --gas-price "$GAS_PRICE" \
@@ -29,7 +103,12 @@ load_worker() (
             # Never advance past an uncertain send: doing so could leave a nonce gap.
             # stderr is retained in worker-N.log by the worker launcher.
             send_rc=0
-            hash=$(timeout "$SEND_TIMEOUT" cast publish "$raw" --async --rpc-url "$SEND_RPC") || send_rc=$?
+            if [[ "${BURST:-false}" == true ]]; then
+                hash=$(load_burst_send "$raw" "$key" "$RUN_DIR/fee-quote-$worker-$i.json") || send_rc=$?
+            else
+                hash=$(EEZ_LOAD_FEE_CACHE="$RUN_DIR/worker-$worker.fee-cache.json" EEZ_FRESH_SEND=1 network_send_quoted_trigger "$raw" "$key" "$SEND_RPC" "$READ_RPC" \
+                    "$RUN_DIR/fee-quote-$worker-$i.json" _load_publish_raw) || send_rc=$?
+            fi
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 printf 'send_error: worker=%s index=%s nonce=%s exit_code=%s timeout_limit=%ss\n' "$worker" "$i" "$nonce" "$send_rc" "$SEND_TIMEOUT" >&2
                 if (( send_rc == 124 )); then
@@ -43,25 +122,43 @@ load_worker() (
             fi
             echo "$hash" >>"$RUN_DIR/worker-$worker.txs"
             hashes+=("$hash"); starts+=("$start"); nonces+=("$nonce"); indexes+=("$i")
+            if [[ "${BURST:-false}" == true ]]; then
+                printf '%s,%s,%s,%s,%s,%s\n' "$worker" "$i" "$nonce" "$hash" "$start" "$(_now_ms)" \
+                    >>"$RUN_DIR/worker-$worker.pending"
+            fi
             nonce=$((nonce+1)); sent=$((sent+1))
         done
         # Bound a whole window's wait. Every accepted hash gets a result even on failure.
-        deadline=$((SECONDS + RECEIPT_TIMEOUT))
-        for ((j=0; j<${#hashes[@]}; j++)); do
-            status=timeout
-            while (( SECONDS < deadline )); do
-                if receipt=$(timeout "$SEND_TIMEOUT" cast receipt "${hashes[$j]}" --async --json --rpc-url "$READ_RPC" 2>/dev/null); then
-                    case "$(jq -r '.status' <<<"$receipt" 2>/dev/null)" in
-                        0x1|1) status=success; break ;;
-                        0x0|0) status=reverted; break ;;
-                    esac
+        if [[ "${BURST:-false}" == true ]]; then
+            while (( sent > 0 )) && { [[ ! -f "$RUN_DIR/worker-$worker.receipts.csv" ]] ||
+                (( $(wc -l <"$RUN_DIR/worker-$worker.receipts.csv") < sent )); }; do
+                if [[ -e "$RUN_DIR/receipts.failed" ]] || ! kill -0 "$RECEIPT_POLLER_PID" 2>/dev/null; then
+                    echo 'Shared receipt poller failed; see receipts.log' >&2
+                    return 1
                 fi
                 sleep 1
             done
-            now=$(_now_ms)
-            echo "$worker,${indexes[$j]},${nonces[$j]},${hashes[$j]},$status,$((now - starts[j]))" >>"$file"
-            [[ "$status" == success ]] || failed=1
-        done
+            if (( sent > 0 )) && awk -F, '$5 != "success" { bad=1 } END { exit !bad }' "$RUN_DIR/worker-$worker.receipts.csv"; then
+                failed=1
+            fi
+        else
+            deadline=$((SECONDS + RECEIPT_TIMEOUT))
+            for ((j=0; j<${#hashes[@]}; j++)); do
+                status=timeout
+                while (( SECONDS < deadline )); do
+                    if receipt=$(timeout "$SEND_TIMEOUT" cast receipt "${hashes[$j]}" --async --json --rpc-url "$READ_RPC" 2>/dev/null); then
+                        case "$(jq -r '.status' <<<"$receipt" 2>/dev/null)" in
+                            0x1|1) status=success; break ;;
+                            0x0|0) status=reverted; break ;;
+                        esac
+                    fi
+                    sleep 1
+                done
+                now=$(_now_ms)
+                echo "$worker,${indexes[$j]},${nonces[$j]},${hashes[$j]},$status,$((now - starts[j]))" >>"$file"
+                [[ "$status" == success ]] || failed=1
+            done
+        fi
         echo "worker $worker: sent $sent/$count"
         (( failed == 0 )) || break
     done
@@ -123,17 +220,22 @@ Usage: bash script/e2e/run/network/load-testing.sh [options] <scenario>
                     (mutually exclusive with --txs)
   --workers N       Concurrent sender wallets (default 20)
   --window N        Pending transactions per wallet (default 10)
-  --fund ETH        Worker balance target on each chain (default 0.001)
-  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0005)
+  --burst           Share initial gas/fees and submit wallets concurrently
+  --fee-multiplier N Integer burst fee multiplier (default 1; requires --burst)
+  --fund ETH        Worker balance target on each chain (default 0.003)
+  --floor ETH       Top up only below this balance (default FUND_ETH / 2 = 0.0015)
   --direct          Fund directly from SOURCE_PK
   --fresh           Create new wallets instead of reusing the existing pool
+  --wallet-offset N First wallet-pool line to use (default 0); give concurrent
+                    runs disjoint ranges (not with --fresh)
   --gas N           Override trigger gas limit
   --help            Show this help
-Env: DEVNET_ENV=chain.env, FUND_ETH, FLOOR_ETH, SOURCE_PK,
+Env: DEVNET_ENV=chain.env, FUND_ETH, FLOOR_ETH, SOURCE_PK, WALLET_OFFSET=0,
      RECEIPT_TIMEOUT=420, SEND_TIMEOUT=30.
 Examples:
   bash script/e2e/run/network/load-testing.sh --workers 20 --txs-per-wallet 500 counter
   bash script/e2e/run/network/load-testing.sh --workers 50 --txs-per-wallet 100 nestedCounter
+  bash script/e2e/run/network/load-testing.sh --wallet-offset 20 --workers 10 --txs 200 counter
 Deploys once; repeats the scenario's ExecuteNetwork(L2) transaction shape.
 Counts transactions, ignoring the scenario's NUM_TXS repetition hint.
 Only receipts are checked; this is not full cross-chain settlement verification.
@@ -143,7 +245,8 @@ EOF
 TXS=1000 WORKERS=20 WINDOW=10 DIRECT=false FRESH=false
 TXS_PER_WALLET=""
 TOTAL_EXPLICIT=false
-FUND_ETH="${FUND_ETH:-0.001}"
+BURST=false FEE_MULTIPLIER=1
+FUND_ETH="${FUND_ETH:-0.003}"
 GAS_OVERRIDE=""
 TARGET_SCENARIO=""
 while (( $# )); do
@@ -151,7 +254,10 @@ while (( $# )); do
         --help|-h) usage; exit 0 ;;
         --txs) TXS="${2:?--txs needs a count}"; TOTAL_EXPLICIT=true; shift 2 ;;
         --txs-per-wallet) TXS_PER_WALLET="${2:?--txs-per-wallet needs a count}"; shift 2 ;;
+        --burst) BURST=true; shift ;;
+        --fee-multiplier) FEE_MULTIPLIER="${2:?--fee-multiplier needs an integer}"; shift 2 ;;
         --fresh) FRESH=true; shift ;;
+        --wallet-offset) WALLET_OFFSET="${2:?--wallet-offset needs a line index}"; shift 2 ;;
         --workers) WORKERS="${2:?--workers needs a count}"; shift 2 ;;
         --window) WINDOW="${2:?--window needs a count}"; shift 2 ;;
         --fund) FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
@@ -166,9 +272,10 @@ done
 [[ -n "$TARGET_SCENARIO" ]] || { usage; exit 1; }
 RECEIPT_TIMEOUT="${RECEIPT_TIMEOUT:-420}"
 SEND_TIMEOUT="${SEND_TIMEOUT:-30}"
-for name in TXS WORKERS WINDOW RECEIPT_TIMEOUT SEND_TIMEOUT; do
+for name in TXS WORKERS WINDOW RECEIPT_TIMEOUT SEND_TIMEOUT FEE_MULTIPLIER; do
     [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || { echo "$name must be a positive integer"; exit 1; }
 done
+[[ "$BURST" == true || "$FEE_MULTIPLIER" == 1 ]] || { echo "--fee-multiplier requires --burst"; exit 1; }
 if [[ -n "$TXS_PER_WALLET" ]]; then
     $TOTAL_EXPLICIT && { echo "Choose --txs or --txs-per-wallet, not both"; exit 1; }
     [[ "$TXS_PER_WALLET" =~ ^[1-9][0-9]*$ ]] || { echo "--txs-per-wallet must be a positive integer"; exit 1; }
@@ -177,11 +284,14 @@ if [[ -n "$TXS_PER_WALLET" ]]; then
     TXS=$((WORKERS * TXS_PER_WALLET))
 fi
 [[ -z "$GAS_OVERRIDE" || "$GAS_OVERRIDE" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid --gas"; exit 1; }
+WALLET_OFFSET="${WALLET_OFFSET:-0}"
+[[ "$WALLET_OFFSET" =~ ^(0|[1-9][0-9]*)$ && ${#WALLET_OFFSET} -le 9 ]] || { echo "--wallet-offset must be at most 9 decimal digits with no leading zeros"; exit 1; }
+! $FRESH || (( WALLET_OFFSET == 0 )) || { echo "Choose --fresh or --wallet-offset, not both"; exit 1; }
 [[ "$TARGET_SCENARIO" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Expected one scenario name"; exit 1; }
 mapfile -t MATCHES < <(find script/e2e/scenarios -path "*/$TARGET_SCENARIO/E2E*.s.sol" -not -path '*/shared/*' | sort)
 (( ${#MATCHES[@]} == 1 )) || { echo "Expected exactly one scenario matching $TARGET_SCENARIO"; exit 1; }
 SOL="${MATCHES[0]}"
-for tool in forge cast jq bc flock timeout; do
+for tool in forge cast jq bc flock timeout python3; do
     command -v "$tool" >/dev/null || { echo "Missing dependency: $tool"; exit 1; }
 done
 source "$SCRIPT_DIR/../../lib/network-config.sh"
@@ -192,7 +302,6 @@ for name in L1_RPC L2_RPC ROLLUPS MANAGER_L2; do
     [[ -n "${!name:-}" ]] || { echo "Missing $name"; exit 1; }
 done
 export L1_RPC L2_RPC ROLLUPS MANAGER_L2
-export L2_ROLLUP_ID="${L2_ROLLUP_ID:-1}"
 SOURCE_PK="${SOURCE_PK:-0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a}"
 (( WORKERS <= TXS )) || WORKERS=$TXS
 # Reuse the same sender pool and funding helper as the existing orchestrators.
@@ -213,7 +322,7 @@ load_exit() {
     cleanup
 }
 trap load_exit EXIT
-load_phase "Building contracts" "$RUN_DIR/build.log" forge build
+# No full forge build: the deploy and trigger forge scripts compile only what the scenario imports.
 load_phase "Funding $WORKERS wallets" "$RUN_DIR/funding.log" fund_workers
 export PK="${WALLET_PKS[0]}"
 export E2E_JOB_DIR="$RUN_DIR"
@@ -235,13 +344,36 @@ GAS="${GAS_OVERRIDE:-${GAS:-${E2E_TRIGGER_GAS:-1000000}}}"
    "$CALLDATA" =~ ^0x([0-9a-fA-F]{2})*$ && "$GAS" =~ ^[1-9][0-9]*$ ]] || {
     echo "Invalid trigger template; see $RUN_DIR/trigger.log"; exit 1;
 }
-# Resolve fees once on the ordinary RPC; front endpoints only receive signed triggers.
-CHAIN_ID=$(cast chain-id --rpc-url "$READ_RPC")
+# Ordinary fees build offline candidates. Burst mode shares one initial quote.
+network_fee_cache_pair "$SEND_RPC" "$READ_RPC" "" CHAIN_ID || exit 1
 GAS_PRICE=$(cast gas-price --rpc-url "$READ_RPC")
-declare -p TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"
+if $BURST; then
+    burst_nonce=$(cast nonce "${WALLET_ADDRS[0]}" --block pending --rpc-url "$READ_RPC")
+    burst_front_nonce=$(cast nonce "${WALLET_ADDRS[0]}" --block pending --rpc-url "$SEND_RPC")
+    (( burst_front_nonce <= burst_nonce )) || burst_nonce=$burst_front_nonce
+    burst_raw=$(cast mktx "$TARGET" "$CALLDATA" --legacy --value "${VALUE}wei" \
+        --gas-limit "$GAS" --gas-price "$GAS_PRICE" --chain-id "$CHAIN_ID" \
+        --nonce "$burst_nonce" --private-key "${WALLET_PKS[0]}")
+    burst_tx=$(cast decode-transaction "$burst_raw" | jq 'if type=="string" then fromjson else . end')
+    load_phase "Quoting burst fees" "$RUN_DIR/burst-quote.log" network_with_fee_lock "$CHAIN_ID" \
+        load_prepare_burst_quote
+    burst_plan=$(cat "$RUN_DIR/burst-plan.json")
+    burst_cap=$(BC_LINE_LENGTH=0 bc <<<"$(jq -r .cap <<<"$burst_plan") * $FEE_MULTIPLIER")
+    burst_tip=$(BC_LINE_LENGTH=0 bc <<<"$(jq -r .tip <<<"$burst_plan") * $FEE_MULTIPLIER")
+    jq --arg cap "$burst_cap" --arg tip "$burst_tip" '.cap=$cap | .tip=$tip' \
+        <<<"$burst_plan" >"$RUN_DIR/burst-plan.json"
+    echo "Burst mode: shared gas/fees, fee multiplier $FEE_MULTIPLIER; concurrent wallet submission"
+fi
+declare -p BURST FEE_MULTIPLIER TARGET_SCENARIO TXS TXS_PER_WALLET WORKERS WINDOW TARGET VALUE CALLDATA GAS CHAIN_ID GAS_PRICE >"$RUN_DIR/config.env"
 echo "Sending $TXS transactions to $TARGET ($TRIGGER_CONTRACT), $WORKERS wallets, window $WINDOW"
 LOAD_PHASE_LOG="$RUN_DIR"
 START=$SECONDS
+if $BURST; then
+    python3 "$SCRIPT_DIR/../../lib/load-receipts.py" --run-dir "$RUN_DIR" --rpc "$READ_RPC" \
+        --receipt-timeout "$RECEIPT_TIMEOUT" --request-timeout "$SEND_TIMEOUT" >"$RUN_DIR/receipts.log" 2>&1 &
+    RECEIPT_POLLER_PID=$!
+    _E2E_PIDS+=("$RECEIPT_POLLER_PID")
+fi
 PIDS=()
 for ((i=0; i<WORKERS; i++)); do
     count=$(( TXS / WORKERS + (i < TXS % WORKERS) ))
@@ -259,6 +391,10 @@ PROGRESS_PID=$!
 _E2E_PIDS+=("$PROGRESS_PID")
 RC=0
 for pid in "${PIDS[@]}"; do wait "$pid" || RC=1; done
+if $BURST; then
+    touch "$RUN_DIR/receipts.stop"
+    wait "$RECEIPT_POLLER_PID" || RC=1
+fi
 kill "$PROGRESS_PID" 2>/dev/null || true
 wait "$PROGRESS_PID" 2>/dev/null || true
 _E2E_PIDS=()

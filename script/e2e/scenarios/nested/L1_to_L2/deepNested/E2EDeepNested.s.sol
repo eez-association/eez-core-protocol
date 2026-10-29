@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -60,14 +62,13 @@ import {
 //               L1 CAP.counter == 1, CAP.targetCounter == 1.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract DeepNestedActions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
     function _l1Steps(address counterL2, address capL1, address ncL2)
         internal
-        pure
+        view
         returns (HashStep[][] memory steps)
     {
         steps = new HashStep[][](1);
@@ -91,26 +92,26 @@ abstract contract DeepNestedActions {
     }
 
     /// Outer/trigger hash (proxyEntryHash on BOTH sides): alice on L1 calls NC on L2.
-    function _outerHash(address ncL2, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, ncL2, L2_ROLLUP_ID, 0, _callNestedData());
+    function _outerHash(address ncL2, address alice) internal view returns (bytes32) {
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, ncL2, e2eRollupId(), 0, _callNestedData());
     }
 
     /// L1 top-level call hash: NC's reentrant CAP.incrementProxy() executes ON L1
     /// (target rollup = MAINNET; source = NC @ L2).
-    function _l1TopCallHash(address capL1, address ncL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, ncL2, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _l1TopCallHash(address capL1, address ncL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, ncL2, e2eRollupId(), capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// Inner L1→L2 reentry: CAP (on L1) calls CounterL2 via its L1-side proxy — keyed with
     /// the plain hash. The same preimage is the CALL_BEGIN fold of the L2 frame's sub-call.
-    function _innerHash(address counterL2, address capL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, capL1, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _innerHash(address counterL2, address capL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, capL1, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementData());
     }
 
     /// L2 nested (outgoing) key: NC (on L2) calls CAP on MAINNET — the call LEAVES the L2, so
     /// it keys with the L2-outgoing hash (callGas=0; devnet deploys EEZL2 with useGasLeft=false).
-    function _l2OutgoingHash(address capL1, address ncL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(ncL2, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _l2OutgoingHash(address capL1, address ncL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(ncL2, e2eRollupId(), capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     function _l1Entries(
@@ -120,12 +121,12 @@ abstract contract DeepNestedActions {
         address alice
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-deep-nested"),
             etherDelta: 0
@@ -140,7 +141,7 @@ abstract contract DeepNestedActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: ncL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: capL1,
             value: 0,
             data: _incrementProxyData()
@@ -168,7 +169,7 @@ abstract contract DeepNestedActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -184,7 +185,7 @@ abstract contract DeepNestedActions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 proxyEntryHash = _outerHash(ncL2, alice);
@@ -274,7 +275,7 @@ contract Deploy is Script {
         address counterL2Addr = vm.envAddress("COUNTER_L2");
 
         vm.startBroadcast();
-        address counterL2ProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, L2_ROLLUP_ID);
+        address counterL2ProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, e2eRollupId());
         CounterAndProxy cap = new CounterAndProxy(Counter(counterL2ProxyL1));
         output("COUNTER_L2_PROXY_L1", counterL2ProxyL1);
         output("CAP_L1", address(cap));
@@ -306,7 +307,7 @@ contract Deploy2 is Script {
         address ncL2Addr = vm.envAddress("NESTED_CALLER_L2");
 
         vm.startBroadcast();
-        address ncProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), ncL2Addr, L2_ROLLUP_ID);
+        address ncProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), ncL2Addr, e2eRollupId());
         output("NC_PROXY_L1", ncProxyL1);
         vm.stopBroadcast();
     }
@@ -357,7 +358,7 @@ contract Execute is Script, DeepNestedActions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     proofSystemAddr,
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(counterL2Addr, capL1Addr, ncL2Addr, msg.sender),
                     noStaticEntries()
                 )

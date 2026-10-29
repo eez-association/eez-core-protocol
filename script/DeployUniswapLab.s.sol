@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Script} from "forge-std/Script.sol";
+import {EEZL2} from "../src/L2/EEZL2.sol";
 import {EEZBridge} from "../src/periphery/EEZBridge.sol";
 import {EEZToken} from "../src/periphery/defiMock/EEZToken.sol";
 import {EEZWrappedNative} from "../src/periphery/defiMock/EEZWrappedNative.sol";
@@ -15,7 +16,7 @@ contract DeployUniswapLab is Script {
     function run(address manager, uint64 rollupId, address owner, uint256 expectedChainId) external {
         require(block.chainid == expectedChainId, "Unexpected chain");
         require(manager.code.length > 0, "Missing EEZ manager");
-        require(rollupId <= 1, "Two-chain lab only");
+        if (rollupId != 0) require(EEZL2(manager).ROLLUP_ID() == rollupId, "L2 rollup ID mismatch");
         uint256 key = vm.envUint("PK");
         require(vm.addr(key) == owner, "Unexpected signer");
         vm.startBroadcast(key);

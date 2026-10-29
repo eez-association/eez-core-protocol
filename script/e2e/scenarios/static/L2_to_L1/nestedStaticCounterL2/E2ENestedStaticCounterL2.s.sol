@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -67,7 +69,6 @@ import {
 //               L2 readerL2.counter == 1, readerL2.lastRead == 1.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract NestedStaticL2Actions {
@@ -81,7 +82,7 @@ abstract contract NestedStaticL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (HashStep[][] memory steps)
     {
         steps = new HashStep[][](1);
@@ -110,25 +111,25 @@ abstract contract NestedStaticL2Actions {
 
     /// Trigger key: alice's call LEAVES the L2 through capProxyL2, so the source entry is
     /// keyed with the L2-outgoing hash (callGas 0 — the devnet deploys useGasLeft = false).
-    function _outgoingHash(address capL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _outgoingHash(address capL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(alice, e2eRollupId(), capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// L1 top-level call hash: CAP.incrementProxy() executes ON L1 (target rollup = MAINNET).
-    function _l1TopCallHash(address capL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(false, alice, L2_ROLLUP_ID, capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _l1TopCallHash(address capL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHash(false, alice, e2eRollupId(), capL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// Inner L1->L2 reentry (CAP -> readerL2): the same digest folds L1's NESTED_BEGIN and
     /// the CALL_BEGIN of its execution inside the L2 source entry.
-    function _innerHash(address readerL2, address capL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, capL1, MAINNET_ROLLUP_ID, readerL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _innerHash(address readerL2, address capL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, capL1, MAINNET_ROLLUP_ID, readerL2, e2eRollupId(), 0, _incrementData());
     }
 
     /// Nested static read key (readerL2 -> CounterL1): isStatic = true, source rollup = the
     /// L2's own id; static keys never fold gas.
-    function _staticHash(address counterL1, address readerL2) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
+    function _staticHash(address counterL1, address readerL2) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
     }
 
     /// The user tx's ONE outgoing entry. CAP's nested reader call rides this same open frame
@@ -140,7 +141,7 @@ abstract contract NestedStaticL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 key = _outgoingHash(capL1, alice);
@@ -191,12 +192,12 @@ abstract contract NestedStaticL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-nested-static-l2"),
             etherDelta: 0
@@ -209,7 +210,7 @@ abstract contract NestedStaticL2Actions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: capL1,
             value: 0,
             data: _incrementProxyData()
@@ -222,7 +223,7 @@ abstract contract NestedStaticL2Actions {
             revertNextNCalls: 0,
             isStatic: true,
             sourceAddress: readerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _counterCallData()
@@ -253,7 +254,7 @@ abstract contract NestedStaticL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — executed as an immediate L2Tx
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -306,7 +307,7 @@ contract Deploy2 is Script {
         address readerL2Addr = vm.envAddress("READER_L2");
 
         vm.startBroadcast();
-        address readerProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), readerL2Addr, L2_ROLLUP_ID);
+        address readerProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), readerL2Addr, e2eRollupId());
         CounterAndProxy cap = new CounterAndProxy(Counter(readerProxyL1));
         output("READER_PROXY_L1", readerProxyL1);
         output("CAP_L1", address(cap));
@@ -373,7 +374,7 @@ contract Execute is Script, NestedStaticL2Actions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(counterL1Addr, readerL2Addr, address(cap), msg.sender),
                     noStaticEntries()
                 )

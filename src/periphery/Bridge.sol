@@ -16,8 +16,8 @@ interface IBridgeToken {
 
 /// @title Bridge
 /// @notice TEST-ONLY periphery for exercising cross-rollup ETH/ERC20 flows; outside the protocol audit scope.
-/// @dev No constructor args — deployed via CREATE2 at the same address on every chain.
-///      Chain-specific config (manager, rollupId, admin) is set via initialize().
+/// @dev Deploy behind a transparent proxy with initialize(admin) in its constructor.
+///      The admin configures EEZ, counterpart and rollup ID exactly once via initializeBridge.
 ///      Uses a lock-and-mint model: native tokens are locked on the source chain,
 ///      and a WrappedToken is minted on the destination. Burning wrapped tokens
 ///      releases the native tokens on the origin chain.
@@ -26,8 +26,7 @@ interface IBridgeToken {
 ///      receiveTokens authenticates the expected proxy; tests supply the remote execution
 ///      assumptions. This does not establish a general asset-origin/backing policy.
 ///      Intentional fixture limits: nominal token amounts (no fee-on-transfer accounting),
-///      first-caller initialization without deployment-context binding, and one remote bridge
-///      address. These are test assumptions, not production remediation requirements.
+///      and one remote bridge address. These are test assumptions, not production remediation requirements.
 contract Bridge {
     using SafeERC20 for IERC20;
 
@@ -44,13 +43,12 @@ contract Bridge {
     // ──────────────────────────────────────────────
 
     /// @notice The cross-chain manager contract (EEZ on L1, EEZL2 on L2)
-    IEEZ public manager;
+    IEEZ public EEZContract;
 
     /// @notice This chain's rollup ID (0 for L1 mainnet)
     uint64 public rollupId;
 
-    /// @notice Admin address that can set the canonical bridge address
-    /// @dev Test configuration only; no production deployment policy is specified.
+    /// @notice Can configure the bridge once; has no transfer or ongoing configuration permission.
     address public admin;
 
     /// @notice Override for the bridge's canonical address (used for cross-chain proxy lookups)
@@ -71,8 +69,8 @@ contract Bridge {
     error ZeroAddress();
     error ProxyCallFailed(bytes reason);
     error UnauthorizedCaller();
-    error OnlyAdmin();
     error AlreadyInitialized();
+    error OnlyAdmin();
 
     // ──────────────────────────────────────────────
     //  Modifiers
@@ -80,7 +78,7 @@ contract Bridge {
 
     /// @dev Validates that msg.sender is the CrossChainProxy representing this bridge from `sourceRollupId`.
     modifier onlyBridgeProxy(uint64 sourceRollupId) {
-        address expectedProxy = manager.computeCrossChainProxyAddress(_bridgeAddress(), sourceRollupId);
+        address expectedProxy = EEZContract.computeCrossChainProxyAddress(_bridgeAddress(), sourceRollupId);
         if (msg.sender != expectedProxy) revert UnauthorizedCaller();
         _;
     }
@@ -94,8 +92,7 @@ contract Bridge {
     //  Events
     // ──────────────────────────────────────────────
 
-    /// @dev Declared for the test API but not emitted by initialize(); do not reconstruct setup from this log.
-    event Initialized(address indexed manager, uint64 rollupId, address indexed admin);
+    event BridgeInitialized(address indexed EEZContract, address indexed counterpartBridge, uint64 rollupId);
     event CanonicalBridgeAddressSet(address indexed addr);
     /// @dev The legacy field name `sender` currently carries destinationAddress (the recipient).
     event EtherBridged(address indexed sender, uint64 indexed rollupId, uint256 amount);
@@ -110,34 +107,43 @@ contract Bridge {
     //  Initialization
     // ──────────────────────────────────────────────
 
-    /// @notice Initialize the bridge with chain-specific config (called once after CREATE2 deployment)
-    /// @param _manager The cross-chain manager address
-    /// @param _rollupId This chain's rollup ID (0 = L1 mainnet)
-    /// @param _admin The admin address that can set the canonical bridge address
-    function initialize(address _manager, uint64 _rollupId, address _admin) external {
-        _initialize(_manager, _rollupId, _admin);
+    /// @dev Locks the bare implementation; proxies start with admin == 0 and set it via initialize.
+    constructor() {
+        admin = address(1);
     }
 
-    /// @dev Shared by the legacy initializer and constructor-initialized deployments.
-    function _initialize(address _manager, uint64 _rollupId, address _admin) internal {
-        if (address(manager) != address(0)) revert AlreadyInitialized();
-        if (_manager == address(0)) revert ZeroAddress();
-        if (_admin == address(0)) revert ZeroAddress();
-        manager = IEEZ(_manager);
-        rollupId = _rollupId;
-        admin = _admin;
+    /// @notice Set only the admin, atomically in the proxy's creation transaction.
+    function initialize(address initialAdmin) external {
+        if (admin != address(0)) revert AlreadyInitialized();
+        if (initialAdmin == address(0)) revert ZeroAddress();
+        admin = initialAdmin;
     }
 
-    // ──────────────────────────────────────────────
-    //  Admin
-    // ──────────────────────────────────────────────
+    /// @notice Configure the bridge exactly once after both chain deployments are known.
+    /// @param _EEZContract The local EEZ/EEZL2 address (its proxy when upgradeable)
+    /// @param counterpartBridge Remote bridge proxy, or zero to use this bridge's own address
+    /// @param localRollupId EEZ routing ID: 0 for L1, registered rollup ID for L2 (not block.chainid)
+    function initializeBridge(
+        address _EEZContract,
+        address counterpartBridge,
+        uint64 localRollupId
+    )
+        external
+        onlyAdmin
+    {
+        _initializeBridge(_EEZContract, counterpartBridge, localRollupId);
+    }
 
-    /// @notice Set the canonical bridge address used for cross-chain proxy lookups
-    /// @dev Use this when the Bridge is deployed at a different address on this chain
-    ///      than on the counterpart chains in a test fixture.
-    function setCanonicalBridgeAddress(address bridgeAddress) external onlyAdmin {
-        canonicalBridgeAddress = bridgeAddress;
-        emit CanonicalBridgeAddressSet(bridgeAddress);
+    /// @dev Shared with constructor-initialized test fixtures. No setup field may be pre-populated.
+    function _initializeBridge(address _EEZContract, address counterpartBridge, uint64 localRollupId) internal {
+        if (address(EEZContract) != address(0) || rollupId != 0 || canonicalBridgeAddress != address(0)) {
+            revert AlreadyInitialized();
+        }
+        if (_EEZContract == address(0)) revert ZeroAddress();
+        EEZContract = IEEZ(_EEZContract);
+        rollupId = localRollupId;
+        canonicalBridgeAddress = counterpartBridge;
+        emit BridgeInitialized(_EEZContract, counterpartBridge, localRollupId);
     }
 
     // ══════════════════════════════════════════════
@@ -317,9 +323,9 @@ contract Bridge {
 
     /// @dev Ensures a CrossChainProxy exists for (addr, rollupId), creating it if needed.
     function _getOrDeployProxy(address originalAddress, uint64 _rollupId) internal returns (address proxy) {
-        proxy = manager.computeCrossChainProxyAddress(originalAddress, _rollupId);
+        proxy = EEZContract.computeCrossChainProxyAddress(originalAddress, _rollupId);
         if (proxy.code.length == 0) {
-            manager.createCrossChainProxy(originalAddress, _rollupId);
+            EEZContract.createCrossChainProxy(originalAddress, _rollupId);
         }
     }
 

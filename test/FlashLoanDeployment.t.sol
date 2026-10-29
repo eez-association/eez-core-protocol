@@ -15,6 +15,18 @@ contract FlashLoanDeploymentManager {
     }
 }
 
+contract FlashLoanDeployL2Harness is DeployL2 {
+    function _e2eRollupId() internal pure override returns (uint64) {
+        return 3;
+    }
+}
+
+contract FlashLoanDeploy2Harness is Deploy2 {
+    function _e2eRollupId() internal pure override returns (uint64) {
+        return 3;
+    }
+}
+
 contract FlashLoanDeploymentTest is Test {
     address internal constant FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
@@ -28,16 +40,16 @@ contract FlashLoanDeploymentTest is Test {
         vm.setEnv("MANAGER_L2", vm.toString(managerL2));
 
         new Deploy().run();
-        new DeployL2().run();
-        new Deploy2().run();
+        new FlashLoanDeployL2Harness().run();
+        new FlashLoanDeploy2Harness().run();
 
         Bridge l1 = Bridge(vm.envAddress("BRIDGE_L1"));
         Bridge l2 = Bridge(vm.envAddress("BRIDGE_L2"));
         assertNotEq(address(l1), address(l2));
-        assertEq(address(l1.manager()), managerL1);
-        assertEq(address(l2.manager()), managerL2);
+        assertEq(address(l1.EEZContract()), managerL1);
+        assertEq(address(l2.EEZContract()), managerL2);
         assertEq(l1.rollupId(), 0);
-        assertEq(l2.rollupId(), 1);
+        assertEq(l2.rollupId(), 3);
         assertEq(l1.canonicalBridgeAddress(), address(l2));
         assertEq(l2.canonicalBridgeAddress(), address(l1));
         assertEq(l1.admin(), l2.admin());

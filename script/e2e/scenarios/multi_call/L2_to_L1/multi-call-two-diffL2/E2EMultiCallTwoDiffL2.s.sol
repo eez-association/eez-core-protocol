@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -44,7 +46,6 @@ import {
 //    into each counter once → counterA=1, counterB=1.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract MultiCallTwoDiffL2Actions {
@@ -55,7 +56,7 @@ abstract contract MultiCallTwoDiffL2Actions {
         address callerL2
     )
         internal
-        pure
+        view
         returns (HashStep[][] memory steps)
     {
         steps = new HashStep[][](1);
@@ -71,13 +72,13 @@ abstract contract MultiCallTwoDiffL2Actions {
     }
 
     /// @dev Identity of a call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
-    function _l1CallHash(address counterL1, address callerL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, callerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
+    function _l1CallHash(address counterL1, address callerL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, callerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev L2-outgoing key the SOURCE L2 matches an outgoing call with — one per target counter.
-    function _l2EntryKey(address counterL1, address callerL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(callerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
+    function _l2EntryKey(address counterL1, address callerL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(callerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev Two L2 source entries — different proxyEntryHashes (counter A, then counter B),
@@ -88,7 +89,7 @@ abstract contract MultiCallTwoDiffL2Actions {
         address callerL2
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         entries = new L2ExecutionEntry[](2);
@@ -116,7 +117,7 @@ abstract contract MultiCallTwoDiffL2Actions {
         address callerL2
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
@@ -125,7 +126,7 @@ abstract contract MultiCallTwoDiffL2Actions {
 
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-multi-call-two-diffL2"),
             etherDelta: 0
@@ -141,7 +142,7 @@ abstract contract MultiCallTwoDiffL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -150,13 +151,13 @@ abstract contract MultiCallTwoDiffL2Actions {
         });
     }
 
-    function _buildL1Call(address counterL1, address callerL2) private pure returns (L2ToL1Call memory) {
+    function _buildL1Call(address counterL1, address callerL2) private view returns (L2ToL1Call memory) {
         return L2ToL1Call({
             revertNextNCalls: 0,
             isStatic: false,
             gas: 0,
             sourceAddress: callerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _incrementCallData()
@@ -241,7 +242,7 @@ contract Execute is Script, MultiCallTwoDiffL2Actions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(counterA, counterB, vm.envAddress("CALL_TWO_DIFF_L2")),
                     noStaticEntries()
                 )

@@ -26,6 +26,7 @@ _eez_rpc() {
 network_rpc() {
     local out code
     out=$(_eez_rpc "$1" "$2" "$3" 2>/dev/null) || return 4
+    [[ -z "${NETWORK_RPC_CAPTURE:-}" ]] || printf '%s\n' "$out" > "$NETWORK_RPC_CAPTURE" || return 1
     jq -e 'type=="object" and .jsonrpc=="2.0" and .id==1' <<< "$out" >/dev/null 2>&1 || return 1
     if jq -e '.error!=null' <<< "$out" >/dev/null; then
         code=$(jq -r '.error.code' <<< "$out")
@@ -201,20 +202,20 @@ network_receipt() { # chain, tx hash, optional exact block hint; one bounded swe
 # Read known delivery blocks once per pass instead of rereading the same header
 # for every transaction. Failure leaves the individual receipt path available.
 network_receipts_from_blocks() { # chain, JSON tx hashes, newline-delimited block hashes
-    local chain="$1" wanted="$2" hints="$3" block rpc out receipts header found='[]'
+    local chain="$1" wanted="$2" hints="$3" full="${4:-false}" block rpc out receipts header found='[]'
     [[ "$wanted" != '[]' && -n "$hints" ]] || return 2
     while read -r block; do
         [[ -n "$block" ]] || continue
         while read -r rpc; do
             out=$(network_rpc "$rpc" eth_getBlockReceipts "[\"$block\"]") || continue
-            receipts=$(jq -ce --argjson wanted "$wanted" --arg block "$block" '
+            receipts=$(jq -ce --argjson wanted "$wanted" --arg block "$block" --argjson full "$full" '
                 select(type=="array") |
                 [.[] | select(.transactionHash as $tx | $wanted | index($tx))] |
                 select(all(.[]; .blockHash==$block and
                     (.blockNumber|test("^0x[0-9a-fA-F]+$")) and
                     (.status=="0x0" or .status=="0x1"))) |
                 select((map(.transactionHash)|unique|length)==length) |
-                map({transactionHash,blockHash,blockNumber,transactionIndex,status,to})' \
+                map(if $full then . else {transactionHash,blockHash,blockNumber,transactionIndex,status,to} end)' \
                 <<< "$out" 2>/dev/null) || continue
             [[ "$receipts" != '[]' ]] || break
             header=$(network_header "$chain" "$(jq -r '.[0].blockNumber' <<< "$receipts")") || return 2
@@ -230,7 +231,7 @@ network_receipts_from_blocks() { # chain, JSON tx hashes, newline-delimited bloc
         <<< "$found" >/dev/null || return 2
     echo "$found"
 }
-network_transaction_input() { # chain, hash, canonical receipt
+network_transaction() { # chain, hash, canonical receipt -> transaction tied to that inclusion
     local chain="$1" tx="$2" receipt="$3" rpc obj block index
     block=$(jq -r .blockHash <<< "$receipt"); index=$(jq -r .transactionIndex <<< "$receipt")
     while read -r rpc; do
@@ -238,9 +239,17 @@ network_transaction_input() { # chain, hash, canonical receipt
         if ! jq -e --arg tx "$tx" '.hash==$tx and (.input|type)=="string"' <<< "$obj" >/dev/null 2>&1; then
             obj=$(network_rpc "$rpc" eth_getTransactionByBlockHashAndIndex "[\"$block\",\"$index\"]") || continue
         fi
-        jq -er --arg tx "$tx" 'select(.hash==$tx)|.input|select(test("^0x([0-9a-fA-F]{2})*$"))' <<< "$obj" && return 0
+        jq -e --arg tx "$tx" --arg block "$block" --arg index "$index" \
+            '.hash==$tx and .blockHash==$block and .transactionIndex==$index and
+             (.input|test("^0x([0-9a-fA-F]{2})*$"))' <<< "$obj" >/dev/null 2>&1 || continue
+        echo "$obj"; return 0
     done < <(network_urls "$chain")
     return 2
+}
+network_transaction_input() {
+    local tx
+    tx=$(network_transaction "$@") || return $?
+    jq -r .input <<< "$tx"
 }
 eez_correlation_detect() {
     local rpc rc found=false transient=false

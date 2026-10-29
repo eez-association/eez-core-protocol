@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -16,6 +18,7 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../../../../../../src/interfaces/IEEZL2.sol";
+import {InitializedBridge} from "../../../../../DeployInitializedBridge.s.sol";
 import {Bridge} from "../../../../../../src/periphery/Bridge.sol";
 import {WrappedToken} from "../../../../../../src/periphery/WrappedToken.sol";
 import {FlashLoan} from "../../../../../../src/periphery/defiMock/FlashLoan.sol";
@@ -70,7 +73,6 @@ import {
 //  L2 wrapped supply = 0 (minted then burned), NFT #1 owned by executorL2.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 /// @notice Every address the scenario's calls fold into a hash, including both Bridges.
@@ -91,7 +93,7 @@ contract TestToken is ERC20 {
     }
 }
 
-abstract contract FlashLoanActions {
+abstract contract FlashLoanActions is E2ERollupConfig {
     uint256 internal constant AMOUNT = 10_000e18;
     // TestToken metadata — folded into both receiveTokens payloads (the forward leg
     // reads it from the L1 token, the return leg from the WrappedToken, which is
@@ -128,51 +130,54 @@ abstract contract FlashLoanActions {
     }
 
     /// Return leg: built on L2 by `bridgeTokens` (wrapped path) — releases escrow to executorL1.
-    function _retReceiveData(FlashLoanAddrs memory a) internal pure returns (bytes memory) {
+    function _retReceiveData(FlashLoanAddrs memory a) internal view returns (bytes memory) {
         return abi.encodeCall(
             Bridge.receiveTokens,
-            (a.token, MAINNET_ROLLUP_ID, a.executorL1, AMOUNT, TOKEN_NAME, TOKEN_SYMBOL, TOKEN_DECIMALS, L2_ROLLUP_ID)
+            (a.token, MAINNET_ROLLUP_ID, a.executorL1, AMOUNT, TOKEN_NAME, TOKEN_SYMBOL, TOKEN_DECIMALS, _e2eRollupId())
         );
     }
 
     // ── Cross-chain call hashes ──
 
     /// Entry-0 key on both sides: bridgeL1 → bridgeL2 forward receiveTokens.
-    function _fwdHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(false, a.bridgeL1, MAINNET_ROLLUP_ID, a.bridgeL2, L2_ROLLUP_ID, 0, _fwdReceiveData(a));
+    function _fwdHash(FlashLoanAddrs memory a) internal view returns (bytes32) {
+        return
+            crossChainCallHash(false, a.bridgeL1, MAINNET_ROLLUP_ID, a.bridgeL2, _e2eRollupId(), 0, _fwdReceiveData(a));
     }
 
     /// Entry-1 key on both sides: executorL1 → executorL2 claimAndBridgeBack.
-    function _claimHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, L2_ROLLUP_ID, 0, _claimData(a));
+    function _claimHash(FlashLoanAddrs memory a) internal view returns (bytes32) {
+        return
+            crossChainCallHash(false, a.executorL1, MAINNET_ROLLUP_ID, a.executorL2, _e2eRollupId(), 0, _claimData(a));
     }
 
     /// Return leg as folded on L1 (entry 1's top-level l2ToL1Call): bridgeL2 → bridgeL1.
-    function _retHash(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(false, a.bridgeL2, L2_ROLLUP_ID, a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
+    function _retHash(FlashLoanAddrs memory a) internal view returns (bytes32) {
+        return
+            crossChainCallHash(false, a.bridgeL2, _e2eRollupId(), a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     /// Return leg as folded on L2 (the call LEAVES the L2, so it keys with the
     /// L2-outgoing hash; same digest under useGasLeft = false).
-    function _retHashL2Out(FlashLoanAddrs memory a) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(a.bridgeL2, L2_ROLLUP_ID, a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
+    function _retHashL2Out(FlashLoanAddrs memory a) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(a.bridgeL2, _e2eRollupId(), a.bridgeL1, MAINNET_ROLLUP_ID, 0, _retReceiveData(a));
     }
 
     // ── Tables ──
 
-    function _l1Entries(FlashLoanAddrs memory a) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(FlashLoanAddrs memory a) internal view returns (ExecutionEntry[] memory entries) {
         bytes32 rootAfterFwd = keccak256("l2-state-after-flash-loan-fwd");
 
         // Entry 0: forward bridge leg — no L1-side calls, seed-only rolling hash.
         RollupUpdate[] memory fwdDeltas = new RollupUpdate[](1);
         fwdDeltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID, currentRoot: keccak256("l2-initial-state"), newRoot: rootAfterFwd, etherDelta: 0
+            rollupId: _e2eRollupId(), currentRoot: keccak256("l2-initial-state"), newRoot: rootAfterFwd, etherDelta: 0
         });
 
         // Entry 1: claim leg — one top-level l2ToL1Call: the return bridge leg runs on L1.
         RollupUpdate[] memory claimDeltas = new RollupUpdate[](1);
         claimDeltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: _e2eRollupId(),
             currentRoot: rootAfterFwd,
             newRoot: keccak256("l2-state-after-flash-loan-claim"),
             etherDelta: 0
@@ -184,7 +189,7 @@ abstract contract FlashLoanActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: a.bridgeL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: _e2eRollupId(),
             targetAddress: a.bridgeL1,
             value: 0,
             data: _retReceiveData(a)
@@ -198,7 +203,7 @@ abstract contract FlashLoanActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: fwdDeltas,
             proxyEntryHash: _fwdHash(a),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: _e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(fwdDeltas, _fwdHash(a)),
@@ -208,7 +213,7 @@ abstract contract FlashLoanActions {
         entries[1] = ExecutionEntry({
             rollupUpdates: claimDeltas,
             proxyEntryHash: _claimHash(a),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: _e2eRollupId(),
             l2ToL1Calls: claimCalls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: claimRh,
@@ -218,7 +223,7 @@ abstract contract FlashLoanActions {
     }
 
     /// Entry-1 rolling-hash folds, replayable by the network verifier over posted roots.
-    function _l1Steps(FlashLoanAddrs memory a) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(FlashLoanAddrs memory a) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](2);
         steps[0] = new HashStep[](0); // entry 0: seed only
         steps[1] = new HashStep[](2);
@@ -226,7 +231,7 @@ abstract contract FlashLoanActions {
         steps[1][1] = RollingHashBuilder.stepCallEnd(true, "");
     }
 
-    function _l2Entries(FlashLoanAddrs memory a) internal pure returns (L2ExecutionEntry[] memory entries) {
+    function _l2Entries(FlashLoanAddrs memory a) internal view returns (L2ExecutionEntry[] memory entries) {
         // Entry 0: forward receiveTokens delivery — deploy WrappedToken + mint.
         CrossChainCall[] memory fwdCalls = new CrossChainCall[](1);
         fwdCalls[0] = CrossChainCall({
@@ -329,8 +334,7 @@ contract Deploy is Script {
 
         // Read the broadcast wallet even when PrepareJob calls this script.
         (, address admin,) = vm.readCallers();
-        Bridge bridge = new Bridge();
-        bridge.initialize(rollupsAddr, MAINNET_ROLLUP_ID, admin);
+        Bridge bridge = new InitializedBridge(rollupsAddr, MAINNET_ROLLUP_ID, admin);
 
         output("TOKEN", address(token));
         output("BRIDGE_L1", address(bridge));
@@ -348,9 +352,8 @@ contract DeployL2 is Script, FlashLoanActions {
 
         vm.startBroadcast();
         (, address admin,) = vm.readCallers();
-        Bridge deployedBridge = new Bridge();
-        deployedBridge.initialize(managerAddr, L2_ROLLUP_ID, admin);
-        deployedBridge.setCanonicalBridgeAddress(bridgeL1);
+        Bridge deployedBridge = new InitializedBridge(managerAddr, _e2eRollupId(), admin);
+        InitializedBridge(address(deployedBridge)).setCanonicalBridgeAddress(bridgeL1);
         address bridge = address(deployedBridge);
 
         // Config args unused on the L2 side — claimAndBridgeBack takes everything as parameters.
@@ -393,12 +396,12 @@ contract Deploy2 is Script, FlashLoanActions {
         address nftAddr = vm.envAddress("FLASH_LOANERS_NFT");
 
         vm.startBroadcast();
-        Bridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
+        InitializedBridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
         FlashLoan pool = new FlashLoan();
         IERC20(tokenAddr).transfer(address(pool), AMOUNT);
 
         // The proxy executorL1 drives to reach executorL2 (the claim-leg trigger target).
-        address executorL2Proxy = getOrCreateProxy(IEEZ(rollupsAddr), executorL2Addr, L2_ROLLUP_ID);
+        address executorL2Proxy = getOrCreateProxy(IEEZ(rollupsAddr), executorL2Addr, _e2eRollupId());
 
         FlashLoanBridgeExecutor executorL1 = new FlashLoanBridgeExecutor(
             address(pool),
@@ -408,7 +411,7 @@ contract Deploy2 is Script, FlashLoanActions {
             wrappedTokenL2,
             nftAddr,
             bridgeL2Addr,
-            L2_ROLLUP_ID,
+            _e2eRollupId(),
             tokenAddr
         );
 
@@ -464,7 +467,7 @@ contract Execute is FlashLoanEnv, FlashLoanActions {
         vm.startBroadcast();
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
-                immediateSingleRollupBatch(proofSystemAddr, L2_ROLLUP_ID, _l1Entries(a), noStaticEntries())
+                immediateSingleRollupBatch(proofSystemAddr, _e2eRollupId(), _l1Entries(a), noStaticEntries())
             );
         FlashLoanBridgeExecutor(a.executorL1).execute();
 

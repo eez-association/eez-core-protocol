@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 // E2E_EXCLUDE_FROM_ALL: NOT LIVE YET (staged/parallel network tests).
 // Validated on local Anvil only. Excluded from automatic all/default runs;
 // select explicitly for local testing until live-network validation is complete.
@@ -86,7 +88,6 @@ contract LocalWriteReader {
 
 /// @notice Entry builders for this scenario's two views of the same source transaction.
 abstract contract StaticLocalWriteL2Actions is Script {
-    uint64 internal constant L2 = 1;
     bytes32 internal constant INITIAL_ROOT = keccak256("l2-initial-state");
     bytes32 internal constant FINAL_ROOT = keccak256("l2-after-static-local-write");
 
@@ -112,12 +113,12 @@ abstract contract StaticLocalWriteL2Actions is Script {
         return abi.encodeCall(LocalWriteReader.run, ());
     }
 
-    function _quoteHash(Actors memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(true, a.reader, L2, a.quote, 0, 0, _quoteData());
+    function _quoteHash(Actors memory a) internal view returns (bytes32) {
+        return crossChainCallHash(true, a.reader, e2eRollupId(), a.quote, 0, 0, _quoteData());
     }
 
-    function _rateHash(Actors memory a) internal pure returns (bytes32) {
-        return crossChainCallHash(true, a.quote, 0, a.reader, L2, 0, _rateData());
+    function _rateHash(Actors memory a) internal view returns (bytes32) {
+        return crossChainCallHash(true, a.quote, 0, a.reader, e2eRollupId(), 0, _rateData());
     }
 
     function _quoteResult(uint256 rate) internal pure returns (bytes memory) {
@@ -140,9 +141,10 @@ abstract contract StaticLocalWriteL2Actions is Script {
         return i == 1 ? 2 : 1;
     }
 
-    function _deltas() internal pure returns (RollupUpdate[] memory deltas) {
+    function _deltas() internal view returns (RollupUpdate[] memory deltas) {
         deltas = new RollupUpdate[](1);
-        deltas[0] = RollupUpdate({rollupId: L2, currentRoot: INITIAL_ROOT, newRoot: FINAL_ROOT, etherDelta: 0});
+        deltas[0] =
+            RollupUpdate({rollupId: e2eRollupId(), currentRoot: INITIAL_ROOT, newRoot: FINAL_ROOT, etherDelta: 0});
     }
 
     function _l1Call(
@@ -152,11 +154,11 @@ abstract contract StaticLocalWriteL2Actions is Script {
         bytes memory data
     )
         internal
-        pure
+        view
         returns (L2ToL1Call memory c)
     {
         c.sourceAddress = source;
-        c.sourceRollupId = L2;
+        c.sourceRollupId = e2eRollupId();
         c.targetAddress = target;
         c.isStatic = isStatic;
         c.data = data;
@@ -184,7 +186,7 @@ abstract contract StaticLocalWriteL2Actions is Script {
         calls[0] = _l2Call(a.quote, a.reader, true, _rateData());
     }
 
-    function _l2Statics(Actors memory a) internal pure returns (StaticExecutionEntryL2[] memory rows) {
+    function _l2Statics(Actors memory a) internal view returns (StaticExecutionEntryL2[] memory rows) {
         rows = new StaticExecutionEntryL2[](2);
         for (uint256 i; i < rows.length; i++) {
             rows[i].proxyEntryHash = _quoteHash(a);
@@ -196,12 +198,12 @@ abstract contract StaticLocalWriteL2Actions is Script {
         }
     }
 
-    function _l1Entries(Actors memory a) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(Actors memory a) internal view returns (ExecutionEntry[] memory entries) {
         entries = new ExecutionEntry[](1);
         ExecutionEntry memory e;
         e.rollupUpdates = _deltas();
         e.proxyEntryHash = bytes32(0);
-        e.destinationRollupId = L2;
+        e.destinationRollupId = e2eRollupId();
         e.success = true;
         e.returnData = "";
         bytes32 rh = RollingHashBuilder.entryBegin(e.rollupUpdates, e.proxyEntryHash);
@@ -248,7 +250,7 @@ contract DeployCallbacks is StaticLocalWriteL2Actions {
     function run() external {
         IEEZ manager = IEEZ(vm.envAddress("ROLLUPS"));
         vm.startBroadcast();
-        address readerProxy = getOrCreateProxy(manager, vm.envAddress("READER"), L2);
+        address readerProxy = getOrCreateProxy(manager, vm.envAddress("READER"), e2eRollupId());
         output("READER_PROXY", readerProxy);
         vm.stopBroadcast();
     }
@@ -274,9 +276,11 @@ contract Execute is StaticLocalWriteL2Actions {
         EEZ manager = EEZ(vm.envAddress("ROLLUPS"));
         vm.startBroadcast();
         manager.postAndVerifyBatch(
-            immediateSingleRollupBatch(vm.envAddress("PROOF_SYSTEM"), L2, _l1Entries(a), new StaticExecutionEntry[](0))
+            immediateSingleRollupBatch(
+                vm.envAddress("PROOF_SYSTEM"), e2eRollupId(), _l1Entries(a), new StaticExecutionEntry[](0)
+            )
         );
-        (, bytes32 root,) = manager.rollups(L2);
+        (, bytes32 root,) = manager.rollups(e2eRollupId());
         require(root == FINAL_ROOT, "unexpected root transition");
         vm.stopBroadcast();
         console.log("done: L1 static reads around local writes");
@@ -312,6 +316,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticLocalWriteL2Actions {
         }
         _printL1Steps(l1, steps);
         _printL1Table(l1);
+        _printL2StaticTable(_l2Statics(a));
         console.log("EXPECTED_L2_HASHES=[]");
         console.log("EXPECTED_L2_CALL_HASHES=[]");
     }

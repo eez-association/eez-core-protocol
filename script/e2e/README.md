@@ -6,8 +6,9 @@ Categories: `one_way`, `multi_call`, `multi_tx`, `nested`, `reentrant`, `revert`
 
 The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
 `topLevelStaticReentrantCounterL2` are included in automatic `all` / default runs.
-The staged runner reports disappeared transactions in its final summary; inclusion
-in `all` does not guarantee that a particular live deployment supports these scenarios.
+The staged runner checks composer status before classifying absent cross-chain
+triggers and reports unresolved triggers at its monitor deadline. Inclusion in
+`all` does not guarantee that a live deployment supports these scenarios.
 The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
 `topLevelStaticReentrantMissingProxyL2` are expected-rejection tests in the
 **staged network runner**. They pass only when `eez_getCrossChainTransaction`
@@ -52,6 +53,51 @@ an `E2E_EXCLUDE_FROM_ALL` marker; remove it only when the scenario is ready.
 Explicit names and category selections still include them; use explicit local
 runs for development. See the [scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
 
+Network verification uses exact composer transaction links by default, including
+full L2 static-table checks. See [transaction roles and compatibility modes](RPC.md#eez_getcrosschaintransaction)
+and [saved verification evidence](RUNNER_GUIDE.md#exact-transaction-links).
+
+Classic network preparation requires the source chain's front (`L1_FRONT` or
+`L2_FRONT`) and uses the greater of the node and front nonces. Failed nonce reads
+retry for up to `E2E_NONCE_TIMEOUT` seconds (default 30); they never substitute
+zero. The L1 catch-up loop shares a 120-second deadline across retries. The staged
+plan path retains its existing batched deployment barrier.
+
+Classic network preparation records L2 setup transaction hashes in a private
+worker broadcast directory. By default, before signing a trigger it refreshes
+their receipts and requires successful canonical inclusion at or below the L2
+`safe` head.
+Settlement reconciliation can replace unsafe blocks, so a successful Forge
+broadcast alone is not a stable setup boundary. Missing or orphaned receipts wait
+for reinclusion; a settled revert fails preparation. `E2E_SETUP_TIMEOUT` bounds
+this wait (default 180 seconds). The network must settle ordinary L2 activity
+without requiring the scenario's cross-chain trigger. Unsupported `safe` or stalled
+settlement fails preparation; it never falls back to a pending or invented nonce.
+This barrier does not provide L1 finality or change the staged plan path.
+
+To retain the earlier behavior of preparing triggers immediately after Forge
+broadcast succeeds, pass `--no-wait-for-confirmation` to `sequential.sh`,
+`parallel.sh`, `staged.sh` (with `PREPARE_MODE=classic`), or directly to
+`lib/network-scenario.sh`. The equivalent environment setting is
+`E2E_NO_WAIT_FOR_CONFIRMATION=true`. For example:
+
+```bash
+bash script/e2e/run/network/parallel.sh --no-wait-for-confirmation counter counterL2
+```
+
+This skips only the L2 setup safe-head wait and its timeout. Private broadcast
+capture, nonce checks, fee quoting, and post-trigger verification remain enabled.
+It restores the risk of preparing a trigger while setup is replaced during
+settlement, including nonce conflicts. The staged plan path is unaffected.
+
+The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
+validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
+and default local runs; named scenarios and category selections remain available.
+
+### Cross-chain trigger fees
+
+Follow the [L1/L2 cross-chain quote, retry and recovery rules](RPC.md#eez_quotefee).
+
 ## Script layout
 
 ```text
@@ -63,7 +109,9 @@ script/
     run/local/      parallel.sh
     lib/            shared shell helpers, composer discovery, staged recovery
     tests/          network configuration, evidence, settlement and recovery regression tests
-    COMMANDS.md     command examples
+    COMMANDS.md     short command list
+    RUNNER_GUIDE.md detailed examples, funding, recovery and verification
+    RPC.md          composer RPC methods, inputs and responses
   tools/            block/trace decoding and explorer verification
   DeployBridge.s.sol  shared deployment utility used beyond E2E
 ```
@@ -84,7 +132,7 @@ remain in their existing `tmp/` directories.
 Run the network runner regression tests with:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s script/e2e/tests -v
+(cd script/e2e/tests && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v)
 ```
 
 ## Prerequisites
@@ -97,7 +145,7 @@ helpers. Network mode needs a test-only key (see step 1).
 ## Local mode (no setup)
 
 ```bash
-bash script/e2e/run/local/parallel.sh              # default selection (34 scenarios; six explicitly excluded)
+bash script/e2e/run/local/parallel.sh              # default selection (omits E2E_EXCLUDE_FROM_ALL scenarios)
 bash script/e2e/run/local/parallel.sh one_way      # one category
 bash script/e2e/run/local/parallel.sh counter bridge
 ```
@@ -161,16 +209,30 @@ source script/e2e/lib/network-config.sh
 load_network_config
 ```
 
-Discovery uses only `L1_FRONT`; inspect the current response for the environment
-you are running against rather than relying on an earlier deployment snapshot.
+Composer metadata discovery (`composer-info.sh`) needs only `L1_FRONT`.
+`load_composer_info` and `load_network_config` additionally require `L1_RPC` and
+`L2_RPC` to validate chain and rollup identities. Inspect the current response for
+the environment you are running against rather than relying on an earlier deployment snapshot.
 The response contains no endpoint URLs, keys, or EEZ rollup IDs. Ethereum chain
-IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` still defaults to 1).
+IDs must not be used as EEZ rollup IDs (`L2_ROLLUP_ID` is read from the discovered L2 manager's `ROLLUP_ID()` and
+checked against the L1 registry and composer rollup manager). An explicitly set
+ID must match discovery. All scenario hashes, tables and proxies use this ID;
+staged snapshots preserve it for resume. Local runs use the ID returned by registration.
 
 Staged resume/verify uses the saved run network snapshot rather than rediscovering
 a potentially different deployment. The single-scenario runner (`lib/network-scenario.sh`) loads `chain.env` (or
 `DEVNET_ENV`) before applying CLI overrides and discovery.
 Fully explicit address arguments on the single-scenario runner remain supported
-for workers and historical deployments; these bypass env-file loading and discovery.
+for workers and historical deployments; these bypass env-file loading and composer
+metadata discovery, but still validate the rollup against both read RPCs.
+Manager assertions inherited by workers are bound to the validated endpoints and
+manager addresses; changing that configuration discards the inherited assertion.
+Automatically discovered IDs are also bound to that configuration and are
+rediscovered after a network change. Explicit env-file/CLI IDs and saved snapshot
+IDs remain assertions and must match discovery.
+The two rollup identity reads retry transient transport failures up to three times,
+with a 20-second timeout per attempt and a one-second delay between attempts.
+Invalid results, contract reverts and identity mismatches fail immediately.
 Decoder invocations discover missing addresses through an exported `L1_FRONT`,
 or accept explicit `--rollups` and `--manager-l2` addresses.
 
@@ -225,7 +287,7 @@ cast logs --rpc-url "$L1_RPC" --from-block $((LATEST-100)) --to-block $LATEST --
 bash script/e2e/run/network/sequential.sh one_way              # category
 bash script/e2e/run/network/sequential.sh counter              # single scenario
 bash script/e2e/run/network/sequential.sh counter bridge       # scenarios
-bash script/e2e/run/network/sequential.sh all                  # default selection (34 scenarios; six explicitly excluded)
+bash script/e2e/run/network/sequential.sh all                  # default selection (omits E2E_EXCLUDE_FROM_ALL scenarios)
 DEVNET_ENV=other.env bash script/e2e/run/network/sequential.sh one_way
 ```
 
@@ -252,8 +314,8 @@ bash script/e2e/run/network/parallel.sh one_way:2 nested      # categories too
 
 Self-funding: `faucet.txt` (in `script/e2e/run/`, gitignored) is the orchestrator's faucet —
 created on first run and topped up from `SOURCE_PK` (default Anvil #2) when short.
-Workers below `FLOOR_ETH` (default 0.0005 ETH) are topped up to `FUND_ETH`
-(default 0.001 ETH) per chain via MultiSend. A `flock` serializes funding; it does
+Workers below `FLOOR_ETH` (default 0.0015 ETH) are topped up to `FUND_ETH`
+(default 0.003 ETH) per chain via MultiSend. A `flock` serializes funding; it does
 not reserve pool wallets for the duration of concurrent runs.
 
 Flags: `--direct` funds workers straight from the source key (anvil #2, or
@@ -334,7 +396,8 @@ verification under the original deadline. A stable semantic mismatch fails.
 When the fronts do not support correlation (`-32601`), or
 `E2E_CORRELATION=off`, pre-trigger snapshots bound the existing content scans.
 Index catch-up and transport failures do not silently disable correlation.
-See [the RPC and retry flow](COMMANDS.md#settlement-correlation-rpc-eez_getsettlementbyl2block--co).
+See the [RPC reference](RPC.md) and
+[detailed verification flow](RUNNER_GUIDE.md#settlement-correlation-rpc-eez_getsettlementbyl2block--co).
 
 ## What a network run verifies
 
@@ -440,10 +503,55 @@ bash script/e2e/run/network/load-testing.sh --workers 20 --txs-per-wallet 500 co
 bash script/e2e/run/network/load-testing.sh --workers 50 --txs-per-wallet 100 nestedCounter
 ```
 
-Funding matches the staged and parallel runners: wallets below **0.0005 ETH**
-are topped up to **0.001 ETH** on each chain before the run. Override with
+Funding matches the staged and parallel runners: wallets below **0.0015 ETH**
+are topped up to **0.003 ETH** on each chain before the run. Override with
 `--fund` / `FUND_ETH` and `--floor` / `FLOOR_ETH`; the floor defaults to half the
 target. Size the balance for the whole load run, including deployment gas on
 the first worker.
+
+`--wallet-offset N` (or `WALLET_OFFSET`) starts at line N of
+`run/wallet-pool.csv`, minting wallets if the pool is shorter. N must be at most
+nine decimal digits with no leading zeros (except 0). Give concurrent
+load runs disjoint ranges so their nonces never collide:
+
+```bash
+bash script/e2e/run/network/load-testing.sh --workers 10 --txs-per-wallet 100 counter                     # wallets 0–9
+bash script/e2e/run/network/load-testing.sh --wallet-offset 10 --workers 10 --txs-per-wallet 100 counter  # wallets 10–19
+```
+
+For concurrent submission, add `--burst`:
+
+```bash
+RECEIPT_TIMEOUT=1800 DEVNET_ENV=chain.envtestnet bash script/e2e/run/network/load-testing.sh --burst --wallet-offset 0 --workers 20 --txs-per-wallet 20 --window 20 counter
+```
+
+Burst mode obtains one initial quote and shares its gas and fee values across
+wallets for the same call template. `--fee-multiplier N` optionally multiplies
+fee prices by a positive integer (default 1); gas stays at the quoted limit.
+These sends are labeled `cached-load-test`, not valid quotes for each new intent.
+Wallets submit concurrently without the per-chain fee lock, in nonce order within
+each wallet. One shared receipt poller collects accepted sends across wallets and queries the
+read RPC in JSON-RPC batches of up to 100 hashes, repeating after a one-second
+pause. Each wallet waits for its window before starting another. Responses are
+matched by ID; missing receipts and individual RPC errors remain pending until
+the receipt timeout. Queue files are `worker-N.pending`, outcomes are
+`worker-N.receipts.csv`, and poller diagnostics are in `receipts.log`. Explicit underfunded refusals retry the same nonce with up to three successive
+1.18× fee increases (each rounded up to whole wei). If the third bump is still
+explicitly underfunded, the transaction enters the normal locked fresh-quote
+retry path. Each worker retains its last accepted gas/fee values, including
+fresh-quote results, for subsequent transactions in this run.
+Uncertain sends stop the wallet. Reused estimates can become insufficient as state or tariffs change.
+Initial quote evidence is in `burst-quote.responses.jsonl`, shared values in
+`burst-plan.json`, and any refusal and refreshed quote in per-transaction files.
+
+By default, load workers try a fresh quote for every transaction. After their first valid
+quote, exhausted transient quote retries fall back to that worker's last validated gas and fee
+numbers for the same call template, preserving the current nonce. This load-only
+fallback ignores the original quote's expiry and logs `LOAD FEE FALLBACK`; saved
+transaction evidence marks `feeSource: cached-load-test` and retains the original
+quote. It is fee reuse, not a valid quote for the new nonce. Balance checks still
+apply. Explicit quote rejections and malformed quotes stop the worker without
+fallback. A failed or uncertain submission stops the worker without a fallback resend.
+Other runners retain strict per-transaction quoting.
 
 Reports trigger receipts and throughput; full settlement verification stays in the e2e runners.

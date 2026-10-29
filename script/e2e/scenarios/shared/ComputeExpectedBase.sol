@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "./E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {
     RollupUpdate,
@@ -56,6 +58,10 @@ abstract contract ComputeExpectedBase is Script {
     function _printL2Table(L2ExecutionEntry[] memory entries) internal pure {
         bytes memory blob = abi.encode(entries);
         _printTableLine("EXPECTED_L2_TABLE=%s", blob);
+    }
+
+    function _printL2StaticTable(L2StaticExecutionEntry[] memory entries) internal pure {
+        _printTableLine("EXPECTED_L2_STATIC_TABLE=%s", abi.encode(entries));
     }
 
     /// @dev Top-level static entries the L1 batch must carry (`batch.staticEntries`). They
@@ -288,9 +294,9 @@ abstract contract ComputeExpectedBase is Script {
     //  Summary
     // ══════════════════════════════════════════════════════════════════
 
-    function _chainName(uint256 rollupId) internal pure returns (string memory) {
+    function _chainName(uint256 rollupId) internal view returns (string memory) {
         if (rollupId == 0) return "L1";
-        if (rollupId == 1) return "L2";
+        if (rollupId == e2eRollupId()) return "L2";
         return string.concat("rollup ", vm.toString(rollupId));
     }
 

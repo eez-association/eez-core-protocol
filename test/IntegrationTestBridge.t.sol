@@ -8,6 +8,7 @@ import {
     CrossChainCall,
     ExpectedOutgoingCrossChainCall
 } from "../src/interfaces/IEEZL2.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import {Bridge} from "../src/periphery/Bridge.sol";
 import {WrappedToken} from "../src/periphery/WrappedToken.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -56,11 +57,10 @@ contract IntegrationTestBridge is IntegrationBase {
         super.setUp();
 
         // ── Bridge deployment ──
-        bridgeL1 = new Bridge();
-        bridgeL2 = new Bridge();
-        bridgeL1.initialize(address(rollups), MAINNET_ROLLUP_ID, address(this));
-        bridgeL2.initialize(address(managerL2), L2_ROLLUP_ID, address(this));
-        bridgeL2.setCanonicalBridgeAddress(address(bridgeL1));
+        bridgeL1 = _deployBridge();
+        bridgeL2 = _deployBridge();
+        bridgeL1.initializeBridge(address(rollups), address(bridgeL2), MAINNET_ROLLUP_ID);
+        bridgeL2.initializeBridge(address(managerL2), address(bridgeL1), L2_ROLLUP_ID);
 
         // ── Token setup ──
         token = new TestToken();
@@ -68,6 +68,18 @@ contract IntegrationTestBridge is IntegrationBase {
 
         // ── Fund alice ──
         vm.deal(alice, 10 ether);
+    }
+
+    function _deployBridge() internal returns (Bridge bridge) {
+        bridge = Bridge(
+            address(
+                new TransparentUpgradeableProxy(
+                    address(new Bridge()),
+                    makeAddr("bridge upgrade owner"),
+                    abi.encodeCall(Bridge.initialize, (address(this)))
+                )
+            )
+        );
     }
 
     /// @dev Computes the proxy-entry call hash for a non-static call addressed to `target` on
@@ -237,13 +249,10 @@ contract IntegrationTestBridge is IntegrationBase {
         //  Phase 1: L1 — Alice bridges tokens via bridgeL1
         // ════════════════════════════════════════════
 
-        // bridgeL1._bridgeAddress() = bridgeL1 (no canonical override)
-        // Bridge creates proxy for (bridgeL1, L2_ROLLUP_ID) on L1
-        // proxy.call(receiveTokensCalldata) from bridgeL1
-        // proxyInfo: originalAddress=bridgeL1, originalRollupId=L2_ROLLUP_ID
-        // target=bridgeL1 on L2_ROLLUP_ID, source=bridgeL1 on MAINNET
+        // The admin configured bridgeL2 as the L1 bridge's counterpart.
+        // The outgoing call targets bridgeL2 on L2, originating from bridgeL1 on L1.
         bytes32 l1ActionHash = _crossChainCallHash(
-            L2_ROLLUP_ID, address(bridgeL1), 0, receiveTokensCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
+            L2_ROLLUP_ID, address(bridgeL2), 0, receiveTokensCalldata, address(bridgeL1), MAINNET_ROLLUP_ID
         );
 
         bytes32 newRoot = keccak256("l2-state-after-token-bridge");
@@ -351,9 +360,7 @@ contract IntegrationTestBridge is IntegrationBase {
     // ═══════════════════════════════════════════════════════════════════════
 
     function test_BridgeTokens_Roundtrip() public {
-        // Cross-reference canonical addresses so onlyBridgeProxy works in both directions
-        bridgeL1.setCanonicalBridgeAddress(address(bridgeL2));
-        // bridgeL2 already has bridgeL1 set as canonical from setUp
+        // Both counterpart addresses were locked by the admin in setUp.
 
         // ════════════════════════════════════════════
         //  Phase 1: L1 — Lock tokens

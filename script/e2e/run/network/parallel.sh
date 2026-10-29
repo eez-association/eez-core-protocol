@@ -44,9 +44,11 @@
 #   --fresh          mint brand-new worker wallets instead of reusing the pool
 #                    (still appended to the pool, so their leftovers are reused later)
 #
+#   --no-wait-for-confirmation  skip the L2 setup safe-head wait in classic preparation
+#
 # Env knobs:
 #   MAX_PARALLEL     max concurrent jobs (default 100 — effectively unthrottled)
-#   FUND_ETH         Worker balance target on each chain (default 0.001)
+#   FUND_ETH         Worker balance target on each chain (default 0.003)
 #   FLOOR_ETH        top-up trigger threshold (default FUND_ETH / 2)
 #   SOURCE_PK        key used for top-ups / --direct funding (default anvil #2)
 #   MULTISEND_BATCH  workers funded per MultiSend tx (default 100 — block-gas headroom)
@@ -58,9 +60,8 @@
 # of being stranded in a fresh account on every invocation.
 # Logs: tmp/e2e-parallel-net/<ts>/<job>.log
 #
-# Known benign race: N parallel runs of the SAME scenario share
-# broadcast/<Sol>/<chainId>/run-latest.json. Nothing reads it (no --resume;
-# the runner parses forge stdout), so a clobbered file is harmless.
+# Setup broadcasts use a private directory per worker, including when the
+# setup confirmation wait is disabled.
 
 set -uo pipefail
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
@@ -77,7 +78,7 @@ for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2; do
 done
 
 # ══ DEFAULTS — edit here ══════════════════════════════════════════════════════
-DEFAULT_FUND_ETH=0.001       # ETH per worker per chain (override: --fund / FUND_ETH)
+DEFAULT_FUND_ETH=0.003       # ETH per worker per chain (override: --fund / FUND_ETH)
 DEFAULT_MAX_PARALLEL=100    # concurrent jobs cap (override: MAX_PARALLEL)
 DEFAULT_SOURCE_PK=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a  # anvil #2 (override: SOURCE_PK)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -94,6 +95,7 @@ while [[ $# -gt 0 && "$1" == --* ]]; do
         --fresh)  FRESH=true; shift ;;
         --fund)   FUND_ETH="${2:?--fund needs an amount}"; shift 2 ;;
         --floor)  FLOOR_ETH="${2:?--floor needs an amount}"; shift 2 ;;
+        --no-wait-for-confirmation) export E2E_NO_WAIT_FOR_CONFIRMATION=true; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -101,7 +103,7 @@ done
 # Default floor = half the target; resolved after flag parsing so --fund moves it.
 FLOOR_ETH="${FLOOR_ETH:-$(echo "scale=18; $FUND_ETH / 2" | bc)}"
 
-[[ $# -gt 0 ]] || { echo "Usage: parallel.sh [--direct] [--fresh] [--fund <eth>] [--floor <eth>] <scenario>[:count] ..."; exit 1; }
+[[ $# -gt 0 ]] || { echo "Usage: parallel.sh [--direct] [--fresh] [--fund <eth>] [--floor <eth>] [--no-wait-for-confirmation] <scenario>[:count] ..."; exit 1; }
 
 # Job expansion + wallet funding are shared with staged.sh.
 source "$SCRIPT_DIR/../../lib/orchestrator.sh"

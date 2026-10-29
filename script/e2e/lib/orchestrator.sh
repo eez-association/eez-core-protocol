@@ -4,7 +4,8 @@
 #
 # Callers source this file and must set beforehand:
 #   SCRIPT_DIR RUN_DIR FUND_ETH FLOOR_ETH SOURCE_PK DIRECT FRESH L1_RPC L2_RPC
-# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain).
+# Optional: MULTISEND_BATCH (default 100), FUND_BALANCE_WORKERS (default 16 per chain),
+#   WALLET_OFFSET (default 0; first pool line used, ignored with FRESH).
 #
 # expand_jobs "<target>[:count]" ...   → JOB_NAMES[] JOB_SOLS[] NJOBS
 # fund_workers                         → WALLET_ADDRS[] WALLET_PKS[] (one per job),
@@ -96,10 +97,8 @@ _poll_delay() {
 }
 
 # ══ Manifest version ══
-# v1: written by the finish step after the deploys mined (waves / classic /
-# older runs). v2: written by the plan step BEFORE the deploys are fired, so
-# "manifest present" alone no longer means "prepared" — the job must also hold
-# .deploys-done and no .prepare-failed marker.
+# Both prepare modes write v2. Plan writes it before deployment; neither mode
+# is sendable until all deploys mined and .deploys-done is present.
 _manifest_version() {  # $1=manifest.env → 1 | 2
     local v
     v=$(sed -n 's/^declare -- E2E_MANIFEST_VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null)
@@ -107,7 +106,20 @@ _manifest_version() {  # $1=manifest.env → 1 | 2
 }
 _job_prepared() {  # $1=job dir → 0 when the job may be sent / verified
     [[ -f "$1/manifest.env" && ! -f "$1/.prepare-failed" ]] || return 1
-    [[ "$(_manifest_version "$1/manifest.env")" == 1 || -f "$1/.deploys-done" ]]
+    [[ "$(_manifest_version "$1/manifest.env")" == 2 && -f "$1/.deploys-done" ]]
+}
+
+# Reject legacy resumes before discovery, recovery or wallet use. Historical
+# v1 evidence can still be inspected with --verify-only; it is never sent again.
+_check_resume_manifests() {
+    local manifest
+    for manifest in "$1"/jobs/*/manifest.env; do
+        [[ -f "$manifest" ]] || continue
+        [[ "$(_manifest_version "$manifest")" == 2 ]] || {
+            echo "Cannot resume $manifest: only v2 manifests are supported; use --verify-only or start a new run" >&2
+            return 1
+        }
+    done
 }
 
 # ── Expand args into a flat job list ──
@@ -218,18 +230,29 @@ fund_workers() {
         echo "$addr"
     }
 
-    # Take the first NJOBS wallets from the persistent pool, minting (and
-    # appending) new ones only when the pool runs short.
+    # Take NJOBS wallets from the persistent pool starting at WALLET_OFFSET.
+    # A short pool is extended up to the needed line, so a given offset always
+    # maps to the same wallets across runs.
+    local offset="${WALLET_OFFSET:-0}"
+    [[ "$offset" =~ ^(0|[1-9][0-9]*)$ && ${#offset} -le 9 ]] || { echo "WALLET_OFFSET must be at most 9 decimal digits with no leading zeros"; exit 1; }
+    $FRESH && offset=0
     touch "$POOL_FILE"; chmod 600 "$POOL_FILE"
     local POOL_LINES=() new waddr wpk i
     $FRESH || mapfile -t POOL_LINES < "$POOL_FILE"
-    echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed$($FRESH && echo ' (--fresh: minting new)')"
+    echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed from line $offset$($FRESH && echo ' (--fresh: minting new)')"
     WALLET_PKS=(); WALLET_ADDRS=()
     echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
     chmod 600 "$RUN_DIR/wallets.csv"
+    while ! $FRESH && (( ${#POOL_LINES[@]} < offset )); do
+        new=$(cast wallet new)
+        waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
+        wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
+        echo "$waddr,$wpk" >> "$POOL_FILE"
+        POOL_LINES+=("$waddr,$wpk")
+    done
     for ((i = 0; i < NJOBS; i++)); do
-        if (( i < ${#POOL_LINES[@]} )); then
-            waddr="${POOL_LINES[$i]%%,*}"; wpk="${POOL_LINES[$i]##*,}"
+        if (( offset + i < ${#POOL_LINES[@]} )); then
+            waddr="${POOL_LINES[$((offset + i))]%%,*}"; wpk="${POOL_LINES[$((offset + i))]##*,}"
         else
             new=$(cast wallet new)
             waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')

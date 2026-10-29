@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {InitializedBridge} from "../script/DeployInitializedBridge.s.sol";
 import {IntegrationBase} from "./IntegrationBase.t.sol";
 import {ExecutionEntry, RollupUpdate, L2ToL1Call, ExpectedL1ToL2Call} from "../src/interfaces/IEEZ.sol";
 import {
@@ -77,13 +78,11 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         super.setUp();
 
         // ── Bridge deployment ──
-        bridgeL1 = new Bridge();
-        bridgeL2 = new Bridge();
-        bridgeL1.initialize(address(rollups), MAINNET_ROLLUP_ID, address(this));
-        bridgeL2.initialize(address(managerL2), L2_ROLLUP_ID, address(this));
+        bridgeL1 = new InitializedBridge(address(rollups), MAINNET_ROLLUP_ID, address(this));
+        bridgeL2 = new InitializedBridge(address(managerL2), L2_ROLLUP_ID, address(this));
         // Cross-reference canonical addresses for bidirectional bridging
-        bridgeL2.setCanonicalBridgeAddress(address(bridgeL1));
-        bridgeL1.setCanonicalBridgeAddress(address(bridgeL2));
+        InitializedBridge(address(bridgeL2)).setCanonicalBridgeAddress(address(bridgeL1));
+        InitializedBridge(address(bridgeL1)).setCanonicalBridgeAddress(address(bridgeL2));
 
         // ── Token setup ──
         token = new FlashLoanTestToken(); // 100,000e18 minted to address(this)
