@@ -48,7 +48,7 @@ contract Bridge {
     /// @notice This chain's rollup ID (0 for L1 mainnet)
     uint64 public rollupId;
 
-    /// @notice Can configure the bridge once; has no transfer or ongoing configuration permission.
+    /// @notice Configures bridge identity once and manages the accepted source rollup.
     address public admin;
 
     /// @notice Override for the bridge's canonical address (used for cross-chain proxy lookups)
@@ -61,6 +61,13 @@ contract Bridge {
     /// @notice Reverse lookup: wrappedToken address => original token info
     mapping(address wrappedToken => TokenInfo tokenInfo) public wrappedTokenInfo;
 
+    /// @notice The sole accepted source rollup once configured; 0 means L1.
+    /// @dev Appended after the legacy mappings to preserve proxy storage layout.
+    uint64 public acceptedSourceRollupId;
+
+    /// @notice Whether the admin has set an accepted source; incoming tokens and all outbound transfers revert while false.
+    bool public sourceRollupSet;
+
     // ──────────────────────────────────────────────
     //  Errors
     // ──────────────────────────────────────────────
@@ -71,6 +78,8 @@ contract Bridge {
     error UnauthorizedCaller();
     error AlreadyInitialized();
     error OnlyAdmin();
+    error SourceRollupNotSet();
+    error SourceRollupNotAccepted(uint64 sourceRollupId);
 
     // ──────────────────────────────────────────────
     //  Modifiers
@@ -78,6 +87,10 @@ contract Bridge {
 
     /// @dev Validates that msg.sender is the CrossChainProxy representing this bridge from `sourceRollupId`.
     modifier onlyBridgeProxy(uint64 sourceRollupId) {
+        if (!sourceRollupSet) revert SourceRollupNotSet();
+        if (sourceRollupId != acceptedSourceRollupId) {
+            revert SourceRollupNotAccepted(sourceRollupId);
+        }
         address expectedProxy = EEZContract.computeCrossChainProxyAddress(_bridgeAddress(), sourceRollupId);
         if (msg.sender != expectedProxy) revert UnauthorizedCaller();
         _;
@@ -94,6 +107,7 @@ contract Bridge {
 
     event BridgeInitialized(address indexed EEZContract, address indexed counterpartBridge, uint64 rollupId);
     event CanonicalBridgeAddressSet(address indexed addr);
+    event AcceptedSourceRollupIdSet(uint64 indexed sourceRollupId);
     /// @dev The legacy field name `sender` currently carries destinationAddress (the recipient).
     event EtherBridged(address indexed sender, uint64 indexed rollupId, uint256 amount);
     event TokensBridged(address indexed token, address indexed sender, uint64 indexed rollupId, uint256 amount);
@@ -134,6 +148,16 @@ contract Bridge {
         _initializeBridge(_EEZContract, counterpartBridge, localRollupId);
     }
 
+    /// @notice Restrict incoming token messages to one source rollup, retaining counterpart proxy authentication.
+    /// @dev Reception and outbound transfers are disabled until set. The admin may replace the accepted ID.
+    ///      This checks the immediate source, not token origin; outbound destination IDs remain unrestricted.
+    /// @param sourceRollupId EEZ routing ID of the accepted source; 0 explicitly selects L1.
+    function setAcceptedSourceRollupId(uint64 sourceRollupId) external onlyAdmin {
+        acceptedSourceRollupId = sourceRollupId;
+        sourceRollupSet = true;
+        emit AcceptedSourceRollupIdSet(sourceRollupId);
+    }
+
     /// @dev Shared with constructor-initialized test fixtures. No setup field may be pre-populated.
     function _initializeBridge(address _EEZContract, address counterpartBridge, uint64 localRollupId) internal {
         if (address(EEZContract) != address(0) || rollupId != 0 || canonicalBridgeAddress != address(0)) {
@@ -153,6 +177,7 @@ contract Bridge {
     /// @notice Bridge ETH to destinationAddress on the destination rollup
     /// @param _rollupId The destination rollup ID
     function bridgeEther(uint64 _rollupId, address destinationAddress) external payable {
+        if (!sourceRollupSet) revert SourceRollupNotSet();
         if (msg.value == 0) revert ZeroAmount();
 
         address proxy = _getOrDeployProxy(destinationAddress, _rollupId);
@@ -170,6 +195,7 @@ contract Bridge {
     /// @param _rollupId The destination rollup ID
     /// @param destinationAddress The recipient address on the destination rollup
     function bridgeTokens(address token, uint256 amount, uint64 _rollupId, address destinationAddress) external {
+        if (!sourceRollupSet) revert SourceRollupNotSet();
         if (amount == 0) revert ZeroAmount();
         if (token == address(0)) revert ZeroAddress();
 
