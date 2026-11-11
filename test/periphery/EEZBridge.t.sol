@@ -23,6 +23,7 @@ contract EEZBridgeTest is Test {
         manager = new EEZL2(1, address(this), false, address(this));
         bridge = new EEZBridge(address(manager), 1, address(this));
         bridge.setCanonicalBridgeAddress(counterpart);
+        bridge.setAcceptedSourceRollupId(0);
         bridgeProxy = manager.createCrossChainProxy(counterpart, 0);
     }
 

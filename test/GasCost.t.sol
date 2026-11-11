@@ -534,7 +534,12 @@ contract GasCost is GasFixture {
         assertLt(seededFull, seededBare, "full-shape seed must make call+expected non-zero originals");
     }
 
+    /// @dev One transaction: warmth only carries between reads of the same transaction.
     function test_Doc_RollDoesNotCoolStorage() public {
+        this.rollDoesNotCoolStorage();
+    }
+
+    function rollDoesNotCoolStorage() external {
         _getRollupState(rA.id); // warm the rollups account + the rollup-config slot
 
         // Cold baseline: cool, then measure one read (cold account + cold slot).
@@ -677,7 +682,12 @@ contract GasCost is GasFixture {
     //  execution are SEPARATE transactions (cold) vs warmed by the post (warm).
     // ══════════════════════════════════════════════════════════════════════════
 
+    /// @dev One transaction: the warm case needs the post and the execution to share one.
     function test_ExecCost_WarmVsCold() public {
+        this.execCostWarmVsCold();
+    }
+
+    function execCostWarmVsCold() external {
         // Warm-up cycle: deploys the source proxies (CREATE2) and brings every slot to its
         // steady-state non-zero VALUE, so the two measurements below differ ONLY by access warmth.
         _postEntryN(2, _calls(_reentrantCall()), _rets(""), true);

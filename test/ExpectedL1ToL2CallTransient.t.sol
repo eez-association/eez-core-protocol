@@ -31,7 +31,8 @@ contract TransientHarness is ExpectedL1ToL2CallTransient {
 
 /// @notice Round-trip tests for the transient (de)serializer.
 /// @dev `store` and `load` are separate external calls; transient storage survives across them
-///      because Foundry runs each test body as one transaction (no `--isolate`).
+///      only inside one transaction, so every test runs its body through one `this.<body>()`
+///      call (under forge isolation each top-level call is its own transaction).
 contract ExpectedL1ToL2CallTransientTest is Test {
     TransientHarness internal t;
 
@@ -44,6 +45,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_RoundTrip_Empty() public {
+        this.roundTrip_Empty();
+    }
+
+    function roundTrip_Empty() external {
         ExpectedL1ToL2Call memory c;
         c.expectedL1toL2Hash = keccak256("hash");
         c.revertedOrStaticRollingHash = keccak256("rolling");
@@ -56,6 +61,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     }
 
     function test_RoundTrip_WithCallsAndData() public {
+        this.roundTrip_WithCallsAndData();
+    }
+
+    function roundTrip_WithCallsAndData() external {
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
         calls[0] = L2ToL1Call({
             gas: 100_000,
@@ -92,6 +101,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
 
     /// @dev Pins the packing maths: max-width scalars must survive the two packed words intact.
     function test_RoundTrip_HeaderPackingExtremes() public {
+        this.roundTrip_HeaderPackingExtremes();
+    }
+
+    function roundTrip_HeaderPackingExtremes() external {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
         calls[0] = L2ToL1Call({
             gas: type(uint64).max,
@@ -114,6 +127,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
 
     /// @dev Storing twice must fully overwrite — a larger first write must not leak into the second.
     function test_RoundTrip_OverwriteShrinks() public {
+        this.roundTrip_OverwriteShrinks();
+    }
+
+    function roundTrip_OverwriteShrinks() external {
         ExpectedL1ToL2Call memory big;
         big.l2ToL1Calls = new L2ToL1Call[](2);
         big.l2ToL1Calls[0].data = hex"aabbccdd";
@@ -133,6 +150,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     /// @dev Two blobs that both end mid-word, each followed by more calldata for the trailing
     ///      partial word to over-read — the reconstructed blobs must still stop at their length.
     function test_RoundTrip_PartialTrailingWords() public {
+        this.roundTrip_PartialTrailingWords();
+    }
+
+    function roundTrip_PartialTrailingWords() external {
         ExpectedL1ToL2Call memory c;
         c.l2ToL1Calls = new L2ToL1Call[](1);
         c.returnData = hex"aabbcc";
@@ -147,6 +168,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     // ─────────────────────────────────────────────────────────────────────────
 
     function test_RoundTrip_Array() public {
+        this.roundTrip_Array();
+    }
+
+    function roundTrip_Array() external {
         ExpectedL1ToL2Call[] memory cs = new ExpectedL1ToL2Call[](3);
 
         // element 0: empty
@@ -178,12 +203,20 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     }
 
     function test_RoundTrip_ArrayEmpty() public {
+        this.roundTrip_ArrayEmpty();
+    }
+
+    function roundTrip_ArrayEmpty() external {
         t.storeArray(new ExpectedL1ToL2Call[](0));
         assertEq(t.loadArray().length, 0);
     }
 
     /// @dev Indexed access: read length, then fetch each element individually — the shape EEZ wants.
     function test_Array_LengthAndLoadAt() public {
+        this.array_LengthAndLoadAt();
+    }
+
+    function array_LengthAndLoadAt() external {
         ExpectedL1ToL2Call[] memory cs = new ExpectedL1ToL2Call[](3);
         for (uint256 i; i < 3; ++i) {
             cs[i].expectedL1toL2Hash = keccak256(abi.encode("elem", i));
@@ -204,6 +237,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     }
 
     function test_LoadAt_OutOfBoundsReverts() public {
+        this.loadAt_OutOfBoundsReverts();
+    }
+
+    function loadAt_OutOfBoundsReverts() external {
         ExpectedL1ToL2Call[] memory cs = new ExpectedL1ToL2Call[](2);
         cs[0].l2ToL1Calls = new L2ToL1Call[](0);
         cs[1].l2ToL1Calls = new L2ToL1Call[](0);
@@ -221,6 +258,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
 
     /// @dev Clear leaves all row data behind; nothing may still be reachable through it.
     function test_Stale_ClearHidesEveryRow() public {
+        this.stale_ClearHidesEveryRow();
+    }
+
+    function stale_ClearHidesEveryRow() external {
         t.storeArray(_fatRows(3));
         assertEq(t.arrayLength(), 3, "seeded");
 
@@ -235,6 +276,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
     /// @dev A shorter table written over a longer one: the stale tail must stay unreachable, and the
     ///      surviving row must be the NEW one, not a blend with the fat row that occupied its slots.
     function test_Stale_ShorterTableAfterClear() public {
+        this.stale_ShorterTableAfterClear();
+    }
+
+    function stale_ShorterTableAfterClear() external {
         t.storeArray(_fatRows(3));
         t.clearArray();
 
@@ -252,6 +297,10 @@ contract ExpectedL1ToL2CallTransientTest is Test {
 
     /// @dev Same, without an intervening clear — a plain overwrite must be equally bounded.
     function test_Stale_ShorterTableWithoutClear() public {
+        this.stale_ShorterTableWithoutClear();
+    }
+
+    function stale_ShorterTableWithoutClear() external {
         t.storeArray(_fatRows(3));
 
         ExpectedL1ToL2Call[] memory lean = new ExpectedL1ToL2Call[](2);

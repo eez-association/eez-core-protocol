@@ -1478,6 +1478,11 @@
     },
     {
       "type": "error",
+      "name": "InsufficientEntryBalance",
+      "inputs": []
+    },
+    {
+      "type": "error",
       "name": "InsufficientRollupBalance",
       "inputs": []
     },
