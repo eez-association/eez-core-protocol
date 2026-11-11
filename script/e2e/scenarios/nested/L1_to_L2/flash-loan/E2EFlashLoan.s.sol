@@ -354,6 +354,7 @@ contract DeployL2 is Script, FlashLoanActions {
         (, address admin,) = vm.readCallers();
         Bridge deployedBridge = new InitializedBridge(managerAddr, _e2eRollupId(), admin);
         InitializedBridge(address(deployedBridge)).setCanonicalBridgeAddress(bridgeL1);
+        deployedBridge.setAcceptedSourceRollupId(MAINNET_ROLLUP_ID);
         address bridge = address(deployedBridge);
 
         // Config args unused on the L2 side — claimAndBridgeBack takes everything as parameters.
@@ -397,6 +398,7 @@ contract Deploy2 is Script, FlashLoanActions {
 
         vm.startBroadcast();
         InitializedBridge(bridgeAddr).setCanonicalBridgeAddress(bridgeL2Addr);
+        Bridge(bridgeAddr).setAcceptedSourceRollupId(_e2eRollupId());
         FlashLoan pool = new FlashLoan();
         IERC20(tokenAddr).transfer(address(pool), AMOUNT);
 

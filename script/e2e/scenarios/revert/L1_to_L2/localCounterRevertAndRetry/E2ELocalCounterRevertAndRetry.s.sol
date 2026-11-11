@@ -23,7 +23,6 @@ import {
     HashStep
 } from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: testnet/devnet fee quote rejects this top-level retry; explicit runs only.
 // One L1 user transaction; both cross-chain calls are top-level:
 // alice -> Caller(L1).execute()
 //   ├─ try this.callThenRevert()

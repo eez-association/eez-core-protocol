@@ -20,8 +20,8 @@ receipt. Null responses, timeouts, other errors, and mined transactions do not
 pass. Evidence is saved in each job's `composer-rejection-<hash>.json` and
 `expected-rejections.csv`; verification checks it again against live RPCs.
 `--resend` does not resend these negative tests. Local Anvil tests still exercise
-catch/create/retry recovery. These scenarios remain excluded from `all`; select
-them explicitly. Other network runners retain their successful-execution checks.
+catch/create/retry recovery. These scenarios are included in `all`. Other network
+runners retain their successful-execution checks.
 See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
@@ -43,15 +43,11 @@ even though its L2 table has one source entry per proxy consumption. Calls made 
 a cross-chain frame remains open stay in that frame's nested tables/sub-arrays and
 never become later system deliveries.
 
-**NOT LIVE YET — static reads around local writes:** `staticLocalWrite`,
-`staticLocalWriteL2`, `nestedStaticLocalWriteL1`, and `nestedStaticLocalWriteL2`
-have passed local Anvil runs only. They are not validated for live staged or
-parallel network testing. They are excluded from `all` / `all:N` discovery in
-`staged.sh` and `parallel.sh`, from `sequential.sh all`,
-and from the local parallel runner's default / `all` set. Each scenario carries
-an `E2E_EXCLUDE_FROM_ALL` marker; remove it only when the scenario is ready.
-Explicit names and category selections still include them; use explicit local
-runs for development. See the [scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
+**Static reads around local writes:** `staticLocalWrite`, `staticLocalWriteL2`,
+`nestedStaticLocalWriteL1`, and `nestedStaticLocalWriteL2` are included in automatic
+`all` / `all:N` and local default runs. Their earlier validation was local Anvil
+only; inclusion does not establish live support. See the
+[scenario descriptions](BUILD_AND_REVIEW_E2E_TESTS.md#static-read--local-write--read-with-callbacks).
 
 Network verification uses exact composer transaction links by default, including
 full L2 static-table checks. See [transaction roles and compatibility modes](RPC.md#eez_getcrosschaintransaction)
@@ -90,9 +86,12 @@ capture, nonce checks, fee quoting, and post-trigger verification remain enabled
 It restores the risk of preparing a trigger while setup is replaced during
 settlement, including nonce conflicts. The staged plan path is unaffected.
 
-The 22 call-pattern scenarios added in PR #54 are explicit-only pending live
-validation. Their `E2E_EXCLUDE_FROM_ALL` markers exclude them from `all`, `all:N`
-and default local runs; named scenarios and category selections remain available.
+All 78 current scenarios are enabled in automatic `all` / `all:N` and local
+default runs, including the 22 call-pattern scenarios from PR #54, missing-proxy
+expected-rejection cases, rollback/retry regressions, and the gas-capacity
+experiment. Network results determine current deployment support; inclusion alone
+does not establish live readiness. The runners still honor `E2E_EXCLUDE_FROM_ALL`
+if a future scenario carries that marker.
 
 ### Cross-chain trigger fees
 

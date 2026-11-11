@@ -26,7 +26,6 @@ import {
     immediateSingleRollupBatch
 } from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: deliberate block-capacity experiment; run explicitly.
 // E2E_LOCAL_L2_BLOCK_GAS_LIMIT: 60000000
 // Local replay reserves room for Forge's padded transaction gas limits.
 // This fixture does not establish packing into a live network's block limit.

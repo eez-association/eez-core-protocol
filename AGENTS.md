@@ -22,9 +22,7 @@ Use implementation and regression tests to establish current behavior; flag disa
 | Transaction decoding and flow viewer | [trace-decoder/README.md](trace-decoder/README.md), `script/tools/` |
 
 `src/periphery/` contains bridge/token/DeFi fixtures outside the core protocol audit scope.
-For ancillary work, read the local README in `script/balancer/`, `experiments/uniswap-lab/`,
-`jsBlobs/`, `jev-test/`, or `transient-storage-demo/`; they have separate workflows.
-
+For ancillary work, read the local README in `script/balancer/`
 ## Commands that matter
 
 Run from the repository root. Use focused checks first, then the relevant broader suite.
@@ -90,7 +88,7 @@ Read [BUILD_AND_REVIEW_E2E_TESTS](script/e2e/BUILD_AND_REVIEW_E2E_TESTS.md) befo
   Verify exact results and persisted evidence; use `ABSENT_L2_HASHES` for expected nondelivery.
 - Respect `E2E_EXCLUDE_FROM_ALL`: default/all runs omit marked scenarios; explicit names/categories
   can include them. A local pass does not establish live readiness.
-  Keep the 22 call-pattern scenarios from PR #54 excluded until explicitly enabled.
+  All current scenarios, including the 22 call-pattern scenarios from PR #54, are explicitly enabled.
 - For requested network runs, use `script/e2e/run/network/staged.sh` with `chain.env` or `DEVNET_ENV`.
   Discover addresses via `eez_composerInfo` on `L1_FRONT`; resume from the saved run snapshot.
   RPC endpoints handle deployment/reads; fronts receive cross-chain triggers. Never expose keys or
@@ -123,3 +121,21 @@ reference even for L2-origin settlement. Capture responses during the run;
 
 Check `git status` before editing and preserve unrelated work. Update affected documentation with
 behavior changes. Report what changed, which checks actually ran, and any remaining verification gaps.
+
+## Command and credential safety
+
+- Review commands/scripts and their output/error paths before execution. Prefer short,
+  readable commands, executed one at a time.
+- Never dump credentials, env files or wallet pools. Print only allowlisted public
+  fields; report credential presence only. Name-based redaction can miss secrets,
+  and endpoint URLs may contain credentials.
+- Avoid shell tracing and process-argument dumps. Prefer protected signing inputs
+  over raw keys in command arguments; existing scripts may still expose arguments.
+- Stop only verified processes owned by the current run using exact PIDs/process
+  groups. Avoid broad pattern kills; confirm exit before starting another run.
+- Interrupted commands may have executed partially. Check effects before retrying.
+- Safety reports must distinguish confirmed incidents, risks and unknowns. Never
+  claim complete safety from an incomplete review.
+- If a secret leaks, stop using it and report the exposure without repeating it.
+  Do not promise log deletion. Changing an env file does not invalidate a wallet
+  key; wallet replacement, fund transfers and authority changes need explicit instructions.

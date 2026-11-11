@@ -20,7 +20,6 @@ import {
     HashStep
 } from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: targeted L1 parent rollback regression; select explicitly.
 // One L1 user transaction; one top-level cross-chain call:
 // alice -> Caller(L1).execute()
 //   ├─ try this.callThenRevert()

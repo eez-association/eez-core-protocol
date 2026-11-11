@@ -34,8 +34,6 @@ import {
     immediateSingleRollupBatch
 } from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: NOT READY. Missing-proxy cases remain explicit-only pending live staged validation.
-
 // Top-level static lookup: L1 reader -> L2 view forwarder -> L2 callback helper -> STATIC L1 Counter.counter().
 // The L2 forwarder implements counter() as a view function, so both cross-chain
 // legs are static. No L2 delivery or state transition is permitted.

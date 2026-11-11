@@ -68,6 +68,21 @@ forge script script/DeployBridge.s.sol:BridgeComputeAddress --offline \
   "$IMPLEMENTATION_SALT" "$PROXY_SALT" "$UPGRADE_OWNER"
 ```
 
+### Restrict incoming bridge messages to one rollup
+
+The bridge admin can call `setAcceptedSourceRollupId(uint64)` to accept incoming
+`receiveTokens` messages only from that EEZ rollup ID. Set the registered L2 ID
+on the L1 bridge and `0` on the L2 bridge to accept L1. This is the immediate
+source rollup, not the token's origin or an Ethereum chain ID. The counterpart
+bridge's cross-chain proxy must still authenticate the call.
+
+```bash
+cast send "$BRIDGE_PROXY" 'setAcceptedSourceRollupId(uint64)' "$SOURCE_ROLLUP_ID" \
+  --rpc-url "$RPC" --account bridge-admin
+cast call "$BRIDGE_PROXY" 'acceptedSourceRollupId()(uint64)' --rpc-url "$RPC"
+cast call "$BRIDGE_PROXY" 'sourceRollupSet()(bool)' --rpc-url "$RPC"
+```
+
 ### Bridge Bash runner
 
 Build the artifacts first, then use the Bash/cast runner. It uses `jq` for JSON;
@@ -100,6 +115,8 @@ Arachnid's fixed, pre-signed factory-bootstrap transaction remains unchanged.
 The runner bootstraps missing Arachnid factories, deploys both implementations,
 then both proxies, and calls the admin-only configuration once per bridge.
 Equal proxy addresses use a zero counterpart; otherwise it links the two proxies.
+Select each bridge's accepted source rollup afterward as described above; incoming
+tokens and outbound transfers remain blocked until that admin call succeeds.
 It saves signed transactions before sending and verifies receipt contents,
 canonical inclusion, implementation/proxy bytecode and final configuration.
 Keep the private run directory when rerunning: completed deployments are reused,

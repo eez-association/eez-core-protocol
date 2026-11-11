@@ -61,6 +61,8 @@ contract IntegrationTestBridge is IntegrationBase {
         bridgeL2 = _deployBridge();
         bridgeL1.initializeBridge(address(rollups), address(bridgeL2), MAINNET_ROLLUP_ID);
         bridgeL2.initializeBridge(address(managerL2), address(bridgeL1), L2_ROLLUP_ID);
+        bridgeL1.setAcceptedSourceRollupId(L2_ROLLUP_ID);
+        bridgeL2.setAcceptedSourceRollupId(MAINNET_ROLLUP_ID);
 
         // ── Token setup ──
         token = new TestToken();

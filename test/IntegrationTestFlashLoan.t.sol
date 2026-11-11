@@ -83,6 +83,8 @@ contract IntegrationTestFlashLoan is IntegrationBase {
         // Cross-reference canonical addresses for bidirectional bridging
         InitializedBridge(address(bridgeL2)).setCanonicalBridgeAddress(address(bridgeL1));
         InitializedBridge(address(bridgeL1)).setCanonicalBridgeAddress(address(bridgeL2));
+        bridgeL1.setAcceptedSourceRollupId(L2_ROLLUP_ID);
+        bridgeL2.setAcceptedSourceRollupId(MAINNET_ROLLUP_ID);
 
         // ── Token setup ──
         token = new FlashLoanTestToken(); // 100,000e18 minted to address(this)

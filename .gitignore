@@ -20,3 +20,6 @@ faucet.txt
 multisend.txt
 wallet-pool.csv
 toShareHtml
+
+# Local experiments
+/experiments/

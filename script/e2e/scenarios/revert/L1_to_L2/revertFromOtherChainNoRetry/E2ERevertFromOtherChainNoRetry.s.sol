@@ -29,7 +29,6 @@ import {
     HashStep
 } from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: targeted rollback regression; select explicitly.
 // RevertFromOtherChainNoRetry — L1-triggered callback erased by an L2 parent revert.
 //
 // alice@L1 -> proxy(SelfCallerRevertOnly@L2).execute()

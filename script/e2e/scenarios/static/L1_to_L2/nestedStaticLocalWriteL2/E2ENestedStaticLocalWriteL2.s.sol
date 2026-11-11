@@ -3,9 +3,7 @@ pragma solidity ^0.8.28;
 
 import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: NOT LIVE YET (staged/parallel network tests).
-// Validated on local Anvil only. Excluded from automatic all/default runs;
-// select explicitly for local testing until live-network validation is complete.
+// Included in automatic all/default runs; live support is checked by network verification.
 
 // NestedStaticLocalWriteL2: nested static reads around local writes on L2.
 // ONE user tx on L1; reader.run() on L2 performs:

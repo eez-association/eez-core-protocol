@@ -3,8 +3,6 @@ pragma solidity ^0.8.28;
 
 import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
 
-// E2E_EXCLUDE_FROM_ALL: Explicit selection only pending live validation.
-
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";

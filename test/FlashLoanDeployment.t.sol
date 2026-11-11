@@ -50,6 +50,10 @@ contract FlashLoanDeploymentTest is Test {
         assertEq(address(l2.EEZContract()), managerL2);
         assertEq(l1.rollupId(), 0);
         assertEq(l2.rollupId(), 3);
+        assertTrue(l1.sourceRollupSet());
+        assertTrue(l2.sourceRollupSet());
+        assertEq(l1.acceptedSourceRollupId(), 3);
+        assertEq(l2.acceptedSourceRollupId(), 0);
         assertEq(l1.canonicalBridgeAddress(), address(l2));
         assertEq(l2.canonicalBridgeAddress(), address(l1));
         assertEq(l1.admin(), l2.admin());

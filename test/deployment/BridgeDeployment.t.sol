@@ -61,6 +61,8 @@ contract BridgeDeploymentTest is Test {
         bridge = _deploy();
         vm.prank(bridgeAdmin);
         bridge.initializeBridge(address(manager), address(0), 7);
+        vm.prank(bridgeAdmin);
+        bridge.setAcceptedSourceRollupId(9);
     }
 
     function _admin(address proxy) internal view returns (ProxyAdmin) {
@@ -266,6 +268,8 @@ contract BridgeDeploymentTest is Test {
             ITransparentUpgradeableProxy(address(bridge)), address(next), abi.encodeCall(BridgeV2Mock.migrate, (42))
         );
         assertEq(BridgeV2Mock(address(bridge)).migrationValue(), 42);
+        assertTrue(bridge.sourceRollupSet());
+        assertEq(bridge.acceptedSourceRollupId(), 9);
         assertEq(next.migrationValue(), 0);
         assertEq(bridge.admin(), bridgeAdmin);
         assertEq(address(bridge.EEZContract()), address(manager));

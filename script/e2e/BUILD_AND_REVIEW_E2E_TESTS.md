@@ -253,8 +253,8 @@ Authoring notes specific to static scenarios:
 
 The two predeployed-proxy scenarios are included in automatic `all` / default
 runs. Their live non-mining failures are reported by the runner. The two
-`MissingProxy` scenarios remain **NOT READY** and carry `E2E_EXCLUDE_FROM_ALL`
-markers pending live validation. Explicit names remain selectable.
+`MissingProxy` scenarios are also included; the staged network runner requires
+the exact expected composer rejection described below.
 
 | Trigger chain | Scenario | Static call tree | Settlement |
 | --- | --- | --- | --- |
@@ -316,11 +316,10 @@ bash script/e2e/run/local/parallel.sh staticReadX2Write staticReadX2WriteL2
 
 ### Static read → local write → read with callbacks
 
-**Status: NOT LIVE YET in staged or parallel network testing.** These four scenarios
-are validated locally only and excluded from automatic `all` / `all:N` runs and the
-local default set. Their `E2E_EXCLUDE_FROM_ALL` markers control this exclusion.
-The explicit command below is for local development; names and category selections
-remain available and do not imply live readiness.
+These four scenarios are included in automatic `all` / `all:N` and local default
+runs. Their earlier validation was local only; network execution and content
+verification determine current live support. The explicit command below also
+remains available for local development.
 
 These scenarios cover candidate retries without a mutable EEZ call between reads.
 Each scenario file contains its reader, remote quote producer, and both chains'

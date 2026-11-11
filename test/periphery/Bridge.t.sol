@@ -81,6 +81,8 @@ contract BridgeTest is Test {
         proxy = new AcceptingProxy();
         manager = new MockManager(address(proxy));
         bridge = new InitializedBridge(address(manager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        bridge.setAcceptedSourceRollupId(DEST_ROLLUP);
         token = new GoodToken();
         token.transfer(alice, 100_000e18);
     }
@@ -135,10 +137,14 @@ contract BridgeTest is Test {
         RevertingProxy bad = new RevertingProxy();
         MockManager badManager = new MockManager(address(bad));
         Bridge b = new InitializedBridge(address(badManager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        b.setAcceptedSourceRollupId(DEST_ROLLUP);
 
         vm.deal(alice, 1 ether);
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.ProxyCallFailed.selector, abi.encodeWithSignature("Error(string)", "nope"))
+        );
         b.bridgeEther{value: 1 ether}(DEST_ROLLUP, dest);
     }
 
@@ -178,10 +184,14 @@ contract BridgeTest is Test {
         RevertingProxy bad = new RevertingProxy();
         MockManager badManager = new MockManager(address(bad));
         Bridge b = new InitializedBridge(address(badManager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        b.setAcceptedSourceRollupId(DEST_ROLLUP);
 
         vm.startPrank(alice);
         token.approve(address(b), 10_000e18);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.ProxyCallFailed.selector, abi.encodeWithSignature("Error(string)", "nope"))
+        );
         b.bridgeTokens(address(token), 10_000e18, DEST_ROLLUP, dest);
         vm.stopPrank();
     }
