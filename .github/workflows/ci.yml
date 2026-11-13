@@ -31,7 +31,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
         with:
-          version: v1.7.1
+          version: v1.8.3
       - name: Build
         run: forge build
       - name: E2E runner regressions
@@ -64,7 +64,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
         with:
-          version: v1.7.1
+          version: v1.8.3
       - name: Build
         run: forge build
       - name: Run every e2e scenario on local anvils
