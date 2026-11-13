@@ -1,8 +1,144 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
+import {TransparentUpgradeableProxy} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 import {Bridge} from "../src/periphery/Bridge.sol";
+
+abstract contract BridgeDeployment is Script {
+    address internal constant FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    bytes32 internal constant FACTORY_CODE_HASH = 0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989;
+    bytes32 internal constant ADMIN_SLOT = bytes32(uint256(keccak256("eip1967.proxy.admin")) - 1);
+    bytes32 internal constant IMPLEMENTATION_SLOT = bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1);
+
+    function _predict(bytes32 salt, bytes memory initCode) internal pure returns (address) {
+        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), FACTORY, salt, keccak256(initCode))))));
+    }
+
+    function _proxyCode(
+        address implementation,
+        address bridgeAdmin,
+        address upgradeOwner
+    )
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodePacked(
+            type(TransparentUpgradeableProxy).creationCode,
+            abi.encode(implementation, upgradeOwner, abi.encodeCall(Bridge.initialize, (bridgeAdmin)))
+        );
+    }
+
+    function _deploy(bytes32 salt, bytes memory initCode) internal returns (address deployed) {
+        require(FACTORY.codehash == FACTORY_CODE_HASH, "Unexpected CREATE2 factory code");
+        deployed = _predict(salt, initCode);
+        if (deployed.code.length == 0) {
+            (bool ok,) = FACTORY.call(abi.encodePacked(salt, initCode));
+            require(ok && deployed.code.length != 0, "CREATE2 deployment failed");
+        }
+    }
+
+    function _implementation(bytes32 salt) internal returns (address implementation) {
+        implementation = _deploy(salt, type(Bridge).creationCode);
+        require(implementation.codehash == keccak256(type(Bridge).runtimeCode), "Implementation code mismatch");
+    }
+
+    function _slotAddress(address target, bytes32 slot) internal view returns (address) {
+        return address(uint160(uint256(vm.load(target, slot))));
+    }
+
+    function _proxy(
+        address implementation,
+        bytes32 salt,
+        address bridgeAdmin,
+        address upgradeOwner
+    )
+        internal
+        returns (Bridge bridge)
+    {
+        require(bridgeAdmin != address(0) && upgradeOwner != address(0), "Zero admin/upgrade owner");
+        address proxy = _deploy(salt, _proxyCode(implementation, bridgeAdmin, upgradeOwner));
+        bridge = Bridge(proxy);
+        address proxyAdmin = _slotAddress(proxy, ADMIN_SLOT);
+        require(_slotAddress(proxy, IMPLEMENTATION_SLOT) == implementation, "Proxy implementation mismatch");
+        require(ProxyAdmin(proxyAdmin).owner() == upgradeOwner, "Upgrade owner mismatch");
+        require(bridge.admin() == bridgeAdmin, "Bridge admin mismatch");
+        console.log("BRIDGE_IMPLEMENTATION", implementation);
+        console.log("BRIDGE_PROXY", proxy);
+        console.log("BRIDGE_PROXY_ADMIN", proxyAdmin);
+        console.log("BRIDGE_ADMIN", bridgeAdmin);
+    }
+}
+
+/// @notice Predict addresses for the broadcasting deployer, who will be the bridge admin.
+contract BridgeComputeAddress is BridgeDeployment {
+    function run(
+        bytes32 implementationSalt,
+        bytes32 proxySalt,
+        address upgradeOwner
+    )
+        external
+        returns (address implementation, address bridge)
+    {
+        vm.startBroadcast();
+        (, address deployer,) = vm.readCallers();
+        vm.stopBroadcast();
+        implementation = _predict(implementationSalt, type(Bridge).creationCode);
+        bridge = _predict(proxySalt, _proxyCode(implementation, deployer, upgradeOwner));
+        console.log("BRIDGE_IMPLEMENTATION", implementation);
+        console.log("BRIDGE_PROXY", bridge);
+        console.log("BRIDGE_ADMIN", deployer);
+    }
+}
+
+/// @notice Optional combined implementation + proxy deployment. Configuration is a separate admin-only step.
+contract DeployBridge is BridgeDeployment {
+    function run(bytes32 implementationSalt, bytes32 proxySalt, address upgradeOwner) external returns (Bridge bridge) {
+        require(upgradeOwner != address(0), "Zero upgrade owner");
+        vm.startBroadcast();
+        (, address deployer,) = vm.readCallers();
+        address implementation = _implementation(implementationSalt);
+        bridge = _proxy(implementation, proxySalt, deployer, upgradeOwner);
+        vm.stopBroadcast();
+    }
+}
+
+/// @notice Run on each chain to deploy its bridge implementation with CREATE2.
+contract DeployBridgeImplementation is BridgeDeployment {
+    function run(bytes32 salt) external returns (address implementation) {
+        vm.startBroadcast();
+        implementation = _implementation(salt);
+        vm.stopBroadcast();
+        console.log("BRIDGE_IMPLEMENTATION", implementation);
+    }
+}
+
+/// @notice Run after implementation deployment; atomically sets the broadcasting wallet as bridge admin.
+contract DeployBridgeProxy is BridgeDeployment {
+    function run(address implementation, bytes32 salt, address upgradeOwner) external returns (Bridge bridge) {
+        vm.startBroadcast();
+        (, address deployer,) = vm.readCallers();
+        bridge = _proxy(implementation, salt, deployer, upgradeOwner);
+        vm.stopBroadcast();
+    }
+}
+
+/// @notice Admin-only, one-time setup after the two bridge proxy addresses are known.
+contract ConfigureBridge is Script {
+    function run(address bridge, address EEZContract, address counterpartBridge, uint64 localRollupId) external {
+        vm.startBroadcast();
+        (, address broadcaster,) = vm.readCallers();
+        require(Bridge(bridge).admin() == broadcaster, "Broadcast as bridge admin");
+        Bridge(bridge).initializeBridge(EEZContract, counterpartBridge, localRollupId);
+        vm.stopBroadcast();
+        console.log("BRIDGE_PROXY", bridge);
+        console.log("EEZ_CONTRACT", EEZContract);
+        console.log("COUNTERPART_BRIDGE", counterpartBridge);
+        console.log("BRIDGE_ROLLUP_ID", uint256(localRollupId));
+    }
+}
 
 /// @dev Deterministic CREATE2 factory (keyless deployment).
 ///      This factory is pre-deployed on most EVM chains (Ethereum, Optimism, Arbitrum, etc.)
@@ -43,52 +179,4 @@ contract DeployCreate2Factory is Script {
         );
         console.log("CREATE2 factory deployed at %s", CREATE2_FACTORY);
     }
-}
-
-/// @title BridgeComputeAddress
-/// @dev forge script script/DeployBridge.s.sol:BridgeComputeAddress --sig "run(bytes32)" $SALT
-contract BridgeComputeAddress is Script {
-    function run(bytes32 salt) external view {
-        address predicted = _computeBridgeAddress(salt);
-        console.log("Predicted BRIDGE=%s", predicted);
-    }
-}
-
-/// @title BridgeDeployL1
-/// @dev forge script script/DeployBridge.s.sol:BridgeDeployL1 \
-///   --rpc-url $L1_RPC --broadcast --private-key $PK --sig "run(address,bytes32)" $EEZContract $SALT
-contract BridgeDeployL1 is Script {
-    function run(address EEZContract, bytes32 salt) external {
-        vm.startBroadcast();
-        address bridge = _deployBridge(salt);
-        Bridge(bridge).initialize(EEZContract, 0, msg.sender);
-        console.log("BRIDGE_L1=%s", bridge);
-        vm.stopBroadcast();
-    }
-}
-
-/// @title BridgeDeployL2  - same deterministic address, no setCanonicalBridgeAddress needed
-/// @dev forge script script/DeployBridge.s.sol:BridgeDeployL2 \
-///   --rpc-url $L2_RPC --broadcast --private-key $PK --sig "run(address,uint64,bytes32)" $MANAGER $ROLLUP_ID $SALT
-contract BridgeDeployL2 is Script {
-    function run(address managerL2, uint64 rollupId, bytes32 salt) external {
-        vm.startBroadcast();
-        address bridge = _deployBridge(salt);
-        Bridge(bridge).initialize(managerL2, rollupId, msg.sender);
-        console.log("BRIDGE_L2=%s", bridge);
-        vm.stopBroadcast();
-    }
-}
-
-function _computeBridgeAddress(bytes32 salt) view returns (address) {
-    bytes memory initCode = type(Bridge).creationCode;
-    return
-        address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), CREATE2_FACTORY, salt, keccak256(initCode))))));
-}
-
-function _deployBridge(bytes32 salt) returns (address deployed) {
-    deployed = _computeBridgeAddress(salt);
-    (bool success,) = CREATE2_FACTORY.call(abi.encodePacked(salt, type(Bridge).creationCode));
-    require(success, "CREATE2 deployment failed");
-    require(deployed.code.length > 0, "Bridge not deployed at expected address");
 }

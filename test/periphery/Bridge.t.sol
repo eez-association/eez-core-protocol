@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {InitializedBridge} from "../../script/DeployInitializedBridge.s.sol";
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Bridge} from "../../src/periphery/Bridge.sol";
@@ -79,8 +80,9 @@ contract BridgeTest is Test {
     function setUp() public {
         proxy = new AcceptingProxy();
         manager = new MockManager(address(proxy));
-        bridge = new Bridge();
-        bridge.initialize(address(manager), THIS_ROLLUP, admin);
+        bridge = new InitializedBridge(address(manager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        bridge.setAcceptedSourceRollupId(DEST_ROLLUP);
         token = new GoodToken();
         token.transfer(alice, 100_000e18);
     }
@@ -89,19 +91,17 @@ contract BridgeTest is Test {
 
     function test_initializeTwiceReverts() public {
         vm.expectRevert(Bridge.AlreadyInitialized.selector);
-        bridge.initialize(address(manager), THIS_ROLLUP, admin);
+        bridge.initialize(admin);
     }
 
     function test_initializeZeroManagerReverts() public {
-        Bridge fresh = new Bridge();
         vm.expectRevert(Bridge.ZeroAddress.selector);
-        fresh.initialize(address(0), THIS_ROLLUP, admin);
+        new InitializedBridge(address(0), THIS_ROLLUP, admin);
     }
 
     function test_initializeZeroAdminReverts() public {
-        Bridge fresh = new Bridge();
         vm.expectRevert(Bridge.ZeroAddress.selector);
-        fresh.initialize(address(manager), THIS_ROLLUP, address(0));
+        new InitializedBridge(address(manager), THIS_ROLLUP, address(0));
     }
 
     // ── admin ───────────────────────────────────────────────────
@@ -109,12 +109,12 @@ contract BridgeTest is Test {
     function test_setCanonicalBridgeAddressOnlyAdmin() public {
         vm.prank(alice);
         vm.expectRevert(Bridge.OnlyAdmin.selector);
-        bridge.setCanonicalBridgeAddress(address(0xBEEF));
+        InitializedBridge(address(bridge)).setCanonicalBridgeAddress(address(0xBEEF));
     }
 
     function test_setCanonicalBridgeAddress() public {
         vm.prank(admin);
-        bridge.setCanonicalBridgeAddress(address(0xBEEF));
+        InitializedBridge(address(bridge)).setCanonicalBridgeAddress(address(0xBEEF));
         assertEq(bridge.canonicalBridgeAddress(), address(0xBEEF));
     }
 
@@ -136,12 +136,15 @@ contract BridgeTest is Test {
         // Point the manager at a reverting proxy.
         RevertingProxy bad = new RevertingProxy();
         MockManager badManager = new MockManager(address(bad));
-        Bridge b = new Bridge();
-        b.initialize(address(badManager), THIS_ROLLUP, admin);
+        Bridge b = new InitializedBridge(address(badManager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        b.setAcceptedSourceRollupId(DEST_ROLLUP);
 
         vm.deal(alice, 1 ether);
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.ProxyCallFailed.selector, abi.encodeWithSignature("Error(string)", "nope"))
+        );
         b.bridgeEther{value: 1 ether}(DEST_ROLLUP, dest);
     }
 
@@ -180,12 +183,15 @@ contract BridgeTest is Test {
     function test_bridgeTokensProxyCallFailedReverts() public {
         RevertingProxy bad = new RevertingProxy();
         MockManager badManager = new MockManager(address(bad));
-        Bridge b = new Bridge();
-        b.initialize(address(badManager), THIS_ROLLUP, admin);
+        Bridge b = new InitializedBridge(address(badManager), THIS_ROLLUP, admin);
+        vm.prank(admin);
+        b.setAcceptedSourceRollupId(DEST_ROLLUP);
 
         vm.startPrank(alice);
         token.approve(address(b), 10_000e18);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.ProxyCallFailed.selector, abi.encodeWithSignature("Error(string)", "nope"))
+        );
         b.bridgeTokens(address(token), 10_000e18, DEST_ROLLUP, dest);
         vm.stopPrank();
     }
@@ -270,7 +276,7 @@ contract BridgeTest is Test {
     function test_canonicalBridgeAddressUsedForProxyLookup() public {
         // Setting a canonical address exercises the `_bridgeAddress` override branch on bridgeTokens.
         vm.prank(admin);
-        bridge.setCanonicalBridgeAddress(address(0xCAFE));
+        InitializedBridge(address(bridge)).setCanonicalBridgeAddress(address(0xCAFE));
 
         vm.startPrank(alice);
         token.approve(address(bridge), 1_000e18);

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -46,7 +48,6 @@ contract StaticReadWriteTargetL2 is IStaticReadWriteTargetL2 {
 
 /// @notice One transaction: one static read, one remote increment, one static read.
 contract StaticReadWriteReaderL2 {
-    uint256 private constant PROXY_CALL_GAS = 5_000_000;
     StaticReadWriteTargetL2 public immutable target;
     uint256 public beforeRead;
     uint256 public incrementResult;
@@ -59,7 +60,7 @@ contract StaticReadWriteReaderL2 {
 
     function run() external {
         beforeRead = target.counter();
-        incrementResult = target.increment{gas: PROXY_CALL_GAS}();
+        incrementResult = target.increment();
         afterRead = target.counter();
         require(incrementResult == beforeRead + 1, "increment result differs");
         require(afterRead == incrementResult, "static read did not advance");
@@ -76,8 +77,6 @@ contract StaticReadWriteReaderL2 {
 
 /// @dev Both sides of this L2-originating scenario, built from the same call identities.
 abstract contract StaticReadWriteL2Actions {
-    uint64 internal constant L2_ID = 1;
-
     function _initialRoot() internal pure returns (bytes32) {
         return keccak256("l2-initial-state");
     }
@@ -92,11 +91,11 @@ abstract contract StaticReadWriteL2Actions {
             : abi.encodeCall(StaticReadWriteTargetL2.increment, ());
     }
 
-    function _key(bool isStatic, address counter, address reader) internal pure returns (bytes32) {
-        return crossChainCallHash(isStatic, reader, L2_ID, counter, 0, 0, _data(isStatic));
+    function _key(bool isStatic, address counter, address reader) internal view returns (bytes32) {
+        return crossChainCallHash(isStatic, reader, e2eRollupId(), counter, 0, 0, _data(isStatic));
     }
 
-    function _l1Calls(address counter, address reader) internal pure returns (L2ToL1Call[] memory calls) {
+    function _l1Calls(address counter, address reader) internal view returns (L2ToL1Call[] memory calls) {
         // One L2 user transaction maps to ONE L1 entry, including both real reads.
         calls = new L2ToL1Call[](3);
         for (uint256 i; i < calls.length; i++) {
@@ -105,7 +104,7 @@ abstract contract StaticReadWriteL2Actions {
                 revertNextNCalls: 0,
                 isStatic: i != 1,
                 sourceAddress: reader,
-                sourceRollupId: L2_ID,
+                sourceRollupId: e2eRollupId(),
                 targetAddress: counter,
                 value: 0,
                 data: _data(i != 1)
@@ -113,7 +112,7 @@ abstract contract StaticReadWriteL2Actions {
         }
     }
 
-    function _l1Steps(address counter, address reader) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address counter, address reader) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](1);
         steps[0] = new HashStep[](6);
         for (uint256 i; i < 3; i++) {
@@ -122,9 +121,10 @@ abstract contract StaticReadWriteL2Actions {
         }
     }
 
-    function _l1Entries(address counter, address reader) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address counter, address reader) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory updates = new RollupUpdate[](1);
-        updates[0] = RollupUpdate({rollupId: L2_ID, currentRoot: _initialRoot(), newRoot: _finalRoot(), etherDelta: 0});
+        updates[0] =
+            RollupUpdate({rollupId: e2eRollupId(), currentRoot: _initialRoot(), newRoot: _finalRoot(), etherDelta: 0});
         bytes32 rh = RollingHashBuilder.foldSteps(
             RollingHashBuilder.entryBegin(updates, bytes32(0)), _l1Steps(counter, reader)[0]
         );
@@ -132,7 +132,7 @@ abstract contract StaticReadWriteL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: updates,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: _l1Calls(counter, reader),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -141,7 +141,7 @@ abstract contract StaticReadWriteL2Actions {
         });
     }
 
-    function _l2Entries(address counter, address reader) internal pure returns (L2ExecutionEntry[] memory entries) {
+    function _l2Entries(address counter, address reader) internal view returns (L2ExecutionEntry[] memory entries) {
         bytes32 key = _key(false, counter, reader);
         entries = new L2ExecutionEntry[](1);
         entries[0] = L2ExecutionEntry({
@@ -159,7 +159,7 @@ abstract contract StaticReadWriteL2Actions {
         address reader
     )
         internal
-        pure
+        view
         returns (StaticExecutionEntryL2[] memory entries)
     {
         entries = new StaticExecutionEntryL2[](2);
@@ -220,7 +220,10 @@ contract Execute is Script, StaticReadWriteL2Actions {
         EEZ(vm.envAddress("ROLLUPS"))
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    vm.envAddress("PROOF_SYSTEM"), L2_ID, _l1Entries(address(counter), reader), noStaticEntries()
+                    vm.envAddress("PROOF_SYSTEM"),
+                    e2eRollupId(),
+                    _l1Entries(address(counter), reader),
+                    noStaticEntries()
                 )
             );
         require(counter.counter() == 1, "destination counter mismatch");
@@ -262,6 +265,7 @@ contract ComputeExpected is ComputeExpectedBase, StaticReadWriteL2Actions {
         _printL2Table(l2);
         _logL2Entry(0, l2[0]);
         StaticExecutionEntryL2[] memory statics = _l2Statics(counter, reader);
+        _printL2StaticTable(statics);
         for (uint256 i; i < statics.length; i++) {
             _logStaticLookup(i, statics[i]);
         }

@@ -18,9 +18,8 @@ contract AcceptAllProofSystem is IProofSystem {
 }
 
 /// @title DeployEEZL1
-/// @notice Deploys AcceptAllProofSystem + EEZ + creates L2 rollup (id=1).
-/// @dev Id 0 is MAINNET_ROLLUP_ID and is never assigned — registerRollup pre-increments its
-///      counter, so the first registered rollup (the L2 manager) lands directly at id 1.
+/// @notice Deploys AcceptAllProofSystem + EEZ, registers the L2 rollup and outputs its assigned ID.
+/// @dev Id 0 is MAINNET_ROLLUP_ID and is never assigned by registerRollup.
 /// Outputs: ROLLUPS, PROOF_SYSTEM, L2_MANAGER, L2_ROLLUP_ID
 contract DeployEEZL1 is Script {
     bytes32 constant DEFAULT_VK = keccak256("verificationKey");
@@ -31,21 +30,18 @@ contract DeployEEZL1 is Script {
         AcceptAllProofSystem ps = new AcceptAllProofSystem();
         EEZ rollups = new EEZ(msg.sender);
 
-        // registerRollup skips id 0 (MAINNET_ROLLUP_ID), so the first registered rollup
-        // lands at id 1.
-        // Create L2 manager + register at id 1.
+        // Create the L2 manager and use the ID assigned by the registry.
         address[] memory psList2 = new address[](1);
         psList2[0] = address(ps);
         bytes32[] memory vks2 = new bytes32[](1);
         vks2[0] = DEFAULT_VK;
         Rollup l2Manager = deployRollup(address(rollups), msg.sender, 1, psList2, vks2);
         uint256 rid = rollups.registerRollup(address(l2Manager), keccak256("l2-initial-state"));
-        require(rid == 1, "expected L2 rollupId = 1");
 
         console.log("PROOF_SYSTEM=%s", address(ps));
         console.log("ROLLUPS=%s", address(rollups));
         console.log("L2_MANAGER=%s", address(l2Manager));
-        console.log("L2_ROLLUP_ID=1");
+        console.log("L2_ROLLUP_ID=%s", rid);
 
         vm.stopBroadcast();
     }

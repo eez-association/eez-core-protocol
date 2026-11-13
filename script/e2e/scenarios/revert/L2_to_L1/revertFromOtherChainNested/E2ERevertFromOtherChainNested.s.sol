@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
@@ -45,7 +47,6 @@ import {
 //   final lastResult == 1; only the retry's NESTED_BEGIN/NESTED_END survives.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract RevertFromOtherChainNestedActions {
@@ -58,7 +59,7 @@ abstract contract RevertFromOtherChainNestedActions {
         address alice
     )
         internal
-        pure
+        view
         returns (HashStep[][] memory steps)
     {
         steps = new HashStep[][](1);
@@ -77,16 +78,16 @@ abstract contract RevertFromOtherChainNestedActions {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
 
-    function _outerHash(address selfCallerL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, selfCallerL1, MAINNET_ROLLUP_ID, 0, _executeData());
+    function _outerHash(address selfCallerL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(alice, e2eRollupId(), selfCallerL1, MAINNET_ROLLUP_ID, 0, _executeData());
     }
 
-    function _l1TopHash(address selfCallerL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(false, alice, L2_ROLLUP_ID, selfCallerL1, MAINNET_ROLLUP_ID, 0, _executeData());
+    function _l1TopHash(address selfCallerL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHash(false, alice, e2eRollupId(), selfCallerL1, MAINNET_ROLLUP_ID, 0, _executeData());
     }
 
-    function _innerHash(address counterL2, address selfCallerL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, selfCallerL1, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _innerHash(address counterL2, address selfCallerL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, selfCallerL1, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementData());
     }
 
     function _callback(
@@ -116,7 +117,7 @@ abstract contract RevertFromOtherChainNestedActions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 key = _outerHash(selfCallerL1, alice);
@@ -149,12 +150,12 @@ abstract contract RevertFromOtherChainNestedActions {
         address alice
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory updates = new RollupUpdate[](1);
         updates[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             etherDelta: 0,
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-revert-and-retry")
@@ -166,7 +167,7 @@ abstract contract RevertFromOtherChainNestedActions {
             isStatic: false,
             gas: 0,
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: selfCallerL1,
             value: 0,
             data: _executeData()
@@ -196,7 +197,7 @@ abstract contract RevertFromOtherChainNestedActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: updates,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -220,7 +221,7 @@ contract Deploy is Script {
         address rollupsAddr = vm.envAddress("ROLLUPS");
         address counterL2 = vm.envAddress("COUNTER_L2");
         vm.startBroadcast();
-        address counterProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2, L2_ROLLUP_ID);
+        address counterProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), counterL2, e2eRollupId());
         SelfCallerWithRevert selfCaller = new SelfCallerWithRevert(Counter(counterProxyL1));
         output("COUNTER_PROXY_L1", counterProxyL1);
         output("SELF_CALLER_L1", address(selfCaller));
@@ -267,7 +268,7 @@ contract Execute is Script, RevertFromOtherChainNestedActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystem, L2_ROLLUP_ID, _l1Entries(counterL2, selfCallerL1, msg.sender), noStaticEntries()
+                    proofSystem, e2eRollupId(), _l1Entries(counterL2, selfCallerL1, msg.sender), noStaticEntries()
                 )
             );
         require(SelfCallerWithRevert(selfCallerL1).lastResult() == 1, "same reentrant row was not retried");

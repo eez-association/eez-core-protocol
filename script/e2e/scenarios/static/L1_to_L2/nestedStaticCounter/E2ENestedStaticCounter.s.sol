@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -67,7 +69,6 @@ import {
 //               L1 CounterL1.counter == 1 (unchanged by the flow).
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract NestedStaticActions {
@@ -84,14 +85,14 @@ abstract contract NestedStaticActions {
     /// Inbound call key (alice on L1 -> readerL2): same digest on both sides — L1's
     /// executeCrossChainCall and L2's executeIncomingCrossChainCall both fold
     /// targetRollupId = L2_ROLLUP_ID and callGas 0.
-    function _callHash(address readerL2, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, readerL2, L2_ROLLUP_ID, 0, _incrementCallData());
+    function _callHash(address readerL2, address alice) internal view returns (bytes32) {
+        return crossChainCallHash(false, alice, MAINNET_ROLLUP_ID, readerL2, e2eRollupId(), 0, _incrementCallData());
     }
 
     /// Nested static read key (readerL2 -> CounterL1): EEZL2's static path folds
     /// isStatic = true and source rollup = its OWN id; static keys never fold gas.
-    function _staticHash(address counterL1, address readerL2) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
+    function _staticHash(address counterL1, address readerL2) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _counterCallData());
     }
 
     /// Single L1 entry — the SOURCE side. The reader's static read of CounterL1 EXECUTES for
@@ -104,12 +105,12 @@ abstract contract NestedStaticActions {
         address alice
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-nested-static"),
             etherDelta: 0
@@ -122,7 +123,7 @@ abstract contract NestedStaticActions {
             revertNextNCalls: 0,
             isStatic: true,
             sourceAddress: readerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _counterCallData()
@@ -137,7 +138,7 @@ abstract contract NestedStaticActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -154,7 +155,7 @@ abstract contract NestedStaticActions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -239,7 +240,7 @@ contract Deploy2 is Script {
         address readerL2Addr = vm.envAddress("READER_L2");
 
         vm.startBroadcast();
-        address readerProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), readerL2Addr, L2_ROLLUP_ID);
+        address readerProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), readerL2Addr, e2eRollupId());
         output("READER_PROXY_L1", readerProxyL1);
         vm.stopBroadcast();
     }
@@ -284,7 +285,7 @@ contract Execute is Script, NestedStaticActions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     _l1Entries(counterL1Addr, readerL2Addr, msg.sender),
                     noStaticEntries()
                 )

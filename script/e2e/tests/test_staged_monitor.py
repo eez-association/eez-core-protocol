@@ -234,5 +234,63 @@ _check_missing_proxy_rejection "$CHAIN" 0xaaa evidence.json
                     self.assertNotEqual(result.returncode, 0)
 
 
+class StagedHashValidationTests(unittest.TestCase):
+    HASH = "0x" + "ab" * 32
+
+    def test_rpc_helper_rejects_malformed_success_results(self):
+        values = [self.HASH, "0x" + "AB" * 32, "warning", "", None, 42,
+                  {"hash": self.HASH}, self.HASH[:-1], self.HASH + "0",
+                  "warning\n" + self.HASH, self.HASH + "\nwarning", " " + self.HASH]
+        for value in values:
+            valid = value in (self.HASH, "0x" + "AB" * 32)
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                script = r'''set -euo pipefail
+RUN_DIR="$TEST_ROOT"
+curl() { printf '%s\n' "$RESPONSE"; }
+''' + function("_rpc_send_raw") + '\n_rpc_send_raw mock-rpc mock-raw\n'
+                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                    timeout=5, env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
+                                    "RESPONSE": json.dumps({"jsonrpc": "2.0", "id": 1, "result": value})})
+                self.assertEqual(result.returncode == 0, valid, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, value + "\n" if valid else "")
+
+    def test_send_worker_preserves_resume_journals_on_bad_output(self):
+        for chain in ("L1", "L2"):
+            for value in (self.HASH, "warning\n" + self.HASH, self.HASH + "\nwarning", "", self.HASH[:-1]):
+                valid = value == self.HASH
+                with self.subTest(chain=chain, value=value), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    job = root / "jobs/job"
+                    job.mkdir(parents=True)
+                    (job / "manifest.env").write_text(f'declare -- _TRIGGER_CHAIN="{chain}"\n')
+                    (job / "rawtxs.txt").write_text("saved\nnext\nlater\n")
+                    (job / "txs.txt").write_text(self.HASH + "\n")
+                    original = f"job,{chain},{self.HASH}\n"
+                    (root / "sent.csv").write_text(original)
+                    (root / "wallets.csv").write_text("job,address,private_key\njob,unused,test-only-key\n")
+                    script = r'''set -euo pipefail
+source "$ORCHESTRATOR"
+ATTEMPT=1
+RUN_DIR="$TEST_ROOT"; JOB_NAMES=(job); NJOBS=1
+SEND_PAUSE=0 RESUME=saved-run L1_RPC=mock-read L2_RPC=mock-read
+_job_prepared() { return 0; }
+_front_rpc() { echo mock-front; }
+_reply() { echo "$1" >> "$RUN_DIR/submissions"; printf '%s\n' "$RETURNED_HASH"; }
+_rpc_send_raw() { _reply "$2"; }
+network_send_quoted_trigger() { _reply "$1"; }
+''' + function("send_worker") + '\nsend_worker 0 "$CHAIN" 1\n'
+                    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                        timeout=5, env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
+                                       "CHAIN": chain, "RETURNED_HASH": value,
+                                       "ORCHESTRATOR": str(E2E / "lib/orchestrator.sh")})
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual((root / "submissions").read_text().splitlines(),
+                                     ["next", "later"] if valid else ["next"])
+                    self.assertEqual((job / "txs.txt").read_text(), (self.HASH + "\n") * (3 if valid else 1))
+                    self.assertEqual((root / "sent.csv").read_text(), original * (3 if valid else 1))
+                    if not valid:
+                        self.assertIn(f"SEND FAILED: job ({chain})", (root / "send-failed.log").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ contract EEZBridgeTest is Test {
         manager = new EEZL2(1, address(this), false, address(this));
         bridge = new EEZBridge(address(manager), 1, address(this));
         bridge.setCanonicalBridgeAddress(counterpart);
+        bridge.setAcceptedSourceRollupId(0);
         bridgeProxy = manager.createCrossChainProxy(counterpart, 0);
     }
 
@@ -110,7 +111,7 @@ contract EEZBridgeTest is Test {
         vm.expectRevert(EEZBridge.InvalidManager.selector);
         new EEZBridge(address(0x123), 1, address(this));
         vm.expectRevert(Bridge.AlreadyInitialized.selector);
-        bridge.initialize(address(manager), 1, alice);
+        bridge.initialize(alice);
     }
 
     function testFuzz_remoteTransferConservesBridgeSupply(uint96 requested) public {

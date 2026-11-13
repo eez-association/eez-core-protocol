@@ -276,7 +276,9 @@ contract EEZExpressivenessL2Test is BaseL2 {
         uint256 beforeGas = gasleft();
         (bool ok, bytes memory result) = address(this).staticcall(abi.encodeCall(this.expensiveRate, ()));
         uint64 callbackGas = uint64(beforeGas - gasleft() + 20_000);
-        uint64 quoteGas = callbackGas + 60_000;
+        // Headroom covers the proxy + manager lookup with cold accounts and slots (an isolated run
+        // starts every call cold); it stays far below one callback, so two candidates never fit.
+        uint64 quoteGas = callbackGas + 150_000;
         assertTrue(ok);
         assertEq(result, abi.encode(uint256(1)));
 

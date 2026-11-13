@@ -56,8 +56,8 @@ contract BalancerV3FlashBorrower is Ownable, ReentrancyGuard, IBalancerV3FlashBo
         executorL2 = executorL2_;
         l2RollupId = l2RollupId_;
         // Remote addresses need no local bytecode. Only their EEZ proxies execute locally.
-        executorL2Proxy = bridge_.manager().computeCrossChainProxyAddress(executorL2_, l2RollupId_);
-        if (executorL2Proxy.code.length == 0) bridge_.manager().createCrossChainProxy(executorL2_, l2RollupId_);
+        executorL2Proxy = bridge_.EEZContract().computeCrossChainProxyAddress(executorL2_, l2RollupId_);
+        if (executorL2Proxy.code.length == 0) bridge_.EEZContract().createCrossChainProxy(executorL2_, l2RollupId_);
     }
 
     /// @notice Full usable liquidity: the lesser of accounted Vault reserves and its actual token balance.

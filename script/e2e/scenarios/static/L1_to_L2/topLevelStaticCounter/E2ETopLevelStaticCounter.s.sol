@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -56,7 +58,6 @@ import {
 //  the same block — which a deferred verifier cannot rely on.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract StaticCounterActions {
@@ -68,8 +69,8 @@ abstract contract StaticCounterActions {
 
     /// Static read key: `EEZ.staticCrossChainCall` folds isStatic = true, source = the proxy's
     /// caller (the reader) at MAINNET, target = (CounterL2, L2), value 0, callGas 0.
-    function _staticKey(address counterL2, address readerL1) internal pure returns (bytes32) {
-        return crossChainCallHashStatic(readerL1, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _counterCallData());
+    function _staticKey(address counterL2, address readerL1) internal view returns (bytes32) {
+        return crossChainCallHashStatic(readerL1, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _counterCallData());
     }
 
     /// The ONE top-level static entry, keyed to the reader (the key folds the proxy caller):
@@ -82,11 +83,11 @@ abstract contract StaticCounterActions {
         bytes memory predicted
     )
         internal
-        pure
+        view
         returns (StaticExecutionEntry[] memory entries)
     {
         ExpectedRootPerRollup[] memory pins = new ExpectedRootPerRollup[](1);
-        pins[0] = ExpectedRootPerRollup({rollupId: L2_ROLLUP_ID, root: keccak256("l2-initial-state")});
+        pins[0] = ExpectedRootPerRollup({rollupId: e2eRollupId(), root: keccak256("l2-initial-state")});
 
         entries = new StaticExecutionEntry[](1);
         entries[0] = StaticExecutionEntry({
@@ -94,7 +95,7 @@ abstract contract StaticCounterActions {
             proxyEntryHash: _staticKey(counterL2, readerL1),
             l2ToL1Calls: noCalls(),
             rollingHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             success: true,
             returnData: predicted
         });
@@ -131,7 +132,7 @@ contract Deploy is Script {
         address counterL2Addr = vm.envAddress("COUNTER_L2");
 
         vm.startBroadcast();
-        address counterProxy = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, L2_ROLLUP_ID);
+        address counterProxy = getOrCreateProxy(IEEZ(rollupsAddr), counterL2Addr, e2eRollupId());
         StaticReadCounter reader = new StaticReadCounter(Counter(counterProxy));
         output("COUNTER_PROXY", counterProxy);
         output("READER_L1", address(reader));
@@ -161,7 +162,7 @@ contract Execute is Script, StaticCounterActions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    e2eRollupId(),
                     new ExecutionEntry[](0),
                     _staticEntries(counterL2Addr, address(reader), predicted)
                 )

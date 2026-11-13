@@ -38,6 +38,22 @@ uint64 constant MAINNET_ROLLUP_ID = 0;
 // ══════════════════════════════════════════════════════════════════════
 Vm constant CHEATS = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
+/// @notice EEZ rollup identity resolved and validated by the runner (not an Ethereum chain ID).
+/// @dev No fallback: missing configuration must fail before preparing an incorrectly routed trigger.
+function e2eRollupId() view returns (uint64) {
+    uint256 id = CHEATS.envUint("L2_ROLLUP_ID");
+    require(id > 0 && id <= type(uint64).max, "Invalid L2_ROLLUP_ID");
+    return uint64(id);
+}
+
+/// @dev Scripts use the runner's validated environment. Test harnesses can override
+/// this accessor without changing Foundry's process-wide environment.
+abstract contract E2ERollupConfig {
+    function _e2eRollupId() internal view virtual returns (uint64) {
+        return e2eRollupId();
+    }
+}
+
 /// @notice Publishes a Deploy* output: printed as "NAME=value" for the shell runners and set as
 ///         an env var so later contracts in the same forge process (PrepareJob) can vm.env* it.
 function output(string memory name, address value) {

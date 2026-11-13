@@ -12,8 +12,15 @@ contract EEZBridge is Bridge {
 
     constructor(address manager_, uint64 rollupId_, address admin_) {
         if (manager_.code.length == 0) revert InvalidManager();
-        _initialize(manager_, rollupId_, admin_);
-        emit Initialized(manager_, rollupId_, admin_);
+        if (admin_ == address(0)) revert ZeroAddress();
+        admin = admin_;
+        _initializeBridge(manager_, address(0), rollupId_);
+    }
+
+    /// @dev Mutable linking is retained only for this direct test/demo fixture.
+    function setCanonicalBridgeAddress(address counterpart) external onlyAdmin {
+        canonicalBridgeAddress = counterpart;
+        emit CanonicalBridgeAddressSet(counterpart);
     }
 
     function _deployWrappedToken(
@@ -26,6 +33,7 @@ contract EEZBridge is Bridge {
         override
         returns (address)
     {
-        return address(new EEZBridgedToken{salt: salt}(address(manager), address(this), name, symbol, tokenDecimals));
+        return
+            address(new EEZBridgedToken{salt: salt}(address(EEZContract), address(this), name, symbol, tokenDecimals));
     }
 }

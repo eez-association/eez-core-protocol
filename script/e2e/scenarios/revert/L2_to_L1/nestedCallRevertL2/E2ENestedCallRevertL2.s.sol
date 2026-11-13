@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
@@ -62,14 +64,13 @@ import {
 //    on both sides because ONE contract produces it
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract NestedCallRevertL2Actions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
     ///      The failed nested resolution unwinds its NESTED folds. SafeCAP catches it
     ///      and returns successfully with no bytes; only the outer call survives.
-    function _l1Steps(address scapL1, address alice) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address scapL1, address alice) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](1);
         steps[0] = new HashStep[](2);
         steps[0][0] = RollingHashBuilder.stepCallBegin(_l1TopCallHash(scapL1, alice));
@@ -93,21 +94,21 @@ abstract contract NestedCallRevertL2Actions {
     /// Outgoing/trigger key: alice's call LEAVES the L2 through scapProxyL2, so
     /// `EEZL2.executeCrossChainCall` keys it with the L2-outgoing hash (callGas=0 —
     /// devnet deploys EEZL2 with useGasLeft=false).
-    function _outgoingHash(address scapL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(alice, L2_ROLLUP_ID, scapL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _outgoingHash(address scapL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(alice, e2eRollupId(), scapL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// L1 top-level call hash: SafeCAP.incrementProxy() executes ON L1 (target rollup =
     /// MAINNET; source = alice @ L2).
-    function _l1TopCallHash(address scapL1, address alice) internal pure returns (bytes32) {
-        return crossChainCallHash(false, alice, L2_ROLLUP_ID, scapL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
+    function _l1TopCallHash(address scapL1, address alice) internal view returns (bytes32) {
+        return crossChainCallHash(false, alice, e2eRollupId(), scapL1, MAINNET_ROLLUP_ID, 0, _incrementProxyData());
     }
 
     /// Inner L1→L2 reentry: SafeCAP (on L1) calls RevertCounter on L2 via its L1-side proxy —
     /// keyed with the plain hash. The same hash keys the L1 nested row AND the CALL_BEGIN
     /// fold of the call's real execution inside the L2 outgoing entry.
-    function _innerHash(address revCounterL2, address scapL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, scapL1, MAINNET_ROLLUP_ID, revCounterL2, L2_ROLLUP_ID, 0, _incrementData());
+    function _innerHash(address revCounterL2, address scapL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, scapL1, MAINNET_ROLLUP_ID, revCounterL2, e2eRollupId(), 0, _incrementData());
     }
 
     /// The user tx's outgoing entry — the L2 view of the whole round trip (mirror of the
@@ -120,7 +121,7 @@ abstract contract NestedCallRevertL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry memory)
     {
         bytes32 key = _outgoingHash(scapL1, alice);
@@ -159,7 +160,7 @@ abstract contract NestedCallRevertL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         entries = new L2ExecutionEntry[](1);
@@ -175,12 +176,12 @@ abstract contract NestedCallRevertL2Actions {
         address alice
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-nested-call-revert-l2"),
             etherDelta: 0
@@ -193,7 +194,7 @@ abstract contract NestedCallRevertL2Actions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: alice,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: scapL1,
             value: 0,
             data: _incrementProxyData()
@@ -225,7 +226,7 @@ abstract contract NestedCallRevertL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0), // pure L2 tx — consumed by postAndVerifyBatch/executeL2Txs
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -261,7 +262,7 @@ contract Deploy is Script {
         address revCounterL2 = vm.envAddress("REV_COUNTER_L2");
 
         vm.startBroadcast();
-        address revCounterProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), revCounterL2, L2_ROLLUP_ID);
+        address revCounterProxyL1 = getOrCreateProxy(IEEZ(rollupsAddr), revCounterL2, e2eRollupId());
 
         // SafeCAP on L1: try/catches target.increment() through the proxy, so the
         // destination's revert is recovered from and the entry commits.
@@ -335,7 +336,7 @@ contract Execute is Script, NestedCallRevertL2Actions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(revCounterL2, scapL1, msg.sender), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(revCounterL2, scapL1, msg.sender), noStaticEntries()
                 )
             );
 
