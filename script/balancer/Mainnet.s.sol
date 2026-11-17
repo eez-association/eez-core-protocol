@@ -51,10 +51,10 @@ contract Mainnet is Script {
 
     function ensureFactoryProxy(address owner) external returns (address proxy) {
         Bridge bridge = checkBridge(false);
-        proxy = bridge.manager().computeCrossChainProxyAddress(CREATE2_FACTORY, 0);
+        proxy = bridge.EEZContract().computeCrossChainProxyAddress(CREATE2_FACTORY, 0);
         if (proxy.code.length == 0) {
             vm.startBroadcast(owner);
-            require(bridge.manager().createCrossChainProxy(CREATE2_FACTORY, 0) == proxy, "Factory proxy mismatch");
+            require(bridge.EEZContract().createCrossChainProxy(CREATE2_FACTORY, 0) == proxy, "Factory proxy mismatch");
             vm.stopBroadcast();
         }
     }
@@ -64,8 +64,11 @@ contract Mainnet is Script {
         bridge = Bridge(l1Chain ? L1_BRIDGE : L2_BRIDGE);
         require(address(bridge).code.length != 0, "Bridge missing");
         require(bridge.rollupId() == (l1Chain ? 0 : 1), "Wrong bridge rollup");
-        require(bridge.canonicalBridgeAddress() == (l1Chain ? L2_BRIDGE : L1_BRIDGE), "Wrong counterpart bridge");
-        require(address(bridge.manager()).code.length != 0, "Bridge manager missing");
+        address counterpart = bridge.canonicalBridgeAddress();
+        // Match Bridge's zero-counterpart fallback to its own address.
+        if (counterpart == address(0)) counterpart = address(bridge);
+        require(counterpart == (l1Chain ? L2_BRIDGE : L1_BRIDGE), "Wrong counterpart bridge");
+        require(address(bridge.EEZContract()).code.length != 0, "Bridge manager missing");
     }
 
     function deployL1(address owner, address executorL2) external returns (BalancerV3FlashBorrower borrower) {
@@ -99,7 +102,7 @@ contract Mainnet is Script {
     }
 
     function preflightL1(address manager) external view returns (uint256 amount) {
-        require(address(checkBridge(true).manager()) == manager, "Wrong L1 manager");
+        require(address(checkBridge(true).EEZContract()) == manager, "Wrong L1 manager");
         uint256 balance = IERC20(USDC).balanceOf(VAULT);
         uint256 reserves = IBalancerV3Vault(VAULT).getReservesOf(IERC20(USDC));
         amount = Math.min(balance, reserves);
@@ -107,7 +110,7 @@ contract Mainnet is Script {
     }
 
     function preflightL2(address manager) external view {
-        require(address(checkBridge(false).manager()) == manager, "Wrong L2 manager");
+        require(address(checkBridge(false).EEZContract()) == manager, "Wrong L2 manager");
     }
 
     function verifyL1(address borrowerAddress, address executorL2, address owner, bool completed) external view {
@@ -117,7 +120,7 @@ contract Mainnet is Script {
         require(address(borrower.vault()) == VAULT && address(borrower.token()) == USDC, "Wrong Vault/token");
         require(address(borrower.bridge()) == address(bridge), "Wrong L1 bridge");
         require(borrower.executorL2() == executorL2 && borrower.l2RollupId() == 1, "Wrong L2 destination");
-        address proxy = bridge.manager().computeCrossChainProxyAddress(executorL2, 1);
+        address proxy = bridge.EEZContract().computeCrossChainProxyAddress(executorL2, 1);
         require(borrower.executorL2Proxy() == proxy && proxy.code.length != 0, "Wrong/missing L2 proxy");
         if (completed) {
             require(IERC20(USDC).balanceOf(borrowerAddress) == 0, "USDC remains on borrower");
@@ -144,7 +147,7 @@ contract Mainnet is Script {
         require(nft.minBalance() == MINIMUM, "Wrong NFT minimum");
         if (configured) {
             require(executor.borrowerL1() == borrower, "Wrong borrower");
-            address proxy = bridge.manager().computeCrossChainProxyAddress(borrower, 0);
+            address proxy = bridge.EEZContract().computeCrossChainProxyAddress(borrower, 0);
             require(executor.borrowerL1Proxy() == proxy && proxy.code.length != 0, "Wrong/missing borrower proxy");
         }
         if (tokenId != 0) {

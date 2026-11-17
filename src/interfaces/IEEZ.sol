@@ -60,7 +60,8 @@ struct RollupConfig {
 ///         in the SAME block by proxy calls / `executeL2Txs`, rather than executing them immediately.
 /// @dev `lastVerifiedBlock`:
 ///      (a) reset marker — every batch touching this rollup first resets its queue bounds + cursor, so a
-///          same-block re-verify REPLACES the prior batch instead of appending to it;
+///          same-block re-verify replaces entries only in this rollup's destination queues (no append).
+///          Joint entries queued under other rollups remain eligible under their live-root checks;
 ///      (b) read gate — `entryQueue` consumers (`executeCrossChainCall` / `executeL2Txs`) require
 ///          `lastVerifiedBlock == block.number`, so a stale entry queue from an earlier block is never
 ///          read. The same block gate applies to static lookups;

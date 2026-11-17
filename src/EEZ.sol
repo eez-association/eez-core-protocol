@@ -128,9 +128,11 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         Saved/restored across a sub-frame.
     uint256 transient _lastL1ToL2CallConsumed;
 
-    /// @notice Net ether flow for the current entry (`Σ inbound msg.value − Σ outbound call value`);
-    ///         the accounting side of the ether-delta invariant (`Σ etherDelta == _entryEtherDelta`).
-    int256 transient _entryEtherDelta;
+    /// @notice ETH held by the current entry: its rollups' opening `etherBalance`s plus inbound
+    ///         `msg.value`, less outgoing call value (subtracted before dispatch, restored if the
+    ///         call fails). Caps outgoing value mid-entry, so other rollups' funds and unaccounted
+    ///         surplus cannot be spent, and must equal the rollups' closing balances at the end.
+    uint256 transient _entryTotalAvailableEther;
 
     // ──────────────────────────────────────────────
     //  Events
@@ -205,10 +207,13 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @notice Error when a rollup would have negative ether balance
     error InsufficientRollupBalance();
 
+    /// @notice An outgoing call's value exceeds the active entry's `_entryTotalAvailableEther`.
+    error InsufficientEntryBalance();
+
     /// @notice Error when the ether delta from the rollup updates doesn't match actual ETH flow
     error EtherDeltaMismatch();
 
-    /// @notice A no-value top-level entry point found a nonzero `_entryEtherDelta` — should be
+    /// @notice A no-value top-level entry point found a nonzero `_entryTotalAvailableEther` — should be
     ///         impossible; signals a corrupted execution context, not recoverable input.
     error ResidualEntryEtherIn();
 
@@ -497,7 +502,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     /// @param entry Leading immediate L2 transaction entry to execute in the isolated self-call.
     function _attemptExecuteImmediateL2Txs(ExecutionEntry calldata entry) external {
         if (msg.sender != address(this)) revert NotSelf();
-        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn(); // L2Tx entries receive no inbound value
+        if (_entryTotalAvailableEther != 0) revert ResidualEntryEtherIn(); // L2Tx entries receive no inbound value
 
         // Hold the reentrant table while `_transientEntries` stays empty (the signal that the immediate L2Tx run is active).
         _setTransientExpectedL1toL2Calls(entry.expectedL1ToL2Calls);
@@ -745,7 +750,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         for (uint256 r = 0; r < rollupCount; r++) {
             bytes memory customData = IRollupContract(
                     rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
-                ).getCustomData(batch.blockNumber);
+                )
+                .getCustomData(batch.blockNumber);
             // Keyed by rollupId so each customData is bound to its rollup; provers must mirror this.
             customDataHashes[r] = keccak256(abi.encode(batch.rollupIdsWithProofSystems[r].rollupId, customData));
         }
@@ -792,15 +798,12 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         return sharedPublicInput;
     }
 
-    /// @notice Marks `rollupId` as verified this block and resets its queue.
-    /// @dev Resets the active queue bounds and cursor on EVERY verify without deleting entries — including a
-    ///      same-block re-verify, where a second proven batch fully SUPERSEDES the first for
-    ///      this rollup (no append). Safe because state only mutates at consumption and every
-    ///      entry is gated by `RollupUpdate.currentRoot`: any dropped entry a later batch
-    ///      wrongly assumed had applied fails the live-root match rather than corrupting
-    ///      state — so discarding unconsumed-but-proven entries is a liveness choice, not a
-    ///      safety one.
-    /// @param rollupId Rollup whose verification block and active queue bounds are reset.
+    /// @notice Marks `rollupId` as verified this block and resets its queues.
+    /// @dev Runs on every verify, same-block re-verifies included: the new batch replaces this
+    ///      rollup's queues (no append); old slots stay in storage. Entries in other rollups'
+    ///      queues that update this rollup are untouched and stay consumable while their
+    ///      `currentRoot` pins match the live roots.
+    /// @param rollupId Rollup whose queues are reset.
     function _markVerifiedBlockAndResetQueues(uint64 rollupId) internal {
         RollupVerification storage rec = verificationByRollup[rollupId];
         rec.lastVerifiedBlock = uint64(block.number);
@@ -869,14 +872,14 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         emit CrossChainCallExecuted(crossChainCallHash, msg.sender, sourceAddress, callData, msg.value);
 
         if (_insideExecution()) {
-            // Reentrant — ADD this call's value to the entry's net-ether accumulator
-            _entryEtherDelta += int256(msg.value);
+            // Reentrant — ADD this call's value to the entry's available ether
+            _entryTotalAvailableEther += msg.value;
             return _consumeNestedCall(destRid, crossChainCallHash);
         }
 
         // Top-level: a fresh entry starts from exactly its own msg.value,
         // so residue can never leak across entries.
-        _entryEtherDelta = int256(msg.value);
+        _entryTotalAvailableEther = msg.value;
         return _consumeAndExecuteEntry(destRid, crossChainCallHash);
     }
 
@@ -895,8 +898,8 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // This function is for starting L2 transactions, and cannot be called in the middle of another execution
         if (_insideExecution()) revert L2TxNotAllowedDuringExecution();
 
-        // Non-payable and non mid-entry — a dirty _entryEtherDelta here is a bug.
-        if (_entryEtherDelta != 0) revert ResidualEntryEtherIn();
+        // Non-payable and non mid-entry — a dirty _entryTotalAvailableEther here is a bug.
+        if (_entryTotalAvailableEther != 0) revert ResidualEntryEtherIn();
 
         emit L2TxExecuted(rollupId);
         return _consumeAndExecuteEntry(rollupId, bytes32(0));
@@ -970,9 +973,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
 
     /// @notice Applies rollup updates (with currentRoot validation), processes the entry's
     ///         direct calls, verifies rolling hash, checks ether accounting.
-    /// @dev `_entryEtherDelta` already holds the entry-point call's `msg.value` when we get here
-    ///      (SET by the top-level entry point before consumption), so it is NOT reset in
-    ///      this preamble — only at the end, after the invariant check.
+    /// @dev `_entryTotalAvailableEther` already holds the entry-point call's `msg.value` when we get here
+    ///      (SET by the top-level entry point before consumption), so the preamble ADDS the
+    ///      rollups' opening balances to it; it is reset only at the end, after the invariant check.
     /// @dev The entry's `l2ToL1Calls[]` is only the calls it runs directly (each reentrant frame carries
     ///      its own sub-calls); `_processL2ToL1Calls` walks its array, with early return on gas shortage
     ///      (no cursor-vs-length check). The verified-rollups set is non-empty for the whole span (backs
@@ -1008,18 +1011,20 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // and ADD each update's rollup to the verified-rollups set (proxy-protection: the proxies the
         // entry can execute are limited to the rollups it proved). Populating the set also flips
         // `_insideExecution()` true (its count is non-zero now); the clear at the end flips it back.
+        // Add each rollup's starting balance to `_entryTotalAvailableEther` (ids are unique).
         for (uint256 i = 0; i < rollupUpdates.length; i++) {
             if (rollups[rollupUpdates[i].rollupId].root != rollupUpdates[i].currentRoot) {
                 revert RootMismatch(rollupUpdates[i].rollupId);
             }
             _pushVerifiedRollup(rollupUpdates[i].rollupId);
+            _entryTotalAvailableEther += rollups[rollupUpdates[i].rollupId].etherBalance;
         }
 
         _rollingHashEntryBegin(rollupUpdates, proxyEntryHash); // initial hash: binds starting state + identity
         _lastL1ToL2CallConsumed = 0;
 
         _processL2ToL1Calls(l2ToL1Calls);
-        int256 totalEtherDelta = _applyRollupUpdates(rollupUpdates);
+        uint256 finalTotalEther = _applyRollupUpdates(rollupUpdates);
 
         // A reentrant no-match folded CALL_NOT_FOUND into the rolling hash, so it surfaces here as a
         // `RollingHashMismatch` — no separate no-match check needed.
@@ -1027,9 +1032,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         // No reentrant table-length check: the unified `expectedL1ToL2Calls` mixes plain-success
         // entries with static / reverted ones (content-addressed, may be unused). Completeness of
         // the success entries is enforced by the rolling hash; an unused entry is inert.
-        // `_entryEtherDelta` sums net ether across the entry's own frame AND every reentrant sub-frame,
-        // so the invariant captures the full physical flow.
-        if (totalEtherDelta != _entryEtherDelta) revert EtherDeltaMismatch();
+        // `_entryTotalAvailableEther` tracks ether across the entry's own frame AND every reentrant sub-frame,
+        // so the rollups' closing balances must add up to it (`Σ etherDelta == net physical flow`).
+        if (finalTotalEther != _entryTotalAvailableEther) revert EtherDeltaMismatch();
 
         emit EntryExecuted(_currentEntryIndex, _rollingHash);
 
@@ -1043,7 +1048,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         }
 
         _clearVerifiedRollups(); // clears the allowed set AND resets _insideExecution() to false
-        _entryEtherDelta = 0; // reset for the next top-level entry in this tx
+        _entryTotalAvailableEther = 0; // reset for the next top-level entry in this tx
         _rollingHash = bytes32(0); // reset so the next entry's `_rollingHashEntryBegin` zero-guard passes
     }
 
@@ -1136,9 +1141,9 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///         rolling hash (call sources already validated in `_validateBatchStructure`).
     /// @dev The index is a local, not transient: it auto-survives a reentrant proxy call (the outer
     ///      stack is preserved across the return), so there's nothing to save/restore for the L2→L1
-    ///      position. Successful value calls SUBTRACT from the transient `_entryEtherDelta` (not a local)
-    ///      so every frame folds into one entry-wide total; a force-revert span's subtractions roll back
-    ///      with its revert (the tstore is undone with the physical value transfer).
+    ///      position. Value calls SUBTRACT from the transient `_entryTotalAvailableEther` (not a local) so every
+    ///      frame shares one entry-wide total; a force-revert span's subtractions roll back with its
+    ///      revert (the tstore is undone with the physical value transfer).
     /// @param calls Ordered L2-to-L1 calls for this entry, nested frame, or force-revert span.
     function _processL2ToL1Calls(L2ToL1Call[] memory calls) internal {
         for (uint256 i = 0; i < calls.length;) {
@@ -1184,13 +1189,19 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (l2ToL1Call.value != 0) revert StaticCallWithValue();
-
                     (success, retData) = sourceProxy.staticcall(payload);
                 } else {
+                    // Subtract before dispatch so reentrant calls cannot reuse value already in flight.
+                    // A failed call's ETH never left, so it is added back.
+                    if (l2ToL1Call.value > _entryTotalAvailableEther) revert InsufficientEntryBalance();
+
+                    _entryTotalAvailableEther -= l2ToL1Call.value;
+
+                    // Execute the proxy call
                     (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(payload);
-                    if (l2ToL1Call.value > 0 && success) {
-                        // Safe uint→int cast: the value was just physically transferred, so it is far below 2^255.
-                        _entryEtherDelta -= int256(l2ToL1Call.value);
+
+                    if (!success) {
+                        _entryTotalAvailableEther += l2ToL1Call.value;
                     }
                 }
 
@@ -1319,28 +1330,33 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
         return true;
     }
 
-    /// @notice Applies rollup updates (root + ether balance) and sums their ether deltas. The
+    /// @notice Applies rollup updates (root + ether balance) and sums the resulting balances. The
     ///         `currentRoot` precondition is the validity gate checked upfront in `_executeEntry`
     ///         (roots are immutable mid-execution), so this just applies `newRoot`.
     /// @param rollupUpdates State-root and ether-balance changes whose root preconditions were already checked.
-    /// @return totalEtherDelta Sum of the signed ether-balance changes across all updated rollups.
-    function _applyRollupUpdates(RollupUpdate[] memory rollupUpdates) internal returns (int256 totalEtherDelta) {
+    /// @return finalTotalEther Sum of the updated rollups' ether balances after their deltas are applied.
+    function _applyRollupUpdates(RollupUpdate[] memory rollupUpdates) internal returns (uint256 finalTotalEther) {
         for (uint256 i = 0; i < rollupUpdates.length; i++) {
             RollupUpdate memory rollupUpdate = rollupUpdates[i];
             RollupConfig storage config = rollups[rollupUpdate.rollupId];
             config.root = rollupUpdate.newRoot;
-            totalEtherDelta += int256(rollupUpdate.etherDelta);
 
-            if (rollupUpdate.etherDelta < 0) {
-                // Widen to int256 before negating so `type(int192).min` cannot overflow.
-                uint256 decrement = uint256(-int256(rollupUpdate.etherDelta));
-                if (config.etherBalance < decrement) revert InsufficientRollupBalance();
-                config.etherBalance -= decrement;
-            } else if (rollupUpdate.etherDelta > 0) {
-                config.etherBalance += uint256(int256(rollupUpdate.etherDelta));
+            // Read the balance once; write it back only when it changes.
+            uint256 etherBalance = config.etherBalance;
+            int256 etherDelta = rollupUpdate.etherDelta; // widened so negating `type(int192).min` cannot overflow
+            if (etherDelta != 0) {
+                if (etherDelta < 0) {
+                    uint256 decrement = uint256(-etherDelta);
+                    if (etherBalance < decrement) revert InsufficientRollupBalance();
+                    etherBalance -= decrement;
+                } else {
+                    etherBalance += uint256(etherDelta);
+                }
+                config.etherBalance = etherBalance;
             }
+            finalTotalEther += etherBalance;
 
-            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot, config.etherBalance);
+            emit L2ExecutionPerformed(rollupUpdate.rollupId, rollupUpdate.newRoot, etherBalance);
         }
     }
 

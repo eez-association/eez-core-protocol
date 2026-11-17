@@ -61,20 +61,16 @@ contract EEZIntermediateRevertTest is Base {
     function _callbacks(Failure failure, bool wrap) internal view returns (L2ToL1Call[] memory calls) {
         uint64 rid = uint64(rollup.id);
         calls = new L2ToL1Call[](3);
-        calls[0] = _call(L2_SENDER, rid, address(prefix), 0,
-            abi.encodeCall(IntermediateRevertTarget.setValue, (11)));
-        calls[1] = _staticCall(L2_SENDER, rid, address(prefix),
-            abi.encodeWithSignature("value()"));
-        calls[2] = _call(L2_SENDER, rid, address(suffix), 0,
-            abi.encodeCall(IntermediateRevertTarget.setValue, (22)));
+        calls[0] = _call(L2_SENDER, rid, address(prefix), 0, abi.encodeCall(IntermediateRevertTarget.setValue, (11)));
+        calls[1] = _staticCall(L2_SENDER, rid, address(prefix), abi.encodeWithSignature("value()"));
+        calls[2] = _call(L2_SENDER, rid, address(suffix), 0, abi.encodeCall(IntermediateRevertTarget.setValue, (22)));
         if (failure == Failure.StaticValue) calls[1].value = 1;
         if (failure == Failure.SpanBounds) calls[1].revertNextNCalls = 3;
         if (wrap) calls[0].revertNextNCalls = 3;
     }
 
     function _callHash(L2ToL1Call memory c) internal pure returns (bytes32) {
-        return _ccHash(c.isStatic, c.sourceAddress, c.sourceRollupId,
-            c.targetAddress, 0, c.value, c.data);
+        return _ccHash(c.isStatic, c.sourceAddress, c.sourceRollupId, c.targetAddress, 0, c.value, c.data);
     }
 
     function _expectedError(Failure failure, bool wrap) internal pure returns (bytes memory data) {
@@ -82,8 +78,9 @@ contract EEZIntermediateRevertTest is Base {
         if (failure == Failure.StaticValue) {
             data = abi.encodeWithSelector(EEZBase.StaticCallWithValue.selector);
         } else if (failure == Failure.SpanBounds) {
-            data = abi.encodeWithSignature("RevertSpanOutOfBounds(uint256,uint256,uint256)",
-                uint256(1), uint256(3), uint256(3));
+            data = abi.encodeWithSignature(
+                "RevertSpanOutOfBounds(uint256,uint256,uint256)", uint256(1), uint256(3), uint256(3)
+            );
         } else {
             return abi.encodeWithSelector(EEZBase.RollingHashMismatch.selector);
         }
@@ -102,18 +99,24 @@ contract EEZIntermediateRevertTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(rid, bytes32(0), NEXT_ROOT);
         entries[0].l2ToL1Calls = new L2ToL1Call[](2);
-        entries[0].l2ToL1Calls[0] = _call(L2_SENDER, rid, address(catcher), 0,
-            abi.encodeCall(IntermediateRevertCatcher.run, (remoteProxy, REMOTE_DATA)));
-        entries[0].l2ToL1Calls[1] = _call(L2_SENDER, rid, address(outerTail), 0,
-            abi.encodeCall(IntermediateRevertTarget.setValue, (99)));
+        entries[0].l2ToL1Calls[0] = _call(
+            L2_SENDER,
+            rid,
+            address(catcher),
+            0,
+            abi.encodeCall(IntermediateRevertCatcher.run, (remoteProxy, REMOTE_DATA))
+        );
+        entries[0].l2ToL1Calls[1] =
+            _call(L2_SENDER, rid, address(outerTail), 0, abi.encodeCall(IntermediateRevertTarget.setValue, (99)));
 
         bytes32 fireHash = _hCallBegin(entries[0].rollingHash, _callHash(entries[0].l2ToL1Calls[0]));
         bytes32 nestedIdentity = _ccHash(false, address(catcher), 0, L2_REMOTE, rid, 0, REMOTE_DATA);
         L2ToL1Call[] memory calls = _callbacks(failure, wrap);
         bytes32 nestedHash = _hNestedBegin(fireHash, nestedIdentity);
         for (uint256 i; i < calls.length; i++) {
-            nestedHash = _hCallEnd(_hCallBegin(nestedHash, _callHash(calls[i])),
-                true, i == 1 ? abi.encode(uint256(11)) : bytes(""));
+            nestedHash = _hCallEnd(
+                _hCallBegin(nestedHash, _callHash(calls[i])), true, i == 1 ? abi.encode(uint256(11)) : bytes("")
+            );
         }
         if (failure == Failure.WrongNestedHash) nestedHash = bytes32(0);
 
@@ -129,8 +132,7 @@ contract EEZIntermediateRevertTest is Base {
         // Same surviving outer transcript whether nested failure is the intended
         // terminal revert or an intermediate validation error swallowed by the app.
         bytes32 outerHash = _hCallEnd(fireHash, true, "");
-        entries[0].rollingHash =
-            _hCallEnd(_hCallBegin(outerHash, _callHash(entries[0].l2ToL1Calls[1])), true, "");
+        entries[0].rollingHash = _hCallEnd(_hCallBegin(outerHash, _callHash(entries[0].l2ToL1Calls[1])), true, "");
         _expectCallbacks(failure);
         _postBatchOne(rollup, entries, _emptyStaticEntries(), 1, 0);
 

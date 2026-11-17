@@ -21,8 +21,9 @@ Living references — when this doc and the code disagree, the code wins:
   (nested, STATIC-kind rows + real `isStatic` execution) — see "Static reads" below.
 - `static/L1_to_L2/topLevelStaticReentrantCounter`: top-level static L2 lookup
   with a static return call into L1; deploys the L1 callback source proxy before the trigger.
-- `topLevelStaticReentrantCounterL2` mirrors it; the `MissingProxy` variants
+- `topLevelStaticReentrantCounterL2` mirrors it; the recovery `MissingProxy` variants
   in both directions omit that deployment and check the exact failure before retry.
+  The `MissingProxyCaught` variants record the failure without deploying or retrying.
 
 ## The frame-coherence invariant
 
@@ -61,6 +62,16 @@ linkage instead comes from matching each L2 source consumption to the correspond
 ordered `l2ToL1Calls[]` preimage, result, and nesting in the single L1 entry. Reverted
 nested frames may also erase their event evidence, so table content and rolling hashes
 remain part of the proof even when no paired event survives.
+
+All scenario proxies, hashes, root pins and table routing must use
+`e2eRollupId()` from `E2EHelpers.sol` for the L2 identity. Network runners discover
+and validate `L2_ROLLUP_ID`; local runners export the ID returned by registration.
+Do not embed `1` or an Ethereum chain ID, and do not add a fallback when the
+runner configuration is missing. L1 remains rollup ID 0.
+For Solidity tests that exercise scenario builders or deployment scripts, use
+the `E2ERollupConfig` accessor and override `_e2eRollupId()` in the test harness.
+Do not set `L2_ROLLUP_ID` with `vm.setEnv`: Foundry shares that environment across
+parallel tests. The default accessor still calls `e2eRollupId()` with no fallback.
 
 ## Deriving the tables from the real transaction
 
@@ -242,9 +253,14 @@ Authoring notes specific to static scenarios:
 ### One static round trip in either direction
 
 The two predeployed-proxy scenarios are included in automatic `all` / default
-runs. Their live non-mining failures are reported by the runner. The two
-`MissingProxy` scenarios remain **NOT READY** and carry `E2E_EXCLUDE_FROM_ALL`
-markers pending live validation. Explicit names remain selectable.
+runs. Their live non-mining failures are reported by the runner. The
+`MissingProxy` recovery and `MissingProxyCaught` failure-recording scenarios are
+also included. Recovery cases require successful execution and full verification.
+The staged network runner expects an exact fee-quote rejection for the two
+`MissingProxyCaught` cases and never submits their triggers. It validates the
+saved quote against the prepared intent; see the [runner contract](README.md).
+The table below describes local execution. A passing negative network test proves
+quote refusal only, not that the error was caught on-chain.
 
 | Trigger chain | Scenario | Static call tree | Settlement |
 | --- | --- | --- | --- |
@@ -252,11 +268,21 @@ markers pending live validation. Explicit names remain selectable.
 | L2 | `topLevelStaticReentrantCounterL2` | L2 reader → L1 view forwarder → L2 producer | One L2 static row executes the callback; one L1 L2Tx entry executes the forwarder with a nested static callback row. |
 | L1 | `topLevelStaticReentrantMissingProxy` | Same static round trip, callback proxy initially absent | The first read fails with exact `StaticCallProxyNotDeployed(proxy)` bytes; the user transaction creates the proxy outside static context and retries. |
 | L2 | `topLevelStaticReentrantMissingProxyL2` | Same reverse round trip, callback proxy initially absent | Same failure/recovery; exactly one completed remote read remains in the L1 L2Tx entry. |
+| L1 | `topLevelStaticReentrantMissingProxyCaught` | Same static round trip, callback proxy remains absent | One failed read is caught and recorded; no retry or L2 delivery. The L1 static row still contains the attempted callback. |
+| L2 | `topLevelStaticReentrantMissingProxyCaughtL2` | Same reverse round trip, callback proxy remains absent | One failed read is caught and recorded. One L1 L2Tx entry with no calls represents the user transaction; no remote read completes. |
 
 The forwarder calls a separate remote callback contract. Its source proxy differs
 from the proxy targeted by the original read, so creating the original proxy cannot
 accidentally satisfy the callback requirement. Success fixtures predeploy the
 callback proxy; missing fixtures only compute its address and assert no code exists.
+The shared `StaticRoundTripFailureReader` makes exactly one low-level static call,
+requires the exact `StaticCallProxyNotDeployed(proxy)` bytes, persists them and
+increments `failedReads`. It never creates a proxy or retries. Both new scenarios
+assert `failedReads == 1`, no callback-proxy code, the exact saved error and an
+unchanged producer. An unrelated lookup failure or an unexpectedly successful read
+fails the trigger. Their static rows use the same callback builders as the recovery
+scenarios; L2's L1 entry has an empty fold sequence because no remote call completes.
+
 The shared `StaticRoundTripReader` checks and persists the exact error, verifies the
 static attempt created no code, deploys in normal context, and retries without
 reloading the table. It fails if a composer silently predeploys the missing proxy.
@@ -273,9 +299,9 @@ inside the original static frame, at the L1 host hash immediately after
 `CALL_BEGIN`; it exports L1 fold steps for replay over posted roots.
 
 ```bash
-bash script/e2e/run/local/parallel.sh topLevelStaticReentrantCounter topLevelStaticReentrantCounterL2 topLevelStaticReentrantMissingProxy topLevelStaticReentrantMissingProxyL2
+bash script/e2e/run/local/parallel.sh topLevelStaticReentrantCounter topLevelStaticReentrantCounterL2 topLevelStaticReentrantMissingProxy topLevelStaticReentrantMissingProxyL2 topLevelStaticReentrantMissingProxyCaught topLevelStaticReentrantMissingProxyCaughtL2
 # Explicit live validation, when the network contracts/composer match this ABI:
-bash script/e2e/run/network/staged.sh topLevelStaticReentrantCounter:1 topLevelStaticReentrantCounterL2:1 topLevelStaticReentrantMissingProxy:1 topLevelStaticReentrantMissingProxyL2:1
+bash script/e2e/run/network/staged.sh topLevelStaticReentrantCounter:1 topLevelStaticReentrantCounterL2:1 topLevelStaticReentrantMissingProxy:1 topLevelStaticReentrantMissingProxyL2:1 topLevelStaticReentrantMissingProxyCaught:1 topLevelStaticReentrantMissingProxyCaughtL2:1
 ```
 
 ### Static read → write → read scenarios
@@ -306,11 +332,10 @@ bash script/e2e/run/local/parallel.sh staticReadX2Write staticReadX2WriteL2
 
 ### Static read → local write → read with callbacks
 
-**Status: NOT LIVE YET in staged or parallel network testing.** These four scenarios
-are validated locally only and excluded from automatic `all` / `all:N` runs and the
-local default set. Their `E2E_EXCLUDE_FROM_ALL` markers control this exclusion.
-The explicit command below is for local development; names and category selections
-remain available and do not imply live readiness.
+These four scenarios are included in automatic `all` / `all:N` and local default
+runs. Their earlier validation was local only; network execution and content
+verification determine current live support. The explicit command below also
+remains available for local development.
 
 These scenarios cover candidate retries without a mutable EEZ call between reads.
 Each scenario file contains its reader, remote quote producer, and both chains'
@@ -397,13 +422,67 @@ Every scenario must satisfy all of these; they are what the suite is audited aga
    comment saying what pins that side instead: trigger assertions locally, the posted
    table on the network).
 
-6. **Structure.** One shared `<Scenario>Actions` abstract builds BOTH sides' hashes
+6. **Structure.** Keep the application contracts, trigger logic, calldata builders and
+   scenario-specific assertions in the scenario file, even when another scenario repeats
+   a small amount of code. Include only the behavior that scenario exercises; avoid
+   shared multi-scenario actors or flags that switch between different test flows.
+   The call-pattern family is the exception: keep `CallPatternHelpers.sol` and
+   `test/mocks/CallPatternContracts.sol` shared across those scenarios. Other generic
+   hash/table utilities also remain shared. One local `<Scenario>Actions` abstract
+   builds BOTH sides' hashes
    from the same env addresses (no inlined duplicate `crossChainCallHash` calls that
    can drift); each contract role deployed on exactly one chain; the file header
    carries the ASCII call-flow schema (topology, one tree per side, final state) —
    copy the shape from `revert/L1_to_L2/nestedCallRevert`. Create proxies with the
    shared `getOrCreateProxy` helper, not inline try/create/catch (the inline form
    breaks forge's simulation replay when the proxy already exists).
+
+## Eventless L1 verification
+
+A successful cross-chain call erased by its L1 parent may export
+`EVENTLESS_L1_CALL_HASHES` as a JSON array of quoted bytes32 call hashes.
+Whitespace inside the array is accepted. Every key must identify exactly one
+successful entry in the whole expected L1 table, including split batches.
+Zero, duplicate, unknown, failed-entry, and ambiguous keys are configuration
+errors; runners validate them before settlement discovery and do not retry them
+as missing batches. Mixed committed/erased repetitions of one call hash need
+occurrence-based expectations and are not supported by this opt-in.
+
+The root checks support independently rolled-back calls: each erased entry
+observes the current committed root and leaves it unchanged for the next entry.
+They do not reconstruct parent frames. Multiple calls that temporarily advance
+roots inside one parent and are then erased together are unsupported; declaring
+their keys does not supply the missing rollback boundaries.
+
+Runners pass the keys explicitly to the calldata verifier. Staged runs retain
+manifest expectations; deployment outputs cannot replace them. Legacy manifests
+without the field recover it from saved `compute.out`. Static tables encoded as
+empty arrays are normalized to `0x` on extraction and manifest reload on both
+chains; they do not require a posting or delivery by themselves.
+With an expected L1 table, the calldata verifier owns completion checks; local
+event discovery checks call identities without demanding completions for erased
+rows. When a scenario declares no `EXPECTED_L1_CALL_HASHES`, local zero-hash
+checks still enforce its `EXPECTED_L1_HASHES` even when a table is present, so
+an incomplete table cannot discard those expectations. Scenarios that mix proxy
+calls with zero-hash entries rely on the calldata verifier for the zero-hash
+entries. Scenarios without a table retain event-only verification.
+
+The verifier still checks posted content, rolling hashes, and root continuity.
+Erased entries must have neither consumption nor completion events and must not
+advance the root cursor. `ABSENT_L2_HASHES` independently checks nondelivery,
+including scenarios that also expect committed deliveries or static tables.
+Network absence checks scan the bounded L2 block range even when exact transaction
+links are available, so omitted deliveries cannot evade the absence check.
+These checks do not prove that the trigger attempted the erased call: the runner
+also requires `VerifyNetwork`, whose assertions must check persisted evidence
+from the intended trigger and exact return/revert bytes. A generic caught-error
+flag that also accepts missing tables or an unrelated revert is insufficient.
+Local runs execute both available state verifiers after mining, including
+`VerifyNetworkL2` when no L2 delivery occurred; a failed assertion fails the run.
+
+Where no delivery exists, a fork-only producer call can establish the cached
+result for the fixture. Restore its state afterward and describe it as a fixture
+check, not as evidence of remote execution or live settlement.
 
 ## Cross-chain mapping checklist
 

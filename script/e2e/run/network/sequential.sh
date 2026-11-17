@@ -28,7 +28,15 @@ for var in L1_RPC L1_FRONT L2_RPC L2_FRONT ROLLUPS MANAGER_L2 PK; do
     [[ -n "${!var:-}" ]] || { echo "Missing $var (check $DEVNET_ENV)"; exit 1; }
 done
 
-[[ $# -gt 0 ]] || { echo "Usage: sequential.sh <scenario|category|all> ..."; exit 1; }
+# Optional flags precede scenario names.
+while [[ $# -gt 0 && "$1" == --* ]]; do
+    case "$1" in
+        --no-wait-for-confirmation) export E2E_NO_WAIT_FOR_CONFIRMATION=true; shift ;;
+        *) echo "Unknown flag: $1"; exit 1 ;;
+    esac
+done
+
+[[ $# -gt 0 ]] || { echo "Usage: sequential.sh [--no-wait-for-confirmation] <scenario|category|all> ..."; exit 1; }
 
 # ── Resolve args to scenario script paths ──
 SOLS=()

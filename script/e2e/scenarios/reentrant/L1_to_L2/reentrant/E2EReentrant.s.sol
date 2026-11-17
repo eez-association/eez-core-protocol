@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -71,12 +73,11 @@ import {
 //  After execution: rcL1.count = 2, rcL2.count = 2.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract ReentrantActions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
-    function _l1Steps(address rcL1, address rcL2) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address rcL1, address rcL2) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](1);
         steps[0] = new HashStep[](4);
         steps[0][0] = RollingHashBuilder.stepCallBegin(_cchSub1(rcL1, rcL2));
@@ -96,21 +97,21 @@ abstract contract ReentrantActions {
     /// @dev The cross-chain call rcL1's code makes: rcL1 -> rcL2Proxy.dC(2). L1's
     ///      executeCrossChainCall folds source=rcL1 MAINNET, target=rcL2 L2; the L2
     ///      delivery folds the same eight fields — one key on both sides.
-    function _sharedProxyEntryHash(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(2));
+    function _sharedProxyEntryHash(address rcL2, address rcL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, e2eRollupId(), 0, _dc(2));
     }
 
     // ── L1 cross-chain call hashes ──
 
     /// @dev L1 entry call dC(1): executed ON L1 (target rcL1 MAINNET), sourced from rcL2 L2.
-    function _cchSub1(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, rcL2, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
+    function _cchSub1(address rcL1, address rcL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, rcL2, e2eRollupId(), rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
     }
 
     /// @dev L1 reentry dC(0): rcL1 -> rcL2Proxy.dC(0) fired while dC(1) runs. Source=rcL1
     ///      MAINNET, target=rcL2 L2.
-    function _cchReentry0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(0));
+    function _cchReentry0(address rcL2, address rcL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, e2eRollupId(), 0, _dc(0));
     }
 
     // ── L2 cross-chain call hashes (self = L2_ROLLUP_ID). The outgoing reentry keys with
@@ -119,21 +120,21 @@ abstract contract ReentrantActions {
 
     /// @dev L2 outgoing reentry dC(1): rcL2 -> rcL1Proxy.dC(1). Source rollup forced to L2;
     ///      target=rcL1 MAINNET. Outgoing — L2-outgoing key (NESTED_BEGIN fold + expectedOutgoingHash).
-    function _cchL2Out1(address rcL1, address rcL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(rcL2, L2_ROLLUP_ID, rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
+    function _cchL2Out1(address rcL1, address rcL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(rcL2, e2eRollupId(), rcL1, MAINNET_ROLLUP_ID, 0, _dc(1));
     }
 
     /// @dev L2 Frame incoming sub-call dC(0): executed ON L2 (target rcL2 L2), sourced from rcL1 MAINNET.
-    function _cchL2Sub0(address rcL2, address rcL1) internal pure returns (bytes32) {
-        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, L2_ROLLUP_ID, 0, _dc(0));
+    function _cchL2Sub0(address rcL2, address rcL1) internal view returns (bytes32) {
+        return crossChainCallHash(false, rcL1, MAINNET_ROLLUP_ID, rcL2, e2eRollupId(), 0, _dc(0));
     }
 
     // ── Entry builders ──
 
-    function _l1Entries(address rcL1, address rcL2) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address rcL1, address rcL2) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-reentrant"),
             etherDelta: 0
@@ -148,7 +149,7 @@ abstract contract ReentrantActions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: rcL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: rcL1,
             value: 0,
             data: _dc(1)
@@ -180,7 +181,7 @@ abstract contract ReentrantActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: topCalls,
             expectedL1ToL2Calls: nested,
             rollingHash: rh,
@@ -193,7 +194,7 @@ abstract contract ReentrantActions {
     /// @dev L2-side entry, delivered via executeIncomingCrossChainCall: incomingCalls[0]
     ///      IS the inbound call (rcL2.dC(2) from rcL1 on Mainnet) and proxyEntryHash is the
     ///      hash of that call (== the shared key).
-    function _l2Entries(address rcL1, address rcL2) internal pure returns (L2ExecutionEntry[] memory entries) {
+    function _l2Entries(address rcL1, address rcL2) internal view returns (L2ExecutionEntry[] memory entries) {
         bytes32 proxyEntryHash = _sharedProxyEntryHash(rcL2, rcL1);
 
         // Top-level incoming call: rcL2.dC(2) from rcL1 — the delivered call itself.
@@ -282,7 +283,7 @@ contract Deploy is Script {
         EEZ rollups = EEZ(rollupsAddr);
 
         // Proxy for rcL2@L2 on L1 (rcL1's peer)
-        address rcL2ProxyOnL1 = getOrCreateProxy(IEEZ(address(rollups)), rcL2Addr, L2_ROLLUP_ID);
+        address rcL2ProxyOnL1 = getOrCreateProxy(IEEZ(address(rollups)), rcL2Addr, e2eRollupId());
 
         // Deploy rcL1 on L1 with peer = rcL2ProxyOnL1
         ReentrantCounter rcL1 = new ReentrantCounter(rcL2ProxyOnL1);
@@ -360,7 +361,7 @@ contract Execute is Script, ReentrantActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(rcL1Addr, rcL2Addr), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(rcL1Addr, rcL2Addr), noStaticEntries()
                 )
             );
         // Trigger: plain call — rcL1's code fires the cross-chain leg itself.

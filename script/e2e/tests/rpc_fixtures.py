@@ -19,6 +19,21 @@ curl() {
     cat "$TEST_ROOT/$url-$method.json"
 }
 export -f curl
+_fixture_rollup_call() {
+    echo "CALL $*" >> "$CALLS"
+    case "$*" in
+        *'ROLLUP_ID()(uint64)'*) cat "$TEST_ROOT/rollup-id" ;;
+        *'rollups(uint64)(address,bytes32,uint256)'*) cat "$TEST_ROOT/registered-manager" ;;
+        *) return 99 ;;
+    esac
+}
+cast() {
+    case "$*" in
+        *'ROLLUP_ID()(uint64)'*|*'rollups(uint64)(address,bytes32,uint256)'*) _fixture_rollup_call "$@" ;;
+        *) command cast "$@" ;;
+    esac
+}
+export -f _fixture_rollup_call cast
 '''
 
 
@@ -29,6 +44,8 @@ class RpcFixture(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.calls = self.root / "calls"
         self.calls.touch()
+        (self.root / "rollup-id").write_text("2\n")
+        (self.root / "registered-manager").write_text("0x" + "2" * 40 + "\n" + "0x" + "0" * 64 + "\n0\n")
         self.info = {
             "version": "v1.2.3-test",
             "eezContracts": {

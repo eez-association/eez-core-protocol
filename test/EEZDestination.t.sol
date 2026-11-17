@@ -22,7 +22,11 @@ contract L1DestinationHarness is EEZ {
     function run(bytes calldata encodedCalls, bool staticEntry) external returns (bytes32) {
         L2ToL1Call[] memory calls = abi.decode(encodedCalls, (L2ToL1Call[]));
         if (staticEntry) return _processStaticL2ToL1Calls(calls);
+        // This destination-only harness skips _executeEntry. Treat its manually
+        // funded ETH as the active entry's ether total before exercising dispatch.
+        _entryTotalAvailableEther = address(this).balance;
         _processL2ToL1Calls(calls);
+        _entryTotalAvailableEther = 0;
         return _rollingHash;
     }
 

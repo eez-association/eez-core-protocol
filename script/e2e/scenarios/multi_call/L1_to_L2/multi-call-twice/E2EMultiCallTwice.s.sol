@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -44,7 +46,6 @@ import {
 //    contract); only returnData (1 vs 2) and the rolling hash differ.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract MultiCallActions {
@@ -60,16 +61,16 @@ abstract contract MultiCallActions {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
 
-    function _callHash(address counterL2, address caller) internal pure returns (bytes32) {
-        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData());
+    function _callHash(address counterL2, address caller) internal view returns (bytes32) {
+        return crossChainCallHash(false, caller, MAINNET_ROLLUP_ID, counterL2, e2eRollupId(), 0, _incrementCallData());
     }
 
-    function _l1Entries(address counterL2, address caller) internal pure returns (ExecutionEntry[] memory entries) {
+    function _l1Entries(address counterL2, address caller) internal view returns (ExecutionEntry[] memory entries) {
         bytes32 ah = _callHash(counterL2, caller);
 
         RollupUpdate[] memory deltasA = new RollupUpdate[](1);
         deltasA[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-twice-1"),
             etherDelta: 0
@@ -77,7 +78,7 @@ abstract contract MultiCallActions {
 
         RollupUpdate[] memory deltasB = new RollupUpdate[](1);
         deltasB[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-state-after-twice-1"),
             newRoot: keccak256("l2-state-after-twice-2"),
             etherDelta: 0
@@ -89,7 +90,7 @@ abstract contract MultiCallActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltasA,
             proxyEntryHash: ah,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(deltasA, ah),
@@ -99,7 +100,7 @@ abstract contract MultiCallActions {
         entries[1] = ExecutionEntry({
             rollupUpdates: deltasB,
             proxyEntryHash: ah,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: RollingHashBuilder.entryBegin(deltasB, ah),
@@ -113,7 +114,7 @@ abstract contract MultiCallActions {
     /// `caller` (CallTwice on L1). Same proxyEntryHash as the L1 entries (the
     /// inbound key IS the L1-side cross-chain call hash). returnData and the
     /// rolling-hash CALL_END payload differ per entry (1 vs 2).
-    function _l2Entries(address counterL2, address caller) internal pure returns (L2ExecutionEntry[] memory entries) {
+    function _l2Entries(address counterL2, address caller) internal view returns (L2ExecutionEntry[] memory entries) {
         entries = new L2ExecutionEntry[](2);
         entries[0] = _buildL2Entry(counterL2, caller, abi.encode(uint256(1)));
         entries[1] = _buildL2Entry(counterL2, caller, abi.encode(uint256(2)));
@@ -126,7 +127,7 @@ abstract contract MultiCallActions {
         uint256 n
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory table)
     {
         table = new L2ExecutionEntry[](1);
@@ -139,7 +140,7 @@ abstract contract MultiCallActions {
         bytes memory retData
     )
         private
-        pure
+        view
         returns (L2ExecutionEntry memory)
     {
         bytes32 ah = _callHash(counterL2, caller);
@@ -188,7 +189,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, e2eRollupId());
 
         CallTwice caller = new CallTwice();
         output("COUNTER_PROXY", counterProxy);
@@ -235,7 +236,7 @@ contract Execute is Script, MultiCallActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, callerAddr), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(counterL2Addr, callerAddr), noStaticEntries()
                 )
             );
         (uint256 first, uint256 second) = CallTwice(callerAddr).callCounterTwice(counterProxy);

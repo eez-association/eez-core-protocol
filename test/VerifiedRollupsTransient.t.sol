@@ -45,6 +45,9 @@ contract VerifiedRollupsHarness is VerifiedRollupsTransient, ExpectedL1ToL2CallT
     }
 }
 
+/// @dev Each harness call is a separate external call; the transient set survives across them
+///      only inside one transaction, so every test that writes runs its body through one
+///      `this.<body>()` call (under forge isolation each top-level call is its own transaction).
 contract VerifiedRollupsTransientTest is Test {
     VerifiedRollupsHarness harness;
 
@@ -60,6 +63,10 @@ contract VerifiedRollupsTransientTest is Test {
     }
 
     function test_PushAndContains() public {
+        this.pushAndContains();
+    }
+
+    function pushAndContains() external {
         harness.push(7);
         harness.push(42);
         assertEq(harness.count(), 2);
@@ -71,12 +78,20 @@ contract VerifiedRollupsTransientTest is Test {
     }
 
     function test_ZeroIdIsAValidMember() public {
+        this.zeroIdIsAValidMember();
+    }
+
+    function zeroIdIsAValidMember() external {
         harness.push(0);
         assertEq(harness.count(), 1);
         assertTrue(harness.contains(0));
     }
 
     function test_DuplicatePushesKept() public {
+        this.duplicatePushesKept();
+    }
+
+    function duplicatePushesKept() external {
         harness.push(5);
         harness.push(5);
         assertEq(harness.count(), 2);
@@ -84,6 +99,10 @@ contract VerifiedRollupsTransientTest is Test {
     }
 
     function test_ClearResetsSet() public {
+        this.clearResetsSet();
+    }
+
+    function clearResetsSet() external {
         harness.push(1);
         harness.push(2);
         harness.clear();
@@ -93,6 +112,10 @@ contract VerifiedRollupsTransientTest is Test {
     }
 
     function test_ClearIsIdempotent() public {
+        this.clearIsIdempotent();
+    }
+
+    function clearIsIdempotent() external {
         harness.clear(); // clearing an empty set is a no-op
         assertEq(harness.count(), 0);
         harness.push(3);
@@ -105,6 +128,10 @@ contract VerifiedRollupsTransientTest is Test {
     /// @notice The count word is authoritative: ids stranded past the count by a clear must
     ///         never be visible to a later, shorter set.
     function test_StaleTailInvisibleAfterClearAndRepush() public {
+        this.staleTailInvisibleAfterClearAndRepush();
+    }
+
+    function staleTailInvisibleAfterClearAndRepush() external {
         harness.push(1);
         harness.push(2);
         harness.push(3);
@@ -120,6 +147,10 @@ contract VerifiedRollupsTransientTest is Test {
     /// @notice Transient writes roll back on revert exactly like storage — a reverted push
     ///         leaves no trace (what `_executeEntry`'s revert paths rely on).
     function test_RevertRollsBackPush() public {
+        this.revertRollsBackPush();
+    }
+
+    function revertRollsBackPush() external {
         harness.push(1);
         vm.expectRevert(VerifiedRollupsHarness.Boom.selector);
         harness.pushThenRevert(2);
@@ -131,6 +162,10 @@ contract VerifiedRollupsTransientTest is Test {
     /// @notice The namespaced region must not collide with `ExpectedL1ToL2CallTransient`'s —
     ///         both live side by side in EEZ.
     function test_NoCollisionWithExpectedTableRegion() public {
+        this.noCollisionWithExpectedTableRegion();
+    }
+
+    function noCollisionWithExpectedTableRegion() external {
         ExpectedL1ToL2Call[] memory calls = new ExpectedL1ToL2Call[](1);
         calls[0] = ExpectedL1ToL2Call({
             expectedL1toL2Hash: keccak256("row0"),
@@ -156,6 +191,10 @@ contract VerifiedRollupsTransientTest is Test {
     }
 
     function testFuzz_PushedIdsAreMembers(uint64[] calldata ids, uint64 probe) public {
+        this.pushedIdsAreMembers(ids, probe);
+    }
+
+    function pushedIdsAreMembers(uint64[] calldata ids, uint64 probe) external {
         bool probeIsMember;
         for (uint256 i = 0; i < ids.length; i++) {
             harness.push(ids[i]);

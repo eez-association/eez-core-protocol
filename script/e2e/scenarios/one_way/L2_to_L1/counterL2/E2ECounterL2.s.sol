@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
 import {EEZL2} from "../../../../../../src/L2/EEZL2.sol";
-import {RollupUpdate, L2ToL1Call, ExecutionEntry, StaticExecutionEntry} from "../../../../../../src/interfaces/IEEZ.sol";
+import {
+    RollupUpdate,
+    L2ToL1Call,
+    ExecutionEntry,
+    StaticExecutionEntry
+} from "../../../../../../src/interfaces/IEEZ.sol";
 import {
     ExecutionEntry as L2ExecutionEntry,
     StaticExecutionEntryL2 as L2StaticExecutionEntry,
@@ -48,10 +55,9 @@ import {
 //    4. Counter.counter() on L1 advances to 1
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
-abstract contract CounterL2Actions {
+abstract contract CounterL2Actions is E2ERollupConfig {
     function _incrementCallData() internal pure returns (bytes memory) {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
@@ -62,13 +68,13 @@ abstract contract CounterL2Actions {
     // binds the observed gas and differs.
 
     /// @dev Identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
-    function _l1CallHash(address counterL1, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, capL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
+    function _l1CallHash(address counterL1, address capL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, capL2, _e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev L2-outgoing key the SOURCE L2 matches the outgoing call with.
-    function _l2EntryKey(address counterL1, address capL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(capL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
+    function _l2EntryKey(address counterL1, address capL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(capL2, _e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementCallData());
     }
 
     /// @dev Single L2 entry — the SOURCE side. Consumed by an outbound `executeCrossChainCall`
@@ -79,7 +85,7 @@ abstract contract CounterL2Actions {
         address counterAndProxyL2
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 proxyEntryHash = _l2EntryKey(counterL1, counterAndProxyL2);
@@ -106,7 +112,7 @@ abstract contract CounterL2Actions {
         address counterAndProxyL2
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](1);
@@ -115,7 +121,7 @@ abstract contract CounterL2Actions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: counterAndProxyL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: _e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _incrementCallData()
@@ -123,7 +129,7 @@ abstract contract CounterL2Actions {
 
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: _e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-counter"),
             etherDelta: 0
@@ -138,7 +144,7 @@ abstract contract CounterL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: _e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -224,7 +230,7 @@ contract Execute is Script, CounterL2Actions {
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
                     vm.envAddress("PROOF_SYSTEM"),
-                    L2_ROLLUP_ID,
+                    _e2eRollupId(),
                     _l1Entries(counterL1, vm.envAddress("COUNTER_AND_PROXY_L2")),
                     noStaticEntries()
                 )

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -41,7 +43,6 @@ import {
 //    accepts the ETH via receive(). After: BridgeReceiver.balance == bridgeAmount().
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 // Defaults to the 0.00001 ETH that bridgeL2 releases. Override the L1-to-L2
@@ -75,13 +76,13 @@ contract BridgeReceiver {
 
 abstract contract BridgeActions {
     function _callHash(address l2Destination, address sender) internal view returns (bytes32) {
-        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, L2_ROLLUP_ID, bridgeAmount(), "");
+        return crossChainCallHash(false, sender, MAINNET_ROLLUP_ID, l2Destination, e2eRollupId(), bridgeAmount(), "");
     }
 
     function _l1Entries(address l2Destination, address sender) internal view returns (ExecutionEntry[] memory entries) {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-bridge"),
             etherDelta: int192(int256(bridgeAmount()))
@@ -92,7 +93,7 @@ abstract contract BridgeActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             // No L1-side calls: the bridge is pure value transfer, so the rolling hash is just the
@@ -164,7 +165,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, L2_ROLLUP_ID);
+        address l2Proxy = getOrCreateProxy(IEEZ(address(rollups)), l2DestAddr, e2eRollupId());
 
         BridgeSender sender = new BridgeSender(l2Proxy, l2DestAddr);
         output("L2_PROXY", l2Proxy);
@@ -208,7 +209,7 @@ contract Execute is Script, BridgeActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(l2DestAddr, senderAddr), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(l2DestAddr, senderAddr), noStaticEntries()
                 )
             );
         BridgeSender(senderAddr).bridge{value: bridgeAmount()}();

@@ -53,8 +53,8 @@ contract BalancerFlashLoanL2 is Ownable, IBalancerFlashLoanL2 {
         if (borrowerL1 != address(0)) revert AlreadyConfigured();
         if (borrower_ == address(0)) revert InvalidConfiguration();
         borrowerL1 = borrower_;
-        borrowerL1Proxy = bridge.manager().computeCrossChainProxyAddress(borrower_, 0);
-        if (borrowerL1Proxy.code.length == 0) bridge.manager().createCrossChainProxy(borrower_, 0);
+        borrowerL1Proxy = bridge.EEZContract().computeCrossChainProxyAddress(borrower_, 0);
+        if (borrowerL1Proxy.code.length == 0) bridge.EEZContract().createCrossChainProxy(borrower_, 0);
         emit Configured(borrower_);
     }
 

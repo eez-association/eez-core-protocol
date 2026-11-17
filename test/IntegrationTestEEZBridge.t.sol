@@ -28,6 +28,8 @@ contract IntegrationTestEEZBridge is IntegrationBase {
         bridgeL2 = new EEZBridge(address(managerL2), L2_ROLLUP_ID, address(this));
         bridgeL1.setCanonicalBridgeAddress(address(bridgeL2));
         bridgeL2.setCanonicalBridgeAddress(address(bridgeL1));
+        bridgeL1.setAcceptedSourceRollupId(L2_ROLLUP_ID);
+        bridgeL2.setAcceptedSourceRollupId(MAINNET_ROLLUP_ID);
         token = new EEZToken(address(rollups), "Original", "ORG", alice, 1000 ether);
     }
 

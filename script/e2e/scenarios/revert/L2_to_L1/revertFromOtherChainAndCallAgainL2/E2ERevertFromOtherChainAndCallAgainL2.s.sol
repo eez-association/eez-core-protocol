@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {e2eRollupId} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -49,14 +51,13 @@ import {
 //  the second would return 2, and the rolling hash would diverge.
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 abstract contract RevertFromOtherChainAndCallAgainL2Actions {
     /// @dev Expected L1 folds, in entry order, independent of the posted seed roots.
     ///      The deliberate rollback span preserves the first successful call's folds.
     ///      Its state unwinds, so the retry also returns 1.
-    function _l1Steps(address counterL1, address selfCallerL2) internal pure returns (HashStep[][] memory steps) {
+    function _l1Steps(address counterL1, address selfCallerL2) internal view returns (HashStep[][] memory steps) {
         steps = new HashStep[][](1);
         steps[0] = new HashStep[](4);
         steps[0][0] = RollingHashBuilder.stepCallBegin(_l1CallHash(counterL1, selfCallerL2));
@@ -72,13 +73,13 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
     /// @dev Source-entry identity: S (on L2) calls the L2 proxy for (Counter@L1) — an outgoing
     ///      call, matched with the L2-outgoing key (`callGas` = 0). Consumed twice by S: the
     ///      first consumption unwinds with innerCall()'s revert, the second survives.
-    function _proxyEntryHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHashL2Out(selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+    function _proxyEntryHash(address counterL1, address selfCallerL2) internal view returns (bytes32) {
+        return crossChainCallHashL2Out(selfCallerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev Identity of the call as executed ON L1 (the CALL_BEGIN fold in the L1 entry).
-    function _l1CallHash(address counterL1, address selfCallerL2) internal pure returns (bytes32) {
-        return crossChainCallHash(false, selfCallerL2, L2_ROLLUP_ID, counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
+    function _l1CallHash(address counterL1, address selfCallerL2) internal view returns (bytes32) {
+        return crossChainCallHash(false, selfCallerL2, e2eRollupId(), counterL1, MAINNET_ROLLUP_ID, 0, _incrementData());
     }
 
     /// @dev L2 source entry: nothing executes on L2 — it just hands S the pre-computed L1
@@ -88,7 +89,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
         address selfCallerL2
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         bytes32 proxyEntryHash = _proxyEntryHash(counterL1, selfCallerL2);
@@ -111,7 +112,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
         address selfCallerL2
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         L2ToL1Call[] memory calls = new L2ToL1Call[](2);
@@ -120,7 +121,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
             revertNextNCalls: 1,
             isStatic: false,
             sourceAddress: selfCallerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _incrementData()
@@ -130,7 +131,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
             revertNextNCalls: 0,
             isStatic: false,
             sourceAddress: selfCallerL2,
-            sourceRollupId: L2_ROLLUP_ID,
+            sourceRollupId: e2eRollupId(),
             targetAddress: counterL1,
             value: 0,
             data: _incrementData()
@@ -138,7 +139,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
 
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-revertFromOtherChainAndCallAgainL2"),
             etherDelta: 0
@@ -155,7 +156,7 @@ abstract contract RevertFromOtherChainAndCallAgainL2Actions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: bytes32(0),
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: e2eRollupId(),
             l2ToL1Calls: calls,
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -249,7 +250,7 @@ contract Execute is Script, RevertFromOtherChainAndCallAgainL2Actions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL1, selfCallerL2), noStaticEntries()
+                    proofSystemAddr, e2eRollupId(), _l1Entries(counterL1, selfCallerL2), noStaticEntries()
                 )
             );
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {E2ERollupConfig} from "../../../shared/E2EHelpers.sol";
+
 import {Script, console} from "forge-std/Script.sol";
 import {EEZ} from "../../../../../../src/EEZ.sol";
 import {IEEZ} from "../../../../../../src/interfaces/IEEZ.sol";
@@ -49,11 +51,10 @@ import {
 //  ties the L1 view (the cached returnData) to the L2 view (the actual execution).
 // ═══════════════════════════════════════════════════════════════════════
 
-uint64 constant L2_ROLLUP_ID = 1;
 uint64 constant MAINNET_ROLLUP_ID = 0;
 
 /// @dev Centralized call + entry definitions — single source of truth for all contracts.
-abstract contract CounterActions {
+abstract contract CounterActions is E2ERollupConfig {
     function _incrementCallData() internal pure returns (bytes memory) {
         return abi.encodeWithSelector(Counter.increment.selector);
     }
@@ -61,11 +62,10 @@ abstract contract CounterActions {
     /// @dev The proxy-entry hash: the inbound cross-chain call (CAP L1 -> Counter L2). Same on both
     ///      sides — L1's executeCrossChainCall and L2's executeIncomingCrossChainCall both fold
     ///      targetRollupId = L2_ROLLUP_ID into `computeCrossChainCallHash`.
-    function _callHash(address counterL2, address counterAndProxy) internal pure returns (bytes32) {
-        return
-            crossChainCallHash(
-                false, counterAndProxy, MAINNET_ROLLUP_ID, counterL2, L2_ROLLUP_ID, 0, _incrementCallData()
-            );
+    function _callHash(address counterL2, address counterAndProxy) internal view returns (bytes32) {
+        return crossChainCallHash(
+            false, counterAndProxy, MAINNET_ROLLUP_ID, counterL2, _e2eRollupId(), 0, _incrementCallData()
+        );
     }
 
     /// @dev Single L1 entry — the cross-chain call returns precomputed `uint256(1)`; the real
@@ -76,12 +76,12 @@ abstract contract CounterActions {
         address counterAndProxy
     )
         internal
-        pure
+        view
         returns (ExecutionEntry[] memory entries)
     {
         RollupUpdate[] memory deltas = new RollupUpdate[](1);
         deltas[0] = RollupUpdate({
-            rollupId: L2_ROLLUP_ID,
+            rollupId: _e2eRollupId(),
             currentRoot: keccak256("l2-initial-state"),
             newRoot: keccak256("l2-state-after-counter"),
             etherDelta: 0
@@ -94,7 +94,7 @@ abstract contract CounterActions {
         entries[0] = ExecutionEntry({
             rollupUpdates: deltas,
             proxyEntryHash: proxyEntryHash,
-            destinationRollupId: L2_ROLLUP_ID,
+            destinationRollupId: _e2eRollupId(),
             l2ToL1Calls: noCalls(),
             expectedL1ToL2Calls: noNestedActions(),
             rollingHash: rh,
@@ -111,7 +111,7 @@ abstract contract CounterActions {
         address counterAndProxy
     )
         internal
-        pure
+        view
         returns (L2ExecutionEntry[] memory entries)
     {
         CrossChainCall[] memory calls = new CrossChainCall[](1);
@@ -163,7 +163,7 @@ contract DeployL2 is Script {
 /// @title Deploy — on L1, create proxy for counterL2 + deploy CounterAndProxy
 /// Env: ROLLUPS, COUNTER_L2
 /// Outputs: COUNTER_PROXY, COUNTER_AND_PROXY
-contract Deploy is Script {
+contract Deploy is Script, E2ERollupConfig {
     function run() external {
         address rollupsAddr = vm.envAddress("ROLLUPS");
         address counterL2Addr = vm.envAddress("COUNTER_L2");
@@ -171,7 +171,7 @@ contract Deploy is Script {
         vm.startBroadcast();
         EEZ rollups = EEZ(rollupsAddr);
 
-        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, L2_ROLLUP_ID);
+        address counterProxy = getOrCreateProxy(IEEZ(address(rollups)), counterL2Addr, _e2eRollupId());
 
         CounterAndProxy cap = new CounterAndProxy(Counter(counterProxy));
 
@@ -222,7 +222,7 @@ contract Execute is Script, CounterActions {
         EEZ(rollupsAddr)
             .postAndVerifyBatch(
                 immediateSingleRollupBatch(
-                    proofSystemAddr, L2_ROLLUP_ID, _l1Entries(counterL2Addr, capAddr), noStaticEntries()
+                    proofSystemAddr, _e2eRollupId(), _l1Entries(counterL2Addr, capAddr), noStaticEntries()
                 )
             );
         CounterAndProxy(capAddr).incrementProxy();
