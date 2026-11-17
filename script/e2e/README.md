@@ -9,19 +9,31 @@ The predeployed-proxy scenarios `topLevelStaticReentrantCounter` and
 The staged runner checks composer status before classifying absent cross-chain
 triggers and reports unresolved triggers at its monitor deadline. Inclusion in
 `all` does not guarantee that a live deployment supports these scenarios.
-The missing-proxy variants `topLevelStaticReentrantMissingProxy` and
-`topLevelStaticReentrantMissingProxyL2` are expected-rejection tests in the
-**staged network runner**. They pass only when `eez_getCrossChainTransaction`
-on the matching source-chain front (`L1_FRONT` or `L2_FRONT`) reports the matching
-hash as terminal with `SimulationFailed` and
-an exact `executor: static callback source proxy ... is not deployed on chain ...;
-it must exist before the read` error, and neither source nor front RPC has a
-receipt. Null responses, timeouts, other errors, and mined transactions do not
-pass. Evidence is saved in each job's `composer-rejection-<hash>.json` and
-`expected-rejections.csv`; verification checks it again against live RPCs.
-`--resend` does not resend these negative tests. Local Anvil tests still exercise
-catch/create/retry recovery. These scenarios are included in `all`. Other network
-runners retain their successful-execution checks.
+In local tests, the recovery variants `topLevelStaticReentrantMissingProxy` and
+`topLevelStaticReentrantMissingProxyL2` catch the exact missing-proxy error,
+create the callback proxy outside static execution, and retry successfully.
+The `topLevelStaticReentrantMissingProxyCaught` and
+`topLevelStaticReentrantMissingProxyCaughtL2` variants catch and persist that
+error without creating the proxy or retrying in local tests.
+On devnet, the staged runner treats only these two `Caught` variants as
+quote-only negative tests: it requires `unsupported_transaction` with the exact
+message `unsupported quote: gas estimation or final effect validation failed`.
+It requests a quote without submitting the trigger, even if quoting unexpectedly
+succeeds. The saved response must match the prepared intent, chain, nonce and
+transaction type; missing/malformed evidence, unrelated errors and timeouts fail.
+`--verify-only` checks the most recent captured response; a resumed failed quote
+attempt cannot reuse older evidence. Quote-only runs need verification enabled.
+A failed quote probe or trigger submission fails the current run, including mixed
+runs with `--no-verify`; a successful resume is not failed by historical log entries.
+This establishes fee-quote rejection, not an on-chain revert or its underlying cause:
+a different simulation failure producing the same code and message can also pass.
+The two recovery variants still require normal receipt, application-state,
+table-content and settlement verification. They are network capability checks:
+a composer that rejects the initial missing-proxy callback fails these tests.
+Local success does not establish that the deployed composer supports recovery.
+Other network runners retain their
+execution expectations; use the staged runner for these negative quote tests.
+All four scenarios remain included in `all`.
 See [their call trees and commands](BUILD_AND_REVIEW_E2E_TESTS.md#one-static-round-trip-in-either-direction).
 
 This doc covers **running** the suite. For the authoritative, self-contained guide
@@ -86,9 +98,9 @@ capture, nonce checks, fee quoting, and post-trigger verification remain enabled
 It restores the risk of preparing a trigger while setup is replaced during
 settlement, including nonce conflicts. The staged plan path is unaffected.
 
-All 78 current scenarios are enabled in automatic `all` / `all:N` and local
+All 80 current scenarios are enabled in automatic `all` / `all:N` and local
 default runs, including the 22 call-pattern scenarios from PR #54, missing-proxy
-expected-rejection cases, rollback/retry regressions, and the gas-capacity
+recovery and caught-failure cases, rollback/retry regressions, and the gas-capacity
 experiment. Network results determine current deployment support; inclusion alone
 does not establish live readiness. The runners still honor `E2E_EXCLUDE_FROM_ALL`
 if a future scenario carries that marker.

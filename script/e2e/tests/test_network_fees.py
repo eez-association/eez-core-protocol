@@ -1187,7 +1187,7 @@ network_send_quoted_trigger() {
     echo "$1" >> "$RUN_DIR/order"
     printf '0x%064x\n' 2
 }
-''' + function("send_worker") + "\n" + dispatch
+''' + function("_expects_static_quote_rejection") + "\n" + function("send_worker") + "\n" + dispatch
                     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
                         env={"PATH": os.environ["PATH"], "TEST_ROOT": directory, "RESUME": resume,
                              "SEND_WORKERS": str(workers), "EXPECTED_FRESH": "0" if resume else "1",

@@ -21,8 +21,9 @@ Living references — when this doc and the code disagree, the code wins:
   (nested, STATIC-kind rows + real `isStatic` execution) — see "Static reads" below.
 - `static/L1_to_L2/topLevelStaticReentrantCounter`: top-level static L2 lookup
   with a static return call into L1; deploys the L1 callback source proxy before the trigger.
-- `topLevelStaticReentrantCounterL2` mirrors it; the `MissingProxy` variants
+- `topLevelStaticReentrantCounterL2` mirrors it; the recovery `MissingProxy` variants
   in both directions omit that deployment and check the exact failure before retry.
+  The `MissingProxyCaught` variants record the failure without deploying or retrying.
 
 ## The frame-coherence invariant
 
@@ -252,9 +253,14 @@ Authoring notes specific to static scenarios:
 ### One static round trip in either direction
 
 The two predeployed-proxy scenarios are included in automatic `all` / default
-runs. Their live non-mining failures are reported by the runner. The two
-`MissingProxy` scenarios are also included; the staged network runner requires
-the exact expected composer rejection described below.
+runs. Their live non-mining failures are reported by the runner. The
+`MissingProxy` recovery and `MissingProxyCaught` failure-recording scenarios are
+also included. Recovery cases require successful execution and full verification.
+The staged network runner expects an exact fee-quote rejection for the two
+`MissingProxyCaught` cases and never submits their triggers. It validates the
+saved quote against the prepared intent; see the [runner contract](README.md).
+The table below describes local execution. A passing negative network test proves
+quote refusal only, not that the error was caught on-chain.
 
 | Trigger chain | Scenario | Static call tree | Settlement |
 | --- | --- | --- | --- |
@@ -262,11 +268,21 @@ the exact expected composer rejection described below.
 | L2 | `topLevelStaticReentrantCounterL2` | L2 reader → L1 view forwarder → L2 producer | One L2 static row executes the callback; one L1 L2Tx entry executes the forwarder with a nested static callback row. |
 | L1 | `topLevelStaticReentrantMissingProxy` | Same static round trip, callback proxy initially absent | The first read fails with exact `StaticCallProxyNotDeployed(proxy)` bytes; the user transaction creates the proxy outside static context and retries. |
 | L2 | `topLevelStaticReentrantMissingProxyL2` | Same reverse round trip, callback proxy initially absent | Same failure/recovery; exactly one completed remote read remains in the L1 L2Tx entry. |
+| L1 | `topLevelStaticReentrantMissingProxyCaught` | Same static round trip, callback proxy remains absent | One failed read is caught and recorded; no retry or L2 delivery. The L1 static row still contains the attempted callback. |
+| L2 | `topLevelStaticReentrantMissingProxyCaughtL2` | Same reverse round trip, callback proxy remains absent | One failed read is caught and recorded. One L1 L2Tx entry with no calls represents the user transaction; no remote read completes. |
 
 The forwarder calls a separate remote callback contract. Its source proxy differs
 from the proxy targeted by the original read, so creating the original proxy cannot
 accidentally satisfy the callback requirement. Success fixtures predeploy the
 callback proxy; missing fixtures only compute its address and assert no code exists.
+The shared `StaticRoundTripFailureReader` makes exactly one low-level static call,
+requires the exact `StaticCallProxyNotDeployed(proxy)` bytes, persists them and
+increments `failedReads`. It never creates a proxy or retries. Both new scenarios
+assert `failedReads == 1`, no callback-proxy code, the exact saved error and an
+unchanged producer. An unrelated lookup failure or an unexpectedly successful read
+fails the trigger. Their static rows use the same callback builders as the recovery
+scenarios; L2's L1 entry has an empty fold sequence because no remote call completes.
+
 The shared `StaticRoundTripReader` checks and persists the exact error, verifies the
 static attempt created no code, deploys in normal context, and retries without
 reloading the table. It fails if a composer silently predeploys the missing proxy.
@@ -283,9 +299,9 @@ inside the original static frame, at the L1 host hash immediately after
 `CALL_BEGIN`; it exports L1 fold steps for replay over posted roots.
 
 ```bash
-bash script/e2e/run/local/parallel.sh topLevelStaticReentrantCounter topLevelStaticReentrantCounterL2 topLevelStaticReentrantMissingProxy topLevelStaticReentrantMissingProxyL2
+bash script/e2e/run/local/parallel.sh topLevelStaticReentrantCounter topLevelStaticReentrantCounterL2 topLevelStaticReentrantMissingProxy topLevelStaticReentrantMissingProxyL2 topLevelStaticReentrantMissingProxyCaught topLevelStaticReentrantMissingProxyCaughtL2
 # Explicit live validation, when the network contracts/composer match this ABI:
-bash script/e2e/run/network/staged.sh topLevelStaticReentrantCounter:1 topLevelStaticReentrantCounterL2:1 topLevelStaticReentrantMissingProxy:1 topLevelStaticReentrantMissingProxyL2:1
+bash script/e2e/run/network/staged.sh topLevelStaticReentrantCounter:1 topLevelStaticReentrantCounterL2:1 topLevelStaticReentrantMissingProxy:1 topLevelStaticReentrantMissingProxyL2:1 topLevelStaticReentrantMissingProxyCaught:1 topLevelStaticReentrantMissingProxyCaughtL2:1
 ```
 
 ### Static read → write → read scenarios

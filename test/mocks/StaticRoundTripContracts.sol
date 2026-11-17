@@ -70,3 +70,36 @@ contract StaticRoundTripReader {
         return lastRead;
     }
 }
+
+/// @notice Record one failed static round trip without deploying the callback proxy
+/// or retrying. The outer transaction succeeds only if the exact failure is caught.
+contract StaticRoundTripFailureReader {
+    ICounterView public immutable readTarget;
+    IEEZ public immutable manager;
+    address public immutable callbackSource;
+    uint64 public immutable sourceRollup;
+    uint256 public failedReads;
+    bytes public missingProxyError;
+
+    constructor(address target, address managerAddress, address source, uint64 rollup) {
+        readTarget = ICounterView(target);
+        manager = IEEZ(managerAddress);
+        callbackSource = source;
+        sourceRollup = rollup;
+    }
+
+    function recordFailure() external {
+        address sourceProxy = manager.computeCrossChainProxyAddress(callbackSource, sourceRollup);
+        require(sourceProxy.code.length == 0, "callback proxy already deployed before read");
+        (bool ok, bytes memory result) = address(readTarget).staticcall(abi.encodeCall(ICounterView.counter, ()));
+        require(!ok, "missing callback proxy unexpectedly succeeded");
+        require(
+            keccak256(result)
+                == keccak256(abi.encodeWithSelector(EEZBase.StaticCallProxyNotDeployed.selector, sourceProxy)),
+            "wrong missing-proxy revert"
+        );
+        require(sourceProxy.code.length == 0, "static read deployed callback proxy");
+        missingProxyError = result;
+        failedReads++;
+    }
+}

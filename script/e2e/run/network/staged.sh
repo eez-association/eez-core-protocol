@@ -324,73 +324,6 @@ _reconcile_replacements() {  # only runs when this phase has saved attempts
     _recover_pending "$pending" "$2" --reconcile-only
 }
 
-# These two network scenarios intentionally fail composer simulation. Local
-# Anvil tests still exercise the contract's catch/create/retry behavior.
-_expects_missing_proxy_rejection() {
-    case "$1" in
-        */topLevelStaticReentrantMissingProxy/E2ETopLevelStaticReentrantMissingProxy.s.sol|*/topLevelStaticReentrantMissingProxyL2/E2ETopLevelStaticReentrantMissingProxyL2.s.sol) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-_check_missing_proxy_rejection() {  # chain, hash, evidence file
-    local chain="$1" hash="$2" evidence="$3" details rpc receipt direct
-    [[ "$chain" == L1 || "$chain" == L2 ]] || return 1
-    rpc=$(_front_rpc "$chain")
-    details=$(cast rpc --rpc-timeout 10 --rpc-url "$rpc" eez_getCrossChainTransaction "$hash" 2>/dev/null) || return 1
-    printf '%s\n' "$details" > "$evidence" || return 1
-    jq -e --arg hash "$hash" '
-        .hash == $hash and .lifecycle == "terminal" and
-        .ownership.state == "terminal" and .ownership.reason == "SimulationFailed" and
-        ((.ownership.rejection.error // "") | test("^executor: static callback source proxy 0x[0-9a-fA-F]{40} is not deployed on chain [0-9]+; it must exist before the read$"))
-    ' <<< "$details" >/dev/null 2>&1 || return 1
-    # A mined transaction (including a revert) is not an expected rejection.
-    [[ "$chain" == L2 ]] && direct="$L2_RPC" || direct="$L1_RPC"
-    for rpc in "$direct" "$(_front_rpc "$chain")"; do
-        receipt=$(cast rpc --rpc-timeout 10 --rpc-url "$rpc" eth_getTransactionReceipt "$hash" 2>/dev/null) || return 1
-        [[ "$receipt" == null ]] || return 1
-    done
-}
-
-_poll_expected_rejections() {  # pending.csv (trigger phase only)
-    local pending="$1" root name chain hash sol evidence
-    root=$(dirname "$pending")
-    [[ -f "$root/jobs.csv" ]] || return 0
-    while IFS=, read -r name chain hash; do
-        sol=$(awk -F, -v name="$name" '$1==name {print $2; exit}' "$root/jobs.csv")
-        _expects_missing_proxy_rejection "$sol" || continue
-        evidence="$root/jobs/$name/composer-rejection-$hash.json"
-        if _check_missing_proxy_rejection "$chain" "$hash" "$evidence"; then
-            if ! grep -qxF "$name,$chain,$hash" "$root/expected-rejections.csv" 2>/dev/null; then
-                printf '%s,%s,%s\n' "$name" "$chain" "$hash" >> "$root/expected-rejections.csv" || return 1
-            fi
-            awk -F, -v n="$name" -v c="$chain" -v h="$hash" \
-                '!($1==n && $2==c && $3==h)' "$pending" > "$pending.tmp" && mv "$pending.tmp" "$pending" || return 1
-            echo "EXPECTED REJECTION $name: $hash (static callback source proxy missing)"
-        fi
-    done < <(cat "$pending")
-}
-
-_verify_expected_rejection() {  # job name; always recheck live evidence
-    local name="$1" job chain hash count=0
-    while IFS=, read -r job chain hash; do
-        [[ "$job" == "$name" ]] || continue
-        count=$((count+1))
-        if [[ -f "$RUN_DIR/mined.csv" ]] && awk -F, -v c="$chain" -v h="$hash" \
-            '$2==c && $3==h {found=1} END {exit !found}' "$RUN_DIR/mined.csv"; then
-            echo "FAIL: $hash already has a recorded receipt"
-            return 1
-        fi
-        _check_missing_proxy_rejection "$chain" "$hash" "$RUN_DIR/jobs/$name/composer-rejection-$hash.json" || {
-            echo "FAIL: $hash is not a confirmed missing-proxy rejection (or has a receipt)"
-            return 1
-        }
-        echo "Expected composer rejection: $hash"
-    done < "$RUN_DIR/sent.csv"
-    [[ "$count" == 1 ]] || { echo "FAIL: expected exactly one sent trigger, found $count"; return 1; }
-    echo '====== Done ====== (expected missing-proxy rejection)'
-}
-
 # Keep routine receipt polling in Bash. Recovery may change a pending hash;
 # the next sweep records its receipt using the same CSV format as before.
 _remove_mined() {
@@ -434,7 +367,6 @@ _poll_pending_once() {
         fi
     done
     _remove_mined "$pend" "$mined" || return 1
-    if [[ "$mode" == front ]]; then _poll_expected_rejections "$pend"; fi
 }
 
 _chain_counts() {  # one progress line for both chains
@@ -690,9 +622,42 @@ _read_plan_inputs() {
 # ══════════════════════════════════════════════
 #  Verify phase (also the whole of --verify-only)
 # ══════════════════════════════════════════════
+# Only the no-recovery scenarios expect a fee-quote refusal on devnet.
+# Recovery scenarios retain full application/content/settlement verification.
+_expects_static_quote_rejection() {
+    case "$1" in
+        */topLevelStaticReentrantMissingProxyCaught/E2ETopLevelStaticReentrantMissingProxyCaught.s.sol|*/topLevelStaticReentrantMissingProxyCaughtL2/E2ETopLevelStaticReentrantMissingProxyCaughtL2.s.sol) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_verify_static_quote_rejection() {
+    python3 script/e2e/lib/verify-quote-rejection.py "$RUN_DIR" "$1"
+}
+
+_probe_static_quote_rejection() {  # job, source chain; never signs or submits
+    local dir="$RUN_DIR/jobs/$1" front read_rpc="$L1_RPC" tx chain rc=0 count=0
+    local raws=()
+    [[ "$2" != L2 ]] || read_rpc="$L2_RPC"
+    front=$(_front_rpc "$2") || return 1
+    if [[ -f "$dir/fee-quote-1.responses.jsonl" ]]; then
+        count=$(wc -l < "$dir/fee-quote-1.responses.jsonl") || return 1
+    fi
+    # Invalidate earlier evidence before a new attempt; transport failure on
+    # resume must not reuse a rejection from a previous quote.
+    printf '%s\n' "$count" > "$dir/quote-probe-start.txt" || return 1
+    mapfile -t raws < "$dir/rawtxs.txt"
+    [[ ${#raws[@]} == 1 ]] || return 1
+    tx=$(cast decode-transaction "${raws[0]}" 2>/dev/null | jq 'if type=="string" then fromjson else . end') || return 1
+    chain=$(network_fee_chain "$tx" "$front" "$read_rpc") || return 1
+    network_with_fee_lock "$chain" network_fee_quote "$tx" "$front" "$read_rpc" "$chain" "" "$dir/fee-quote-1.json" >/dev/null || rc=$?
+    [[ "$rc" == 1 ]] || { echo "FAIL: expected a terminal fee-quote rejection, got status $rc"; return 1; }
+    _verify_static_quote_rejection "$1"
+}
+
 _verify_launch() {  # $1=job name $2=sol $3=pk — one job's network.sh verify stage, log in its dir
-    if _expects_missing_proxy_rejection "$2"; then
-        _verify_expected_rejection "$1" > "$RUN_DIR/jobs/$1/verify.log" 2>&1
+    if _expects_static_quote_rejection "$2"; then
+        _verify_static_quote_rejection "$1" > "$RUN_DIR/jobs/$1/verify.log" 2>&1
         return $?
     fi
     E2E_STAGE=verify E2E_JOB_DIR="$RUN_DIR/jobs/$1" E2E_SNAPSHOT="$RUN_DIR/snapshot.env" \
@@ -741,7 +706,8 @@ verify_phase() {
         name="${row%%,*}"; sol="${row#*,}"
         dir="$RUN_DIR/jobs/$name"
         want_n=$(sed -n 's/^declare -- _TX_COUNT="\(.*\)"$/\1/p' "$dir/manifest.env" 2>/dev/null)
-        sent_n=$(wc -l 2>/dev/null < "$dir/txs.txt" || echo 0)
+        sent_n=0
+        [[ ! -f "$dir/txs.txt" ]] || sent_n=$(wc -l < "$dir/txs.txt")
         if [[ ! -f "$dir/manifest.env" ]]; then
             # A truncated (resumed) run deliberately stopped before these jobs —
             # report them, but they are not failures. Jobs the prepare phase
@@ -752,6 +718,8 @@ verify_phase() {
         elif [[ -f "$dir/.prepare-failed" ]] || { ! _job_prepared "$dir" && [[ "$(_manifest_version "$dir/manifest.env")" != 1 ]]; }; then
             # v2 manifest (written at plan time) whose deploys never mined / held no code
             PRE_FAILED+=("$name (planned but deploys not confirmed - $dir/prepare.log)"); continue
+        elif _expects_static_quote_rejection "$sol"; then
+            : # Verify captured quote evidence even though no trigger was submitted.
         elif [[ ! -s "$dir/txs.txt" ]]; then
             PRE_FAILED+=("$name (nothing sent)"); continue
         elif (( sent_n < ${want_n:-1} )); then   # a send failure mid-job is an orchestration failure, not a protocol one
@@ -894,7 +862,7 @@ while IFS=, read -r _name _sol; do
     # in mined.csv) is put back on the send list — its raw txs are unchanged and their
     # nonces unused. The old hashes are archived per attempt; their rows leave
     # sent.csv so the monitor does not wait on them again.
-    if $RESEND && ! _expects_missing_proxy_rejection "$_sol" && [[ -s "$_jd/txs.txt" ]] && ! grep -qFf "$_jd/txs.txt" "$RUN_DIR/mined.csv" 2>/dev/null; then
+    if $RESEND && [[ -s "$_jd/txs.txt" ]] && ! grep -qFf "$_jd/txs.txt" "$RUN_DIR/mined.csv" 2>/dev/null; then
         mv "$_jd/txs.txt" "$_jd/txs.txt.attempt$ATTEMPT"
         [[ -f "$RUN_DIR/sent.csv.attempt$ATTEMPT" ]] || cp "$RUN_DIR/sent.csv" "$RUN_DIR/sent.csv.attempt$ATTEMPT"
         grep -v "^$_name," "$RUN_DIR/sent.csv" > "$RUN_DIR/sent.csv.tmp" || true
@@ -1057,7 +1025,6 @@ echo "== Send phase ($SEND_WORKERS L1 workers + one L2 sender; concurrent)"
 _phase_begin send
 # touch, not truncate — a resumed run appends to the earlier records
 touch "$RUN_DIR/sent.csv" "$RUN_DIR/send-failed.log"
-_SEND_FAILURES_BEFORE=$(grep -c '^SEND FAILED:' "$RUN_DIR/send-failed.log" || true)
 _staged_save_quoted_trigger() { # signed quote, raw file, line
     local plan="$1" file="$2" line="$3"
     [[ "$line" =~ ^[1-9][0-9]*$ && $(wc -l < "$file") -ge $line ]] || return 1
@@ -1067,13 +1034,22 @@ _staged_save_quoted_trigger() { # signed quote, raw file, line
 }
 
 send_worker() {  # worker index, chain, worker count
-    local j name dir chain rpc raw hash done_n raw_line signing_key send_rc
+    local j name dir chain rpc raw hash done_n raw_line signing_key send_rc worker_rc=0
     for ((j = $1; j < NJOBS; j += $3)); do
         name="${JOB_NAMES[$j]}"; dir="$RUN_DIR/jobs/$name"
         _job_prepared "$dir" || continue   # prepare failed, or a v2 manifest whose deploys never mined
         chain=$(sed -n 's/^declare -- _TRIGGER_CHAIN="\(.*\)"$/\1/p' "$dir/manifest.env")
         [[ "$chain" == "$2" ]] || continue
         rpc=$(_front_rpc "$chain")
+        if _expects_static_quote_rejection "${JOB_SOLS[$j]:-}"; then
+            if _timed_job "$name" quote _probe_static_quote_rejection "$name" "$chain" > "$dir/quote-check.log" 2>&1; then
+                echo "EXPECTED QUOTE REJECTION: $name ($chain)"
+            else
+                echo "QUOTE CHECK FAILED: $name ($chain)" | tee -a "$RUN_DIR/send-failed.log" >&2
+                worker_rc=1
+            fi
+            continue
+        fi
         # A resumed partial multi-tx send continues after the hashes already recorded.
         done_n=0
         [[ -f "$dir/txs.txt" ]] && done_n=$(wc -l < "$dir/txs.txt")
@@ -1095,6 +1071,7 @@ send_worker() {  # worker index, chain, worker count
             unset signing_key
             if (( send_rc != 0 )) || [[ ! "$hash" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
                 echo "SEND FAILED: $name ($chain)" | tee -a "$RUN_DIR/send-failed.log" >&2
+                worker_rc=1
                 break
             fi
             echo "$hash" >> "$dir/txs.txt"
@@ -1102,6 +1079,7 @@ send_worker() {  # worker index, chain, worker count
             [[ "$SEND_PAUSE" == 0 ]] || sleep "$SEND_PAUSE"   # pace the burst (per worker)
         done < <(tail -n +$((done_n + 1)) "$dir/rawtxs.txt")
     done
+    return "$worker_rc"
 }
 S_PIDS=()
 # Start the existing L2 sender alongside the L1 workers, without another worker pool.
@@ -1112,14 +1090,19 @@ for ((w = 0; w < SEND_WORKERS && w < NJOBS; w++)); do
     send_worker "$w" L1 "$SEND_WORKERS" &
     S_PIDS+=($!)
 done
-for pid in "${S_PIDS[@]}"; do wait "$pid"; done
+# Collect this attempt's worker failures; historical logs do not fail a resume.
+SEND_RC=0
+for pid in "${S_PIDS[@]}"; do wait "$pid" || SEND_RC=1; done
 N_SENT=$(wc -l < "$RUN_DIR/sent.csv")
 _chain_counts trigger "$RUN_DIR/sent.csv"
-_SEND_FAILURES_AFTER=$(grep -c '^SEND FAILED:' "$RUN_DIR/send-failed.log" || true)
-(( _SEND_FAILURES_AFTER == _SEND_FAILURES_BEFORE )) || echo "SEND FAILURES in $RUN_DIR/send-failed.log"
-_phase_end send "$(if (( _SEND_FAILURES_AFTER > _SEND_FAILURES_BEFORE )); then echo fail; else echo pass; fi)"
+(( SEND_RC == 0 )) || echo "SEND/QUOTE FAILURES in $RUN_DIR/send-failed.log"
+_phase_end send "$([[ $SEND_RC -eq 0 ]] && echo pass || echo fail)"
 
-(( N_SENT > 0 )) || { echo "Nothing sent - aborting"; exit 1; }
+# A quote-only run legitimately submits no triggers. Its evidence is checked below.
+if (( N_SENT == 0 )) && $NO_VERIFY; then
+    echo "Nothing sent; run without --no-verify to validate expected quote rejections"
+    exit 1
+fi
 
 # ══ Phase 5: monitor ══
 # Bash polls receipts per chain; recovery runs only at its checkpoints.
@@ -1140,7 +1123,7 @@ if $NO_VERIFY; then
     echo ""
     echo "== --no-verify: stopping after monitor. Verify later with:"
     echo "   bash script/e2e/run/network/staged.sh --verify-only $RUN_DIR"
-    [[ $MONITOR_RC -eq 0 && ! -s "$RUN_DIR/pending.csv" && $PREP_FAIL -eq 0 && $N_REVERTED -eq 0 ]]
+    [[ $SEND_RC -eq 0 && $MONITOR_RC -eq 0 && ! -s "$RUN_DIR/pending.csv" && $PREP_FAIL -eq 0 && $N_REVERTED -eq 0 ]]
     exit $?
 fi
 
@@ -1148,5 +1131,5 @@ fi
 _phase_begin verify
 verify_phase; _RC=$?
 _phase_end verify "$([[ $_RC -eq 0 ]] && echo pass || echo fail)"
-(( MONITOR_RC == 0 )) || _RC=1
+(( SEND_RC == 0 && MONITOR_RC == 0 )) || _RC=1
 exit $_RC

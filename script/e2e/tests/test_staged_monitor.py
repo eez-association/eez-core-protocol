@@ -18,8 +18,7 @@ def function(name):
 
 
 FUNCTIONS = "\n".join(function(name) for name in (
-    "_expects_missing_proxy_rejection", "_check_missing_proxy_rejection",
-    "_poll_expected_rejections", "_remove_mined", "_poll_pending_once", "_chain_counts", "_monitor_files"))
+    "_remove_mined", "_poll_pending_once", "_chain_counts", "_monitor_files"))
 DEFAULT = re.search(r'^MAX_MONITOR_WAIT=.*$', RUNNER, re.M).group()
 
 
@@ -146,92 +145,34 @@ _monitor_files sent.csv mined.csv pending.csv "${RECOVERY_INTERVAL:-2}" "$MODE" 
         self.assertNotIn("lookups", files)
 
 
-class StagedRejectionTests(unittest.TestCase):
-    def status(self):
-        return {
-            "hash": "0xaaa", "lifecycle": "terminal",
-            "ownership": {
-                "state": "terminal", "reason": "SimulationFailed",
-                "rejection": {"error": "executor: static callback source proxy 0x" + "a" * 40
-                              + " is not deployed on chain 1; it must exist before the read"},
-            },
-        }
-
-    def run_check(self, chain, status, **settings):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "status.json").write_text(json.dumps(status))
-            script = r"""
+class StagedStaticFailureVerificationTests(unittest.TestCase):
+    def test_recovery_uses_normal_verifier_and_propagates_failure(self):
+        for name in ("topLevelStaticReentrantMissingProxy", "topLevelStaticReentrantMissingProxyL2"):
+            direction = "L2_to_L1" if name.endswith("L2") else "L1_to_L2"
+            sol = f"script/e2e/scenarios/static/{direction}/{name}/E2E{name[0].upper() + name[1:]}.s.sol"
+            self.assertTrue((E2E.parents[1] / sol).is_file())
+            for code in (0, 7):
+                with self.subTest(name=name, verifier_exit=code), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "jobs" / name).mkdir(parents=True)
+                    # A recorded receipt must reach full verification, not a rejection shortcut.
+                    (root / "mined.csv").write_text(f"{name},L1,0xaaa,16,0x1\n")
+                    script = r"""
 set -euo pipefail
-cd "$TEST_ROOT"
-L1_RPC=direct1 L2_RPC=direct2
-_front_rpc() { [[ "$1" == L1 ]] && echo front1 || echo front2; }
-cast() {
-    [[ "$1 $2 $3 $4" == 'rpc --rpc-timeout 10 --rpc-url' && "$7" == 0xaaa ]] || return 90
-    echo "$5 $6 $7" >> calls
-    case "$6" in
-        eez_getCrossChainTransaction)
-            [[ "$5" == "$EXPECTED_FRONT" && "${LOOKUP_FAIL:-0}" != 1 ]] || return 91
-            cat status.json ;;
-        eth_getTransactionReceipt)
-            [[ "$5" == "$EXPECTED_FRONT" || "$5" == "$EXPECTED_DIRECT" ]] || return 92
-            if [[ "$5" == "${MINED_ENDPOINT:-none}" ]]; then
-                echo '{"status":"0x0"}'
-            else
-                echo null
-            fi ;;
-        *) return 93 ;;
-    esac
+L1_RPC=direct1 L2_RPC=direct2 L1_FRONT=front1 L2_FRONT=front2
+ROLLUPS=registry MANAGER_L2=manager
+bash() {
+    [[ "$1" == script/e2e/lib/network-scenario.sh && "$2" == "$SOL" ]] || return 91
+    [[ "$E2E_STAGE" == verify && "$E2E_JOB_DIR" == "$RUN_DIR/jobs/$JOB" ]] || return 92
+    echo normal-verifier
+    return "$VERIFY_EXIT"
 }
-""" + function("_check_missing_proxy_rejection") + r"""
-_check_missing_proxy_rejection "$CHAIN" 0xaaa evidence.json
-"""
-            suffix = "1" if chain == "L1" else "2"
-            result = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=10,
-                env={"PATH": os.environ["PATH"], "TEST_ROOT": directory, "CHAIN": chain,
-                     "EXPECTED_FRONT": "front" + suffix, "EXPECTED_DIRECT": "direct" + suffix,
-                     **settings})
-            files = {p.name: p.read_text() for p in root.iterdir()}
-            return result, files
-
-    def test_status_uses_matching_front_and_receipts_check_both_endpoints(self):
-        for chain, suffix in (("L1", "1"), ("L2", "2")):
-            with self.subTest(chain=chain):
-                status = self.status()
-                result, files = self.run_check(chain, status)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(files["calls"].splitlines(), [
-                    f"front{suffix} eez_getCrossChainTransaction 0xaaa",
-                    f"direct{suffix} eth_getTransactionReceipt 0xaaa",
-                    f"front{suffix} eth_getTransactionReceipt 0xaaa",
-                ])
-                self.assertEqual(json.loads(files["evidence.json"]), status)
-
-    def test_null_wrong_hash_nonterminal_and_unrelated_rejections_fail(self):
-        statuses = [None]
-        for field, value in (("hash", "0xbbb"), ("lifecycle", "pending")):
-            status = self.status()
-            status[field] = value
-            statuses.append(status)
-        for field, value in (("reason", "OtherFailure"), ("state", "pending"),
-                             ("rejection", {"error": "some other simulation failure"})):
-            status = self.status()
-            status["ownership"][field] = value
-            statuses.append(status)
-        for chain in ("L1", "L2"):
-            for status in statuses:
-                with self.subTest(chain=chain, status=status):
-                    result, _ = self.run_check(chain, status)
-                    self.assertNotEqual(result.returncode, 0)
-
-    def test_rpc_failure_or_receipt_at_either_endpoint_cannot_pass(self):
-        for chain, suffix in (("L1", "1"), ("L2", "2")):
-            for settings in ({"LOOKUP_FAIL": "1"}, {"MINED_ENDPOINT": "front" + suffix},
-                             {"MINED_ENDPOINT": "direct" + suffix}):
-                with self.subTest(chain=chain, settings=settings):
-                    result, _ = self.run_check(chain, self.status(), **settings)
-                    self.assertNotEqual(result.returncode, 0)
+""" + function("_expects_static_quote_rejection") + "\n" + function("_verify_launch") + '\n_verify_launch "$JOB" "$SOL" unused-test-key\n'
+                    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                        env={"PATH": os.environ["PATH"], "RUN_DIR": directory, "JOB": name,
+                             "SOL": sol, "VERIFY_EXIT": str(code)}, timeout=5)
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertEqual((root / "jobs" / name / "verify.log").read_text(), "normal-verifier\n")
 
 
 class StagedHashValidationTests(unittest.TestCase):
@@ -278,12 +219,12 @@ _front_rpc() { echo mock-front; }
 _reply() { echo "$1" >> "$RUN_DIR/submissions"; printf '%s\n' "$RETURNED_HASH"; }
 _rpc_send_raw() { _reply "$2"; }
 network_send_quoted_trigger() { _reply "$1"; }
-''' + function("send_worker") + '\nsend_worker 0 "$CHAIN" 1\n'
+''' + function("_expects_static_quote_rejection") + "\n" + function("send_worker") + '\nsend_worker 0 "$CHAIN" 1\n'
                     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                         timeout=5, env={"PATH": os.environ["PATH"], "TEST_ROOT": directory,
                                        "CHAIN": chain, "RETURNED_HASH": value,
                                        "ORCHESTRATOR": str(E2E / "lib/orchestrator.sh")})
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 0 if valid else 1, result.stdout + result.stderr)
                     self.assertEqual((root / "submissions").read_text().splitlines(),
                                      ["next", "later"] if valid else ["next"])
                     self.assertEqual((job / "txs.txt").read_text(), (self.HASH + "\n") * (3 if valid else 1))

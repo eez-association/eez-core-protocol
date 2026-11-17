@@ -41,7 +41,7 @@ npm --prefix trace-decoder test
   need calls in one transaction. E2E execution and isolated gas benchmarks retain `--isolate`.
 - The local E2E runner with no scenario arguments runs the default suite. Use
   `MAX_PARALLEL=1` for reproducibility, as CI does.
-- Solidity is pinned to **0.8.34**, via IR, optimizer runs **1**; CI pins Foundry **v1.7.1**.
+- Solidity is pinned to **0.8.34**, via IR, optimizer runs **1**; CI pins Foundry **v1.8.3**.
   EEZ is near EIP-170's 24,576-byte runtime limit. Follow the deployable-contract size
   guard in [.github/workflows/ci.yml](.github/workflows/ci.yml); script-only `BlobTranslator` exceeds it intentionally.
 - Format changed Solidity files with `forge fmt <paths>`. Decoder dependencies install
