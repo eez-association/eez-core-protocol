@@ -32,7 +32,7 @@ pragma solidity 0.8.34;
 struct CrossChainCall {
     uint16 revertNextNCalls; // number of consecutive calls (this one included) to revert after being executed; 0 = none. Used when the revert is triggered on the other chain (the calls ran, but were rolled back on the source's network)
     bool isStatic; // whether to execute via STATICCALL (read-only, no value)
-    uint64 gas; // gas limit for the target call; 0 = forward all remaining gas
+    uint64 gas; // manager-to-proxy gas budget, including proxy overhead and target execution; 0 = uncapped
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on this L2

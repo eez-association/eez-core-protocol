@@ -120,12 +120,11 @@ abstract contract IntegrationBase is Test {
         }
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](rids.length);
         for (uint256 _i = 0; _i < rids.length; _i++) {
-            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx});
+            rps[_i] = RollupIdWithProofSystems({rollupId: rids[_i], proofSystemIndexes: psIdx, builderData: bytes32(0)});
         }
 
         ProofSystemBatchPerVerificationEntries memory batch = ProofSystemBatchPerVerificationEntries({
             expectedRootPerRollup: new ExpectedRootPerRollup[](0),
-            blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
             staticEntries: staticEntries,

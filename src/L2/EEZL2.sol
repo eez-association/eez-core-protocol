@@ -604,15 +604,18 @@ contract EEZL2 is EEZBase {
                     return;
                 }
 
+                // Use available gas when no cap is set.
+                uint256 callGas = cc.gas == 0 ? gasleft() : cc.gas;
+
                 bool success;
                 bytes memory retData;
                 if (cc.isStatic) {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (cc.value != 0) revert StaticCallWithValue();
-                    (success, retData) = sourceProxy.staticcall(payload);
+                    (success, retData) = sourceProxy.staticcall{gas: callGas}(payload);
                 } else {
-                    (success, retData) = sourceProxy.call{value: cc.value}(payload);
+                    (success, retData) = sourceProxy.call{gas: callGas, value: cc.value}(payload);
                 }
 
                 _rollingHashCallEnd(success, retData);
@@ -772,7 +775,10 @@ contract EEZL2 is EEZBase {
             // Check if the context has enough gas.
             if (!_hasEnoughCallGas(cc.gas, payload.length, 0)) revert InsufficientCallGas(cc.gas);
 
-            (bool success, bytes memory retData) = sourceProxy.staticcall(payload);
+            // Use available gas when no cap is set.
+            uint256 callGas = cc.gas == 0 ? gasleft() : cc.gas;
+
+            (bool success, bytes memory retData) = sourceProxy.staticcall{gas: callGas}(payload);
 
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }

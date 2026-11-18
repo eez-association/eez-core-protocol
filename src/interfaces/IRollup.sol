@@ -38,18 +38,11 @@ interface IRollupContract {
         view
         returns (bytes32[] memory vkeys);
 
-    /// @notice Returns the opaque `customData` blob this rollup binds into its per-rollup
-    ///         verification commit during proof verification. Folded one rollup at a time
-    ///         into the batch's SHARED public input inside `_verifyProofSystemBatch`.
-    ///         `blockNumber` is the single L1 block the whole batch is bound to, passed in via
-    ///         `EEZ.postAndVerifyBatch`.
-    /// @dev The contents are entirely rollup-defined — e.g. an ABI-encoded `(timestamp,
-    ///      blockHash)` pair, or any other L1-view commitment the rollup's circuit expects.
-    ///      `blockNumber == 0` conventionally keeps a no-context behavior (empty blob). A
-    ///      non-zero `blockNumber` binds the rollup's chosen view; implementations SHOULD
-    ///      reject a blockNumber they cannot resolve so a stale value can't silently bind an
-    ///      empty blob into the proof commit.
-    /// @param blockNumber L1 block context requested by the batch, interpreted by the rollup manager.
+    /// @notice Returns the opaque custom data committed into this rollup's shared proof input.
+    /// @dev EEZ passes this rollup's own builderData without interpreting it. Only the returned
+    ///      bytes are bound by EEZ, so include every input and context the proof must distinguish.
+    ///      Implementations define supported values and must reject context they cannot resolve.
+    /// @param builderData Builder-supplied per-rollup input, interpreted by this manager.
     /// @return customData Rollup-defined context bytes committed into the shared public input.
-    function getCustomData(uint64 blockNumber) external view returns (bytes memory customData);
+    function getCustomData(bytes32 builderData) external view returns (bytes memory customData);
 }

@@ -85,7 +85,7 @@ contract BadVkeyManager is IRollupContract {
         vkeys[1] = bytes32(uint256(2));
     }
 
-    function getCustomData(uint64) external pure returns (bytes memory) {
+    function getCustomData(bytes32) external pure returns (bytes memory) {
         return "";
     }
 }
@@ -275,7 +275,7 @@ contract EEZCoverageTest is Base {
         idx[0] = 0;
         idx[1] = 0; // duplicate
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: idx});
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(r.id), proofSystemIndexes: idx, builderData: bytes32(0)});
         ProofSystemBatchPerVerificationEntries memory b =
             _raw(_emptyEntries(), _emptyStaticEntries(), psList, proofs, rps, 0, 0);
         vm.expectRevert(EEZ.InvalidProofSystemConfig.selector);
@@ -472,10 +472,12 @@ contract EEZCoverageTest is Base {
         idxOne[0] = 0;
 
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] =
-            RollupIdWithProofSystems({rollupId: uint64(idLo), proofSystemIndexes: idLo == rAll.id ? idxAll : idxOne});
-        rps[1] =
-            RollupIdWithProofSystems({rollupId: uint64(idHi), proofSystemIndexes: idHi == rAll.id ? idxAll : idxOne});
+        rps[0] = RollupIdWithProofSystems({
+            rollupId: uint64(idLo), proofSystemIndexes: idLo == rAll.id ? idxAll : idxOne, builderData: bytes32(0)
+        });
+        rps[1] = RollupIdWithProofSystems({
+            rollupId: uint64(idHi), proofSystemIndexes: idHi == rAll.id ? idxAll : idxOne, builderData: bytes32(0)
+        });
 
         ProofSystemBatchPerVerificationEntries memory b =
             _raw(_emptyEntries(), _emptyStaticEntries(), psSorted, proofs, rps, 0, 0);

@@ -10,6 +10,7 @@ pragma solidity 0.8.34;
 struct RollupIdWithProofSystems {
     uint64 rollupId; // the rollup id
     uint64[] proofSystemIndexes; // indices into the batch's `proofSystems[]` selecting the proof systems this rollup will be verified against; strictly increasing
+    bytes32 builderData; // opaque per-rollup input interpreted by its manager through getCustomData
 }
 
 /// @notice A rollup's expected root.
@@ -42,7 +43,6 @@ struct ProofSystemBatchPerVerificationEntries {
     uint256[] blobIndices; // indices of the tx's EIP-4844 blobs this batch consumes
     bytes callData; // batch-scoped calldata; its hash is folded into the public input
     bytes[] proofs; // one proof per `proofSystems` entry
-    uint64 blockNumber; // L1 block the batch binds to (via `getCustomData`): 0 = none, type(uint64).max = latest
     bool bindMsgSenderInPublicInput; // true = fold msg.sender into the public input so only the submitter can land the batch (front-run protection); false = fold address(0) (anyone may submit)
 }
 
@@ -90,7 +90,7 @@ struct RollupUpdate {
 struct L2ToL1Call {
     uint16 revertNextNCalls; // number of consecutive calls (this one included) to revert after being executed; 0 = none. Used when the revert is triggered on the other chain (the calls ran, but were rolled back on the source's network)
     bool isStatic; // whether to execute via STATICCALL (read-only, no value)
-    uint64 gas; // gas limit for the target call; 0 = forward all remaining gas
+    uint64 gas; // manager-to-proxy gas budget, including proxy overhead and target execution; 0 = uncapped
     address sourceAddress; // originating address on the source rollup
     uint64 sourceRollupId; // originating rollup
     address targetAddress; // call target on L1

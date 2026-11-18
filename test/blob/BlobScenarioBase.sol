@@ -492,7 +492,7 @@ abstract contract BlobScenarioBase is Test {
         psIdx[0] = 0;
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](nR);
         for (uint256 i = 0; i < nR; i++) {
-            rps[i] = RollupIdWithProofSystems({rollupId: rids[i], proofSystemIndexes: psIdx});
+            rps[i] = RollupIdWithProofSystems({rollupId: rids[i], proofSystemIndexes: psIdx, builderData: bytes32(0)});
         }
 
         rollups.postAndVerifyBatch(
@@ -507,7 +507,6 @@ abstract contract BlobScenarioBase is Test {
                 blobIndices: new uint256[](0),
                 callData: "",
                 proofs: proofs,
-                blockNumber: 0,
                 bindMsgSenderInPublicInput: false
             })
         );

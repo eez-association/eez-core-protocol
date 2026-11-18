@@ -165,12 +165,11 @@ contract GasExecPaths is GasFixture {
         psIdx[0] = 0;
 
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rA.id), proofSystemIndexes: psIdx});
-        rps[1] = RollupIdWithProofSystems({rollupId: uint64(rB.id), proofSystemIndexes: psIdx});
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rA.id), proofSystemIndexes: psIdx, builderData: bytes32(0)});
+        rps[1] = RollupIdWithProofSystems({rollupId: uint64(rB.id), proofSystemIndexes: psIdx, builderData: bytes32(0)});
 
         batch = ProofSystemBatchPerVerificationEntries({
             expectedRootPerRollup: new ExpectedRootPerRollup[](0),
-            blockNumber: 0,
             bindMsgSenderInPublicInput: false,
             entries: entries,
             staticEntries: _emptyStaticEntries(),

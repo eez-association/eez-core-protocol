@@ -12,7 +12,7 @@ export const event=(chain,name,args)=>({address:M[chain],...protocol[chain].enco
 export const row=(source,target,data,rid=0,extra={})=>({revertNextNCalls:0,isStatic:false,gas:0,sourceAddress:source,sourceRollupId:rid,targetAddress:target,value:0,data,...extra});
 export const l1Entry=(key,calls=[],extra={})=>({rollupUpdates:[{rollupId:1,etherDelta:0,currentRoot:ZERO,newRoot:ZERO}],proxyEntryHash:key,l2ToL1Calls:calls,expectedL1ToL2Calls:[],rollingHash:ZERO,destinationRollupId:1,success:true,returnData:result,...extra});
 export const l2Entry=(key,calls=[],extra={})=>({proxyEntryHash:key,incomingCalls:calls,expectedOutgoingCalls:[],rollingHash:ZERO,success:true,returnData:result,...extra});
-export const batch=(entries,staticEntries=[])=>({expectedRootPerRollup:[],entries,staticEntries,immediateEntryCount:0,immediateStaticEntryCount:0,proofSystems:[address(90)],rollupIdsWithProofSystems:[{rollupId:1,proofSystemIndexes:[0]}],blobIndices:[],callData:'0x',proofs:['0x'],blockNumber:0,bindMsgSenderInPublicInput:false});
+export const batch=(entries,staticEntries=[])=>({expectedRootPerRollup:[],entries,staticEntries,immediateEntryCount:0,immediateStaticEntryCount:0,proofSystems:[address(90)],rollupIdsWithProofSystems:[{rollupId:1,proofSystemIndexes:[0],builderData:ZERO}],blobIndices:[],callData:'0x',proofs:['0x'],bindMsgSenderInPublicInput:false});
 
 export function scenario({direction='L1',repeat=1,deep=false,isStatic=false,revert=false,rollback=false,ambiguous=false}={}) {
   const calls=[],txs={L1:new Map(),L2:new Map()},blocks={L1:new Map(),L2:new Map()},registry={L1:new Map(),L2:new Map()};

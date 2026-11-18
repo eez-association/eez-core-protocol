@@ -148,10 +148,10 @@ abstract contract Base is Test, TestHashes {
             idx[i] = uint64(i);
         }
         rps = new RollupIdWithProofSystems[](1);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rid), proofSystemIndexes: idx});
+        rps[0] = RollupIdWithProofSystems({rollupId: uint64(rid), proofSystemIndexes: idx, builderData: bytes32(0)});
     }
 
-    /// @notice Raw batch builder: every list is caller-supplied; `blockNumber = 0`, no pins,
+    /// @notice Raw batch builder: every list is caller-supplied; per-rollup context supplied by `rps`, no pins,
     ///         no blobs, empty `callData`, submitter-unbound.
     function _raw(
         ExecutionEntry[] memory entries,
@@ -166,7 +166,6 @@ abstract contract Base is Test, TestHashes {
         pure
         returns (ProofSystemBatchPerVerificationEntries memory b)
     {
-        b.blockNumber = 0;
         b.entries = entries;
         b.staticEntries = staticEntries;
         b.immediateEntryCount = immediateEntryCount;
@@ -222,8 +221,10 @@ abstract contract Base is Test, TestHashes {
         uint64[] memory idx = new uint64[](1);
         idx[0] = 0;
         RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](2);
-        rps[0] = RollupIdWithProofSystems({rollupId: uint64(ridFirst), proofSystemIndexes: idx});
-        rps[1] = RollupIdWithProofSystems({rollupId: uint64(ridSecond), proofSystemIndexes: idx});
+        rps[0] =
+            RollupIdWithProofSystems({rollupId: uint64(ridFirst), proofSystemIndexes: idx, builderData: bytes32(0)});
+        rps[1] =
+            RollupIdWithProofSystems({rollupId: uint64(ridSecond), proofSystemIndexes: idx, builderData: bytes32(0)});
         b = _raw(entries, staticEntries, psList, proofs, rps, immediateEntryCount, immediateStaticEntryCount);
     }
 

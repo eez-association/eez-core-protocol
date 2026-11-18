@@ -873,6 +873,11 @@
                   "name": "proofSystemIndexes",
                   "type": "uint64[]",
                   "internalType": "uint64[]"
+                },
+                {
+                  "name": "builderData",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
                 }
               ]
             },
@@ -890,11 +895,6 @@
               "name": "proofs",
               "type": "bytes[]",
               "internalType": "bytes[]"
-            },
-            {
-              "name": "blockNumber",
-              "type": "uint64",
-              "internalType": "uint64"
             },
             {
               "name": "bindMsgSenderInPublicInput",

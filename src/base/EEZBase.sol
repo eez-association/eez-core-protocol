@@ -405,13 +405,13 @@ abstract contract EEZBase is IEEZ {
         if (destination == address(this)) revert EEZDestinationForbidden();
     }
 
-    /// @notice Checks the estimated gas budget to protect users from composer underfunding,
-    ///         whether accidental or deliberate, being mistaken for a destination call failure.
+    /// @notice Checks a conservative estimated budget before dispatching to a proxy.
     /// @dev callGas == 0 skips the check and forwards available gas, subject to EVM forwarding limits.
-    ///      Check after encoding the payload and resolving the proxy. Account-creation gas is
-    ///      the poster's responsibility and, along with normal EVM rules, may reduce the gas delivered
-    ///      to the destination below callGas. This estimate excludes return-data processing and the rest of the entry.
-    /// @param callGas Requested destination gas cap; zero bypasses the budget check.
+    ///      Check after encoding the payload and resolving the proxy. Retain the conservative
+    ///      two-hop allowance even though proxy work now falls inside callGas. This is not a
+    ///      guarantee of full forwarding or completion: account creation, manager-side result
+    ///      processing and remaining entry work are not covered. Value calls retain EVM stipend rules.
+    /// @param callGas Requested whole proxy-call budget; zero bypasses the budget check.
     /// @param payloadLength Byte length of the already-encoded proxy forwarding payload.
     /// @param value Ether value forwarded, used to estimate transfer overhead.
     /// @return True if the cap is zero or gasleft() meets the estimated dispatch budget.
