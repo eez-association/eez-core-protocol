@@ -70,7 +70,8 @@ contract CrossChainProxy {
             (address destination, uint64 callGas, bytes memory data) =
                 abi.decode(msg.data[4:], (address, uint64, bytes));
 
-            // Cap gas at the target, leaving proxy overhead outside the cap; zero means uncapped.
+            // Retain the inner target cap as an upper bound; the manager also caps this proxy call.
+            // Proxy work and EVM forwarding rules reduce target gas; zero means uncapped.
             // A manager STATICCALL keeps this CALL and its descendants in static context.
             (bool success, bytes memory result) = callGas == 0
                 ? destination.call{value: msg.value}(data)

@@ -4,6 +4,16 @@ Run from the repository root. Set the variables below; use **proxy addresses** i
 `PRIVATE_KEY` must belong to the Rollup owner for registration, or the relevant ProxyAdmin
 owner for upgrades. Remove `--broadcast` to simulate. Receipts: `broadcast/`.
 
+## Cross-chain proxy bytecode
+
+`foundry.toml` disables the source metadata hash for `CrossChainProxy` and contracts
+that import it, including EEZ and EEZL2. The compiler-version tag remains. This keeps
+comment-only and metadata-only interface edits from changing the proxy's CREATE2
+address; compiler, configuration and executable-code changes can still change it.
+Removing the existing metadata hash changes the current init-code hash and predicted
+addresses once. Rebuild managers and address-prediction tooling together; this does
+not change already deployed contracts.
+
 ## Full deployment
 
 L1: upgradeable EEZ + upgradeable Rollup + ECDSA proof system + registration (threshold 1).

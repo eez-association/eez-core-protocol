@@ -7,7 +7,7 @@ import {Rollup} from "../src/rollupContract/Rollup.sol";
 import {ExecutionEntry} from "../src/interfaces/IEEZ.sol";
 
 /// @notice Covers the `publicInputsHash` context bindings of
-///         `ProofSystemBatchPerVerificationEntries`: `blockNumber` (path coverage of
+///         `ProofSystemBatchPerVerificationEntries`: per-rollup `builderData` (path coverage of
 ///         `Rollup.getCustomData` — 0 / recent block / `type(uint64).max` sentinel /
 ///         `BlockHashUnavailable` reverts — plus the binding guarantee that the returned
 ///         `customData` blob folds into `publicInputsHash` exactly as
@@ -39,7 +39,7 @@ contract BlockNumberBindingTest is Base {
         ExecutionEntry[] memory entries = new ExecutionEntry[](1);
         entries[0] = _immediateEntry(r.id, STATE0, STATE1);
         batch = _singleSubBatch(r, entries, _emptyStaticEntries(), 1, 0);
-        batch.blockNumber = blockNumber;
+        batch.rollupIdsWithProofSystems[0].builderData = bytes32(uint256(blockNumber));
     }
 
     /// @notice Mirrors `_verifyProofSystemBatch`'s two-stage publicInputsHash for the
@@ -53,6 +53,19 @@ contract BlockNumberBindingTest is Base {
         view
         returns (bytes32)
     {
+        bytes[] memory contexts = new bytes[](1);
+        contexts[0] = customData;
+        return _expectedPublicInputsHash(batch, contexts);
+    }
+
+    function _expectedPublicInputsHash(
+        ProofSystemBatchPerVerificationEntries memory batch,
+        bytes[] memory contexts
+    )
+        internal
+        view
+        returns (bytes32)
+    {
         bytes32[] memory entryHashes = new bytes32[](batch.entries.length);
         for (uint256 i = 0; i < batch.entries.length; i++) {
             entryHashes[i] = keccak256(abi.encode(batch.entries[i]));
@@ -60,8 +73,13 @@ contract BlockNumberBindingTest is Base {
         bytes32[] memory staticEntryHashes = new bytes32[](0);
         bytes32[] memory blobHashes = new bytes32[](0);
 
-        bytes32[] memory customDataHashes = new bytes32[](1);
-        customDataHashes[0] = keccak256(abi.encode(uint64(r.id), customData));
+        bytes32[] memory customDataHashes = new bytes32[](contexts.length);
+        bytes32 acc;
+        for (uint256 i = 0; i < contexts.length; i++) {
+            uint64 rid = batch.rollupIdsWithProofSystems[i].rollupId;
+            customDataHashes[i] = keccak256(abi.encode(rid, contexts[i]));
+            acc = keccak256(abi.encode(acc, rid, DEFAULT_VK));
+        }
         bytes32 sharedPublicInput = keccak256(
             abi.encodePacked(
                 abi.encode(entryHashes),
@@ -73,7 +91,6 @@ contract BlockNumberBindingTest is Base {
             )
         );
 
-        bytes32 acc = keccak256(abi.encode(bytes32(0), r.id, DEFAULT_VK));
         return keccak256(abi.encodePacked(sharedPublicInput, acc));
     }
 
@@ -84,6 +101,40 @@ contract BlockNumberBindingTest is Base {
     // ──────────────────────────────────────────────
     //  Path coverage
     // ──────────────────────────────────────────────
+
+    function test_BuilderDataRejectsUpperBits() public {
+        ProofSystemBatchPerVerificationEntries memory batch = _batchWithBlockNumber(0);
+        bytes32 unsupported = bytes32(uint256(1) << 64);
+        batch.rollupIdsWithProofSystems[0].builderData = unsupported;
+        vm.expectRevert(abi.encodeWithSelector(Rollup.UnsupportedBuilderData.selector, unsupported));
+        rollups.postAndVerifyBatch(batch);
+    }
+
+    function test_PerRollupBuilderDataBindsIndependentContexts() public {
+        vm.roll(1000);
+        vm.warp(123_456);
+        RollupHandle memory other = _makeRollup(STATE0);
+        ProofSystemBatchPerVerificationEntries memory batch =
+            _twoRollupBatch(r.id, other.id, new ExecutionEntry[](0), _emptyStaticEntries(), 0, 0);
+        bytes32 latest = bytes32(uint256(type(uint64).max));
+        bytes32 historical = bytes32(uint256(990));
+        bytes[] memory contexts = new bytes[](2);
+        contexts[0] = abi.encode(block.timestamp, blockhash(999));
+        contexts[1] = abi.encode(uint256(0), blockhash(990));
+        ps.setExpectedPublicInputsHash(_expectedPublicInputsHash(batch, contexts));
+
+        // Swapping the two rollups' context inputs must invalidate the pinned proof.
+        batch.rollupIdsWithProofSystems[0].builderData = historical;
+        batch.rollupIdsWithProofSystems[1].builderData = latest;
+        vm.expectRevert(EEZ.InvalidProof.selector);
+        rollups.postAndVerifyBatch(batch);
+
+        batch.rollupIdsWithProofSystems[0].builderData = latest;
+        batch.rollupIdsWithProofSystems[1].builderData = historical;
+        rollups.postAndVerifyBatch(batch);
+        assertEq(rollups.lastVerifiedBlock(uint64(r.id)), block.number);
+        assertEq(rollups.lastVerifiedBlock(uint64(other.id)), block.number);
+    }
 
     function test_RecentBlockNumber_Succeeds() public {
         vm.roll(1000);

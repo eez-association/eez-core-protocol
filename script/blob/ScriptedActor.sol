@@ -223,8 +223,9 @@ contract ScriptedActor {
 
     /// @dev Mutable proxy call with the step's explicit gas when set.
     function _dispatch(Step storage s) internal returns (bool ok, bytes memory ret) {
-        if (s.stepGas == 0) return s.target.call{value: s.value}(s.data);
-        return s.target.call{value: s.value, gas: s.stepGas}(s.data);
+        // Use available gas when no cap is set.
+        uint256 callGas = s.stepGas == 0 ? gasleft() : s.stepGas;
+        return s.target.call{value: s.value, gas: callGas}(s.data);
     }
 
     /// @dev Static proxy read with the step's explicit gas when set. Capping matters: the proxy's
@@ -232,8 +233,9 @@ contract ScriptedActor {
     ///      STATICCALL, so an uncapped read would torch ~63/64 of this frame's remaining gas and
     ///      starve the explicit requests of the steps after it.
     function _dispatchStatic(Step storage s) internal view returns (bool ok, bytes memory ret) {
-        if (s.stepGas == 0) return s.target.staticcall(s.data);
-        return s.target.staticcall{gas: s.stepGas}(s.data);
+        // Use available gas when no cap is set.
+        uint256 callGas = s.stepGas == 0 ? gasleft() : s.stepGas;
+        return s.target.staticcall{gas: callGas}(s.data);
     }
 
     function _serveStatic() internal view {

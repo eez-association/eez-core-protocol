@@ -372,7 +372,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
     ///      executions to per-rollup queues, (9) clear transient tables. See the inline comments for
     ///      the per-step rationale.
     /// @param batch entries, static entries, per-rollup PS subsets, proofs, transient prefix bounds,
-    ///        and the L1 `blockNumber` the batch binds to.
+    ///        and each rollup's opaque `builderData`.
     function postAndVerifyBatch(ProofSystemBatchPerVerificationEntries calldata batch) external {
         // Reentrancy guard: block a nested `postAndVerifyBatch` (e.g. from the meta hook, or from an
         // immediate L2Tx's proxy target) so it can't corrupt the shared transient tables. The two flags
@@ -751,7 +751,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             bytes memory customData = IRollupContract(
                     rollups[batch.rollupIdsWithProofSystems[r].rollupId].rollupContract
                 )
-                .getCustomData(batch.blockNumber);
+                .getCustomData(batch.rollupIdsWithProofSystems[r].builderData);
             // Keyed by rollupId so each customData is bound to its rollup; provers must mirror this.
             customDataHashes[r] = keccak256(abi.encode(batch.rollupIdsWithProofSystems[r].rollupId, customData));
         }
@@ -1183,13 +1183,16 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                     return;
                 }
 
+                // Use available gas when no cap is set.
+                uint256 callGas = l2ToL1Call.gas == 0 ? gasleft() : l2ToL1Call.gas;
+
                 bool success;
                 bytes memory retData;
                 if (l2ToL1Call.isStatic) {
                     // Read-only dispatch: STATICCALL carries no value and reverts on any state write.
                     // A static call loaded with value is malformed — reject it rather than drop the value.
                     if (l2ToL1Call.value != 0) revert StaticCallWithValue();
-                    (success, retData) = sourceProxy.staticcall(payload);
+                    (success, retData) = sourceProxy.staticcall{gas: callGas}(payload);
                 } else {
                     // Subtract before dispatch so reentrant calls cannot reuse value already in flight.
                     // A failed call's ETH never left, so it is added back.
@@ -1198,7 +1201,7 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
                     _entryTotalAvailableEther -= l2ToL1Call.value;
 
                     // Execute the proxy call
-                    (success, retData) = sourceProxy.call{value: l2ToL1Call.value}(payload);
+                    (success, retData) = sourceProxy.call{gas: callGas, value: l2ToL1Call.value}(payload);
 
                     if (!success) {
                         _entryTotalAvailableEther += l2ToL1Call.value;
@@ -1526,7 +1529,10 @@ contract EEZ is EEZBase, ExpectedL1ToL2CallTransient, VerifiedRollupsTransient {
             // Check if the context has enough gas.
             if (!_hasEnoughCallGas(l2ToL1Call.gas, payload.length, 0)) revert InsufficientCallGas(l2ToL1Call.gas);
 
-            (bool success, bytes memory retData) = sourceProxy.staticcall(payload);
+            // Use available gas when no cap is set.
+            uint256 callGas = l2ToL1Call.gas == 0 ? gasleft() : l2ToL1Call.gas;
+
+            (bool success, bytes memory retData) = sourceProxy.staticcall{gas: callGas}(payload);
             computedHash = _rollingHashStaticResult(computedHash, success, retData);
         }
     }

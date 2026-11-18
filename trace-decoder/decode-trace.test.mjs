@@ -37,8 +37,8 @@ function batch(callData) {
       rollingHash: HASH, destinationRollupId: 1, success: true, returnData: "0x",
     }],
     staticEntries: [], immediateEntryCount: 0, immediateStaticEntryCount: 0,
-    proofSystems: [OTHER], rollupIdsWithProofSystems: [{ rollupId: 1, proofSystemIndexes: [0] }],
-    blobIndices: [], callData, proofs: ["0x1234"], blockNumber: 0,
+    proofSystems: [OTHER], rollupIdsWithProofSystems: [{ rollupId: 1, proofSystemIndexes: [0], builderData: ethers.ZeroHash }],
+    blobIndices: [], callData, proofs: ["0x1234"],
     bindMsgSenderInPublicInput: false,
   };
 }

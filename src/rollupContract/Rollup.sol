@@ -95,6 +95,9 @@ contract Rollup is IRollupContract, OwnableUpgradeable {
     ///         is unavailable (≥ current block or older than the last 256 blocks → 0).
     error BlockHashUnavailable(uint64 blockNumber);
 
+    /// @notice The reference manager only supports builder data encoding a uint64 block selector.
+    error UnsupportedBuilderData(bytes32 builderData);
+
     // ──────────────────────────────────────────────
     //  Constructor and initialization
     // ──────────────────────────────────────────────
@@ -166,16 +169,22 @@ contract Rollup is IRollupContract, OwnableUpgradeable {
     }
 
     /// @notice Opaque `customData` blob this rollup binds into its per-rollup verification
-    ///         commit for the L1 `blockNumber` the batch is bound to. The registry folds the
+    ///         commit for the L1 block selected by this rollup's `builderData`. The registry folds the
     ///         result into the batch's shared public input, so the proof attests against this
     ///         exact L1 view.
     /// @dev Reference impl returns ABI-encoded `(timestamp, blockHash)` with timestamp 0: a
     ///      past block's timestamp can't be recovered on-chain (only `block.timestamp` of the
     ///      current block is available), so it's read off-chain from the header instead.
-    /// @param blockNumber L1 block to bind. 0 = no block context (empty blob);
+    /// @param builderData L1 block selector encoded as bytes32(uint256(number)); must fit uint64.
+    ///        0 = no block context (empty blob);
     ///        type(uint64).max = latest context (current timestamp + last block header).
     /// @return customData Empty bytes for zero; otherwise ABI-encoded (timestamp, blockHash).
-    function getCustomData(uint64 blockNumber) external view returns (bytes memory customData) {
+    function getCustomData(bytes32 builderData) external view returns (bytes memory customData) {
+        // TODO: Add chain configuration here (chain ID, rollup ID, system contracts, genesis, etc.)
+        // or include it in the verification key.
+        if (uint256(builderData) > type(uint64).max) revert UnsupportedBuilderData(builderData);
+        uint64 blockNumber = uint64(uint256(builderData));
+
         // 0 is the "no L1 context" sentinel — bind an empty blob.
         if (blockNumber == 0) return "";
 

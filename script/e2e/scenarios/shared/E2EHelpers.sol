@@ -318,7 +318,7 @@ function immediateSingleRollupBatch(
     uint64[] memory psIdx = new uint64[](1);
     psIdx[0] = 0;
     RollupIdWithProofSystems[] memory rps = new RollupIdWithProofSystems[](1);
-    rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx});
+    rps[0] = RollupIdWithProofSystems({rollupId: rollupId, proofSystemIndexes: psIdx, builderData: bytes32(0)});
     batch = ProofSystemBatchPerVerificationEntries({
         expectedRootPerRollup: new ExpectedRootPerRollup[](0),
         entries: entries,
@@ -330,7 +330,6 @@ function immediateSingleRollupBatch(
         blobIndices: new uint256[](0),
         callData: "",
         proofs: proofs,
-        blockNumber: 0,
         bindMsgSenderInPublicInput: false
     });
 }
