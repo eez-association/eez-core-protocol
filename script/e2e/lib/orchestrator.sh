@@ -159,21 +159,51 @@ expand_jobs() {
     NJOBS=${#JOB_NAMES[@]}
 }
 
+# Capture machine-readable output; never forward wallet diagnostics containing keys.
+_new_wallet() {
+    local json
+    json=$(cast wallet new --json 2>/dev/null) || {
+        echo "Wallet creation failed" >&2
+        return 1
+    }
+    printf '%s' "$json" | jq -er '
+        (if type == "object" then
+            select(.success == true) | .data
+        else . end)
+        | select(type == "array" and length == 1)
+        | .[0]
+        | select(.address | test("^0x[0-9a-fA-F]{40}$"))
+        | select(.private_key | test("^0x[0-9a-fA-F]{64}$"))
+        | [.address, .private_key] | join(",")
+    ' 2>/dev/null || {
+        echo "Invalid wallet JSON" >&2
+        return 1
+    }
+}
+
+# Create credential files privately and restrict existing files before writing.
+_secure_wallet_file() {
+    ( umask 077; touch -- "$1" && chmod 600 -- "$1" ) || {
+        echo "Cannot secure wallet file: $1" >&2
+        return 1
+    }
+}
+
 # ── Fund one pooled wallet per job (faucet + MultiSend, exclusive lock) ──
 # Holds an exclusive lock for the whole funding sequence: concurrent
 # orchestrator instances share the source funding key, and racing its nonce
 # yields "replacement transaction underpriced".
 fund_workers() {
     exec 9>"$_E2E_WALLET_STATE_DIR/.faucet.lock"
-    flock 9 || { echo "Failed to acquire faucet lock"; exit 1; }
+    flock 9 || { echo "Failed to acquire faucet lock" >&2; exit 1; }
 
     MULTISEND_BATCH="${MULTISEND_BATCH:-100}"
     [[ "$MULTISEND_BATCH" =~ ^[1-9][0-9]*$ ]] || {
-        echo "MULTISEND_BATCH must be a positive integer"; exit 1; }
+        echo "MULTISEND_BATCH must be a positive integer" >&2; exit 1; }
 
     FUND_BALANCE_WORKERS="${FUND_BALANCE_WORKERS:-16}"
     [[ "$FUND_BALANCE_WORKERS" =~ ^[1-9][0-9]*$ ]] || {
-        echo "FUND_BALANCE_WORKERS must be a positive integer"; exit 1; }
+        echo "FUND_BALANCE_WORKERS must be a positive integer" >&2; exit 1; }
 
     if $DIRECT; then
         # ── Direct mode: fund workers straight from the source key ──
@@ -184,16 +214,17 @@ fund_workers() {
         # ── Persistent faucet account ──
         local FAUCET_FILE="$_E2E_WALLET_STATE_DIR/faucet.txt" new
         if [[ -f "$FAUCET_FILE" ]]; then
+            _secure_wallet_file "$FAUCET_FILE" || exit 1
             FAUCET_ADDR=$(sed -n 's/^address: *//p' "$FAUCET_FILE")
             FAUCET_PK=$(sed -n 's/^pvtKey: *//p' "$FAUCET_FILE")
-            [[ -n "$FAUCET_ADDR" && -n "$FAUCET_PK" ]] || { echo "Malformed $FAUCET_FILE"; exit 1; }
+            [[ "$FAUCET_ADDR" =~ ^0x[0-9a-fA-F]{40}$ && "$FAUCET_PK" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+                echo "Malformed $FAUCET_FILE" >&2; exit 1; }
             echo "Reusing faucet $FAUCET_ADDR"
         else
-            new=$(cast wallet new)
-            FAUCET_ADDR=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-            FAUCET_PK=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-            printf 'address: %s\npvtKey:  %s\n' "$FAUCET_ADDR" "$FAUCET_PK" > "$FAUCET_FILE"
-            chmod 600 "$FAUCET_FILE"
+            new=$(_new_wallet) || exit 1
+            IFS=, read -r FAUCET_ADDR FAUCET_PK <<< "$new"
+            _secure_wallet_file "$FAUCET_FILE" || exit 1
+            printf 'address: %s\npvtKey:  %s\n' "$FAUCET_ADDR" "$FAUCET_PK" > "$FAUCET_FILE" || exit 1
             echo "Created faucet $FAUCET_ADDR → $FAUCET_FILE"
         fi
 
@@ -234,33 +265,33 @@ fund_workers() {
     # A short pool is extended up to the needed line, so a given offset always
     # maps to the same wallets across runs.
     local offset="${WALLET_OFFSET:-0}"
-    [[ "$offset" =~ ^(0|[1-9][0-9]*)$ && ${#offset} -le 9 ]] || { echo "WALLET_OFFSET must be at most 9 decimal digits with no leading zeros"; exit 1; }
+    [[ "$offset" =~ ^(0|[1-9][0-9]*)$ && ${#offset} -le 9 ]] || { echo "WALLET_OFFSET must be at most 9 decimal digits with no leading zeros" >&2; exit 1; }
     $FRESH && offset=0
-    touch "$POOL_FILE"; chmod 600 "$POOL_FILE"
+    _secure_wallet_file "$POOL_FILE" || exit 1
     local POOL_LINES=() new waddr wpk i
     $FRESH || mapfile -t POOL_LINES < "$POOL_FILE"
     echo "Wallet pool: ${#POOL_LINES[@]} available, $NJOBS needed from line $offset$($FRESH && echo ' (--fresh: minting new)')"
     WALLET_PKS=(); WALLET_ADDRS=()
-    echo "job,address,private_key" > "$RUN_DIR/wallets.csv"
-    chmod 600 "$RUN_DIR/wallets.csv"
+    _secure_wallet_file "$RUN_DIR/wallets.csv" || exit 1
+    echo "job,address,private_key" > "$RUN_DIR/wallets.csv" || exit 1
     while ! $FRESH && (( ${#POOL_LINES[@]} < offset )); do
-        new=$(cast wallet new)
-        waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-        wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-        echo "$waddr,$wpk" >> "$POOL_FILE"
+        new=$(_new_wallet) || exit 1
+        IFS=, read -r waddr wpk <<< "$new"
+        echo "$waddr,$wpk" >> "$POOL_FILE" || exit 1
         POOL_LINES+=("$waddr,$wpk")
     done
     for ((i = 0; i < NJOBS; i++)); do
         if (( offset + i < ${#POOL_LINES[@]} )); then
+            [[ "${POOL_LINES[$((offset + i))]}" =~ ^0x[0-9a-fA-F]{40},0x[0-9a-fA-F]{64}$ ]] || {
+                echo "Malformed wallet pool record at line $((offset + i + 1))" >&2; exit 1; }
             waddr="${POOL_LINES[$((offset + i))]%%,*}"; wpk="${POOL_LINES[$((offset + i))]##*,}"
         else
-            new=$(cast wallet new)
-            waddr=$(echo "$new" | grep -oE 'Address: +0x[0-9a-fA-F]{40}' | grep -oE '0x.*')
-            wpk=$(echo "$new"  | grep -oE 'Private key: +0x[0-9a-fA-F]{64}' | grep -oE '0x.*')
-            echo "$waddr,$wpk" >> "$POOL_FILE"
+            new=$(_new_wallet) || exit 1
+            IFS=, read -r waddr wpk <<< "$new"
+            echo "$waddr,$wpk" >> "$POOL_FILE" || exit 1
         fi
         WALLET_PKS+=("$wpk"); WALLET_ADDRS+=("$waddr")
-        echo "${JOB_NAMES[$i]},$waddr,$wpk" >> "$RUN_DIR/wallets.csv"
+        echo "${JOB_NAMES[$i]},$waddr,$wpk" >> "$RUN_DIR/wallets.csv" || exit 1
     done
 
     local FUND_WEI FLOOR_WEI MS_L1 MS_L2 pid_l1 pid_l2 rc=0
